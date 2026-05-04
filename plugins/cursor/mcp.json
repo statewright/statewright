@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "statewright": {
+      "command": "statewright-gateway",
+      "args": ["--config", ".statewright/config.json", "--hook-server"]
+    }
+  }
+}

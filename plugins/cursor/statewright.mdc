@@ -1,0 +1,36 @@
+---
+description: "Statewright state machine guardrails — enforces phased workflows, tool restrictions, and iteration limits for structured task execution"
+alwaysApply: true
+---
+
+# Statewright State Machine Protocol
+
+You are operating under statewright state machine constraints. A state machine governs which tools you may use and when you must transition between phases.
+
+## Required Behavior
+
+1. **At the start of every task**, call `statewright_get_state` to determine your current phase, allowed tools, and iteration count.
+
+2. **Only use tools listed in `allowedTools`** for the current state. If you need a tool not in the list, you must transition to a state that permits it first.
+
+3. **Track your iterations.** When `iteration` approaches `maxIterations`, you must either transition to the next state or explain why you cannot.
+
+4. **Transition by calling `statewright_transition`** with the appropriate event name (e.g., `DONE`, `FAIL`, `PLAN_READY`). Before each transition, output:
+   ```
+   **[statewright]** CURRENT_STATE => TARGET_STATE
+   ```
+
+5. **When the workflow reaches a final state**, output:
+   ```
+   **[statewright]** Workflow complete.
+   ```
+
+6. **Do not stop working** until you have reached a final state (`isFinal: true`). If you believe the task is complete but the state machine disagrees, transition to the appropriate final state first.
+
+## Phase Instructions
+
+Each state may include `instructions` — follow them as directives for that phase. The state machine defines the workflow; your job is to execute within it.
+
+## Tool Enforcement
+
+Cursor does not enforce tool restrictions at the harness level. You must self-enforce. If `statewright_get_state` shows a tool is not in `allowedTools`, do not use it regardless of what Cursor permits.

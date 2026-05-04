@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine",
+    "crates/agent",
+    "crates/demo",
+    "crates/tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"

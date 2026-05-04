@@ -1,0 +1,24 @@
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["--jetstream", "--store_dir", "/data", "-p", "4222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # monitoring
+    volumes:
+      - nats-data:/data
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: statewright
+      POSTGRES_USER: statewright
+      POSTGRES_PASSWORD: statewright-dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+
+volumes:
+  nats-data:
+  pg-data:

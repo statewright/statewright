@@ -1,0 +1,16 @@
+{
+  "definition": {
+    "id": "nine-seconds-control",
+    "initial": "working",
+    "states": {
+      "working": {
+        "instructions": "Fix the staging environment issue. All tools and API actions are available.",
+        "on": { "DONE": "completed", "FAIL": "failed" }
+      },
+      "completed": { "type": "final" },
+      "failed": { "type": "final" }
+    },
+    "guards": {}
+  },
+  "upstream_servers": []
+}

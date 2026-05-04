@@ -1,0 +1,23 @@
+[package]
+name = "statewright-tui"
+description = "TUI demo for statewright — watch a small LLM fix bugs within state machine guardrails"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "statewright"
+path = "src/main.rs"
+
+[dependencies]
+statewright-engine = { path = "../engine" }
+statewright-agent = { path = "../agent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+similar = "2"
+anyhow = "1"
+futures-lite = "2"

@@ -1,0 +1,67 @@
+version: '3'
+
+vars:
+  CARGO: "{{.HOME}}/.cargo/bin/cargo"
+
+tasks:
+  test:
+    desc: "Run all workspace tests"
+    cmds:
+      - "{{.CARGO}} test --workspace"
+
+  build:
+    desc: "Build all binaries"
+    cmds:
+      - "{{.CARGO}} build"
+
+  reset:calc:
+    desc: "Reset buggy-calc fixture"
+    cmds:
+      - |
+        cat > crates/demo/fixtures/buggy-calc/calc.py << 'EOF'
+        """Simple calculator module."""
+
+
+        def add(a, b):
+            return a + b
+
+
+        def subtract(a, b):
+            return a - b
+
+
+        def multiply(a, b):
+            return a * b
+
+
+        def divide(a, b):
+            if b == 0:
+                raise ValueError("Cannot divide by zero")
+            return a // b
+
+
+        def percentage(value, total):
+            """Calculate what percentage 'value' is of 'total'."""
+            if total == 0:
+                raise ValueError("Total cannot be zero")
+            return (value / total) * 100
+        EOF
+      - rm -rf crates/demo/fixtures/buggy-calc/__pycache__
+      - echo "buggy-calc fixture reset"
+
+  run:bugfix:
+    desc: "Run bug-fix demo (OLLAMA_URL, MODEL, MODE, FIXTURE)"
+    vars:
+      OLLAMA_URL: '{{default "http://localhost:11434/v1" .OLLAMA_URL}}'
+      MODEL: '{{default "gemma4:31b" .MODEL}}'
+      MODE: '{{default "raw" .MODE}}'
+      FIXTURE: '{{default "crates/demo/fixtures/buggy-calc" .FIXTURE}}'
+    cmds:
+      - |
+        {{.CARGO}} run --bin sw-demo -- \
+          --use-hardcoded-machine \
+          --workdir "{{.FIXTURE}}" \
+          --ollama-url "{{.OLLAMA_URL}}" \
+          --model "{{.MODEL}}" \
+          --tool-mode "{{.MODE}}" \
+          --max-steps 20

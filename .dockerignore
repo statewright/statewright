@@ -1,0 +1,8 @@
+target
+dist
+site
+.git
+.claude
+*.log
+provisional-patent-draft.md
+provisional-patent-review.md

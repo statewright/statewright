@@ -1,0 +1,437 @@
+use crate::types::*;
+use serde_json::Value;
+
+/// Resolve a transition: given current state + event + context + definition,
+/// compute the new state and context.
+pub fn resolve_transition(
+    current_state: &str,
+    event: &str,
+    event_data: &Value,
+    context: &Value,
+    definition: &MachineDefinition,
+) -> Result<TransitionResult, TransitionError> {
+    let state_def = definition
+        .states
+        .get(current_state)
+        .ok_or_else(|| TransitionError::StateNotFound {
+            state: current_state.to_string(),
+        })?;
+
+    let transition = match state_def.on.get(event) {
+        Some(t) => t,
+        None => {
+            // Event not recognized — check for safe_next fallback
+            if let Some(safe_target) = &state_def.safe_next {
+                let new_context = apply_context_patch(context, event_data);
+                return Ok(TransitionResult {
+                    new_state: safe_target.clone(),
+                    new_context,
+                    transitioned: true,
+                    requires_approval: false,
+                    approval_message: None,
+                    invoke: None,
+                });
+            }
+            return Err(TransitionError::NoMatchingTransition {
+                state: current_state.to_string(),
+                event: event.to_string(),
+            });
+        }
+    };
+
+    // Evaluate guards
+    for guard_name in transition.guard_names() {
+        if let Some(guard_def) = definition.guards.get(guard_name) {
+            if !crate::guard::evaluate_guard(guard_def, context) {
+                return Err(TransitionError::GuardFailed {
+                    guard: guard_name.to_string(),
+                });
+            }
+        }
+    }
+
+    let new_state = transition.target().to_string();
+    let new_context = apply_context_patch(context, event_data);
+
+    let invoke = transition.invoke_ref().map(|inv| InvokeResult {
+        machine: inv.machine.to_string(),
+        on_complete: inv.on_complete.to_string(),
+        on_fail: inv.on_fail.map(|s| s.to_string()),
+        input: inv.input.cloned(),
+    });
+
+    Ok(TransitionResult {
+        new_state,
+        new_context,
+        transitioned: true,
+        requires_approval: transition.requires_approval(),
+        approval_message: match transition {
+            TransitionDef::Full {
+                approval_message, ..
+            } => approval_message.clone(),
+            _ => None,
+        },
+        invoke,
+    })
+}
+
+/// Apply a context patch (shallow merge of patch into context).
+pub fn apply_context_patch(context: &Value, patch: &Value) -> Value {
+    let Some(ctx_obj) = context.as_object() else {
+        return context.clone();
+    };
+
+    let Some(patch_obj) = patch.as_object() else {
+        return context.clone();
+    };
+
+    let mut merged = ctx_obj.clone();
+    for (key, value) in patch_obj {
+        merged.insert(key.clone(), value.clone());
+    }
+    Value::Object(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn order_machine() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "order",
+            "initial": "draft",
+            "context": { "item_count": 0, "items": [] },
+            "states": {
+                "draft": {
+                    "on": {
+                        "ADD_ITEM": "draft",
+                        "SUBMIT": {
+                            "target": "pending_payment",
+                            "guards": ["has_items", "has_payment"]
+                        },
+                        "CANCEL": "cancelled"
+                    }
+                },
+                "pending_payment": {
+                    "on": {
+                        "CONFIRM_PAYMENT": "confirmed",
+                        "CANCEL": "cancelled"
+                    }
+                },
+                "confirmed": {
+                    "on": { "SHIP": "shipped" }
+                },
+                "shipped": {
+                    "on": { "DELIVER": "delivered" }
+                },
+                "delivered": { "type": "final" },
+                "cancelled": { "type": "final" }
+            },
+            "guards": {
+                "has_items": { "field": "item_count", "op": "gt", "value": 0 },
+                "has_payment": { "field": "payment_method", "op": "exists" }
+            }
+        }))
+        .expect("order machine should parse")
+    }
+
+    #[test]
+    fn simple_transition_changes_state() {
+        let def = order_machine();
+        let ctx = json!({"item_count": 0});
+        let result = resolve_transition("draft", "CANCEL", &json!({}), &ctx, &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "cancelled");
+    }
+
+    #[test]
+    fn guarded_transition_passes_when_guards_satisfied() {
+        let def = order_machine();
+        let ctx = json!({"item_count": 2, "payment_method": "card_4242"});
+        let result = resolve_transition("draft", "SUBMIT", &json!({}), &ctx, &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "pending_payment");
+    }
+
+    #[test]
+    fn guarded_transition_fails_when_guard_not_met() {
+        let def = order_machine();
+        let ctx = json!({"item_count": 0});
+        let result = resolve_transition("draft", "SUBMIT", &json!({}), &ctx, &def);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TransitionError::GuardFailed { guard } => assert_eq!(guard, "has_items"),
+            other => panic!("expected GuardFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unhandled_event_returns_error() {
+        let def = order_machine();
+        let ctx = json!({});
+        let result = resolve_transition("draft", "SHIP", &json!({}), &ctx, &def);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TransitionError::NoMatchingTransition { state, event } => {
+                assert_eq!(state, "draft");
+                assert_eq!(event, "SHIP");
+            }
+            other => panic!("expected NoMatchingTransition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn self_transition_stays_in_same_state() {
+        let def = order_machine();
+        let ctx = json!({"item_count": 0});
+        let result = resolve_transition("draft", "ADD_ITEM", &json!({}), &ctx, &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "draft");
+    }
+
+    #[test]
+    fn unknown_state_returns_error() {
+        let def = order_machine();
+        let ctx = json!({});
+        let result = resolve_transition("nonexistent", "SUBMIT", &json!({}), &ctx, &def);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TransitionError::StateNotFound { state } => assert_eq!(state, "nonexistent"),
+            other => panic!("expected StateNotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn full_lifecycle_draft_to_delivered() {
+        let def = order_machine();
+        let ctx = json!({"item_count": 2, "payment_method": "card_4242"});
+
+        let r = resolve_transition("draft", "SUBMIT", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(r.new_state, "pending_payment");
+
+        let r = resolve_transition("pending_payment", "CONFIRM_PAYMENT", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(r.new_state, "confirmed");
+
+        let r = resolve_transition("confirmed", "SHIP", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(r.new_state, "shipped");
+
+        let r = resolve_transition("shipped", "DELIVER", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(r.new_state, "delivered");
+    }
+
+    #[test]
+    fn approval_flag_propagated() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "agent",
+            "initial": "planning",
+            "states": {
+                "planning": {
+                    "on": {
+                        "READY": {
+                            "target": "executing",
+                            "requires_approval": true,
+                            "approval_message": "Agent wants to start executing"
+                        }
+                    }
+                },
+                "executing": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let result = resolve_transition("planning", "READY", &json!({}), &json!({}), &def).unwrap();
+        assert!(result.requires_approval);
+        assert_eq!(result.approval_message.as_deref(), Some("Agent wants to start executing"));
+    }
+
+    // safe_next tests
+
+    #[test]
+    fn safe_next_fires_on_unrecognized_event() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "safe_next": "done",
+                    "on": { "FINISH": "done", "FAIL": "failed" }
+                },
+                "done": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        // Model says "COMPLETE" but the event is "FINISH" — safe_next catches it
+        let result = resolve_transition("working", "COMPLETE", &json!({}), &json!({}), &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "done");
+    }
+
+    #[test]
+    fn safe_next_does_not_override_valid_transitions() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "safe_next": "fallback",
+                    "on": { "FINISH": "done", "FAIL": "failed" }
+                },
+                "done": { "type": "final" },
+                "failed": { "type": "final" },
+                "fallback": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        // Valid event still works normally — safe_next is not consulted
+        let result = resolve_transition("working", "FINISH", &json!({}), &json!({}), &def).unwrap();
+        assert_eq!(result.new_state, "done"); // NOT fallback
+    }
+
+    #[test]
+    fn safe_next_does_not_override_fail() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "safe_next": "done",
+                    "on": { "FAIL": "failed" }
+                },
+                "done": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        // FAIL still works — safe_next doesn't intercept defined events
+        let result = resolve_transition("working", "FAIL", &json!({}), &json!({}), &def).unwrap();
+        assert_eq!(result.new_state, "failed");
+    }
+
+    #[test]
+    fn no_safe_next_still_errors_on_unrecognized() {
+        let def = order_machine(); // no safe_next defined
+        let result = resolve_transition("draft", "GIBBERISH", &json!({}), &json!({}), &def);
+        assert!(result.is_err());
+    }
+
+    // invoke tests
+
+    #[test]
+    fn invoke_transition_returns_invoke_result() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "tdd",
+            "initial": "implementing",
+            "states": {
+                "implementing": {
+                    "on": {
+                        "DONE": "testing",
+                        "FAIL": "failed"
+                    }
+                },
+                "testing": {
+                    "on": {
+                        "TESTS_PASS": "completed",
+                        "TESTS_FAIL": {
+                            "invoke": "debug_machine",
+                            "on_complete": "testing",
+                            "on_fail": "failed",
+                            "input": { "scope": "last_change" }
+                        }
+                    }
+                },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let result = resolve_transition(
+            "testing", "TESTS_FAIL", &json!({}), &json!({}), &def,
+        ).unwrap();
+
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "testing"); // on_complete target
+        let invoke = result.invoke.unwrap();
+        assert_eq!(invoke.machine, "debug_machine");
+        assert_eq!(invoke.on_complete, "testing");
+        assert_eq!(invoke.on_fail.as_deref(), Some("failed"));
+        assert_eq!(invoke.input, Some(json!({"scope": "last_change"})));
+    }
+
+    #[test]
+    fn non_invoke_transition_has_no_invoke() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "a",
+            "states": {
+                "a": { "on": { "GO": "b" } },
+                "b": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let result = resolve_transition("a", "GO", &json!({}), &json!({}), &def).unwrap();
+        assert!(result.invoke.is_none());
+    }
+
+    #[test]
+    fn invoke_with_no_on_fail_defaults_to_none() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "on": {
+                        "DEBUG": {
+                            "invoke": "fixer",
+                            "on_complete": "working"
+                        }
+                    }
+                },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let result = resolve_transition("working", "DEBUG", &json!({}), &json!({}), &def).unwrap();
+        let invoke = result.invoke.unwrap();
+        assert_eq!(invoke.machine, "fixer");
+        assert!(invoke.on_fail.is_none());
+        assert!(invoke.input.is_none());
+    }
+
+    // Context patch tests
+    #[test]
+    fn context_patch_merges_fields() {
+        let ctx = json!({"a": 1, "b": 2});
+        let patch = json!({"b": 99, "c": 3});
+        let result = apply_context_patch(&ctx, &patch);
+        assert_eq!(result, json!({"a": 1, "b": 99, "c": 3}));
+    }
+
+    #[test]
+    fn context_patch_with_empty_patch_returns_clone() {
+        let ctx = json!({"a": 1});
+        let result = apply_context_patch(&ctx, &json!({}));
+        assert_eq!(result, json!({"a": 1}));
+    }
+
+    #[test]
+    fn context_patch_with_null_patch_returns_clone() {
+        let ctx = json!({"a": 1});
+        let result = apply_context_patch(&ctx, &Value::Null);
+        assert_eq!(result, json!({"a": 1}));
+    }
+}

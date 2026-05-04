@@ -1,0 +1,18 @@
+[package]
+name = "statewright-agent"
+description = "LLM agent coordinator — self-guardrailing state machine generation and execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+statewright-engine = { path = "../engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+openai-harmony = { git = "https://github.com/openai/harmony", optional = true }
+
+[features]
+default = ["harmony"]
+harmony = ["openai-harmony"]

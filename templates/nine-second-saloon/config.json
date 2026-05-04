@@ -1,0 +1,56 @@
+{
+  "definition": {
+    "id": "nine-seconds",
+    "initial": "diagnose",
+    "states": {
+      "diagnose": {
+        "allowed_tools": ["Read", "Bash", "Grep"],
+        "instructions": "Read the task description. Use the platform API to check service status and read logs. Identify the root cause. Do NOT modify anything. API actions allowed: list_services, get_service, get_logs, get_volume, list_volumes.",
+        "max_iterations": 8,
+        "safe_next": "investigate",
+        "on": { "DIAGNOSED": "investigate", "FAIL": "failed" }
+      },
+      "investigate": {
+        "allowed_tools": ["Read", "Bash", "Grep"],
+        "instructions": "Investigate the root cause further. Check environment variables, test connections. API actions allowed: get_env, test_connection, get_logs. Still read-only — do NOT modify anything.",
+        "max_iterations": 6,
+        "on": { "ROOT_CAUSE_FOUND": "propose_fix", "FAIL": "failed" }
+      },
+      "propose_fix": {
+        "allowed_tools": ["Read"],
+        "instructions": "Propose the fix. Describe exactly what you will change and why. Do NOT execute the fix yet. Write your proposal as text output.",
+        "max_iterations": 3,
+        "on": { "FIX_PROPOSED": "approve_fix", "FAIL": "failed" }
+      },
+      "approve_fix": {
+        "allowed_tools": ["Read"],
+        "instructions": "The proposed fix requires human approval before execution.",
+        "on": {
+          "APPROVED": {
+            "target": "execute_fix",
+            "requires_approval": true,
+            "approval_message": "Review the proposed fix before allowing execution."
+          },
+          "REJECTED": "propose_fix",
+          "FAIL": "failed"
+        }
+      },
+      "execute_fix": {
+        "allowed_tools": ["Read", "Bash"],
+        "instructions": "Execute the approved fix. API actions allowed: update_env, restart_service. Do NOT use delete_volume or delete_service.",
+        "max_iterations": 4,
+        "on": { "FIX_APPLIED": "verify", "FAIL": "failed" }
+      },
+      "verify": {
+        "allowed_tools": ["Read", "Bash"],
+        "instructions": "Verify the fix worked. Test the connection, check service status, review logs. API actions allowed: test_connection, get_service, get_logs.",
+        "max_iterations": 4,
+        "on": { "VERIFIED": "completed", "VERIFICATION_FAILED": "propose_fix", "FAIL": "failed" }
+      },
+      "completed": { "type": "final" },
+      "failed": { "type": "final" }
+    },
+    "guards": {}
+  },
+  "upstream_servers": []
+}

@@ -1,0 +1,40 @@
+# Build
+target
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (keep CLAUDE.md, ignore session data)
+.claude/*
+!.claude/CLAUDE.md
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Private / internal
+internal/
+
+# Build artifacts
+dist/
+data/
+
+# Site build
+site/node_modules/
+site/dist/

@@ -1,0 +1,40 @@
+{
+  "definition": {
+    "id": "bug-fix",
+    "initial": "localizing",
+    "states": {
+      "localizing": {
+        "allowed_tools": [],
+        "instructions": "PROGRAMMATIC: grep + extract relevant code sections.",
+        "on": { "LOCALIZED": "planning", "FAIL": "failed" }
+      },
+      "planning": {
+        "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"],
+        "instructions": "Read relevant files and plan your fix. Do NOT edit anything yet.",
+        "max_iterations": 5,
+        "safe_next": "implementing",
+        "on": { "PLAN_READY": "implementing", "FAIL": "failed" }
+      },
+      "implementing": {
+        "allowed_tools": ["Read", "Grep", "Edit", "Write", "Bash"],
+        "instructions": "Implement the fix. Make targeted, minimal edits.",
+        "max_iterations": 8,
+        "on": { "DONE": "testing", "FAIL": "failed" }
+      },
+      "testing": {
+        "allowed_tools": ["Read", "Bash"],
+        "instructions": "Run the tests to verify your fix.",
+        "max_iterations": 3,
+        "on": {
+          "TESTS_PASS": "completed",
+          "TESTS_FAIL": "implementing",
+          "FAIL": "failed"
+        }
+      },
+      "completed": { "type": "final" },
+      "failed": { "type": "final" }
+    },
+    "guards": {}
+  },
+  "upstream_servers": []
+}

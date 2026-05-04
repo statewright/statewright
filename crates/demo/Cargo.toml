@@ -1,0 +1,27 @@
+[package]
+name = "statewright-demo"
+description = "Demo: LLM creates its own state machine guardrails to fix a bug"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "statewright_demo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sw-demo"
+path = "src/main.rs"
+
+[dependencies]
+statewright-engine = { path = "../engine" }
+statewright-agent = { path = "../agent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4", features = ["derive"] }
+similar = "2"
+libc = "0.2"

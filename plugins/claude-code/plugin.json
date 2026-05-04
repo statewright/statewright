@@ -9,8 +9,5 @@
   "homepage": "https://statewright.ai",
   "repository": "https://github.com/statewright/statewright",
   "license": "Apache-2.0",
-  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"],
-  "hooks": "./settings.json",
-  "mcpServers": "./mcp.json",
-  "install": "./install.sh"
+  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"]
 }

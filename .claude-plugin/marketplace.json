@@ -18,7 +18,7 @@
       "category": "development",
       "source": {
         "source": "git-subdir",
-        "repo": "statewright/statewright",
+        "url": "https://github.com/statewright/statewright.git",
         "path": "plugins/claude-code",
         "ref": "main"
       },

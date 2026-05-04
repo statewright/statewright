@@ -1,0 +1,21 @@
+{
+  "name": "statewright",
+  "description": "State machine guardrails for AI agents",
+  "version": "0.1.0",
+  "plugins": {
+    "statewright": {
+      "name": "statewright",
+      "description": "State machine workflow enforcement — controls which tools your agent can use in each phase.",
+      "version": "0.1.0",
+      "entrypoint": "plugins/claude-code",
+      "mcpServers": {
+        "statewright": {
+          "type": "http",
+          "url": "https://mcp.statewright.ai"
+        }
+      },
+      "hooks": "plugins/claude-code/settings.json",
+      "install": "plugins/claude-code/install.sh"
+    }
+  }
+}

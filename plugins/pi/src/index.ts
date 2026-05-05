@@ -1,14 +1,20 @@
 /**
- * Statewright skill extension for Pi coding agent
+ * Statewright extension for Pi coding agent
  *
- * Registers statewright_transition and statewright_get_state as Pi skills,
- * hooks into tool execution for enforcement, and renders state info
- * via pi-tui components.
+ * Enforces state machine guardrails via the statewright MCP gateway's
+ * hook HTTP server. Registers custom tools, blocks unauthorized tool
+ * calls, injects state context before each agent turn.
  *
- * Pi extensions live in ~/.pi/agent/extensions/ or project .pi/extensions/
+ * Install:
+ *   ~/.pi/agent/extensions/statewright/index.ts  (global)
+ *   .pi/extensions/statewright/index.ts           (project)
+ *
+ * Requires: statewright-gateway running with --hook-server
  */
 
-import { readFileSync } from "fs"
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
+import { Type } from "typebox"
+import { readFileSync } from "node:fs"
 
 interface HookResponse {
   decision?: string
@@ -72,92 +78,150 @@ async function getState(port: string): Promise<StateResponse | null> {
   }
 }
 
-/**
- * Pi extension entry point.
- *
- * Pi extensions export a default function that receives the extension
- * context (project, client, tools API) and returns skill definitions
- * and lifecycle hooks.
- */
-export default async function statewrightExtension(ctx: {
-  defineTools: (tools: Record<string, unknown>) => void
-  onToolBefore: (handler: (tool: string, args: unknown) => Promise<void>) => void
-  onToolAfter: (handler: (tool: string, result: unknown) => Promise<void>) => void
-}) {
+function formatStateContext(state: StateResponse): string {
+  const lines = [
+    `Statewright state machine is active. Current phase: ${state.state} (iteration ${state.iteration}/${state.maxIterations ?? "∞"}).`,
+    `Tools available in this phase: ${state.allowedTools.join(", ")}.`,
+  ]
+  if (state.instructions) {
+    lines.push(`Phase instructions: ${state.instructions}`)
+  }
+  lines.push(
+    "",
+    "State transition reporting convention:",
+    "- Before each call to statewright_transition, output a line: **[statewright]** CURRENT_STATE => TARGET_STATE",
+    "- When the workflow reaches a final state, output: **[statewright]** Workflow complete.",
+    "- Call statewright_get_state at the start to confirm the current phase.",
+  )
+  return lines.join("\n")
+}
+
+export default async function statewrightExtension(pi: ExtensionAPI) {
   const port = getPort()
   if (!port) {
     console.warn("[statewright] Gateway not running — extension inactive")
     return
   }
 
-  console.log("[statewright] Connected to gateway on port", port)
+  // Verify connectivity
+  const initial = await getState(port)
+  if (!initial) {
+    console.warn("[statewright] Could not reach gateway on port", port)
+    return
+  }
 
-  // Register statewright tools as Pi skills
-  ctx.defineTools({
-    statewright_get_state: {
-      description:
-        "Get the current state machine state, available tools, transitions, and iteration count.",
-      parameters: {},
-      execute: async () => {
-        const state = await getState(port)
-        if (!state) return { error: "Gateway not reachable" }
-        return state
-      },
-    },
-    statewright_transition: {
-      description:
-        "Transition the state machine to a new state by emitting an event.",
-      parameters: {
-        event: {
-          type: "string",
-          description: "The transition event name (e.g., DONE, FAIL, PLAN_READY)",
-          required: true,
-        },
-      },
-      execute: async (args: { event: string }) => {
-        // The MCP gateway handles the actual transition
-        // This skill just provides the interface for Pi's tool system
-        const resp = await hookRequest(port, "pre-tool", {
-          tool_name: `statewright_transition:${args.event}`,
-        })
-        return resp ?? { error: "Gateway not reachable" }
-      },
+  console.log(
+    `[statewright] Phase: ${initial.state} (${initial.iteration}/${initial.maxIterations ?? "∞"}) | Tools: ${initial.allowedTools.join(", ")}`,
+  )
+
+  // --- Custom tools ---
+
+  pi.registerTool({
+    name: "statewright_get_state",
+    label: "Get State",
+    description:
+      "Get the current state machine state, available tools, transitions, and iteration count.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, signal) {
+      const state = await getState(port)
+      if (!state) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(state, null, 2),
+          },
+        ],
+      }
     },
   })
 
-  // Hook into tool execution for enforcement
-  ctx.onToolBefore(async (tool: string, _args: unknown) => {
-    const resp = await hookRequest(port, "pre-tool", { tool_name: tool })
+  pi.registerTool({
+    name: "statewright_transition",
+    label: "Transition State",
+    description:
+      "Transition the state machine to a new state by emitting an event (e.g., DONE, FAIL, PLAN_READY).",
+    parameters: Type.Object({
+      event: Type.String({
+        description: "The transition event name (e.g., DONE, FAIL, PLAN_READY)",
+      }),
+    }),
+    async execute(_toolCallId, params: { event: string }, signal) {
+      const resp = await hookRequest(port, "pre-tool", {
+        tool_name: `statewright_transition:${params.event}`,
+      })
+      if (!resp) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(resp, null, 2),
+          },
+        ],
+      }
+    },
+  })
+
+  // --- Context injection (equivalent to Claude Code UserPromptSubmit) ---
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const state = await getState(port)
+    if (!state) return
+
+    // Update status bar
+    ctx.ui.setStatus(
+      "statewright",
+      `[statewright] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
+    )
+
+    // Inject state context as a system message
+    return {
+      appendSystemPrompt: formatStateContext(state),
+    }
+  })
+
+  // --- Tool enforcement (equivalent to Claude Code PreToolUse) ---
+
+  pi.on("tool_call", async (event, ctx) => {
+    // Never gate statewright's own tools
+    if (event.toolName.startsWith("statewright_")) return
+
+    const resp = await hookRequest(port, "pre-tool", {
+      tool_name: event.toolName,
+    })
     if (!resp) return
 
     if (resp.decision === "deny") {
-      throw new Error(
-        `[statewright] BLOCKED: ${resp.additionalContext ?? "Tool not available in current phase"}`,
+      return {
+        block: true,
+        reason: resp.additionalContext ?? "Tool not available in current phase",
+      }
+    }
+  })
+
+  // --- Post-tool tracking (equivalent to Claude Code PostToolUse) ---
+
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.toolName.startsWith("statewright_")) return
+
+    const resp = await hookRequest(port, "post-tool", {
+      tool_name: event.toolName,
+    })
+    if (!resp) return
+
+    // Update status on state change
+    const state = await getState(port)
+    if (state) {
+      ctx.ui.setStatus(
+        "statewright",
+        `[statewright] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
       )
     }
 
-    if (resp.additionalContext) {
-      console.log(`[statewright] ${resp.additionalContext}`)
-    }
-  })
-
-  ctx.onToolAfter(async (tool: string, _result: unknown) => {
-    const resp = await hookRequest(port, "post-tool", { tool_name: tool })
-    if (!resp) return
-
-    if (resp.transition) {
-      console.log(`[statewright] ${resp.transition}`)
-    }
     if (resp.completed) {
-      console.log("[statewright] Workflow complete.")
+      ctx.ui.notify("[statewright] Workflow complete.", "success")
+    } else if (resp.transition) {
+      ctx.ui.notify(`[statewright] ${resp.transition}`, "info")
     }
   })
-
-  // Print initial state
-  const state = await getState(port)
-  if (state) {
-    console.log(
-      `[statewright] Phase: ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"}) | Tools: ${state.allowedTools.join(", ")}`,
-    )
-  }
 }

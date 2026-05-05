@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh user-prompt",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh user-prompt",
             "timeout": 5000
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh pre-tool",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh pre-tool",
             "timeout": 5000
           }
         ]
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh post-tool",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh post-tool",
             "timeout": 3000
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh stop",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh stop",
             "timeout": 3000
           }
         ]

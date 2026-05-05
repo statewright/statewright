@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "statewright": {
-      "type": "http",
-      "url": "https://mcp.statewright.ai"
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-proxy.sh"]
     }
   }
 }

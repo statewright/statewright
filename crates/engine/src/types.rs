@@ -33,6 +33,21 @@ pub struct StateDef {
     /// Declared by the state machine author, not inferred.
     #[serde(default)]
     pub safe_next: Option<String>,
+    /// Maximum lines that may be edited in this state.
+    #[serde(default)]
+    pub max_edit_lines: Option<u32>,
+    /// Allowed shell commands (for Bash tool restriction).
+    #[serde(default)]
+    pub allowed_commands: Option<Vec<String>>,
+    /// Tool name to restrict commands on (default: "Bash").
+    #[serde(default)]
+    pub allowed_commands_tool: Option<String>,
+    /// Maximum files that may be edited in this state.
+    #[serde(default)]
+    pub max_files_per_state: Option<u32>,
+    /// Maximum context bytes the agent may accumulate in this state.
+    #[serde(default)]
+    pub context_budget_bytes: Option<u64>,
 }
 
 /// A transition triggered by an event.

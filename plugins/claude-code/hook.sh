@@ -144,6 +144,58 @@ case "$ENDPOINT" in
 
     # Check if tool is allowed
     if echo "$ALLOWED" | grep -qx "$TOOL_NAME"; then
+      # Tool name is in allowed_tools — but if it's Bash, classify the command
+      # to prevent bypass of Write/Edit/Destructive restrictions via shell redirects
+      if [ "$TOOL_NAME" = "Bash" ]; then
+        COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+        if [ -n "$COMMAND" ]; then
+          # Check for file write operations (redirects, heredocs) when Write/Edit not allowed
+          HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
+          HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
+          if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
+            if echo "$COMMAND" | grep -qE '>[^>2]|>>\s*\S'; then
+              REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              exit 0
+            fi
+            if echo "$COMMAND" | grep -qE 'sed\s+-i|perl\s+-p?i'; then
+              REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
+              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              exit 0
+            fi
+          fi
+          # Check for destructive operations (always blocked in restricted states)
+          if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
+            REASON="Bash command blocked: destructive operation (rm/shred/truncate) not permitted in '$CURRENT' phase."
+            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            exit 0
+          fi
+          # Check for destructive ops after && or ;
+          if echo "$COMMAND" | grep -qE '(&&|;)\s*(rm|rmdir|shred|truncate|unlink)\s'; then
+            REASON="Bash command blocked: destructive operation not permitted in '$CURRENT' phase."
+            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            exit 0
+          fi
+          # Check allowed_commands from cache if present
+          ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
+          if [ -n "$ALLOWED_CMDS" ]; then
+            CMD_OK=false
+            while IFS= read -r prefix; do
+              case "$COMMAND" in "$prefix"*) CMD_OK=true; break ;; esac
+            done <<< "$ALLOWED_CMDS"
+            if [ "$CMD_OK" = false ]; then
+              REASON="Bash command blocked: '$COMMAND' not in allowed commands for '$CURRENT' phase."
+              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              exit 0
+            fi
+          fi
+        fi
+      fi
       exit 0  # Allowed — silent pass
     fi
 

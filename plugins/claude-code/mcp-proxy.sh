@@ -13,7 +13,7 @@ upload_client_tools() {
   local MCP_CONFIG="$HOME/.claude/.mcp.json"
   local tools
 
-  # Claude Code built-in tools
+  # Claude Code built-in tools + statewright MCP tools (can't self-scan)
   tools=$(jq -n '[
     {"name":"Read","source":"Claude Code","category":"File"},
     {"name":"Edit","source":"Claude Code","category":"File"},
@@ -26,7 +26,12 @@ upload_client_tools() {
     {"name":"Agent","source":"Claude Code","category":"Execute"},
     {"name":"WebFetch","source":"Claude Code","category":"Web"},
     {"name":"WebSearch","source":"Claude Code","category":"Web"},
-    {"name":"NotebookEdit","source":"Claude Code","category":"Notebook"}
+    {"name":"NotebookEdit","source":"Claude Code","category":"Notebook"},
+    {"name":"statewright_start","source":"MCP:statewright","category":"MCP","description":"Activate a workflow for this session"},
+    {"name":"statewright_stop","source":"MCP:statewright","category":"MCP","description":"Deactivate the current workflow"},
+    {"name":"statewright_transition","source":"MCP:statewright","category":"MCP","description":"Transition to the next state"},
+    {"name":"statewright_get_state","source":"MCP:statewright","category":"MCP","description":"Get current state, allowed tools, and transitions"},
+    {"name":"statewright_list_workflows","source":"MCP:statewright","category":"MCP","description":"List available workflows"}
   ]')
 
   # Scan configured MCP servers for additional tools

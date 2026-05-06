@@ -34,22 +34,44 @@ upload_client_tools() {
     for server in $(jq -r '.mcpServers // {} | keys[]' "$MCP_CONFIG" 2>/dev/null); do
       [ "$server" = "statewright" ] && continue
       local server_url=$(jq -r ".mcpServers[\"$server\"].url // empty" "$MCP_CONFIG" 2>/dev/null)
+      local server_cmd=$(jq -r ".mcpServers[\"$server\"].command // empty" "$MCP_CONFIG" 2>/dev/null)
+      local server_tools=""
 
-      # Only scan HTTP MCP servers (can't easily query stdio servers)
       if [ -n "$server_url" ]; then
+        # HTTP MCP server — single POST
         local auth_header=$(jq -r ".mcpServers[\"$server\"].headers.Authorization // empty" "$MCP_CONFIG" 2>/dev/null)
         local extra_headers=""
         [ -n "$auth_header" ] && extra_headers="-H \"Authorization: $auth_header\""
 
-        local server_tools=$(eval curl -sf --max-time 5 -X POST "\"$server_url\"" \
+        server_tools=$(eval curl -sf --max-time 5 -X POST "\"$server_url\"" \
           -H "'Content-Type: application/json'" \
           $extra_headers \
           -d "'{"jsonrpc":"2.0","method":"tools/list","params":{},"id":99}'" 2>/dev/null \
           | jq "[.result.tools[]? | {name: .name, source: \"MCP:$server\", category: \"MCP\", description: .description}]" 2>/dev/null)
 
-        if [ -n "$server_tools" ] && [ "$server_tools" != "null" ] && [ "$server_tools" != "[]" ]; then
-          tools=$(echo "$tools" | jq ". + $server_tools")
-        fi
+      elif [ -n "$server_cmd" ]; then
+        # Stdio MCP server — launch, handshake, query, kill
+        local server_args=$(jq -r ".mcpServers[\"$server\"].args // [] | join(\" \")" "$MCP_CONFIG" 2>/dev/null)
+        local server_env=$(jq -r ".mcpServers[\"$server\"].env // {} | to_entries | map(\"export \" + .key + \"=\" + (.value | @sh) + \";\") | join(\" \")" "$MCP_CONFIG" 2>/dev/null)
+
+        server_tools=$(timeout 10 bash -c "
+          ${server_env}
+          { echo '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"statewright-scanner\",\"version\":\"0.1\"}},\"id\":1}'; \
+            sleep 0.5; \
+            echo '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}'; \
+            echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":2}'; \
+            sleep 1; \
+          } | $server_cmd $server_args 2>/dev/null | while IFS= read -r line; do
+            if echo \"\$line\" | jq -e '.id == 2 and .result.tools' >/dev/null 2>&1; then
+              echo \"\$line\"
+              break
+            fi
+          done
+        " 2>/dev/null | jq "[.result.tools[]? | {name: .name, source: \"MCP:$server\", category: \"MCP\", description: .description}]" 2>/dev/null)
+      fi
+
+      if [ -n "$server_tools" ] && [ "$server_tools" != "null" ] && [ "$server_tools" != "[]" ]; then
+        tools=$(echo "$tools" | jq ". + $server_tools")
       fi
     done
   fi

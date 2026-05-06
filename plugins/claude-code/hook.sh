@@ -227,14 +227,19 @@ case "$ENDPOINT" in
         rm -f "$ACTIVE_FILE" "$CACHE_FILE"
         ;;
       statewright_transition|mcp__statewright__statewright_transition)
+        # Read previous state before refreshing
+        PREV_STATE=$(cat "$CACHE_FILE" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
         # Refresh cache after transition
         STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
         if [ -n "$STATE_JSON" ]; then
           echo "$STATE_JSON" > "$CACHE_FILE"
-          # Check for final state
+          NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
           if [ "$IS_FINAL" = "true" ]; then
             rm -f "$ACTIVE_FILE" "$CACHE_FILE"
+            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
+          elif [ -n "$PREV_STATE" ] && [ -n "$NEW_STATE" ]; then
+            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE}\"}}"
           fi
         fi
         ;;

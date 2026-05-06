@@ -30,16 +30,27 @@ upload_client_tools() {
   ]')
 
   # Scan configured MCP servers for additional tools
-  if [ -f "$MCP_CONFIG" ]; then
-    for server in $(jq -r '.mcpServers // {} | keys[]' "$MCP_CONFIG" 2>/dev/null); do
+  # Collect all MCP config files: user global + plugin caches
+  local mcp_configs="$MCP_CONFIG"
+  for pconf in "$HOME/.claude/plugins/cache"/*/*/.mcp.json; do
+    [ -f "$pconf" ] && mcp_configs="$mcp_configs $pconf"
+  done
+
+  local seen_servers=""
+  for conf_file in $mcp_configs; do
+    [ -f "$conf_file" ] || continue
+    for server in $(jq -r '.mcpServers // {} | keys[]' "$conf_file" 2>/dev/null); do
       [ "$server" = "statewright" ] && continue
-      local server_url=$(jq -r ".mcpServers[\"$server\"].url // empty" "$MCP_CONFIG" 2>/dev/null)
-      local server_cmd=$(jq -r ".mcpServers[\"$server\"].command // empty" "$MCP_CONFIG" 2>/dev/null)
+      # Skip duplicates across config files
+      case " $seen_servers " in *" $server "*) continue ;; esac
+      seen_servers="$seen_servers $server"
+      local server_url=$(jq -r ".mcpServers[\"$server\"].url // empty" "$conf_file" 2>/dev/null)
+      local server_cmd=$(jq -r ".mcpServers[\"$server\"].command // empty" "$conf_file" 2>/dev/null)
       local server_tools=""
 
       if [ -n "$server_url" ]; then
         # HTTP MCP server — single POST
-        local auth_header=$(jq -r ".mcpServers[\"$server\"].headers.Authorization // empty" "$MCP_CONFIG" 2>/dev/null)
+        local auth_header=$(jq -r ".mcpServers[\"$server\"].headers.Authorization // empty" "$conf_file" 2>/dev/null)
         local extra_headers=""
         [ -n "$auth_header" ] && extra_headers="-H \"Authorization: $auth_header\""
 
@@ -51,30 +62,26 @@ upload_client_tools() {
 
       elif [ -n "$server_cmd" ]; then
         # Stdio MCP server — launch, handshake, query, kill
-        local server_args=$(jq -r ".mcpServers[\"$server\"].args // [] | join(\" \")" "$MCP_CONFIG" 2>/dev/null)
-        local server_env=$(jq -r ".mcpServers[\"$server\"].env // {} | to_entries | map(\"export \" + .key + \"=\" + (.value | @sh) + \";\") | join(\" \")" "$MCP_CONFIG" 2>/dev/null)
+        local server_args=$(jq -r ".mcpServers[\"$server\"].args // [] | join(\" \")" "$conf_file" 2>/dev/null)
+        local server_env=$(jq -r ".mcpServers[\"$server\"].env // {} | to_entries | map(\"export \" + .key + \"=\" + (.value | @sh) + \";\") | join(\" \")" "$conf_file" 2>/dev/null)
 
-        server_tools=$(timeout 10 bash -c "
+        server_tools=$(timeout 15 bash -c "
           ${server_env}
           { echo '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"statewright-scanner\",\"version\":\"0.1\"}},\"id\":1}'; \
             sleep 0.5; \
             echo '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}'; \
             echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":2}'; \
-            sleep 1; \
-          } | $server_cmd $server_args 2>/dev/null | while IFS= read -r line; do
-            if echo \"\$line\" | jq -e '.id == 2 and .result.tools' >/dev/null 2>&1; then
-              echo \"\$line\"
-              break
-            fi
-          done
-        " 2>/dev/null | jq "[.result.tools[]? | {name: .name, source: \"MCP:$server\", category: \"MCP\", description: .description}]" 2>/dev/null)
+            sleep 2; \
+          } | $server_cmd $server_args 2>/dev/null
+        " 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' \
+          | jq -s '[.[] | select(.id == 2) | .result.tools[]? | {name: .name, source: "MCP:'"$server"'", category: "MCP", description: (.description // "")[:120]}]' 2>/dev/null)
       fi
 
       if [ -n "$server_tools" ] && [ "$server_tools" != "null" ] && [ "$server_tools" != "[]" ]; then
         tools=$(echo "$tools" | jq ". + $server_tools")
       fi
     done
-  fi
+  done
 
   # Upload to PB directly (hook accepts API key auth)
   curl -sf --max-time 10 -X POST "$PB_URL/api/client-tools" \

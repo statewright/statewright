@@ -32,7 +32,7 @@ upload_client_tools() {
   # Scan configured MCP servers for additional tools
   # Collect all MCP config files: user global + plugin caches
   local mcp_configs="$MCP_CONFIG"
-  for pconf in "$HOME/.claude/plugins/cache"/*/*/.mcp.json; do
+  for pconf in "$HOME/.claude/plugins/cache"/*/*/*/.mcp.json; do
     [ -f "$pconf" ] && mcp_configs="$mcp_configs $pconf"
   done
 

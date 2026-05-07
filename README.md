@@ -18,12 +18,12 @@ Instead of making the model bigger, make the problem smaller. Formal state machi
 
 | Model | Size | With statewright | Without |
 |-------|------|-----------------|---------|
-| gemma4:e2b | 7.2GB | PASS | FAIL |
+| gemma4:e2b | 7.2GB | FAIL | FAIL |
 | gpt-oss | 13.8GB | PASS | FAIL |
 | gemma4:31b | 19.9GB | PASS | FAIL |
 | llama3.3 | 42.5GB | PASS | FAIL |
 
-**With statewright: 10/10. Without: 2/10.** Same models, same tasks, same hardware. Results fine-tuning couldn't touch — without the training overhead. [Research brief →](https://statewright.ai/research)
+The inflection point is ~13GB. Below that, models can't maintain valid tool call JSON through complex arguments — the constraint helps but doesn't overcome fundamental serialization limits. Above 13GB, **statewright takes models from 2/10 to 10/10** on the same tasks, same hardware. [Research brief →](https://statewright.ai/research)
 
 ## Quick start
 

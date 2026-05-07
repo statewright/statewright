@@ -121,10 +121,10 @@ State machines aren't DAGs — they loop and retry, which is what agentic work a
 | Agent | Integration | Enforcement |
 |-------|------------|-------------|
 | [Claude Code](plugins/claude-code/) | Hooks + MCP | Hard (protocol layer) |
-| [Codex](plugins/codex/) | Hooks | Hard |
-| [opencode](plugins/opencode/) | TypeScript plugin | Hard |
-| [Pi](plugins/pi/) | Skills extension | Hard |
-| [Cursor](plugins/cursor/) | MCP + rules | Advisory |
+| [Codex](plugins/codex/) | Hooks | Hard (alpha) |
+| [opencode](plugins/opencode/) | TypeScript plugin | Hard (alpha) |
+| [Pi](plugins/pi/) | Skills extension | Hard (alpha) |
+| [Cursor](plugins/cursor/) | MCP + rules | Advisory (alpha) |
 
 ## Engine
 

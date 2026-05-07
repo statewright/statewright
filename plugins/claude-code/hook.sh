@@ -74,8 +74,14 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- No active workflow: dormant mode (zero overhead) ---
+    # --- No active workflow: hint on first prompt of session ---
     if [ ! -f "$ACTIVE_FILE" ]; then
+      HINT_FILE="$STATEWRIGHT_DIR/.session_hinted"
+      if [ ! -f "$HINT_FILE" ]; then
+        mkdir -p "$STATEWRIGHT_DIR"
+        touch "$HINT_FILE"
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.\"}}"
+      fi
       exit 0
     fi
 
@@ -93,7 +99,7 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
@@ -224,7 +230,7 @@ case "$ENDPOINT" in
         ;;
       statewright_stop|mcp__statewright__statewright_stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted" "$STATEWRIGHT_DIR/.session_hinted"
         ;;
       statewright_transition|mcp__statewright__statewright_transition)
         # Read previous state before refreshing
@@ -236,7 +242,7 @@ case "$ENDPOINT" in
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
           if [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$PREV_STATE" ] && [ -n "$NEW_STATE" ]; then
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE}\"}}"

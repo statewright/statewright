@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Plugin:statewright:statewright"
+    ]
+  },
   "hooks": {
     "UserPromptSubmit": [
       {

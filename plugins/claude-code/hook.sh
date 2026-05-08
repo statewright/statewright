@@ -231,7 +231,6 @@ case "$ENDPOINT" in
     # Detect statewright MCP tool calls and manage local state
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
     TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
-    echo "$(date): post-tool: $TOOL_NAME" >> /tmp/statewright_hook_debug.log 2>/dev/null || true
 
     # Match any prefix: statewright_X, mcp__statewright__X, mcp__plugin_statewright_*__X
     SW_ACTION=""

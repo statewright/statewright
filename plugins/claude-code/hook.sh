@@ -115,7 +115,10 @@ case "$ENDPOINT" in
     INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
     TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
 
-    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS. Use statewright_transition(event) MCP tool to advance."
+    BLOCKED_ENV=$(echo "$STATE_JSON" | jq -r '.blocked_env // [] | join(", ")' 2>/dev/null || true)
+    ENV_OVERRIDES=$(echo "$STATE_JSON" | jq -r '.env_overrides // {} | to_entries | map(.key + "=" + .value) | join(", ")' 2>/dev/null || true)
+
+    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.} Use statewright_transition(event) MCP tool to advance."
     CONTEXT=$(echo "$CONTEXT" | sed 's/"/\\"/g')
     echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$CONTEXT\"}}"
     exit 0
@@ -199,6 +202,18 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
               exit 0
             fi
+          fi
+          # Check blocked_env — deny commands referencing blocked environment variables
+          BLOCKED_ENVS=$(echo "$STATE_JSON" | jq -r '.blocked_env // [] | .[]' 2>/dev/null || true)
+          if [ -n "$BLOCKED_ENVS" ]; then
+            while IFS= read -r bvar; do
+              if echo "$COMMAND" | grep -qE "\\\$$bvar|\\\$\{$bvar\}|^$bvar=| $bvar="; then
+                REASON="Bash command blocked: references blocked env var '$bvar' in '$CURRENT' phase. This variable is restricted to prevent cross-environment access."
+                REASON=$(echo "$REASON" | sed 's/"/\\"/g')
+                echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+                exit 0
+              fi
+            done <<< "$BLOCKED_ENVS"
           fi
         fi
       fi

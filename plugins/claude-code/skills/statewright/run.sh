@@ -50,11 +50,17 @@ case "$CMD" in
     PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
     SW_DIR="$HOME/.statewright/projects/$PROJECT_HASH"
     mkdir -p "$SW_DIR"
-    rm -f "$SW_DIR/.active" "$SW_DIR/.state_cache" "$SW_DIR/.session_hinted" "$SW_DIR/.discovered_commands"
+    rm -f "$SW_DIR/.active" "$SW_DIR/.state_cache" "$SW_DIR/.session_hinted" "$SW_DIR/.discovered_commands" "$SW_DIR/.capture_enabled" "$SW_DIR/.run_id" "$SW_DIR/.log_seq"
     # Load workflow on gateway
-    mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\"}},\"id\":1}"
+    LOAD_RESP=$(mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\"}},\"id\":1}")
+    echo "$LOAD_RESP"
     # Activate local enforcement
     echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$SW_DIR/.active"
+    # Check if capture_output is enabled and store run_id for log linkage
+    RUN_ID=$(echo "$LOAD_RESP" | jq -r '.run_id // empty' 2>/dev/null || true)
+    CAPTURE=$(echo "$LOAD_RESP" | jq -r '.capture_output // false' 2>/dev/null || true)
+    [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$SW_DIR/.run_id"
+    [ "$CAPTURE" = "true" ] && touch "$SW_DIR/.capture_enabled"
     # Fetch and cache state, output context hint
     STATE=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
     if [ -n "$STATE" ]; then

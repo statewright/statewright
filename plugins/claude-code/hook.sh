@@ -134,7 +134,7 @@ case "$ENDPOINT" in
 
     # Always allow system/internal/MCP tools
     case "$TOOL_NAME" in
-      statewright_*|mcp__statewright*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode) exit 0 ;;
+      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)

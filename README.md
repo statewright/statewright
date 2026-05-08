@@ -14,7 +14,9 @@ AI agents are powerful but brittle. Give a model 40+ tools and an open-ended pro
 
 Instead of making the model bigger, make the problem smaller. Formal state machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. An implementation state gets edit tools but no shell access. A testing state gets bash but only for test commands. The model physically cannot skip steps or use the wrong tool at the wrong time.
 
-## Results
+This is model-agnostic. Frontier models like Opus and Sonnet solve more reliably with fewer tokens and debug cycles. Smaller local models cross capability thresholds they couldn't reach on their own. The technique works the same way regardless of where the model runs.
+
+## Research results
 
 | Model | Size | With statewright | Without |
 |-------|------|-----------------|---------|
@@ -23,7 +25,7 @@ Instead of making the model bigger, make the problem smaller. Formal state machi
 | gemma4:31b | 19.9GB | PASS | FAIL |
 | llama3.3 | 42.5GB | PASS | FAIL |
 
-The inflection point is ~13GB. Below that, models can't maintain valid tool call JSON through complex arguments — the constraint helps but doesn't overcome fundamental serialization limits. Above 13GB, **statewright takes models from 2/10 to 10/10** on the same tasks, same hardware. [Research brief →](https://statewright.ai/research)
+We validated the approach on local models where the effect is most measurable. The inflection point is ~13GB — below that, models can't maintain valid tool call JSON through complex arguments. Above 13GB, **statewright takes models from 2/10 to 10/10** on the same tasks, same hardware. The same constraints applied to frontier models (via Claude Code, Codex, Cursor) reduce token waste, prevent debug spirals, and improve first-attempt success rates. [Research brief →](https://statewright.ai/research)
 
 ## Quick start
 

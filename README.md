@@ -18,12 +18,15 @@ This is model-agnostic. Frontier models like Opus and Sonnet solve more reliably
 
 ## Research results
 
-| Model | Size | With statewright | Without |
-|-------|------|-----------------|---------|
-| gemma4:e2b | 7.2GB | FAIL | FAIL |
-| gpt-oss:20b | 13.8GB | PASS | FAIL |
-| gemma4:31b | 19.9GB | PASS | FAIL |
-| llama3.3 | 42.5GB | PASS | FAIL |
+| Model | Size | Bug Fix (26 lines) | SWE-bench (5 tasks) |
+|-------|------|--------------------|---------------------|
+| gemma3 | 3.3GB | FAIL | FAIL |
+| gemma4:e2b | 7.2GB | PASS* | FAIL |
+| gpt-oss:20b | 13.8GB | PASS | PASS (5/5) |
+| gemma4:31b | 19.9GB | PASS | PASS (5/5) |
+| llama3.3 | 42.5GB | PASS | PASS (2/2) |
+
+*\*with specialized edit_line tool adaptation*
 
 We validated the approach on local models where the effect is most measurable — across model families and generations. Notably, model age does not seem to impact the results. The inflection point is ~13GB — below that, models can't maintain valid tool call JSON through complex arguments. Above 13GB, **statewright takes models from 2/10 to 10/10** on the same tasks, same hardware. The same constraints applied to frontier models (via Claude Code, Codex, Cursor) reduce token waste, prevent debug spirals, and improve first-attempt success rates. [Research brief →](https://statewright.ai/research)
 

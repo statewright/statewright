@@ -231,9 +231,20 @@ case "$ENDPOINT" in
     # Detect statewright MCP tool calls and manage local state
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
     TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
+    echo "$(date): post-tool: $TOOL_NAME" >> /tmp/statewright_hook_debug.log 2>/dev/null || true
 
+    # Match any prefix: statewright_X, mcp__statewright__X, mcp__plugin_statewright_*__X
+    SW_ACTION=""
     case "$TOOL_NAME" in
-      statewright_start|mcp__statewright__statewright_start)
+      *statewright_start) SW_ACTION="start" ;;
+      *statewright_stop) SW_ACTION="stop" ;;
+      *statewright_transition) SW_ACTION="transition" ;;
+      *statewright_load_workflow) SW_ACTION="start" ;;
+      *statewright_deactivate) SW_ACTION="stop" ;;
+    esac
+
+    case "$SW_ACTION" in
+      start)
         # Activate enforcement
         mkdir -p "$STATEWRIGHT_DIR"
         echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
@@ -243,11 +254,11 @@ case "$ENDPOINT" in
           echo "$STATE_JSON" > "$CACHE_FILE"
         fi
         ;;
-      statewright_stop|mcp__statewright__statewright_stop)
+      stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted" "$STATEWRIGHT_DIR/.session_hinted"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
         ;;
-      statewright_transition|mcp__statewright__statewright_transition)
+      transition)
         # Read previous state before refreshing
         PREV_STATE=$(cat "$CACHE_FILE" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
         # Refresh cache after transition

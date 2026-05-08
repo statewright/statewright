@@ -8,7 +8,7 @@ ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 
 STATEWRIGHT_DIR="${HOME}/.statewright"
-API_KEY=$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || echo "${STATEWRIGHT_API_KEY:-}")
+API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 ACTIVE_FILE="$STATEWRIGHT_DIR/.active"
 CACHE_FILE="$STATEWRIGHT_DIR/.state_cache"

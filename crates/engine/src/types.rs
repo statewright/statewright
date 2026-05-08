@@ -48,6 +48,12 @@ pub struct StateDef {
     /// Maximum context bytes the agent may accumulate in this state.
     #[serde(default)]
     pub context_budget_bytes: Option<u64>,
+    /// Environment variables blocked in this state (denied in Bash commands).
+    #[serde(default)]
+    pub blocked_env: Option<Vec<String>>,
+    /// Environment variable overrides for this state (injected as context, not enforced).
+    #[serde(default)]
+    pub env_overrides: Option<BTreeMap<String, String>>,
 }
 
 /// A transition triggered by an event.

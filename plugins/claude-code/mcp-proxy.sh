@@ -88,11 +88,28 @@ upload_client_tools() {
     done
   done
 
-  # Upload to PB directly (hook accepts API key auth)
+  # Discover Taskfile/Makefile commands, namespaced by directory basename
+  local commands='[]'
+  local project_name=$(basename "$(pwd)")
+  if command -v task &>/dev/null && { [ -f "Taskfile.yml" ] || [ -f "Taskfile.yaml" ] || [ -f "taskfile.yml" ]; }; then
+    local task_cmds=$(task --list-all 2>/dev/null | grep '^\*' | awk '{print $2}' | sed 's/:$//' | head -30)
+    if [ -n "$task_cmds" ]; then
+      commands=$(echo "$task_cmds" | jq -R '.' | jq -s --arg proj "$project_name" '[.[] | {name: ., source: "Taskfile", category: "task", project: $proj}]')
+    fi
+  fi
+  if [ -f "Makefile" ] || [ -f "makefile" ]; then
+    local make_cmds=$(make -pRrq 2>/dev/null | awk -F: '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,a," ");print a[1]}' | sort -u | grep -v '^\.' | head -30)
+    if [ -n "$make_cmds" ]; then
+      local make_json=$(echo "$make_cmds" | jq -R '.' | jq -s --arg proj "$project_name" '[.[] | {name: ., source: "Makefile", category: "make", project: $proj}]')
+      commands=$(echo "$commands" | jq ". + $make_json")
+    fi
+  fi
+
+  # Upload tools + commands to PB
   curl -sf --max-time 10 -X POST "$PB_URL/api/client-tools" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $key" \
-    -d "{\"tools\": $tools}" >/dev/null 2>&1
+    -d "{\"tools\": $tools, \"commands\": $commands}" >/dev/null 2>&1
 }
 
 # --- Main proxy loop ---

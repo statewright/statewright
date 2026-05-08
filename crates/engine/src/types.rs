@@ -49,10 +49,10 @@ pub struct StateDef {
     #[serde(default)]
     pub context_budget_bytes: Option<u64>,
     /// Environment variables blocked in this state (denied in Bash commands).
-    #[serde(default)]
+    #[serde(default, alias = "deny_env")]
     pub blocked_env: Option<Vec<String>>,
     /// Environment variable overrides for this state (injected as context, not enforced).
-    #[serde(default)]
+    #[serde(default, alias = "env")]
     pub env_overrides: Option<BTreeMap<String, String>>,
 }
 
@@ -74,6 +74,8 @@ pub enum TransitionDef {
         #[serde(default)]
         approval_message: Option<String>,
     },
+    /// Guarded: array of conditional transitions — first matching guard wins (XState pattern).
+    Guarded(Vec<GuardedTransition>),
     /// Invoke: delegate to a sub-machine, then resume at on_complete.
     Invoke {
         /// Reference to the sub-machine definition to invoke.
@@ -89,18 +91,29 @@ pub enum TransitionDef {
     },
 }
 
+/// A single conditional transition within a Guarded array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardedTransition {
+    pub target: String,
+    #[serde(default)]
+    pub guard: Option<String>,
+    #[serde(default)]
+    pub guards: Option<Vec<String>>,
+}
+
 impl TransitionDef {
     pub fn target(&self) -> &str {
         match self {
             TransitionDef::Simple(t) => t,
             TransitionDef::Full { target, .. } => target,
+            TransitionDef::Guarded(branches) => branches.first().map(|b| b.target.as_str()).unwrap_or(""),
             TransitionDef::Invoke { on_complete, .. } => on_complete,
         }
     }
 
     pub fn guard_names(&self) -> Vec<&str> {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } => vec![],
+            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Guarded(_) => vec![],
             TransitionDef::Full { guard, guards, .. } => {
                 let mut names = Vec::new();
                 if let Some(g) = guard {
@@ -118,7 +131,7 @@ impl TransitionDef {
 
     pub fn requires_approval(&self) -> bool {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } => false,
+            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Guarded(_) => false,
             TransitionDef::Full { requires_approval, .. } => requires_approval.unwrap_or(false),
         }
     }

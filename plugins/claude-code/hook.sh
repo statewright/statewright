@@ -10,8 +10,12 @@ HOOK_INPUT=$(cat 2>/dev/null || true)
 STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
-ACTIVE_FILE="$STATEWRIGHT_DIR/.active"
-CACHE_FILE="$STATEWRIGHT_DIR/.state_cache"
+
+# Project-scoped state files — hash cwd so different projects don't leak state
+PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
+PROJECT_DIR="$STATEWRIGHT_DIR/projects/$PROJECT_HASH"
+ACTIVE_FILE="$PROJECT_DIR/.active"
+CACHE_FILE="$PROJECT_DIR/.state_cache"
 
 # --- Auto-bootstrap settings.json + MCP config ---
 SETTINGS="$HOME/.claude/settings.json"
@@ -76,7 +80,7 @@ case "$ENDPOINT" in
 
     # --- No active workflow: hint on first prompt of session ---
     if [ ! -f "$ACTIVE_FILE" ]; then
-      HINT_FILE="$STATEWRIGHT_DIR/.session_hinted"
+      HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
         mkdir -p "$STATEWRIGHT_DIR"
         touch "$HINT_FILE"
@@ -99,13 +103,13 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
 
     # Write state cache for PreToolUse (zero-network enforcement)
-    mkdir -p "$STATEWRIGHT_DIR"
+    mkdir -p "$PROJECT_DIR"
     echo "$STATE_JSON" > "$CACHE_FILE"
 
     # Build context
@@ -118,7 +122,28 @@ case "$ENDPOINT" in
     BLOCKED_ENV=$(echo "$STATE_JSON" | jq -r '.blocked_env // [] | join(", ")' 2>/dev/null || true)
     ENV_OVERRIDES=$(echo "$STATE_JSON" | jq -r '.env_overrides // {} | to_entries | map(.key + "=" + .value) | join(", ")' 2>/dev/null || true)
 
-    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.} Use statewright_transition(event) MCP tool to advance."
+    # Command discovery: detect Taskfile/Makefile and list available commands
+    AVAILABLE_CMDS=""
+    CMDS_FILE="$PROJECT_DIR/.discovered_commands"
+    if [ ! -f "$CMDS_FILE" ]; then
+      # Discover once per session
+      if command -v task &>/dev/null && [ -f "Taskfile.yml" ] || [ -f "Taskfile.yaml" ] || [ -f "taskfile.yml" ]; then
+        TASK_CMDS=$(task --list-all 2>/dev/null | grep '^\*' | awk '{print $2}' | sed 's/:$//' | head -30 | tr '\n' ', ' | sed 's/,$//')
+        [ -n "$TASK_CMDS" ] && AVAILABLE_CMDS="Taskfile commands ($(basename "$(pwd)")): $TASK_CMDS"
+      fi
+      if [ -f "Makefile" ] || [ -f "makefile" ]; then
+        MAKE_CMDS=$(make -pRrq 2>/dev/null | awk -F: '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,a," ");print a[1]}' | sort -u | grep -v '^\.' | head -30 | tr '\n' ', ' | sed 's/,$//')
+        [ -n "$MAKE_CMDS" ] && AVAILABLE_CMDS="${AVAILABLE_CMDS:+$AVAILABLE_CMDS. }Makefile targets ($(basename "$(pwd)")): $MAKE_CMDS"
+      fi
+      echo "$AVAILABLE_CMDS" > "$CMDS_FILE"
+    else
+      AVAILABLE_CMDS=$(cat "$CMDS_FILE")
+    fi
+
+    SM_CONTEXT=$(echo "$STATE_JSON" | jq -r '.context // {} | to_entries | map(.key + "=" + (.value | tostring)) | join(", ")' 2>/dev/null || true)
+    GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
+
+    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO. When transitioning with guards, pass data: statewright_transition(event, data={key: value}).}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} When calling statewright_transition, ALWAYS include a data param: statewright_transition(event='EVENT', data={'rationale': 'why you are transitioning', ...any state context fields that guards may check}). This updates the state context for guard evaluation and creates an audit trail."
     CONTEXT=$(echo "$CONTEXT" | sed 's/"/\\"/g')
     echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$CONTEXT\"}}"
     exit 0
@@ -245,7 +270,7 @@ case "$ENDPOINT" in
     case "$SW_ACTION" in
       start)
         # Activate enforcement
-        mkdir -p "$STATEWRIGHT_DIR"
+        mkdir -p "$PROJECT_DIR"
         echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
         # Fetch and cache initial state
         STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
@@ -255,7 +280,7 @@ case "$ENDPOINT" in
         ;;
       stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
         ;;
       transition)
         # Read previous state before refreshing
@@ -267,7 +292,7 @@ case "$ENDPOINT" in
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
           if [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)

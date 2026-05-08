@@ -232,14 +232,14 @@ case "$ENDPOINT" in
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
     TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
 
-    # Match any prefix: statewright_X, mcp__statewright__X, mcp__plugin_statewright_*__X
+    # Match tool name regardless of prefix format (mcp__, plugin:, etc.)
     SW_ACTION=""
     case "$TOOL_NAME" in
-      *statewright_start) SW_ACTION="start" ;;
-      *statewright_stop) SW_ACTION="stop" ;;
-      *statewright_transition) SW_ACTION="transition" ;;
-      *statewright_load_workflow) SW_ACTION="start" ;;
-      *statewright_deactivate) SW_ACTION="stop" ;;
+      *statewright_start*) SW_ACTION="start" ;;
+      *statewright_load_workflow*) SW_ACTION="start" ;;
+      *statewright_stop*) SW_ACTION="stop" ;;
+      *statewright_deactivate*) SW_ACTION="stop" ;;
+      *statewright_transition*) SW_ACTION="transition" ;;
     esac
 
     case "$SW_ACTION" in
@@ -269,10 +269,14 @@ case "$ENDPOINT" in
           if [ "$IS_FINAL" = "true" ]; then
             rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$STATEWRIGHT_DIR/.session_hinted"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
-          elif [ -n "$PREV_STATE" ] && [ -n "$NEW_STATE" ]; then
+          elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
             NEXT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Next transitions: ${NEXT_TRANSITIONS}. Use ONLY these exact event names with statewright_transition.\"}}"
+            if [ -n "$PREV_STATE" ]; then
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Next transitions: ${NEXT_TRANSITIONS}. Use ONLY these exact event names with statewright_transition.\"}}"
+            else
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Now in ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Next transitions: ${NEXT_TRANSITIONS}. Use ONLY these exact event names with statewright_transition.\"}}"
+            fi
           fi
         fi
         ;;

@@ -84,6 +84,7 @@ On top of that sits a **plugin layer** that integrates with your coding agent vi
 | Command guard | Whitelist shell commands per state |
 | Edit scope limits | Cap files edited per state |
 | Approval gates | Human approval before high-risk transitions |
+| Environment scoping | Constrain or alias env vars per state — no prod credentials in test phases |
 | Context budget | Track tool result bytes, warn at threshold |
 
 ## Define your own workflows

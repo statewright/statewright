@@ -39,7 +39,49 @@ pub fn resolve_transition(
         }
     };
 
-    // Evaluate guards
+    // Handle guarded (conditional) transitions — first matching branch wins
+    if let TransitionDef::Guarded(branches) = transition {
+        for branch in branches {
+            let mut all_pass = true;
+            // Check single guard
+            if let Some(guard_name) = &branch.guard {
+                if let Some(guard_def) = definition.guards.get(guard_name.as_str()) {
+                    if !crate::guard::evaluate_guard(guard_def, context) {
+                        all_pass = false;
+                    }
+                }
+            }
+            // Check guard list
+            if all_pass {
+                if let Some(guard_names) = &branch.guards {
+                    for guard_name in guard_names {
+                        if let Some(guard_def) = definition.guards.get(guard_name.as_str()) {
+                            if !crate::guard::evaluate_guard(guard_def, context) {
+                                all_pass = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if all_pass {
+                let new_context = apply_context_patch(context, event_data);
+                return Ok(TransitionResult {
+                    new_state: branch.target.clone(),
+                    new_context,
+                    transitioned: true,
+                    requires_approval: false,
+                    approval_message: None,
+                    invoke: None,
+                });
+            }
+        }
+        return Err(TransitionError::GuardFailed {
+            guard: "no matching branch".to_string(),
+        });
+    }
+
+    // Evaluate guards for single transitions
     for guard_name in transition.guard_names() {
         if let Some(guard_def) = definition.guards.get(guard_name) {
             if !crate::guard::evaluate_guard(guard_def, context) {
@@ -410,6 +452,68 @@ mod tests {
         assert_eq!(invoke.machine, "fixer");
         assert!(invoke.on_fail.is_none());
         assert!(invoke.input.is_none());
+    }
+
+    // Guarded transition tests
+
+    #[test]
+    fn guarded_transition_takes_first_matching_branch() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "scout",
+            "initial": "posting",
+            "states": {
+                "posting": {
+                    "on": {
+                        "POSTED": [
+                            { "guard": "under_limit", "target": "evaluating" },
+                            { "guard": "at_limit", "target": "reporting" }
+                        ]
+                    }
+                },
+                "evaluating": { "type": "final" },
+                "reporting": { "type": "final" }
+            },
+            "guards": {
+                "under_limit": { "field": "post_count", "op": "lt", "value": 5 },
+                "at_limit": { "field": "post_count", "op": "gte", "value": 5 }
+            }
+        }))
+        .unwrap();
+
+        // Under limit: should go to evaluating
+        let ctx = json!({"post_count": 2});
+        let result = resolve_transition("posting", "POSTED", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(result.new_state, "evaluating");
+
+        // At limit: should go to reporting
+        let ctx = json!({"post_count": 5});
+        let result = resolve_transition("posting", "POSTED", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(result.new_state, "reporting");
+    }
+
+    #[test]
+    fn guarded_transition_no_match_returns_error() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "a",
+            "states": {
+                "a": {
+                    "on": {
+                        "GO": [
+                            { "guard": "never_true", "target": "b" }
+                        ]
+                    }
+                },
+                "b": { "type": "final" }
+            },
+            "guards": {
+                "never_true": { "field": "x", "op": "eq", "value": "impossible" }
+            }
+        }))
+        .unwrap();
+
+        let result = resolve_transition("a", "GO", &json!({}), &json!({}), &def);
+        assert!(result.is_err());
     }
 
     // Context patch tests

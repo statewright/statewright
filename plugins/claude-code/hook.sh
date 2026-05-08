@@ -136,7 +136,10 @@ case "$ENDPOINT" in
       AVAILABLE_CMDS=$(cat "$CMDS_FILE")
     fi
 
-    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} Use statewright_transition(event) MCP tool to advance."
+    SM_CONTEXT=$(echo "$STATE_JSON" | jq -r '.context // {} | to_entries | map(.key + "=" + (.value | tostring)) | join(", ")' 2>/dev/null || true)
+    GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
+
+    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO. When transitioning with guards, pass data: statewright_transition(event, data={key: value}).}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} Use statewright_transition(event) MCP tool to advance."
     CONTEXT=$(echo "$CONTEXT" | sed 's/"/\\"/g')
     echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$CONTEXT\"}}"
     exit 0

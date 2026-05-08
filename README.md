@@ -71,7 +71,7 @@ Then start a workflow:
 ◆ [statewright] Workflow complete. 46 seconds.
 ```
 
-You can also use the slash command directly: `/statewright bugfix`. The agent picks up natural language cues or explicit commands.
+You can also use the slash command directly: `/statewright start bugfix`. The agent picks up natural language cues or explicit commands.
 
 ## How it works
 

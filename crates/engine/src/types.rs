@@ -207,6 +207,11 @@ pub struct MachineMeta {
     pub danger_level: Option<DangerLevel>,
     #[serde(default)]
     pub requires_human_approval: Option<bool>,
+    #[serde(default)]
+    pub capture_output: Option<bool>,
+    /// Catch-all for forward compatibility with new meta fields.
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

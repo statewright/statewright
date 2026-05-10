@@ -44,7 +44,7 @@ mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
-    -d "$1" 2>/dev/null | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+    -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
 # ============================================================
@@ -78,20 +78,36 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- No active workflow: hint on first prompt of session ---
-    if [ ! -f "$ACTIVE_FILE" ]; then
+    # --- Check gateway for active workflow (source of truth) ---
+    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
+
+    # If gateway has an active workflow but local .active doesn't exist, sync it
+    if [ -n "$CURRENT" ] && [ ! -f "$ACTIVE_FILE" ]; then
+      mkdir -p "$PROJECT_DIR"
+      echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"synced\":true}" > "$ACTIVE_FILE"
+      # Extract run_id and capture_output from gateway status
+      STATUS_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_status","arguments":{}},"id":1}')
+      if [ -n "$STATUS_JSON" ]; then
+        RUN_ID=$(echo "$STATUS_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+        [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
+      fi
+    fi
+
+    # --- No active workflow on gateway: show hint ---
+    if [ -z "$CURRENT" ]; then
+      if [ -f "$ACTIVE_FILE" ]; then
+        # Gateway says no workflow but local says active — clean up stale state
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+      fi
       HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
-        mkdir -p "$STATEWRIGHT_DIR"
+        mkdir -p "$PROJECT_DIR"
         touch "$HINT_FILE"
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.\"}}"
       fi
       exit 0
     fi
-
-    # --- Active workflow: inject state context ---
-    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
 
     # Gateway unreachable — graceful degradation
     if [ -z "$CURRENT" ]; then
@@ -159,7 +175,7 @@ case "$ENDPOINT" in
 
     # Always allow system/internal/MCP tools
     case "$TOOL_NAME" in
-      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode) exit 0 ;;
+      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)
@@ -255,7 +271,7 @@ case "$ENDPOINT" in
   post-tool)
     # Detect statewright MCP tool calls and manage local state
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
-    TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
+    TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empty' 2>/dev/null || true)
 
     # Match tool name regardless of prefix format (mcp__, plugin:, etc.)
     SW_ACTION=""
@@ -280,8 +296,11 @@ case "$ENDPOINT" in
         fi
         # Check for capture_output + run_id from tool result
         if [ -n "$TOOL_RESULT" ]; then
-          RUN_ID=$(echo "$TOOL_RESULT" | jq -r '.run_id // empty' 2>/dev/null || true)
-          CAPTURE=$(echo "$TOOL_RESULT" | jq -r '.capture_output // false' 2>/dev/null || true)
+          # tool_response is an array of content objects; extract the text, parse as JSON
+          PARSED=$(echo "$TOOL_RESULT" | jq -r 'if type == "array" then .[0].text // empty else . end' 2>/dev/null || true)
+          RUN_ID=$(echo "$PARSED" | jq -r '.run_id // empty' 2>/dev/null || true)
+          CAPTURE=$(echo "$PARSED" | jq -r '.capture_output // false' 2>/dev/null || true)
+          # Debug: persist what we got (not cleaned by final state handler)
           [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
           [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
         fi

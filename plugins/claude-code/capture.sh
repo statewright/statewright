@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
-# Workflow log capture — uploads full tool output to PB for audit/review
-# Runs async (non-blocking) via PostToolUse hook
-# Only active when a workflow has meta.capture_output enabled
+# Workflow log capture — uploads full tool output to PB
+# Runs async via PostToolUse hook. No local files needed.
+# PB hook auto-links to the latest running workflow_run.
 
-STATEWRIGHT_DIR="${HOME}/.statewright"
-API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
+API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 
-# Project-scoped state
-PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-PROJECT_DIR="$STATEWRIGHT_DIR/projects/$PROJECT_HASH"
-
-# Only capture if workflow is active and capture is enabled
-[ -f "$PROJECT_DIR/.active" ] || exit 0
-[ -f "$PROJECT_DIR/.capture_enabled" ] || exit 0
+[ -z "$API_KEY" ] && exit 0
 
 HOOK_INPUT=$(cat 2>/dev/null || true)
 [ -z "$HOOK_INPUT" ] && exit 0
@@ -21,59 +14,44 @@ HOOK_INPUT=$(cat 2>/dev/null || true)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 [ -z "$TOOL_NAME" ] && exit 0
 
-# Skip statewright control tools — only capture work tools
-case "$TOOL_NAME" in
-  *statewright_*) exit 0 ;;
-esac
+# Skip statewright control tools
+case "$TOOL_NAME" in *statewright_*) exit 0 ;; esac
 
 TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || true)
-TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
+TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empty' 2>/dev/null || true)
 DURATION=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0' 2>/dev/null || true)
 
-# Read the current run_id from cache
-RUN_ID=$(cat "$PROJECT_DIR/.run_id" 2>/dev/null || true)
-[ -z "$RUN_ID" ] && exit 0
+# Read current phase from state cache (best effort)
+PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
+PHASE=$(cat "$HOME/.statewright/projects/$PROJECT_HASH/.state_cache" 2>/dev/null | jq -r '.state // "unknown"' 2>/dev/null || echo "unknown")
 
-# Read current phase
-PHASE=$(cat "$PROJECT_DIR/.state_cache" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
-
-# Sequence counter per phase
-SEQ_FILE="$PROJECT_DIR/.log_seq"
-SEQ=$(cat "$SEQ_FILE" 2>/dev/null || echo "0")
-SEQ=$((SEQ + 1))
-echo "$SEQ" > "$SEQ_FILE"
-
-# Truncate output if massive (keep first + last 50KB)
+# Truncate massive output (keep first + last 50KB)
 OUTPUT_LEN=${#TOOL_OUTPUT}
 if [ "$OUTPUT_LEN" -gt 102400 ]; then
   HEAD=$(echo "$TOOL_OUTPUT" | head -c 51200)
   TAIL=$(echo "$TOOL_OUTPUT" | tail -c 51200)
   TOOL_OUTPUT="${HEAD}
-
 ... [truncated ${OUTPUT_LEN} bytes] ...
-
 ${TAIL}"
 fi
 
-# Upload to PB
-# Escape for JSON — use jq to safely encode
+# POST to PB — hook auto-links run_id
 PAYLOAD=$(jq -n \
-  --arg run_id "$RUN_ID" \
   --arg phase "$PHASE" \
   --arg tool_name "$TOOL_NAME" \
   --argjson tool_input "$TOOL_INPUT" \
   --arg tool_output "$TOOL_OUTPUT" \
-  --argjson sequence "$SEQ" \
-  --argjson duration_ms "$DURATION" \
+  --argjson duration_ms "${DURATION:-0}" \
   '{
-    run_id: $run_id,
     phase: $phase,
     tool_name: $tool_name,
     tool_input: $tool_input,
     tool_output: $tool_output,
-    sequence: $sequence,
+    sequence: 0,
     duration_ms: $duration_ms
-  }')
+  }' 2>/dev/null)
+
+[ -z "$PAYLOAD" ] && exit 0
 
 curl -sf --max-time 5 -X POST "$PB_URL/api/collections/workflow_logs/records" \
   -H 'Content-Type: application/json' \

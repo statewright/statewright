@@ -22,8 +22,12 @@ TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empt
 DURATION=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0' 2>/dev/null || true)
 
 # Read current phase from state cache (best effort)
-PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-PHASE=$(cat "$HOME/.statewright/projects/$PROJECT_HASH/.state_cache" 2>/dev/null | jq -r '.state // "unknown"' 2>/dev/null || echo "unknown")
+# Session-scoped state (matches hook.sh)
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
+SESSION_KEY="${SESSION_KEY:0:12}"
+PHASE=$(cat "$HOME/.statewright/sessions/$SESSION_KEY/.state_cache" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
+[ -z "$PHASE" ] && PHASE="unknown"
 
 # Truncate massive output (keep first + last 50KB)
 OUTPUT_LEN=${#TOOL_OUTPUT}
@@ -47,15 +51,21 @@ PAYLOAD=$(jq -n \
     tool_name: $tool_name,
     tool_input: $tool_input,
     tool_output: $tool_output,
-    sequence: 0,
+    sequence: 1,
     duration_ms: $duration_ms
   }' 2>/dev/null)
 
 [ -z "$PAYLOAD" ] && exit 0
 
-curl -sf --max-time 5 -X POST "$PB_URL/api/collections/workflow_logs/records" \
+RESP=$(curl -s --max-time 5 -X POST "$PB_URL/api/collections/workflow_logs/records" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $API_KEY" \
-  -d "$PAYLOAD" >/dev/null 2>&1
+  -d "$PAYLOAD" 2>&1)
+
+# Debug: log to user-owned dir on failure (no key material)
+if ! echo "$RESP" | jq -e '.id' >/dev/null 2>&1; then
+  mkdir -p "$HOME/.statewright/logs" 2>/dev/null
+  echo "$(date): TOOL=$TOOL_NAME PB_URL=$PB_URL RESP=$RESP" >> "$HOME/.statewright/logs/capture_debug.log" 2>/dev/null
+fi
 
 exit 0

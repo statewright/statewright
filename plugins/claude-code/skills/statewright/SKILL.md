@@ -8,4 +8,4 @@ allowed-tools: Bash(*)
 
 !`bash ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS`
 
-IMPORTANT: If the output above shows a workflow was loaded, you MUST now call the `statewright_load_workflow` MCP tool with the same workflow name. This registers it with your MCP session for enforcement. Do this immediately without asking.
+IMPORTANT: If the output above says a workflow was found, you MUST call the `statewright_load_workflow` MCP tool with that workflow name to activate it. This is the ONLY way to start enforcement. Do this immediately without asking.

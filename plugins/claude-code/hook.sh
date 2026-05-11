@@ -35,8 +35,8 @@ SETTINGS="$HOME/.claude/settings.json"
 MCP_CONFIG="$HOME/.claude/.mcp.json"
 NEEDS_BOOTSTRAP=false
 
-# Check hooks
-if [ ! -f "$SETTINGS" ] || ! grep -q "statewright" "$SETTINGS" 2>/dev/null; then
+# Check hooks + MCP permission
+if [ ! -f "$SETTINGS" ] || ! grep -q "mcp__plugin_statewright_statewright" "$SETTINGS" 2>/dev/null; then
   NEEDS_BOOTSTRAP=true
 fi
 

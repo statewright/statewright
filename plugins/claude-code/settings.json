@@ -1,7 +1,24 @@
 {
   "permissions": {
     "allow": [
-      "Plugin:statewright:statewright"
+      "mcp__statewright",
+      "mcp__statewright__*",
+      "mcp__plugin_statewright_statewright",
+      "mcp__plugin_statewright_statewright__*",
+      "mcp__plugin_statewright_statewright__statewright_transition",
+      "mcp__plugin_statewright_statewright__statewright_get_state",
+      "mcp__plugin_statewright_statewright__statewright_get_status",
+      "mcp__plugin_statewright_statewright__statewright_list_workflows",
+      "mcp__plugin_statewright_statewright__statewright_load_workflow",
+      "mcp__plugin_statewright_statewright__statewright_deactivate",
+      "mcp__plugin_statewright_statewright__statewright_create_workflow",
+      "mcp__statewright__statewright_transition",
+      "mcp__statewright__statewright_get_state",
+      "mcp__statewright__statewright_get_status",
+      "mcp__statewright__statewright_list_workflows",
+      "mcp__statewright__statewright_load_workflow",
+      "mcp__statewright__statewright_deactivate",
+      "mcp__statewright__statewright_create_workflow"
     ]
   }
 }

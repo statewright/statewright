@@ -7,6 +7,17 @@ set -o pipefail
 ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 
+# jq is required for JSON processing — prompt install if missing
+if ! command -v jq &>/dev/null; then
+  if [ "$ENDPOINT" = "user-prompt" ]; then
+    INSTALL_CMD="brew install jq"
+    command -v apt-get &>/dev/null && INSTALL_CMD="sudo apt-get install -y jq"
+    command -v apk &>/dev/null && INSTALL_CMD="apk add jq"
+    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright requires jq (JSON processor) but it is not installed. Install it by running: ${INSTALL_CMD}\"}}"
+  fi
+  exit 0
+fi
+
 STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"

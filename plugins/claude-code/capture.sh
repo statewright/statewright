@@ -2,6 +2,8 @@
 # Workflow log capture — uploads tool output to statewright.ai for run history.
 # Runs async via PostToolUse hook. Server auto-links logs to the active run.
 
+command -v jq &>/dev/null || exit 0
+
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 

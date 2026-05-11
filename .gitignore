@@ -39,3 +39,5 @@ data/
 site/node_modules/
 site/dist/
 plugins/pi/node_modules/
+.mcp.json
+plugins/claude-code/Taskfile.yml

@@ -6,8 +6,6 @@ arguments: "[command] [workflow]"
 allowed-tools: Bash(*)
 ---
 
-## Result
-
 !`bash ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS`
 
-Summarize the result above in one sentence.
+IMPORTANT: If the output above says a workflow was found, you MUST call the `statewright_load_workflow` MCP tool with that workflow name to activate it. This is the ONLY way to start enforcement. Do this immediately without asking.

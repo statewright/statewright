@@ -7,13 +7,26 @@ set -o pipefail
 ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 
+# jq is required for JSON processing — prompt install if missing
+if ! command -v jq &>/dev/null; then
+  if [ "$ENDPOINT" = "user-prompt" ]; then
+    INSTALL_CMD="brew install jq"
+    command -v apt-get &>/dev/null && INSTALL_CMD="sudo apt-get install -y jq"
+    command -v apk &>/dev/null && INSTALL_CMD="apk add jq"
+    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright requires jq (JSON processor) but it is not installed. Install it by running: ${INSTALL_CMD}\"}}"
+  fi
+  exit 0
+fi
+
 STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 
-# Project-scoped state files — hash cwd so different projects don't leak state
-PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-PROJECT_DIR="$STATEWRIGHT_DIR/projects/$PROJECT_HASH"
+# Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
+SESSION_KEY="${SESSION_KEY:0:12}"
+PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
 
@@ -22,8 +35,8 @@ SETTINGS="$HOME/.claude/settings.json"
 MCP_CONFIG="$HOME/.claude/.mcp.json"
 NEEDS_BOOTSTRAP=false
 
-# Check hooks
-if [ ! -f "$SETTINGS" ] || ! grep -q "statewright" "$SETTINGS" 2>/dev/null; then
+# Check hooks + MCP permission
+if [ ! -f "$SETTINGS" ] || ! grep -q "mcp__plugin_statewright_statewright" "$SETTINGS" 2>/dev/null; then
   NEEDS_BOOTSTRAP=true
 fi
 
@@ -44,7 +57,7 @@ mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
-    -d "$1" 2>/dev/null | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+    -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
 # ============================================================
@@ -57,7 +70,7 @@ case "$ENDPOINT" in
     if [ -z "$API_KEY" ]; then
       # Let key-paste prompts through
       if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
-        PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-f0-9]*')
+        PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"The user pasted their statewright API key. Run this command to save it: mkdir -p ~/.statewright && echo '$PASTED_KEY' > ~/.statewright/api_key && chmod 600 ~/.statewright/api_key — then confirm it is saved and tell them they can activate a workflow with: statewright_start(workflow='bugfix')\"}}"
         exit 0
       fi
@@ -78,18 +91,18 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- No active workflow: hint on first prompt of session ---
+    # --- No local .active: dormant (no cross-session leak from gateway) ---
     if [ ! -f "$ACTIVE_FILE" ]; then
       HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
-        mkdir -p "$STATEWRIGHT_DIR"
+        mkdir -p "$PROJECT_DIR"
         touch "$HINT_FILE"
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.\"}}"
       fi
       exit 0
     fi
 
-    # --- Active workflow: inject state context ---
+    # --- Active workflow: fetch state from gateway ---
     STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
 
@@ -103,7 +116,7 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
@@ -144,8 +157,7 @@ case "$ENDPOINT" in
     GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
 
     CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO. When transitioning with guards, pass data: statewright_transition(event, data={key: value}).}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} When calling statewright_transition, ALWAYS include a data param: statewright_transition(event='EVENT', data={'rationale': 'why you are transitioning', ...any state context fields that guards may check}). This updates the state context for guard evaluation and creates an audit trail."
-    CONTEXT=$(echo "$CONTEXT" | sed 's/"/\\"/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$CONTEXT\"}}"
+    jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
 
@@ -159,7 +171,7 @@ case "$ENDPOINT" in
 
     # Always allow system/internal/MCP tools
     case "$TOOL_NAME" in
-      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode) exit 0 ;;
+      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)
@@ -189,29 +201,22 @@ case "$ENDPOINT" in
           if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
             if echo "$COMMAND" | grep -qE '>[^>2]|>>\s*\S'; then
               REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
             if echo "$COMMAND" | grep -qE 'sed\s+-i|perl\s+-p?i'; then
               REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
           fi
           # Check for destructive operations (always blocked in restricted states)
           if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
-            REASON="Bash command blocked: destructive operation (rm/shred/truncate) not permitted in '$CURRENT' phase."
-            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
-          # Check for destructive ops after && or ;
           if echo "$COMMAND" | grep -qE '(&&|;)\s*(rm|rmdir|shred|truncate|unlink)\s'; then
-            REASON="Bash command blocked: destructive operation not permitted in '$CURRENT' phase."
-            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
           # Check allowed_commands from cache if present
@@ -219,12 +224,11 @@ case "$ENDPOINT" in
           if [ -n "$ALLOWED_CMDS" ]; then
             CMD_OK=false
             while IFS= read -r prefix; do
-              case "$COMMAND" in "$prefix"*) CMD_OK=true; break ;; esac
+              case "$COMMAND" in "$prefix"|"$prefix "*) CMD_OK=true; break ;; esac
             done <<< "$ALLOWED_CMDS"
             if [ "$CMD_OK" = false ]; then
-              REASON="Bash command blocked: '$COMMAND' not in allowed commands for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
           fi
@@ -233,9 +237,8 @@ case "$ENDPOINT" in
           if [ -n "$BLOCKED_ENVS" ]; then
             while IFS= read -r bvar; do
               if echo "$COMMAND" | grep -qE "\\\$$bvar|\\\$\{$bvar\}|^$bvar=| $bvar="; then
-                REASON="Bash command blocked: references blocked env var '$bvar' in '$CURRENT' phase. This variable is restricted to prevent cross-environment access."
-                REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-                echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+                REASON="Bash command blocked: references restricted env var in this phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
             done <<< "$BLOCKED_ENVS"
@@ -246,16 +249,16 @@ case "$ENDPOINT" in
     fi
 
     # Tool denied — use correct hookSpecificOutput format
-    REASON="Tool '$TOOL_NAME' is not available in the '$CURRENT' phase. Allowed tools: $(echo $ALLOWED | tr '\n' ', ' | sed 's/,$//').${TRANSITIONS:+ To advance, call statewright_transition with one of: $TRANSITIONS.}"
-    REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+    ALLOWED_LIST=$(echo "$ALLOWED" | tr '\n' ', ' | sed 's/,$//')
+    REASON="Tool '$TOOL_NAME' is not available in the '$CURRENT' phase. Allowed: ${ALLOWED_LIST}.${TRANSITIONS:+ To advance, use statewright_transition with: $TRANSITIONS.}"
+    jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
     exit 0
     ;;
 
   post-tool)
     # Detect statewright MCP tool calls and manage local state
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
-    TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // empty' 2>/dev/null || true)
+    TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empty' 2>/dev/null || true)
 
     # Match tool name regardless of prefix format (mcp__, plugin:, etc.)
     SW_ACTION=""
@@ -271,16 +274,27 @@ case "$ENDPOINT" in
       start)
         # Activate enforcement
         mkdir -p "$PROJECT_DIR"
+        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
         echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
         # Fetch and cache initial state
         STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
         if [ -n "$STATE_JSON" ]; then
           echo "$STATE_JSON" > "$CACHE_FILE"
         fi
+        # Check for capture_output + run_id from tool result
+        if [ -n "$TOOL_RESULT" ]; then
+          # tool_response is an array of content objects; extract the text, parse as JSON
+          PARSED=$(echo "$TOOL_RESULT" | jq -r 'if type == "array" then .[0].text // empty else . end' 2>/dev/null || true)
+          RUN_ID=$(echo "$PARSED" | jq -r '.run_id // empty' 2>/dev/null || true)
+          CAPTURE=$(echo "$PARSED" | jq -r '.capture_output // false' 2>/dev/null || true)
+          # Debug: persist what we got (not cleaned by final state handler)
+          [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
+          [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
+        fi
         ;;
       stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
         ;;
       transition)
         # Read previous state before refreshing
@@ -292,7 +306,7 @@ case "$ENDPOINT" in
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
           if [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -306,6 +320,12 @@ case "$ENDPOINT" in
         fi
         ;;
     esac
+    exit 0
+    ;;
+
+  stop)
+    # Clean up session state on Claude Code exit
+    rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
     exit 0
     ;;
 

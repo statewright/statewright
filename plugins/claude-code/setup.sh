@@ -52,10 +52,18 @@ for event, entries in statewright_hooks.items():
     existing.extend(entries)
     hooks[event] = existing
 
+# Auto-approve statewright MCP tools (plugin settings.json can't set permissions)
+perms = settings.setdefault("permissions", {})
+allow = perms.setdefault("allow", [])
+# Plugin MCP servers are namespaced: mcp__plugin_{marketplace}_{plugin}
+mcp_rule = "mcp__plugin_statewright_statewright"
+if mcp_rule not in allow:
+    allow.append(mcp_rule)
+
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
 
-print(f"Statewright hooks installed in {settings_path}")
+print(f"Statewright hooks + MCP permissions installed in {settings_path}")
 
 # Generate MCP config with auth from saved API key
 import os

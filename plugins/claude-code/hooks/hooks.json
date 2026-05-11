@@ -31,7 +31,13 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh post-tool",
-            "timeout": 3000
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/capture.sh",
+            "timeout": 3000,
+            "async": true
           }
         ]
       }

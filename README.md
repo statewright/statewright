@@ -1,10 +1,10 @@
 # statewright
 
-Visual state machines that make AI agents reliable.
+> Agents are suggestions, states are laws.
+
+One hook, one JSON file, every agent. State machine guardrails that control which tools your AI agent can use in each phase. Define the workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
-
-State machine guardrails for AI agents. Controls which tools your agent can use in each phase — enforced at the protocol layer, not via prompts. Agents are suggestions, states are laws.
 
 ## The problem
 
@@ -12,9 +12,9 @@ AI agents are powerful but brittle. Give a model 40+ tools and an open-ended pro
 
 ## The approach
 
-Instead of making the model bigger, make the problem smaller. Formal state machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. An implementation state gets edit tools but no shell access. A testing state gets bash but only for test commands. The model physically cannot skip steps or use the wrong tool at the wrong time.
+Instead of making the model bigger, make the problem smaller. Formal state machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. An implementation state gets edit tools with limited shell — write-via-redirect and destructive ops are blocked even when Bash is allowed. A testing state gets bash but only for test commands. Call a tool that's not in the current phase and you get rejected with a message telling you what IS available and how to transition.
 
-This is model-agnostic. Frontier models like Opus and Sonnet solve more reliably with fewer tokens and debug cycles. Smaller local models cross capability thresholds they couldn't reach on their own. The technique works the same way regardless of where the model runs.
+Works the same way on frontier models (fewer tokens, fewer debug spirals) and local models (13B+ models solving tasks they'd otherwise fail). Model-agnostic.
 
 ## Research results
 
@@ -28,7 +28,9 @@ This is model-agnostic. Frontier models like Opus and Sonnet solve more reliably
 
 *\*with specialized edit_line tool adaptation*
 
-We validated the approach on local models where the effect is most measurable — across model families and generations. Notably, model age does not seem to impact the results. The inflection point is ~13GB — below that, models can't maintain valid tool call JSON through complex arguments. Above 13GB, **statewright takes models from 2/10 to 10/10** on the same tasks, same hardware. The same constraints applied to frontier models (via Claude Code, Codex, Cursor) reduce token waste, prevent debug spirals, and improve first-attempt success rates. [Research brief →](https://statewright.ai/research)
+We validated on local models where the effect is most measurable. In our 5-task SWE-bench subset, **models above 13GB went from 2/10 to 10/10** with statewright constraints. Same tasks, same hardware. Below 13GB, models can't maintain valid tool call JSON through complex arguments — that's the floor, not a statewright limitation. Model age didn't predict success; VRAM threshold did.
+
+Frontier models benefit too: fewer tokens, fewer debug spirals, higher first-attempt success. [Research brief →](https://statewright.ai/research)
 
 ## Quick start
 
@@ -86,11 +88,15 @@ On top of that sits a **plugin layer** that integrates with your coding agent vi
 | Per-state tool enforcement | Tools invisible to agent when not in allowed_tools |
 | Decision checkpoints | max_iterations per state forces transition or fail |
 | Edit guard | Rejects diffs exceeding max_edit_lines |
-| Command guard | Whitelist shell commands per state |
+| Command guard | Prefix-matched command allow list per state |
+| Bash discernment | Redirects (`>>`) and destructive ops (`rm`, `shred`) blocked in non-write states |
 | Edit scope limits | Cap files edited per state |
-| Approval gates | Human approval before high-risk transitions |
-| Environment scoping | Constrain or alias env vars per state — no prod credentials in test phases |
+| Guards | Conditional transitions — programmatic predicates (eq, gt, exists, etc.) on context data |
+| Approval gates | `requires_approval` pauses for human review before high-risk transitions |
+| Environment scoping | `blocked_env` + `env_overrides` — no prod credentials in test phases |
 | Context budget | Track tool result bytes, warn at threshold |
+| Session isolation | Per-session state via `CLAUDE_SESSION_ID` — parallel sessions don't interfere |
+| Run history | Full observability: every tool call, transition rationale, per-phase grouping |
 
 ## Define your own workflows
 
@@ -113,9 +119,15 @@ On top of that sits a **plugin layer** that integrates with your coding agent vi
     "testing": {
       "allowed_tools": ["Read", "Bash"],
       "allowed_commands": ["pytest", "cargo test", "npm test"],
-      "on": { "PASS": "completed", "FAIL_TEST": "implementing" }
+      "on": {
+        "PASS": { "target": "completed", "guard": "tests_passed" },
+        "FAIL_TEST": "implementing"
+      }
     },
     "completed": { "type": "final" }
+  },
+  "guards": {
+    "tests_passed": { "field": "test_result", "op": "eq", "value": "pass" }
   }
 }
 ```
@@ -140,6 +152,28 @@ The core engine is a pure Rust library with no runtime dependencies.
 use statewright_engine::{MachineDefinition, resolve_transition, validate_definition};
 ```
 
+## What's new (May 2026)
+
+- **Observability dashboard** — run history with per-phase tool logs, transition rationale, smart rendering for Read/Edit/Bash/Glob output
+- **Guards** — conditional transitions with declarative predicates (eq, neq, gt, exists, contains). XState-style branched transitions.
+- **Agent-generated workflows** — `statewright_create_workflow` MCP tool. Point the agent at the [JSON schema](https://statewright.ai/workflow-schema.json), it generates and uploads a state machine.
+- **Environment controls** — `blocked_env` denies access to specific env vars, `env_overrides` aliases them per state
+- **Bash command discernment** — redirect detection, destructive op blocking, `allowed_commands` prefix matching
+- **Approval gates** — `requires_approval` on transitions for human-in-the-loop
+- **Session isolation** — per-session state scoping, parallel Claude Code sessions don't interfere
+- **Docs** — [statewright.ai/docs](https://statewright.ai/docs) — schema reference, workflow patterns, MCP tool reference
+- **Docs RAG** — `statewright_search_docs` MCP tool for agents to look up schema fields and patterns
+
+## Docs
+
+Full documentation at [statewright.ai/docs](https://statewright.ai/docs): getting started, workflow authoring, schema reference, MCP tool reference, and agent-generated workflows.
+
+## Contributing
+
+Workflow definitions, templates, and bug reports welcome. See the [docs](https://statewright.ai/docs/workflows/create-your-own/) for how to write workflows.
+
 ## License
 
 Apache 2.0 — portions [FSL-1.1-Apache-2.0](https://fsl.software) (see `LICENSE.md` in subdirectories). Managed cloud at [statewright.ai](https://statewright.ai).
+
+> One hook to rule them all.

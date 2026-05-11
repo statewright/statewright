@@ -6,10 +6,10 @@ State machine guardrails for opencode. TypeScript plugin using opencode's native
 
 1. Build the gateway: `cargo install statewright-gateway`
 
-2. Create `.statewright/config.json` in your project:
+2. Copy a workflow template:
    ```bash
    mkdir -p .statewright
-   cp templates/nine-second-saloon/config.json .statewright/config.json
+   cp templates/bugfix/config.json .statewright/config.json
    ```
 
 3. Add MCP server to `opencode.json`:

@@ -6,7 +6,7 @@ State machine guardrails for Cursor IDE. MCP server provides the tools; `.mdc` r
 
 1. Build the gateway: `cargo install statewright-gateway`
 
-2. Create `.statewright/config.json` in your project
+2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
 
 3. Copy the MCP config into your project:
    ```bash

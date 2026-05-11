@@ -5,7 +5,7 @@ State machine guardrails for OpenAI Codex CLI.
 ## Setup
 
 1. Install the gateway: `cargo install statewright-gateway`
-2. Create `.statewright/config.json` in your project
+2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
 3. Add the MCP server to `~/.codex/config.toml`:
    ```toml
    [mcp.statewright]

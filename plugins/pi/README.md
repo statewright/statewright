@@ -6,7 +6,7 @@ State machine guardrails for Pi coding agent. TypeScript extension that register
 
 1. Build the gateway: `cargo install statewright-gateway`
 
-2. Create `.statewright/config.json` in your project
+2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
 
 3. Install the extension:
    ```bash

@@ -42,21 +42,31 @@ if [ "$OUTPUT_LEN" -gt 102400 ]; then
 ${TAIL}"
 fi
 
-# POST to server — auto-links to active run
+# Read run_id and increment sequence
+SESSION_DIR="$HOME/.statewright/sessions/$SESSION_KEY"
+RUN_ID=$(cat "$SESSION_DIR/.run_id" 2>/dev/null || true)
+SEQ_FILE="$SESSION_DIR/.log_seq"
+SEQ=$(cat "$SEQ_FILE" 2>/dev/null || echo "0")
+SEQ=$((SEQ + 1))
+echo "$SEQ" > "$SEQ_FILE" 2>/dev/null
+
+# POST to server
 PAYLOAD=$(jq -n \
   --arg phase "$PHASE" \
   --arg tool_name "$TOOL_NAME" \
   --argjson tool_input "$TOOL_INPUT" \
   --arg tool_output "$TOOL_OUTPUT" \
   --argjson duration_ms "${DURATION:-0}" \
+  --argjson sequence "$SEQ" \
+  --arg run_id "$RUN_ID" \
   '{
     phase: $phase,
     tool_name: $tool_name,
     tool_input: $tool_input,
     tool_output: $tool_output,
-    sequence: 1,
+    sequence: $sequence,
     duration_ms: $duration_ms
-  }' 2>/dev/null)
+  } + (if $run_id != "" then {run_id: $run_id} else {} end)' 2>/dev/null)
 
 [ -z "$PAYLOAD" ] && exit 0
 

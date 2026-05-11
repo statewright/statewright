@@ -3,55 +3,5 @@
     "allow": [
       "Plugin:statewright:statewright"
     ]
-  },
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".statewright/hook.sh user-prompt",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".statewright/hook.sh pre-tool",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".statewright/hook.sh post-tool",
-            "timeout": 3000
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".statewright/hook.sh stop",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
   }
 }

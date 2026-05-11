@@ -16,7 +16,7 @@ mcp_call() {
     -H "Authorization: Bearer $API_KEY" \
     -d "$1" 2>/dev/null)
   if [ -n "$RESP" ]; then
-    echo "$RESP" | jq -r '.result.content[0].text // .error.message // empty' 2>/dev/null
+    echo "$RESP" | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // .error.message // empty' 2>/dev/null
   else
     echo "Gateway unreachable at $GW_URL"
   fi
@@ -35,9 +35,11 @@ case "$CMD" in
     ;;
   stop)
     mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_deactivate","arguments":{}},"id":1}'
-    PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-    SW_PROJECT="$HOME/.statewright/projects/$PROJECT_HASH"
-    rm -f "$SW_PROJECT/.active" "$SW_PROJECT/.state_cache" "$SW_PROJECT/.session_hinted" "$SW_PROJECT/.discovered_commands"
+    HOOK_SCRIPT="$(dirname "$0")/../hook.sh"
+    [ ! -f "$HOOK_SCRIPT" ] && HOOK_SCRIPT="$(dirname "$0")/../../hook.sh"
+    if [ -f "$HOOK_SCRIPT" ]; then
+      echo '{"tool_name":"statewright_deactivate"}' | bash "$HOOK_SCRIPT" post-tool >/dev/null 2>&1
+    fi
     echo "Workflow deactivated. All tools available."
     ;;
   status)
@@ -46,25 +48,27 @@ case "$CMD" in
   start|*)
     [ "$CMD" != "start" ] && WORKFLOW="$CMD"
     [ -z "$WORKFLOW" ] && echo "Usage: /statewright start <workflow-name>" && exit 0
-    # Clean slate — project-scoped state files
-    PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-    SW_DIR="$HOME/.statewright/projects/$PROJECT_HASH"
+    # Session-scoped state
+    SESSION_KEY="${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}"
+    SESSION_KEY="${SESSION_KEY:0:12}"
+    SW_DIR="$HOME/.statewright/sessions/$SESSION_KEY"
     mkdir -p "$SW_DIR"
     rm -f "$SW_DIR/.active" "$SW_DIR/.state_cache" "$SW_DIR/.session_hinted" "$SW_DIR/.discovered_commands" "$SW_DIR/.capture_enabled" "$SW_DIR/.run_id" "$SW_DIR/.log_seq"
     # Load workflow on gateway
-    LOAD_RESP=$(mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\",\"project_id\":\"$PROJECT_HASH\"}},\"id\":1}")
+    # Load workflow on gateway
+    LOAD_RESP=$(mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\",\"session_id\":\"$SESSION_KEY\"}},\"id\":1}")
     echo "$LOAD_RESP"
-    # Activate local enforcement
-    echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$SW_DIR/.active"
-    # Check if capture_output is enabled and store run_id for log linkage
-    RUN_ID=$(echo "$LOAD_RESP" | jq -r '.run_id // empty' 2>/dev/null || true)
-    CAPTURE=$(echo "$LOAD_RESP" | jq -r '.capture_output // false' 2>/dev/null || true)
-    [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$SW_DIR/.run_id"
-    [ "$CAPTURE" = "true" ] && touch "$SW_DIR/.capture_enabled"
-    # Fetch and cache state, output context hint
+
+    # Trigger PostToolUse hook to write state files (run.sh can't persist files directly)
+    HOOK_SCRIPT="$(dirname "$0")/../hook.sh"
+    [ ! -f "$HOOK_SCRIPT" ] && HOOK_SCRIPT="$(dirname "$0")/../../hook.sh"
+    if [ -f "$HOOK_SCRIPT" ]; then
+      echo "{\"tool_name\":\"statewright_load_workflow\",\"tool_result\":$(echo "$LOAD_RESP" | jq -Rs .)}" | bash "$HOOK_SCRIPT" post-tool >/dev/null 2>&1
+    fi
+
+    # Output context for the agent
     STATE=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
     if [ -n "$STATE" ]; then
-      echo "$STATE" > "$SW_DIR/.state_cache"
       PHASE=$(echo "$STATE" | jq -r '.state // empty' 2>/dev/null)
       TOOLS=$(echo "$STATE" | jq -r '.allowed_tools // [] | join(", ")' 2>/dev/null)
       TRANS=$(echo "$STATE" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null)

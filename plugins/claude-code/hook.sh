@@ -11,9 +11,11 @@ STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 
-# Project-scoped state files — hash cwd so different projects don't leak state
-PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")
-PROJECT_DIR="$STATEWRIGHT_DIR/projects/$PROJECT_HASH"
+# Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
+SESSION_KEY="${SESSION_KEY:0:12}"
+PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
 
@@ -78,28 +80,8 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- Check gateway for active workflow (source of truth) ---
-    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
-
-    # If gateway has an active workflow but local .active doesn't exist, sync it
-    if [ -n "$CURRENT" ] && [ ! -f "$ACTIVE_FILE" ]; then
-      mkdir -p "$PROJECT_DIR"
-      echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"synced\":true}" > "$ACTIVE_FILE"
-      # Extract run_id and capture_output from gateway status
-      STATUS_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_status","arguments":{}},"id":1}')
-      if [ -n "$STATUS_JSON" ]; then
-        RUN_ID=$(echo "$STATUS_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
-        [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
-      fi
-    fi
-
-    # --- No active workflow on gateway: show hint ---
-    if [ -z "$CURRENT" ]; then
-      if [ -f "$ACTIVE_FILE" ]; then
-        # Gateway says no workflow but local says active — clean up stale state
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
-      fi
+    # --- No local .active: dormant (no cross-session leak from gateway) ---
+    if [ ! -f "$ACTIVE_FILE" ]; then
       HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
         mkdir -p "$PROJECT_DIR"
@@ -108,6 +90,10 @@ case "$ENDPOINT" in
       fi
       exit 0
     fi
+
+    # --- Active workflow: fetch state from gateway ---
+    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
 
     # Gateway unreachable — graceful degradation
     if [ -z "$CURRENT" ]; then

@@ -125,11 +125,44 @@ while IFS= read -r line; do
     if [ "$METHOD" = "initialize" ]; then
       echo '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":'"$ID"'}'
     elif [ "$METHOD" = "tools/list" ]; then
-      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_start","description":"Activate a statewright workflow for this session. Tools will be restricted per state.","inputSchema":{"type":"object","properties":{"workflow":{"type":"string","description":"Workflow name (e.g. bugfix, etl-pipeline, code-review)"}},"required":["workflow"]}},{"name":"statewright_stop","description":"Deactivate the current workflow. All tools become available again.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_state","description":"Get the current workflow state, allowed tools, and available transitions.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_transition","description":"Transition to the next state in the workflow.","inputSchema":{"type":"object","properties":{"event":{"type":"string","description":"Transition event name (e.g. READY, DONE, PASS, FAIL)"}},"required":["event"]}},{"name":"statewright_list_workflows","description":"List all available workflows for this user.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
+      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_start","description":"Activate a statewright workflow for this session. Tools will be restricted per state.","inputSchema":{"type":"object","properties":{"workflow":{"type":"string","description":"Workflow name (e.g. bugfix, etl-pipeline, code-review)"}},"required":["workflow"]}},{"name":"statewright_stop","description":"Deactivate the current workflow. All tools become available again.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_state","description":"Get the current workflow state, allowed tools, and available transitions.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_transition","description":"Transition to the next state in the workflow.","inputSchema":{"type":"object","properties":{"event":{"type":"string","description":"Transition event name (e.g. READY, DONE, PASS, FAIL)"}},"required":["event"]}},{"name":"statewright_list_workflows","description":"List all available workflows for this user.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "notifications/initialized" ]; then
       : # notification, no response
     else
       echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key not configured. Visit https://statewright.ai/keys to generate one."},"id":'"$ID"'}'
+    fi
+    continue
+  fi
+
+  # Handle statewright_search_docs locally (no gateway round-trip)
+  METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
+  TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
+  if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
+    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
+    QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
+    if [ -z "$QUERY" ]; then
+      echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Missing required parameter: query"}]},"id":'"$ID"'}'
+    else
+      # Fetch search index and do keyword matching
+      INDEX=$(curl -sf --max-time 5 "$PB_URL/docs/search-index.json" 2>/dev/null)
+      if [ -n "$INDEX" ]; then
+        RESULTS=$(echo "$INDEX" | jq --arg q "$QUERY" '[
+          .[] | select(
+            (.title | ascii_downcase | contains($q | ascii_downcase)) or
+            (.section | ascii_downcase | contains($q | ascii_downcase)) or
+            (.content | ascii_downcase | contains($q | ascii_downcase))
+          ) | {url, title, section, snippet: (.content | .[0:300])}
+        ] | .[0:5]' 2>/dev/null)
+        if [ -n "$RESULTS" ] && [ "$RESULTS" != "[]" ]; then
+          RESULT_TEXT=$(echo "$RESULTS" | jq -r '.[] | "## \(.title) > \(.section)\nURL: https://statewright.ai\(.url)\n\(.snippet)\n"' 2>/dev/null)
+          RESULT_JSON=$(jq -n --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')
+          echo "$RESULT_JSON"
+        else
+          echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"No results found for: '"$QUERY"'"}]},"id":'"$ID"'}'
+        fi
+      else
+        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Search index unavailable"}]},"id":'"$ID"'}'
+      fi
     fi
     continue
   fi
@@ -141,6 +174,11 @@ while IFS= read -r line; do
     -d "$line" 2>/dev/null)
 
   if [ -n "$RESPONSE" ]; then
+    # Inject statewright_search_docs into tools/list responses from gateway
+    if [ "$METHOD" = "tools/list" ]; then
+      SEARCH_TOOL='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. \"guard operators\", \"allowed_tools\", \"approval gate\")"}},"required":["query"]}}'
+      RESPONSE=$(echo "$RESPONSE" | jq --argjson tool "$SEARCH_TOOL" '.result.tools += [$tool]' 2>/dev/null || echo "$RESPONSE")
+    fi
     echo "$RESPONSE"
   else
     ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)

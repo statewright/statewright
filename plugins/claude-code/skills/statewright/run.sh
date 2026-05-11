@@ -55,7 +55,6 @@ case "$CMD" in
     mkdir -p "$SW_DIR"
     rm -f "$SW_DIR/.active" "$SW_DIR/.state_cache" "$SW_DIR/.session_hinted" "$SW_DIR/.discovered_commands" "$SW_DIR/.capture_enabled" "$SW_DIR/.run_id" "$SW_DIR/.log_seq"
     # Load workflow on gateway
-    # Load workflow on gateway
     LOAD_RESP=$(mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\",\"session_id\":\"$SESSION_KEY\"}},\"id\":1}")
     echo "$LOAD_RESP"
 

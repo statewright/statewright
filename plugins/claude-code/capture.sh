@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Workflow log capture — uploads full tool output to PB
-# Runs async via PostToolUse hook. No local files needed.
-# PB hook auto-links to the latest running workflow_run.
+# Workflow log capture — uploads tool output to statewright.ai for run history.
+# Runs async via PostToolUse hook. Server auto-links logs to the active run.
 
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
@@ -39,7 +38,7 @@ if [ "$OUTPUT_LEN" -gt 102400 ]; then
 ${TAIL}"
 fi
 
-# POST to PB — hook auto-links run_id
+# POST to server — auto-links to active run
 PAYLOAD=$(jq -n \
   --arg phase "$PHASE" \
   --arg tool_name "$TOOL_NAME" \

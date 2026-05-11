@@ -59,7 +59,7 @@ case "$ENDPOINT" in
     if [ -z "$API_KEY" ]; then
       # Let key-paste prompts through
       if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
-        PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-f0-9]*')
+        PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"The user pasted their statewright API key. Run this command to save it: mkdir -p ~/.statewright && echo '$PASTED_KEY' > ~/.statewright/api_key && chmod 600 ~/.statewright/api_key — then confirm it is saved and tell them they can activate a workflow with: statewright_start(workflow='bugfix')\"}}"
         exit 0
       fi
@@ -146,8 +146,7 @@ case "$ENDPOINT" in
     GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
 
     CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO. When transitioning with guards, pass data: statewright_transition(event, data={key: value}).}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} When calling statewright_transition, ALWAYS include a data param: statewright_transition(event='EVENT', data={'rationale': 'why you are transitioning', ...any state context fields that guards may check}). This updates the state context for guard evaluation and creates an audit trail."
-    CONTEXT=$(echo "$CONTEXT" | sed 's/"/\\"/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$CONTEXT\"}}"
+    jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
 
@@ -191,29 +190,22 @@ case "$ENDPOINT" in
           if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
             if echo "$COMMAND" | grep -qE '>[^>2]|>>\s*\S'; then
               REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
             if echo "$COMMAND" | grep -qE 'sed\s+-i|perl\s+-p?i'; then
               REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
           fi
           # Check for destructive operations (always blocked in restricted states)
           if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
-            REASON="Bash command blocked: destructive operation (rm/shred/truncate) not permitted in '$CURRENT' phase."
-            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
-          # Check for destructive ops after && or ;
           if echo "$COMMAND" | grep -qE '(&&|;)\s*(rm|rmdir|shred|truncate|unlink)\s'; then
-            REASON="Bash command blocked: destructive operation not permitted in '$CURRENT' phase."
-            REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+            jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
           # Check allowed_commands from cache if present
@@ -221,12 +213,11 @@ case "$ENDPOINT" in
           if [ -n "$ALLOWED_CMDS" ]; then
             CMD_OK=false
             while IFS= read -r prefix; do
-              case "$COMMAND" in "$prefix"*) CMD_OK=true; break ;; esac
+              case "$COMMAND" in "$prefix"|"$prefix "*) CMD_OK=true; break ;; esac
             done <<< "$ALLOWED_CMDS"
             if [ "$CMD_OK" = false ]; then
-              REASON="Bash command blocked: '$COMMAND' not in allowed commands for '$CURRENT' phase."
-              REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+              REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
           fi
@@ -235,9 +226,8 @@ case "$ENDPOINT" in
           if [ -n "$BLOCKED_ENVS" ]; then
             while IFS= read -r bvar; do
               if echo "$COMMAND" | grep -qE "\\\$$bvar|\\\$\{$bvar\}|^$bvar=| $bvar="; then
-                REASON="Bash command blocked: references blocked env var '$bvar' in '$CURRENT' phase. This variable is restricted to prevent cross-environment access."
-                REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-                echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+                REASON="Bash command blocked: references restricted env var in this phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
             done <<< "$BLOCKED_ENVS"
@@ -248,9 +238,9 @@ case "$ENDPOINT" in
     fi
 
     # Tool denied — use correct hookSpecificOutput format
-    REASON="Tool '$TOOL_NAME' is not available in the '$CURRENT' phase. Allowed tools: $(echo $ALLOWED | tr '\n' ', ' | sed 's/,$//').${TRANSITIONS:+ To advance, call statewright_transition with one of: $TRANSITIONS.}"
-    REASON=$(echo "$REASON" | sed 's/"/\\"/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$REASON\"}}"
+    ALLOWED_LIST=$(echo "$ALLOWED" | tr '\n' ', ' | sed 's/,$//')
+    REASON="Tool '$TOOL_NAME' is not available in the '$CURRENT' phase. Allowed: ${ALLOWED_LIST}.${TRANSITIONS:+ To advance, use statewright_transition with: $TRANSITIONS.}"
+    jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
     exit 0
     ;;
 
@@ -319,6 +309,12 @@ case "$ENDPOINT" in
         fi
         ;;
     esac
+    exit 0
+    ;;
+
+  stop)
+    # Clean up session state on Claude Code exit
+    rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
     exit 0
     ;;
 

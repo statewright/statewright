@@ -55,7 +55,8 @@ case "$CMD" in
     mkdir -p "$SW_DIR"
     rm -f "$SW_DIR/.active" "$SW_DIR/.state_cache" "$SW_DIR/.session_hinted" "$SW_DIR/.discovered_commands" "$SW_DIR/.capture_enabled" "$SW_DIR/.run_id" "$SW_DIR/.log_seq"
     # Load workflow on gateway
-    LOAD_RESP=$(mcp_call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"statewright_load_workflow\",\"arguments\":{\"name\":\"$WORKFLOW\",\"session_id\":\"$SESSION_KEY\"}},\"id\":1}")
+    LOAD_PAYLOAD=$(jq -n --arg name "$WORKFLOW" --arg sid "$SESSION_KEY" '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_load_workflow","arguments":{"name":$name,"session_id":$sid}},"id":1}')
+    LOAD_RESP=$(mcp_call "$LOAD_PAYLOAD")
     echo "$LOAD_RESP"
 
     # Trigger PostToolUse hook to write state files (run.sh can't persist files directly)

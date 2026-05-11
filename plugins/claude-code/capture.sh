@@ -10,21 +10,23 @@ PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 [ -z "$HOOK_INPUT" ] && exit 0
 
+# Check if capture is enabled for this session (opt-in via workflow meta.capture_output)
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
+SESSION_KEY="${SESSION_KEY:0:12}"
+[ ! -f "$HOME/.statewright/sessions/$SESSION_KEY/.capture_enabled" ] && exit 0
+
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 [ -z "$TOOL_NAME" ] && exit 0
 
 # Skip statewright control tools
 case "$TOOL_NAME" in *statewright_*) exit 0 ;; esac
 
-TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || true)
+TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
 TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_result // .tool_response // empty' 2>/dev/null || true)
-DURATION=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0' 2>/dev/null || true)
+DURATION=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0' 2>/dev/null || echo '0')
 
-# Read current phase from state cache (best effort)
-# Session-scoped state (matches hook.sh)
-HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
-SESSION_KEY="${SESSION_KEY:0:12}"
+# Read current phase from state cache
 PHASE=$(cat "$HOME/.statewright/sessions/$SESSION_KEY/.state_cache" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
 [ -z "$PHASE" ] && PHASE="unknown"
 

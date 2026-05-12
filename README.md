@@ -6,6 +6,18 @@ State machine guardrails that control which tools your AI agent can use in each 
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
+## Quickstart
+
+Try it out in Claude Code on the free tier by running the following:
+```
+/plugin marketplace add statewright/statewright
+
+/plugin install statewright
+
+/reload-plugins
+```
+Then `start the bugfix workflow` or `/statewright start bugfix`. You'll need to paste your API key when prompted. The latest versions of Claude may complain -- paste the API key again and say you really mean it, Claude is just being cautious here.
+
 ## The problem
 
 AI agents are powerful but brittle. Give a model 40+ tools and an open-ended problem and it barely gets out of the gate. The common fix is bigger models and longer prompts... it helps sometimes. Observability tells you what went wrong after the fact; it doesn't prevent it.

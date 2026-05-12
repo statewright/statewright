@@ -133,7 +133,7 @@ Full guardrail reference in [the docs](https://statewright.ai/docs/tools/referen
 }
 ```
 
-State machines aren't DAGs — they loop and retry, which is what agentic work actually needs. Build workflows visually at [statewright.ai/workflows](https://statewright.ai/workflows), or have your agent generate one from context using `statewright_create_workflow` (the [JSON schema](https://statewright.ai/workflow-schema.json) is public).
+State machines aren't DAGs — they loop and retry, which is what agentic work actually needs. Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.json) and it generates a workflow via `statewright_create_workflow`. Tweak tools, commands, and environment blocks in the [visual editor](https://statewright.ai/workflows).
 
 ## Supported agents
 

@@ -155,16 +155,27 @@ while IFS= read -r line; do
       # Fetch search index and do keyword matching
       INDEX=$(curl -sf --max-time 5 "$PB_URL/docs/search-index.json" 2>/dev/null)
       if [ -n "$INDEX" ]; then
-        RESULTS=$(echo "$INDEX" | jq --arg q "$QUERY" '[
+        RESULTS=$(echo "$INDEX" | jq --arg q "$QUERY" '
           ($q | ascii_downcase | split(" ")) as $terms |
-          .[] | . as $chunk |
-          select(
+          [.[] | . as $chunk |
             ($chunk.title | ascii_downcase) as $t |
             ($chunk.section | ascii_downcase) as $s |
             ($chunk.content | ascii_downcase) as $c |
-            any($terms[]; . as $term | ($t | contains($term)) or ($s | contains($term)) or ($c | contains($term)))
-          ) | {url, title, section, snippet: (.content | .[0:300])}
-        ] | unique_by(.url + .section) | .[0:5]' 2>/dev/null)
+            ([$terms[] | select(($t | contains(.)) or ($s | contains(.)))] | length) as $title_hits |
+            ([$terms[] | select($c | contains(.))] | length) as $content_hits |
+            select(($title_hits + $content_hits) > 0) |
+            {url, title, section, content: $chunk.content, score: (($title_hits * 3) + $content_hits)}
+          ] | sort_by(-.score) | unique_by(.url + .section) | .[0:5] |
+          [.[] | {url, title, section, snippet: .content[0:500]}]
+        ' 2>/dev/null)
+        # Always include the full schema if query mentions schema/definition/create
+        if echo "$QUERY" | grep -qiE 'schema|definition|create workflow'; then
+          SCHEMA_CHUNK=$(echo "$INDEX" | jq -c '[.[] | select(.title == "Workflow JSON Schema")] | .[0] // empty' 2>/dev/null)
+          if [ -n "$SCHEMA_CHUNK" ] && [ "$SCHEMA_CHUNK" != "null" ]; then
+            SCHEMA_ENTRY=$(echo "$SCHEMA_CHUNK" | jq -c '{url, title, section, snippet: .content}')
+            RESULTS=$(echo "$RESULTS" | jq --argjson s "$SCHEMA_ENTRY" '. | if any(.title == "Workflow JSON Schema") then . else [$s] + .[0:4] end')
+          fi
+        fi
         if [ -n "$RESULTS" ] && [ "$RESULTS" != "[]" ]; then
           RESULT_TEXT=$(echo "$RESULTS" | jq -r '.[] | "## \(.title) > \(.section)\nURL: https://statewright.ai\(.url)\n\(.snippet)\n"' 2>/dev/null)
           RESULT_JSON=$(jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')

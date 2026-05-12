@@ -156,12 +156,15 @@ while IFS= read -r line; do
       INDEX=$(curl -sf --max-time 5 "$PB_URL/docs/search-index.json" 2>/dev/null)
       if [ -n "$INDEX" ]; then
         RESULTS=$(echo "$INDEX" | jq --arg q "$QUERY" '[
-          .[] | select(
-            (.title | ascii_downcase | contains($q | ascii_downcase)) or
-            (.section | ascii_downcase | contains($q | ascii_downcase)) or
-            (.content | ascii_downcase | contains($q | ascii_downcase))
+          ($q | ascii_downcase | split(" ")) as $terms |
+          .[] | . as $chunk |
+          select(
+            ($chunk.title | ascii_downcase) as $t |
+            ($chunk.section | ascii_downcase) as $s |
+            ($chunk.content | ascii_downcase) as $c |
+            any($terms[]; . as $term | ($t | contains($term)) or ($s | contains($term)) or ($c | contains($term)))
           ) | {url, title, section, snippet: (.content | .[0:300])}
-        ] | .[0:5]' 2>/dev/null)
+        ] | unique_by(.url + .section) | .[0:5]' 2>/dev/null)
         if [ -n "$RESULTS" ] && [ "$RESULTS" != "[]" ]; then
           RESULT_TEXT=$(echo "$RESULTS" | jq -r '.[] | "## \(.title) > \(.section)\nURL: https://statewright.ai\(.url)\n\(.snippet)\n"' 2>/dev/null)
           RESULT_JSON=$(jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')

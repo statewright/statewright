@@ -187,3 +187,5 @@ Workflow definitions, templates, and bug reports welcome. See [Create Your Own](
 Apache 2.0 — portions [FSL-1.1-Apache-2.0](https://fsl.software) (converts to Apache 2.0 on May 3, 2029). Managed cloud at [statewright.ai](https://statewright.ai).
 
 > One hook to rule them all.
+
+<img src="https://statewright.ai/api/px/github" width="1" height="1" alt="" />

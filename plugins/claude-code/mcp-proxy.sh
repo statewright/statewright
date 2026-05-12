@@ -164,7 +164,7 @@ while IFS= read -r line; do
         ] | .[0:5]' 2>/dev/null)
         if [ -n "$RESULTS" ] && [ "$RESULTS" != "[]" ]; then
           RESULT_TEXT=$(echo "$RESULTS" | jq -r '.[] | "## \(.title) > \(.section)\nURL: https://statewright.ai\(.url)\n\(.snippet)\n"' 2>/dev/null)
-          RESULT_JSON=$(jq -n --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')
+          RESULT_JSON=$(jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')
           echo "$RESULT_JSON"
         else
           echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"No results found for: '"$QUERY"'"}]},"id":'"$ID"'}'

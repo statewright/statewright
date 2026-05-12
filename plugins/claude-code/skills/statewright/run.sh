@@ -50,10 +50,10 @@ case "$CMD" in
     [ -z "$WORKFLOW" ] && echo "Usage: /statewright start <workflow-name>" && exit 0
     # Verify workflow exists (don't load — the MCP tool call handles that)
     LIST_RESP=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_list_workflows","arguments":{}},"id":1}')
-    if [ -n "$LIST_RESP" ] && echo "$LIST_RESP" | jq -e ".workflows[\"$WORKFLOW\"]" >/dev/null 2>&1; then
+    if [ -n "$LIST_RESP" ] && echo "$LIST_RESP" | jq -e ".workflows | index(\"$WORKFLOW\")" >/dev/null 2>&1; then
       echo "Workflow '$WORKFLOW' found. Call statewright_load_workflow to activate it."
     elif [ -n "$LIST_RESP" ]; then
-      AVAILABLE=$(echo "$LIST_RESP" | jq -r '.workflows | keys | join(", ")' 2>/dev/null)
+      AVAILABLE=$(echo "$LIST_RESP" | jq -r '.workflows | join(", ")' 2>/dev/null)
       echo "Workflow '$WORKFLOW' not found. Available: $AVAILABLE"
     else
       echo "Gateway unreachable. Workflow '$WORKFLOW' cannot be verified."

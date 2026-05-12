@@ -134,8 +134,17 @@ while IFS= read -r line; do
     continue
   fi
 
-  # Handle statewright_search_docs locally (no gateway round-trip)
   METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
+
+  # Notifications: no response needed, trigger side effects
+  if [ "$METHOD" = "notifications/initialized" ]; then
+    if [ -n "$API_KEY" ]; then
+      (upload_client_tools "$API_KEY" &)
+    fi
+    continue
+  fi
+
+  # Handle statewright_search_docs locally (no gateway round-trip)
   TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
   if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
     ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
@@ -177,7 +186,7 @@ while IFS= read -r line; do
     # Inject statewright_search_docs into tools/list responses from gateway
     if [ "$METHOD" = "tools/list" ]; then
       SEARCH_TOOL='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. \"guard operators\", \"allowed_tools\", \"approval gate\")"}},"required":["query"]}}'
-      RESPONSE=$(echo "$RESPONSE" | jq --argjson tool "$SEARCH_TOOL" '.result.tools += [$tool]' 2>/dev/null || echo "$RESPONSE")
+      RESPONSE=$(echo "$RESPONSE" | jq -c --argjson tool "$SEARCH_TOOL" '.result.tools += [$tool]' 2>/dev/null || echo "$RESPONSE")
     fi
     echo "$RESPONSE"
   else
@@ -185,9 +194,4 @@ while IFS= read -r line; do
     echo '{"jsonrpc":"2.0","error":{"code":-2,"message":"Gateway unreachable"},"id":'"$ID"'}'
   fi
 
-  # After notifications/initialized, scan and upload client tools (background)
-  METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
-  if [ "$METHOD" = "notifications/initialized" ] && [ -n "$API_KEY" ]; then
-    (upload_client_tools "$API_KEY" &)
-  fi
 done

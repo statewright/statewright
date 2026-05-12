@@ -2,19 +2,21 @@
 
 > Agents are suggestions, states are laws.
 
-One hook, one JSON file, every agent. State machine guardrails that control which tools your AI agent can use in each phase. Define the workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi.
+State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://statewright.ai/docs)
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
 ## The problem
 
-AI agents are powerful but brittle. Give a model 40+ tools and an open-ended problem and it barely gets out of the gate. Most people brute-force reliability with bigger models and longer prompts, with mixed results. Observability tells you what went wrong after the fact — it doesn't prevent it.
+AI agents are powerful but brittle. Give a model 40+ tools and an open-ended problem and it barely gets out of the gate. The common fix is bigger models and longer prompts... it helps sometimes. Observability tells you what went wrong after the fact; it doesn't prevent it.
 
 ## The approach
 
-Instead of making the model bigger, make the problem smaller. Formal state machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. An implementation state gets edit tools with limited shell — write-via-redirect and destructive ops are blocked even when Bash is allowed. A testing state gets bash but only for test commands. Call a tool that's not in the current phase and you get rejected with a message telling you what IS available and how to transition.
+Instead of making the model bigger, make the problem smaller.
 
-Works the same way on frontier models (fewer tokens, fewer debug spirals) and local models (13B+ models solving tasks they'd otherwise fail). Model-agnostic.
+State machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. When the agent transitions to implementation, edit tools unlock with limited shell access (write-via-redirect and destructive ops are blocked even when Bash is allowed). Testing only permits designated test commands. If you call a tool that's not in the current phase, you get rejected with a message telling you what IS available and how to transition.
+
+Works the same way on frontier models (fewer tokens to completion) and local models where 13B+ models start solving tasks they'd otherwise fail.
 
 ## Research results
 
@@ -24,17 +26,18 @@ Works the same way on frontier models (fewer tokens, fewer debug spirals) and lo
 | gemma4:e2b | 7.2GB | PASS* | FAIL |
 | gpt-oss:20b | 13.8GB | PASS | PASS (5/5) |
 | gemma4:31b | 19.9GB | PASS | PASS (5/5) |
-| llama3.3 | 42.5GB | PASS | PASS (2/2) |
+| llama3.3 | 42.5GB | PASS | PASS (2/2)† |
 
 *\*with specialized edit_line tool adaptation*
+*†tested on 2 of the 5 tasks (added after initial experiment run)*
 
-We validated on local models where the effect is most measurable. In our 5-task SWE-bench subset, **models above 13GB went from 2/10 to 10/10** with statewright constraints. Same tasks, same hardware. Below 13GB, models can't maintain valid tool call JSON through complex arguments — that's the floor, not a statewright limitation. Model age didn't predict success; VRAM threshold did.
+We validated on local models where the effect is most measurable. In our 5-task SWE-bench subset, two models (13.8GB and 19.9GB) **went from 2/10 to 10/10** with statewright constraints. Same tasks, same hardware. Below 13GB, models can produce tool calls but can't retain enough file content to produce accurate edits — that's the floor, not a statewright limitation.
 
-Frontier models benefit too: fewer tokens, fewer debug spirals, higher first-attempt success. [Research brief →](https://statewright.ai/research)
+Frontier models with default system prompts handle the obvious catastrophic actions (database deletion, credential leaks)... most of the time. The structural win is bigger: breaking read-loop death spirals where models re-read the same file 5+ times without ever editing, and keeping the tool space small enough that the model actually reasons instead of flailing. [Research brief →](https://statewright.ai/research)
 
 ## Quick start
 
-Install into Claude Code in a few keystrokes:
+Install into Claude Code:
 
 ```
 /plugin marketplace add statewright/statewright
@@ -73,30 +76,28 @@ Then start a workflow:
 ◆ [statewright] Workflow complete. 46 seconds.
 ```
 
-You can also use the slash command directly: `/statewright start bugfix`. The agent picks up natural language cues or explicit commands.
+You can also use the slash command directly: `/statewright start bugfix`.
 
 ## How it works
 
-The core is a **Rust engine** that evaluates state machine definitions — states, transitions, guards, tool restrictions. It's deterministic: the engine doesn't use an LLM, it enforces the machine.
+The core is a Rust engine that evaluates state machine definitions: states, transitions, guards, tool restrictions. It's deterministic. No LLM in the loop.
 
-On top of that sits a **plugin layer** that integrates with your coding agent via MCP. When you activate a workflow, hooks enforce the tool restrictions per state automatically. The model sees 5 tools instead of 30, gets clear instructions for the current phase, and transitions when conditions are met.
+On top of that sits a plugin layer that integrates with your coding agent via MCP. When you activate a workflow, hooks enforce tool restrictions per state automatically. The model sees 5 tools instead of 30, gets clear instructions for the current phase, and transitions when conditions are met.
 
-### Guardrails enforced over MCP
+### Guardrails
 
 | Guardrail | What it does |
 |-----------|-------------|
-| Per-state tool enforcement | Tools invisible to agent when not in allowed_tools |
-| Decision checkpoints | max_iterations per state forces transition or fail |
-| Edit guard | Rejects diffs exceeding max_edit_lines |
-| Command guard | Prefix-matched command allow list per state |
-| Bash discernment | Redirects (`>>`) and destructive ops (`rm`, `shred`) blocked in non-write states |
-| Edit scope limits | Cap files edited per state |
-| Guards | Conditional transitions — programmatic predicates (eq, gt, exists, etc.) on context data |
+| Per-state tool enforcement | Tools invisible to agent when not in `allowed_tools` |
+| Bash discernment | Redirects (`>>`), destructive ops (`rm`, `shred`), and scripting interpreters blocked in non-write states |
+| Edit guards | Rejects diffs exceeding `max_edit_lines`, caps files edited per state |
+| Command allow-lists | Prefix-matched `allowed_commands` per state |
+| Conditional transitions | Guards with programmatic predicates (eq, gt, exists, etc.) on context data |
 | Approval gates | `requires_approval` pauses for human review before high-risk transitions |
-| Environment scoping | `blocked_env` + `env_overrides` — no prod credentials in test phases |
-| Context budget | Track tool result bytes, warn at threshold |
-| Session isolation | Per-session state via `CLAUDE_SESSION_ID` — parallel sessions don't interfere |
-| Run history | Full observability: every tool call, transition rationale, per-phase grouping |
+| Environment scoping | `blocked_env` + `env_overrides` per state |
+| Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
+
+Full guardrail reference in [the docs](https://statewright.ai/docs/tools/reference).
 
 ## Define your own workflows
 
@@ -132,7 +133,7 @@ On top of that sits a **plugin layer** that integrates with your coding agent vi
 }
 ```
 
-State machines aren't DAGs — they loop and retry, which is what agentic work actually needs. Build workflows visually at [statewright.ai/workflows](https://statewright.ai/workflows).
+State machines aren't DAGs — they loop and retry, which is what agentic work actually needs. Build workflows visually at [statewright.ai/workflows](https://statewright.ai/workflows), or have your agent generate one from context using `statewright_create_workflow` (the [JSON schema](https://statewright.ai/workflow-schema.json) is public).
 
 ## Supported agents
 
@@ -144,36 +145,45 @@ State machines aren't DAGs — they loop and retry, which is what agentic work a
 | [Pi](plugins/pi/) | Skills extension | Hard (alpha) |
 | [Cursor](plugins/cursor/) | MCP + rules | Advisory (alpha) |
 
-## Engine
+Hard = tool calls blocked at the protocol layer before the model sees them. Advisory = rules injected into context but not enforced.
 
-The core engine is a pure Rust library with no runtime dependencies.
+## Pricing
+
+Free for individual developers. The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway.
+
+| Plan | Workflows | Run History | Price |
+|------|-----------|-------------|-------|
+| Free | 3 | 72 hours | $0 |
+| Pro | Unlimited | 7 days | $29/mo |
+| Team | Unlimited | 90 days | $99/mo |
+| Enterprise | Unlimited | Unlimited | [Contact us](https://statewright.ai) |
+
+## Self-hosting
+
+The engine (`crates/engine`) is Apache 2.0 and embeddable with no runtime dependencies. Single-developer and single-team self-hosting of the full stack is permitted under the FSL license.
 
 ```rust
 use statewright_engine::{MachineDefinition, resolve_transition, validate_definition};
 ```
 
-## What's new (May 2026)
+## Tradeoffs
 
-- **Observability dashboard** — run history with per-phase tool logs, transition rationale, smart rendering for Read/Edit/Bash/Glob output
-- **Guards** — conditional transitions with declarative predicates (eq, neq, gt, exists, contains). XState-style branched transitions.
-- **Agent-generated workflows** — `statewright_create_workflow` MCP tool. Point the agent at the [JSON schema](https://statewright.ai/workflow-schema.json), it generates and uploads a state machine.
-- **Environment controls** — `blocked_env` denies access to specific env vars, `env_overrides` aliases them per state
-- **Bash command discernment** — redirect detection, destructive op blocking, `allowed_commands` prefix matching
-- **Approval gates** — `requires_approval` on transitions for human-in-the-loop
-- **Session isolation** — per-session state scoping, parallel Claude Code sessions don't interfere
-- **Docs** — [statewright.ai/docs](https://statewright.ai/docs) — schema reference, workflow patterns, MCP tool reference
-- **Docs RAG** — `statewright_search_docs` MCP tool for agents to look up schema fields and patterns
+- Requires MCP support in the agent (or hooks for non-MCP agents like Codex)
+- Workflow definitions are authored by hand, though agents can generate them via `statewright_create_workflow`
+- Cursor enforcement is advisory, not hard. MCP alone can't gate tool calls in Cursor's architecture
+- Research results are from a 5-task SWE-bench subset, not the full 2294-instance benchmark
+- If a workflow is too restrictive, the agent gets stuck. `statewright_deactivate` is the escape hatch
 
 ## Docs
 
-Full documentation at [statewright.ai/docs](https://statewright.ai/docs): getting started, workflow authoring, schema reference, MCP tool reference, and agent-generated workflows.
+[statewright.ai/docs](https://statewright.ai/docs) — install guide, workflow authoring, [schema reference](https://statewright.ai/docs/workflows/schema-reference), [MCP tool reference](https://statewright.ai/docs/tools/reference), and [agent-generated workflows](https://statewright.ai/docs/tools/agent-generated-workflows).
 
 ## Contributing
 
-Workflow definitions, templates, and bug reports welcome. See the [docs](https://statewright.ai/docs/workflows/create-your-own/) for how to write workflows.
+Workflow definitions, templates, and bug reports welcome. See [Create Your Own](https://statewright.ai/docs/workflows/create-your-own/) for how to write workflows.
 
 ## License
 
-Apache 2.0 — portions [FSL-1.1-Apache-2.0](https://fsl.software) (see `LICENSE.md` in subdirectories). Managed cloud at [statewright.ai](https://statewright.ai).
+Apache 2.0 — portions [FSL-1.1-Apache-2.0](https://fsl.software) (converts to Apache 2.0 on May 3, 2029). Managed cloud at [statewright.ai](https://statewright.ai).
 
 > One hook to rule them all.

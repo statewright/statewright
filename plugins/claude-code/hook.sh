@@ -209,6 +209,12 @@ case "$ENDPOINT" in
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
+            # Block scripting interpreters that can write files
+            if echo "$COMMAND" | grep -qE '^\s*(python|python3|ruby|node|perl|php)\s'; then
+              REASON="Bash command blocked: scripting interpreter not permitted without Write/Edit in '$CURRENT' phase."
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+              exit 0
+            fi
           fi
           # Check for destructive operations (always blocked in restricted states)
           if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then

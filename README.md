@@ -151,12 +151,14 @@ Hard = tool calls blocked at the protocol layer before the model sees them. Advi
 
 Free for individual developers. The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway.
 
-| Plan | Workflows | Run History | Price |
-|------|-----------|-------------|-------|
-| Free | 3 | 72 hours | $0 |
-| Pro | Unlimited | 7 days | $29/mo |
-| Team | Unlimited | 90 days | $99/mo |
-| Enterprise | Unlimited | Unlimited | [Contact us](https://statewright.ai) |
+(these tiers are likely to be in flux: prices will not increase, tier grants can only increase)
+
+| Plan | Workflows | Transitions/mo | Run History | Price |
+|------|-----------|-------------|----------------|-------|
+| Free | 3 | 200 | 72 hours | $0 |
+| Pro | 10 | 2500 | 7 days | $29/mo |
+| Team | 30 | 10000 | 90 days | $99/mo |
+| Enterprise | Unlimited | Unlimited | to Specification | [Contact us](mailto:sales@statewright.ai) |
 
 ## Self-hosting
 

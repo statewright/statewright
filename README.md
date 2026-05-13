@@ -2,7 +2,7 @@
 
 > Agents are suggestions, states are laws.
 
-State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://statewright.ai/docs)
+State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://docs.statewright.ai)
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
@@ -109,7 +109,7 @@ On top of that sits a plugin layer that integrates with your coding agent via MC
 | Environment scoping | `blocked_env` + `env_overrides` per state |
 | Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
 
-Full guardrail reference in [the docs](https://statewright.ai/docs/tools/reference).
+Full guardrail reference in [the docs](https://docs.statewright.ai/tools/reference).
 
 ## Define your own workflows
 
@@ -190,11 +190,11 @@ use statewright_engine::{MachineDefinition, resolve_transition, validate_definit
 
 ## Docs
 
-[statewright.ai/docs](https://statewright.ai/docs) — install guide, workflow authoring, [schema reference](https://statewright.ai/docs/workflows/schema-reference), [MCP tool reference](https://statewright.ai/docs/tools/reference), and [agent-generated workflows](https://statewright.ai/docs/tools/agent-generated-workflows).
+[docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), and [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows).
 
 ## Contributing
 
-Workflow definitions, templates, and bug reports welcome. See [Create Your Own](https://statewright.ai/docs/workflows/create-your-own/) for how to write workflows.
+Workflow definitions, templates, and bug reports welcome. See [Create Your Own](https://docs.statewright.ai/workflows/create-your-own/) for how to write workflows.
 
 ## License
 

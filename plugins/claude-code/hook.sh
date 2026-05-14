@@ -161,7 +161,7 @@ case "$ENDPOINT" in
     SM_CONTEXT=$(echo "$STATE_JSON" | jq -r '.context // {} | to_entries | map(.key + "=" + (.value | tostring)) | join(", ")' 2>/dev/null || true)
     GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
 
-    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. ${INSTRUCTIONS:+Instructions: $INSTRUCTIONS. }Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO. When transitioning with guards, pass data: statewright_transition(event, data={key: value}).}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.} When calling statewright_transition, ALWAYS include a data param: statewright_transition(event='EVENT', data={'rationale': 'why you are transitioning', ...any state context fields that guards may check}). This updates the state context for guard evaluation and creates an audit trail."
+    CONTEXT="Statewright workflow active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Transitions without rationale will be rejected. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason for this transition', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use, do not access via env/printenv/.env files): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
     jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
@@ -280,6 +280,8 @@ case "$ENDPOINT" in
       *statewright_deactivate*) SW_ACTION="stop" ;;
       *statewright_pause*) SW_ACTION="stop" ;;
       *statewright_transition*) SW_ACTION="transition" ;;
+      *statewright_force_state*) SW_ACTION="transition" ;;
+      *statewright_get_state*) SW_ACTION="refresh_cache" ;;
     esac
 
     case "$SW_ACTION" in
@@ -328,6 +330,15 @@ case "$ENDPOINT" in
             else
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Now in ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Next transitions: ${NEXT_TRANSITIONS}. Use ONLY these exact event names with statewright_transition.\"}}"
             fi
+          fi
+        fi
+        ;;
+      refresh_cache)
+        # Silently update cache from gateway state (catches force_state drift)
+        if [ -f "$ACTIVE_FILE" ]; then
+          STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+          if [ -n "$STATE_JSON" ]; then
+            echo "$STATE_JSON" > "$CACHE_FILE"
           fi
         fi
         ;;

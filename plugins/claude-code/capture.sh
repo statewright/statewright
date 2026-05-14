@@ -5,6 +5,7 @@
 command -v jq &>/dev/null || exit 0
 
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
+API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 
 [ -z "$API_KEY" ] && exit 0

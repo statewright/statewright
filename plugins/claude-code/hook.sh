@@ -20,6 +20,7 @@ fi
 
 STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
+API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 
 # Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env

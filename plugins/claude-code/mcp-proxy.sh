@@ -117,6 +117,7 @@ while IFS= read -r line; do
   [ -z "$line" ] && continue
 
   API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 
   if [ -z "$API_KEY" ]; then
     METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)

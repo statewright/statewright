@@ -71,7 +71,11 @@ case "$ENDPOINT" in
       # Let key-paste prompts through
       if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
         PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"The user pasted their statewright API key. Run this command to save it: mkdir -p ~/.statewright && echo '$PASTED_KEY' > ~/.statewright/api_key && chmod 600 ~/.statewright/api_key — then confirm it is saved and tell them they can activate a workflow with: statewright_start(workflow='bugfix')\"}}"
+        # Save the key directly — don't ask Claude to do it (Claude freaks out about pasted keys)
+        mkdir -p "$STATEWRIGHT_DIR"
+        echo "$PASTED_KEY" > "$STATEWRIGHT_DIR/api_key"
+        chmod 600 "$STATEWRIGHT_DIR/api_key"
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright API key saved automatically. The user can now activate a workflow with: statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.\"}}"
         exit 0
       fi
 

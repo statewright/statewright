@@ -204,7 +204,7 @@ case "$ENDPOINT" in
           HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
           HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
           if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
-            if echo "$COMMAND" | grep -qE '>[^>2]|>>\s*\S'; then
+            if echo "$COMMAND" | grep -qE '(^|[^0-9])>[^>&]|>>\s*\S'; then
               REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0

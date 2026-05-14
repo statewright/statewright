@@ -277,6 +277,7 @@ case "$ENDPOINT" in
       *statewright_load_workflow*) SW_ACTION="start" ;;
       *statewright_stop*) SW_ACTION="stop" ;;
       *statewright_deactivate*) SW_ACTION="stop" ;;
+      *statewright_pause*) SW_ACTION="stop" ;;
       *statewright_transition*) SW_ACTION="transition" ;;
     esac
 

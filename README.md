@@ -196,6 +196,9 @@ use statewright_engine::{MachineDefinition, resolve_transition, validate_definit
 
 Workflow definitions, templates, and bug reports welcome. See [Create Your Own](https://docs.statewright.ai/workflows/create-your-own/) for how to write workflows.
 
+- [Report an issue](https://github.com/statewright/statewright/issues/new)
+- [Discussions & feedback](https://github.com/statewright/statewright/discussions)
+
 ## License
 
 Apache 2.0 — portions [FSL-1.1-ALv2](https://fsl.software) (converts to Apache 2.0 on May 3, 2029). Managed cloud at [statewright.ai](https://statewright.ai).

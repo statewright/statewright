@@ -13,6 +13,22 @@ pub struct MachineDefinition {
     pub guards: BTreeMap<String, GuardDef>,
     #[serde(default)]
     pub meta: Option<MachineMeta>,
+    #[serde(default)]
+    pub interrupts: BTreeMap<String, InterruptDef>,
+}
+
+/// Interrupt definition — reactive auto-transition triggered by file edits.
+/// Uses the History State pattern: detour to a handler state, `$return` resumes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptDef {
+    pub trigger: InterruptTrigger,
+    pub target: String,
+}
+
+/// Trigger condition for an interrupt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptTrigger {
+    pub file_pattern: String,
 }
 
 /// Definition of a single state.

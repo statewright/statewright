@@ -22,11 +22,11 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         errors.push("no final state defined; at least one state must have type: final".into());
     }
 
-    // 3. All transition targets must reference existing states
+    // 3. All transition targets must reference existing states (skip $return)
     for (state_name, state_def) in &definition.states {
         for (event, transition) in &state_def.on {
             let target = transition.target();
-            if !definition.states.contains_key(target) {
+            if target != "$return" && !definition.states.contains_key(target) {
                 errors.push(format!(
                     "state '{}' event '{}' targets nonexistent state '{}'",
                     state_name, event, target
@@ -45,18 +45,35 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         }
     }
 
-    // 5. All states must be reachable from initial (BFS)
+    // 5. All interrupt targets must reference existing states
+    for (int_name, int_def) in &definition.interrupts {
+        if !definition.states.contains_key(&int_def.target) {
+            errors.push(format!(
+                "interrupt '{}' targets nonexistent state '{}'",
+                int_name, int_def.target
+            ));
+        }
+    }
+
+    // 6. All states must be reachable from initial or interrupt targets (BFS)
     if definition.states.contains_key(&definition.initial) {
         let mut visited = BTreeSet::new();
         let mut queue = VecDeque::new();
         queue.push_back(definition.initial.as_str());
         visited.insert(definition.initial.as_str());
 
+        // Interrupt target states are reachable via interrupt trigger
+        for int_def in definition.interrupts.values() {
+            if definition.states.contains_key(&int_def.target) && visited.insert(int_def.target.as_str()) {
+                queue.push_back(int_def.target.as_str());
+            }
+        }
+
         while let Some(state_name) = queue.pop_front() {
             if let Some(state_def) = definition.states.get(state_name) {
                 for transition in state_def.on.values() {
                     let target = transition.target();
-                    if definition.states.contains_key(target) && visited.insert(target) {
+                    if target != "$return" && definition.states.contains_key(target) && visited.insert(target) {
                         queue.push_back(target);
                     }
                 }
@@ -227,6 +244,112 @@ mod tests {
                 "failed": { "type": "final" }
             },
             "guards": {}
+        }))
+        .unwrap();
+
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    // --- Interrupt validation tests ---
+
+    #[test]
+    fn rejects_interrupt_target_nonexistent() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "bad",
+            "initial": "start",
+            "states": {
+                "start": { "on": { "GO": "end" } },
+                "end": { "type": "final" }
+            },
+            "guards": {},
+            "interrupts": {
+                "bad_interrupt": {
+                    "trigger": { "file_pattern": "**/*.js" },
+                    "target": "ghost_state"
+                }
+            }
+        }))
+        .unwrap();
+
+        let err = validate_definition(&def).unwrap_err();
+        assert!(err.errors.iter().any(|e| e.contains("ghost_state")));
+    }
+
+    #[test]
+    fn interrupt_target_state_not_flagged_unreachable() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": { "on": { "DONE": "completed" } },
+                "pb_validating": { "on": { "VALIDATED": "$return", "FAIL": "failed" } },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {},
+            "interrupts": {
+                "pb_check": {
+                    "trigger": { "file_pattern": "site/pb/**/*.js" },
+                    "target": "pb_validating"
+                }
+            }
+        }))
+        .unwrap();
+
+        // pb_validating is only reachable via interrupt — should NOT be flagged as unreachable
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    #[test]
+    fn return_target_not_flagged_as_nonexistent() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "working",
+            "states": {
+                "working": { "on": { "DONE": "completed" } },
+                "pb_validating": { "on": { "VALIDATED": "$return", "FAIL": "failed" } },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {},
+            "interrupts": {
+                "pb_check": {
+                    "trigger": { "file_pattern": "site/pb/**/*.js" },
+                    "target": "pb_validating"
+                }
+            }
+        }))
+        .unwrap();
+
+        // $return should not trigger "nonexistent state" error
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    #[test]
+    fn accepts_valid_interrupt_workflow() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "tdd-with-pb-check",
+            "initial": "implementing",
+            "states": {
+                "implementing": {
+                    "on": { "DONE": "testing", "FAIL": "failed" }
+                },
+                "testing": {
+                    "on": { "PASS": "completed", "FAIL": "implementing" }
+                },
+                "pb_validating": {
+                    "on": { "VALIDATED": "$return", "FAIL": "failed" }
+                },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {},
+            "interrupts": {
+                "pb_check": {
+                    "trigger": { "file_pattern": "site/pb/**/*.js" },
+                    "target": "pb_validating"
+                }
+            }
         }))
         .unwrap();
 

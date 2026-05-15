@@ -65,9 +65,16 @@ pub fn resolve_transition(
                 }
             }
             if all_pass {
-                let new_context = apply_context_patch(context, event_data);
+                let raw_target = branch.target.clone();
+                let new_state = resolve_return_target(&raw_target, context)?;
+                let mut new_context = apply_context_patch(context, event_data);
+                if raw_target == "$return" {
+                    if let Some(obj) = new_context.as_object_mut() {
+                        obj.remove("_interrupt_return");
+                    }
+                }
                 return Ok(TransitionResult {
-                    new_state: branch.target.clone(),
+                    new_state,
                     new_context,
                     transitioned: true,
                     requires_approval: false,
@@ -92,8 +99,14 @@ pub fn resolve_transition(
         }
     }
 
-    let new_state = transition.target().to_string();
-    let new_context = apply_context_patch(context, event_data);
+    let raw_target = transition.target().to_string();
+    let new_state = resolve_return_target(&raw_target, context)?;
+    let mut new_context = apply_context_patch(context, event_data);
+    if raw_target == "$return" {
+        if let Some(obj) = new_context.as_object_mut() {
+            obj.remove("_interrupt_return");
+        }
+    }
 
     let invoke = transition.invoke_ref().map(|inv| InvokeResult {
         machine: inv.machine.to_string(),
@@ -115,6 +128,22 @@ pub fn resolve_transition(
         },
         invoke,
     })
+}
+
+/// Resolve `$return` target — looks up `_interrupt_return` in context.
+/// Non-`$return` targets pass through unchanged.
+fn resolve_return_target(target: &str, context: &Value) -> Result<String, TransitionError> {
+    if target == "$return" {
+        context
+            .get("_interrupt_return")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| TransitionError::InvalidDefinition {
+                message: "$return target used but _interrupt_return not set in context".to_string(),
+            })
+    } else {
+        Ok(target.to_string())
+    }
 }
 
 /// Apply a context patch (shallow merge of patch into context).
@@ -537,5 +566,79 @@ mod tests {
         let ctx = json!({"a": 1});
         let result = apply_context_patch(&ctx, &Value::Null);
         assert_eq!(result, json!({"a": 1}));
+    }
+
+    // $return target tests (History State pattern)
+
+    fn interrupt_machine() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "interrupt-test",
+            "initial": "implementing",
+            "states": {
+                "implementing": {
+                    "on": { "DONE": "testing", "FAIL": "failed" }
+                },
+                "testing": {
+                    "on": { "PASS": "completed", "FAIL": "implementing" }
+                },
+                "pb_validating": {
+                    "on": { "VALIDATED": "$return", "FAIL": "failed" }
+                },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {},
+            "interrupts": {
+                "pb_check": {
+                    "trigger": { "file_pattern": "site/pb/**/*.js" },
+                    "target": "pb_validating"
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn return_target_resolves_from_context() {
+        let def = interrupt_machine();
+        let ctx = json!({"_interrupt_return": "implementing"});
+        let result = resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "implementing");
+    }
+
+    #[test]
+    fn return_target_errors_when_not_in_context() {
+        let def = interrupt_machine();
+        let ctx = json!({}); // no _interrupt_return
+        let result = resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            TransitionError::InvalidDefinition { message } => {
+                assert!(message.contains("$return"));
+            }
+            other => panic!("expected InvalidDefinition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn return_target_cleans_up_context() {
+        let def = interrupt_machine();
+        let ctx = json!({"_interrupt_return": "implementing", "some_data": "kept"});
+        let result = resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(result.new_state, "implementing");
+        // _interrupt_return should be removed from context
+        assert!(result.new_context.get("_interrupt_return").is_none());
+        // other context preserved
+        assert_eq!(result.new_context["some_data"], "kept");
+    }
+
+    #[test]
+    fn normal_target_ignores_interrupt_return_in_context() {
+        let def = interrupt_machine();
+        // Even if _interrupt_return is in context, a normal target resolves normally
+        let ctx = json!({"_interrupt_return": "implementing"});
+        let result = resolve_transition("implementing", "DONE", &json!({}), &ctx, &def).unwrap();
+        assert_eq!(result.new_state, "testing"); // NOT "implementing"
     }
 }

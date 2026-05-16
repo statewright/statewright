@@ -295,6 +295,54 @@ case "$ENDPOINT" in
       *statewright_get_state*) SW_ACTION="refresh_cache" ;;
     esac
 
+    # --- Interrupt detection for file-changing tools (Edit, Write, MultiEdit) ---
+    if [ -f "$ACTIVE_FILE" ] && [ -z "$SW_ACTION" ] && [ -f "$CACHE_FILE" ]; then
+      FILE_PATH=""
+      case "$TOOL_NAME" in
+        Edit|Write|MultiEdit|edit_file|write_file|create_or_update_file)
+          FILE_PATH=$(echo "$HOOK_INPUT" | jq -r '.tool_input.file_path // .tool_input.path // .tool_input.file // empty' 2>/dev/null || true)
+          ;;
+      esac
+
+      if [ -n "$FILE_PATH" ]; then
+        # Check interrupt patterns from cached state
+        INTERRUPTS=$(cat "$CACHE_FILE" | jq -r '.interrupts // {} | to_entries[] | .key + "\t" + .value.file_pattern' 2>/dev/null || true)
+        if [ -n "$INTERRUPTS" ]; then
+          # Already in interrupt handler? Skip.
+          IN_HANDLER=$(cat "$CACHE_FILE" | jq -r '.context._interrupt_return // empty' 2>/dev/null || true)
+          if [ -z "$IN_HANDLER" ]; then
+            MATCHED_INT=""
+            while IFS=$'\t' read -r INT_NAME INT_PATTERN; do
+              [ -z "$INT_NAME" ] && continue
+              # Convert glob to regex: ** -> .*, * -> [^/]*, ? -> [^/]
+              REGEX=$(echo "$INT_PATTERN" | sed 's/\./\\./g; s/\*\*/\x00/g; s/\*/[^\/]*/g; s/\x00/.*/g; s/?/[^\/]/g')
+              if echo "$FILE_PATH" | grep -qE "^${REGEX}$" 2>/dev/null; then
+                MATCHED_INT="$INT_NAME"
+                break
+              fi
+            done <<< "$INTERRUPTS"
+
+            if [ -n "$MATCHED_INT" ]; then
+              # Trigger interrupt via gateway
+              INT_RESULT=$(mcp_call "$(jq -nc --arg evt "INTERRUPT:$MATCHED_INT" --arg fp "$FILE_PATH" '{jsonrpc:"2.0",method:"tools/call",params:{name:"statewright_transition",arguments:{event:$evt,data:{trigger_file:$fp}}},id:99}')")
+              # Refresh cache
+              STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":100}')
+              if [ -n "$STATE_JSON" ]; then
+                echo "$STATE_JSON" > "$CACHE_FILE"
+                NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
+                RETURN_TO=$(echo "$STATE_JSON" | jq -r '.interrupt_handler.return_state // empty' 2>/dev/null || true)
+                NEXT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
+                NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
+                INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
+                echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] INTERRUPT '${MATCHED_INT}' triggered by ${FILE_PATH}. State: ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Transitions: ${NEXT_TRANSITIONS}. Return to: ${RETURN_TO}.${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}\"}}"
+                exit 0
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+
     case "$SW_ACTION" in
       start)
         # Activate enforcement

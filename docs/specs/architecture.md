@@ -49,7 +49,7 @@ This split exists because K8s and NATS are good at fundamentally different thing
 │  │  NATS JetStream  │    │  Worker Pods     │                 │
 │  │  (Apache 2.0)    │◄──►│  (Stateless)     │                 │
 │  │                  │    │                  │                 │
-│  │  - Event routing │    │  - XState exec   │                 │
+│  │  - Event routing │    │  - Transition exec│                 │
 │  │  - Instance lock │    │  - Transition    │                 │
 │  │  - Pub/sub       │    │    processing    │                 │
 │  │  - Durable subs  │    │  - Guard eval    │                 │
@@ -278,7 +278,7 @@ Each state transition is an atomic operation:
 1. Acquire NATS KV lock for instance
 2. Read current state from Postgres
 3. Evaluate guard conditions
-4. Execute transition (XState)
+4. Execute transition (engine)
 5. Write new state + transition log in single Postgres transaction
 6. Publish state change to NATS subject
 7. Update K8s CRD status (async, non-blocking)
@@ -395,7 +395,7 @@ Platform teams get:
 | Dimension | Statewright | StateBacked | Temporal | Restate |
 |-----------|-------------|-------------|----------|---------|
 | Deployment | Self-hosted K8s operator | Hosted SaaS | Self-hosted or Cloud | Self-hosted or Cloud |
-| State model | Explicit FSM (CRDs) | Explicit FSM (XState) | Implicit (event history) | Implicit (journal) |
+| State model | Explicit FSM (CRDs) | Explicit FSM (JS) | Implicit (event history) | Implicit (journal) |
 | K8s native | Yes (CRDs, labels, RBAC) | No | No | No |
 | Human-in-the-loop | First-class (state parking) | Possible but not primary | Signal-based (bolted on) | Not primary |
 | Debugging | kubectl + state inspection | API + dashboard | Event history replay | Journal replay |

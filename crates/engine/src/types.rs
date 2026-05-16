@@ -90,7 +90,7 @@ pub enum TransitionDef {
         #[serde(default)]
         approval_message: Option<String>,
     },
-    /// Guarded: array of conditional transitions — first matching guard wins (XState pattern).
+    /// Guarded: array of conditional transitions — first matching guard wins.
     Guarded(Vec<GuardedTransition>),
     /// Invoke: delegate to a sub-machine, then resume at on_complete.
     Invoke {

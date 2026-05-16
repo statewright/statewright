@@ -218,13 +218,13 @@ Worker Pod Lifecycle:
 
 Workers need a state machine execution engine. Options:
 
-1. **Embedded XState via V8 isolate** (QuickJS or Deno core): Run actual XState definitions in a JavaScript runtime within the Rust worker. Maximum compatibility with existing XState machines.
+1. **Embedded JS via V8 isolate** (QuickJS or Deno core): Run statechart definitions in a JavaScript runtime within the Rust worker. Maximum compatibility with existing JS state machine libraries.
 
-2. **Native Rust state machine engine**: Parse the CRD spec and evaluate transitions natively. Faster, no JS runtime dependency, but requires reimplementing XState semantics.
+2. **Native Rust state machine engine**: Parse the CRD spec and evaluate transitions natively. Faster, no JS runtime dependency.
 
 3. **Hybrid**: Native Rust for simple transitions (90% of cases), V8 for complex guards/actions that need JavaScript evaluation.
 
-Recommendation: Start with option 2 (native Rust). The CRD spec format is simpler than full XState — it's a declarative state/transition/guard model, not arbitrary JavaScript. Add JS evaluation capability later if needed for complex guard expressions.
+Recommendation: Start with option 2 (native Rust). The CRD spec format is a declarative state/transition/guard model, not arbitrary JavaScript. Add JS evaluation capability later if needed for complex guard expressions.
 
 ## Admission Webhooks
 

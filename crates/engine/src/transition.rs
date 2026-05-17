@@ -30,6 +30,7 @@ pub fn resolve_transition(
                     requires_approval: false,
                     approval_message: None,
                     invoke: None,
+                    fork: None,
                 });
             }
             return Err(TransitionError::NoMatchingTransition {
@@ -80,6 +81,7 @@ pub fn resolve_transition(
                     requires_approval: false,
                     approval_message: None,
                     invoke: None,
+                    fork: None,
                 });
             }
         }
@@ -115,6 +117,13 @@ pub fn resolve_transition(
         input: inv.input.cloned(),
     });
 
+    let fork = transition.fork_ref().map(|f| ForkResult {
+        branches: f.branches.clone(),
+        join: f.join.clone(),
+        on_complete: f.on_complete.clone(),
+        on_fail: f.on_fail.clone(),
+    });
+
     Ok(TransitionResult {
         new_state,
         new_context,
@@ -127,6 +136,7 @@ pub fn resolve_transition(
             _ => None,
         },
         invoke,
+        fork,
     })
 }
 
@@ -640,5 +650,111 @@ mod tests {
         let ctx = json!({"_interrupt_return": "implementing"});
         let result = resolve_transition("implementing", "DONE", &json!({}), &ctx, &def).unwrap();
         assert_eq!(result.new_state, "testing"); // NOT "implementing"
+    }
+
+    // Fork transition tests
+
+    fn fork_machine() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "ci-pipeline",
+            "initial": "building",
+            "context": {},
+            "states": {
+                "building": {
+                    "on": {
+                        "BUILD_DONE": {
+                            "fork": {
+                                "branches": {
+                                    "lint": { "initial": "lint_run", "terminal": "lint_done" },
+                                    "types": { "initial": "types_run", "terminal": "types_done" }
+                                },
+                                "join": "all",
+                                "on_complete": "deploying",
+                                "on_fail": "failed"
+                            }
+                        }
+                    }
+                },
+                "lint_run": { "on": { "PASS": "lint_done", "FAIL": "lint_failed" } },
+                "lint_done": { "type": "final" },
+                "lint_failed": { "type": "final" },
+                "types_run": { "on": { "PASS": "types_done", "FAIL": "types_failed" } },
+                "types_done": { "type": "final" },
+                "types_failed": { "type": "final" },
+                "deploying": { "on": { "DEPLOYED": "completed" } },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn fork_def_deserializes() {
+        let def = fork_machine();
+        let building = def.states.get("building").unwrap();
+        let transition = building.on.get("BUILD_DONE").unwrap();
+        assert!(transition.is_fork());
+        let fork = transition.fork_ref().unwrap();
+        assert_eq!(fork.branches.len(), 2);
+        assert!(fork.branches.contains_key("lint"));
+        assert!(fork.branches.contains_key("types"));
+        assert_eq!(fork.on_complete, "deploying");
+        assert!(matches!(fork.join, JoinStrategy::All));
+    }
+
+    #[test]
+    fn fork_target_returns_on_complete() {
+        let def = fork_machine();
+        let transition = def.states.get("building").unwrap().on.get("BUILD_DONE").unwrap();
+        assert_eq!(transition.target(), "deploying");
+    }
+
+    #[test]
+    fn fork_transition_returns_fork_result() {
+        let def = fork_machine();
+        let result = resolve_transition("building", "BUILD_DONE", &json!({}), &json!({}), &def).unwrap();
+        assert!(result.transitioned);
+        assert_eq!(result.new_state, "deploying");
+        let fork = result.fork.unwrap();
+        assert_eq!(fork.branches.len(), 2);
+        assert_eq!(fork.branches["lint"].initial, "lint_run");
+        assert_eq!(fork.branches["lint"].terminal, "lint_done");
+        assert_eq!(fork.on_complete, "deploying");
+    }
+
+    #[test]
+    fn fork_join_defaults_to_all() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "start",
+            "states": {
+                "start": {
+                    "on": {
+                        "GO": {
+                            "fork": {
+                                "branches": { "a": { "initial": "a_run", "terminal": "a_done" } },
+                                "on_complete": "end"
+                            }
+                        }
+                    }
+                },
+                "a_run": { "on": { "DONE": "a_done" } },
+                "a_done": { "type": "final" },
+                "end": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let fork = def.states["start"].on["GO"].fork_ref().unwrap();
+        assert!(matches!(fork.join, JoinStrategy::All));
+    }
+
+    #[test]
+    fn non_fork_transition_has_no_fork() {
+        let def = fork_machine();
+        let result = resolve_transition("lint_run", "PASS", &json!({}), &json!({}), &def).unwrap();
+        assert!(result.fork.is_none());
     }
 }

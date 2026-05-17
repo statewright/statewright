@@ -55,7 +55,37 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         }
     }
 
-    // 6. All states must be reachable from initial or interrupt targets (BFS)
+    // 6. All fork branch states must exist
+    for (state_name, state_def) in &definition.states {
+        for (event, transition) in &state_def.on {
+            if let Some(fork) = transition.fork_ref() {
+                for (branch_name, branch) in &fork.branches {
+                    if !definition.states.contains_key(&branch.initial) {
+                        errors.push(format!(
+                            "state '{}' event '{}' fork branch '{}' initial state '{}' not found",
+                            state_name, event, branch_name, branch.initial
+                        ));
+                    }
+                    if !definition.states.contains_key(&branch.terminal) {
+                        errors.push(format!(
+                            "state '{}' event '{}' fork branch '{}' terminal state '{}' not found",
+                            state_name, event, branch_name, branch.terminal
+                        ));
+                    }
+                }
+                if let Some(ref on_fail) = fork.on_fail {
+                    if !definition.states.contains_key(on_fail) {
+                        errors.push(format!(
+                            "state '{}' event '{}' fork on_fail state '{}' not found",
+                            state_name, event, on_fail
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. All states must be reachable from initial, interrupt targets, or fork branches (BFS)
     if definition.states.contains_key(&definition.initial) {
         let mut visited = BTreeSet::new();
         let mut queue = VecDeque::new();
@@ -66,6 +96,22 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         for int_def in definition.interrupts.values() {
             if definition.states.contains_key(&int_def.target) && visited.insert(int_def.target.as_str()) {
                 queue.push_back(int_def.target.as_str());
+            }
+        }
+
+        // Fork branch states are reachable via fork transition
+        for state_def in definition.states.values() {
+            for transition in state_def.on.values() {
+                if let Some(fork) = transition.fork_ref() {
+                    for branch in fork.branches.values() {
+                        if definition.states.contains_key(&branch.initial) && visited.insert(branch.initial.as_str()) {
+                            queue.push_back(branch.initial.as_str());
+                        }
+                        if definition.states.contains_key(&branch.terminal) && visited.insert(branch.terminal.as_str()) {
+                            queue.push_back(branch.terminal.as_str());
+                        }
+                    }
+                }
             }
         }
 
@@ -353,6 +399,125 @@ mod tests {
         }))
         .unwrap();
 
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    // --- Fork validation tests ---
+
+    #[test]
+    fn accepts_valid_fork_workflow() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "pipeline",
+            "initial": "building",
+            "states": {
+                "building": {
+                    "on": {
+                        "BUILD_DONE": {
+                            "fork": {
+                                "branches": {
+                                    "lint": { "initial": "lint_run", "terminal": "lint_done" },
+                                    "types": { "initial": "types_run", "terminal": "types_done" }
+                                },
+                                "on_complete": "deploying"
+                            }
+                        }
+                    }
+                },
+                "lint_run": { "on": { "PASS": "lint_done" } },
+                "lint_done": { "type": "final" },
+                "types_run": { "on": { "PASS": "types_done" } },
+                "types_done": { "type": "final" },
+                "deploying": { "on": { "DONE": "completed" } },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    #[test]
+    fn rejects_fork_with_nonexistent_branch_initial() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "bad",
+            "initial": "start",
+            "states": {
+                "start": {
+                    "on": {
+                        "GO": {
+                            "fork": {
+                                "branches": {
+                                    "a": { "initial": "ghost", "terminal": "a_done" }
+                                },
+                                "on_complete": "end"
+                            }
+                        }
+                    }
+                },
+                "a_done": { "type": "final" },
+                "end": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let err = validate_definition(&def).unwrap_err();
+        assert!(err.errors.iter().any(|e| e.contains("ghost")));
+    }
+
+    #[test]
+    fn rejects_fork_with_nonexistent_on_complete() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "bad",
+            "initial": "start",
+            "states": {
+                "start": {
+                    "on": {
+                        "GO": {
+                            "fork": {
+                                "branches": {
+                                    "a": { "initial": "a_run", "terminal": "a_done" }
+                                },
+                                "on_complete": "nowhere"
+                            }
+                        }
+                    }
+                },
+                "a_run": { "on": { "DONE": "a_done" } },
+                "a_done": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let err = validate_definition(&def).unwrap_err();
+        assert!(err.errors.iter().any(|e| e.contains("nowhere")));
+    }
+
+    #[test]
+    fn fork_branch_states_not_flagged_unreachable() {
+        // Branch states are only reachable via fork — should NOT be flagged
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "pipeline",
+            "initial": "building",
+            "states": {
+                "building": {
+                    "on": {
+                        "BUILD_DONE": {
+                            "fork": {
+                                "branches": {
+                                    "lint": { "initial": "lint_run", "terminal": "lint_done" }
+                                },
+                                "on_complete": "done"
+                            }
+                        }
+                    }
+                },
+                "lint_run": { "on": { "PASS": "lint_done" } },
+                "lint_done": { "type": "final" },
+                "done": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
         assert!(validate_definition(&def).is_ok());
     }
 }

@@ -92,6 +92,10 @@ pub enum TransitionDef {
     },
     /// Guarded: array of conditional transitions — first matching guard wins.
     Guarded(Vec<GuardedTransition>),
+    /// Fork: spawn parallel branches, join when complete.
+    Fork {
+        fork: ForkDef,
+    },
     /// Invoke: delegate to a sub-machine, then resume at on_complete.
     Invoke {
         /// Reference to the sub-machine definition to invoke.
@@ -123,13 +127,14 @@ impl TransitionDef {
             TransitionDef::Simple(t) => t,
             TransitionDef::Full { target, .. } => target,
             TransitionDef::Guarded(branches) => branches.first().map(|b| b.target.as_str()).unwrap_or(""),
+            TransitionDef::Fork { fork } => &fork.on_complete,
             TransitionDef::Invoke { on_complete, .. } => on_complete,
         }
     }
 
     pub fn guard_names(&self) -> Vec<&str> {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Guarded(_) => vec![],
+            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Fork { .. } | TransitionDef::Guarded(_) => vec![],
             TransitionDef::Full { guard, guards, .. } => {
                 let mut names = Vec::new();
                 if let Some(g) = guard {
@@ -147,7 +152,7 @@ impl TransitionDef {
 
     pub fn requires_approval(&self) -> bool {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Guarded(_) => false,
+            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Fork { .. } | TransitionDef::Guarded(_) => false,
             TransitionDef::Full { requires_approval, .. } => requires_approval.unwrap_or(false),
         }
     }
@@ -169,6 +174,58 @@ impl TransitionDef {
             _ => None,
         }
     }
+
+    /// Returns true if this transition forks into parallel branches.
+    pub fn is_fork(&self) -> bool {
+        matches!(self, TransitionDef::Fork { .. })
+    }
+
+    /// Get the fork details, if this is a fork transition.
+    pub fn fork_ref(&self) -> Option<&ForkDef> {
+        match self {
+            TransitionDef::Fork { fork } => Some(fork),
+            _ => None,
+        }
+    }
+}
+
+/// Fork definition — parallel branch execution with join.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkDef {
+    pub branches: BTreeMap<String, BranchDef>,
+    #[serde(default = "default_join")]
+    pub join: JoinStrategy,
+    pub on_complete: String,
+    #[serde(default)]
+    pub on_fail: Option<String>,
+}
+
+fn default_join() -> JoinStrategy {
+    JoinStrategy::All
+}
+
+/// A single branch within a fork.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchDef {
+    pub initial: String,
+    pub terminal: String,
+}
+
+/// Join strategy for fork completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinStrategy {
+    All,
+    Any,
+}
+
+/// Details of a fork triggered by a transition.
+#[derive(Debug, Clone)]
+pub struct ForkResult {
+    pub branches: BTreeMap<String, BranchDef>,
+    pub join: JoinStrategy,
+    pub on_complete: String,
+    pub on_fail: Option<String>,
 }
 
 /// Reference to a sub-machine invocation.
@@ -248,6 +305,8 @@ pub struct TransitionResult {
     pub approval_message: Option<String>,
     /// If set, this transition invokes a sub-machine before advancing.
     pub invoke: Option<InvokeResult>,
+    /// If set, this transition forks into parallel branches.
+    pub fork: Option<ForkResult>,
 }
 
 /// Details of a sub-machine invocation triggered by a transition.

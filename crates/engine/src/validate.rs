@@ -99,7 +99,7 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
             }
         }
 
-        // Fork branch states are reachable via fork transition
+        // Fork branch states + on_fail are reachable via fork transition
         for state_def in definition.states.values() {
             for transition in state_def.on.values() {
                 if let Some(fork) = transition.fork_ref() {
@@ -109,6 +109,11 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
                         }
                         if definition.states.contains_key(&branch.terminal) && visited.insert(branch.terminal.as_str()) {
                             queue.push_back(branch.terminal.as_str());
+                        }
+                    }
+                    if let Some(ref on_fail) = fork.on_fail {
+                        if definition.states.contains_key(on_fail) && visited.insert(on_fail.as_str()) {
+                            queue.push_back(on_fail.as_str());
                         }
                     }
                 }

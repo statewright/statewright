@@ -107,6 +107,7 @@ On top of that sits a plugin layer that integrates with your coding agent via MC
 | Conditional transitions | Guards with programmatic predicates (eq, gt, exists, etc.) on context data |
 | Approval gates | `requires_approval` pauses for human review before high-risk transitions |
 | Interrupts | File changes matching glob patterns auto-transition to validation states, then return |
+| Fork/join | Parallel branch execution with configurable join strategies (all, any) |
 | Environment scoping | `blocked_env` + `env_overrides` per state |
 | Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
 

@@ -305,6 +305,14 @@ case "$ENDPOINT" in
       esac
 
       if [ -n "$FILE_PATH" ]; then
+        # Normalize to relative path (Edit/Write pass absolute paths)
+        # Try cwd first, then strip any leading path up to pattern match
+        CWD_PREFIX="$(pwd)/"
+        REL_PATH="$FILE_PATH"
+        case "$FILE_PATH" in
+          "$CWD_PREFIX"*) REL_PATH="${FILE_PATH#$CWD_PREFIX}" ;;
+        esac
+
         # Check interrupt patterns from cached state
         INTERRUPTS=$(cat "$CACHE_FILE" | jq -r '.interrupts // {} | to_entries[] | .key + "\t" + .value.file_pattern' 2>/dev/null || true)
         if [ -n "$INTERRUPTS" ]; then
@@ -315,28 +323,21 @@ case "$ENDPOINT" in
             while IFS=$'\t' read -r INT_NAME INT_PATTERN; do
               [ -z "$INT_NAME" ] && continue
               # Convert glob to regex: ** -> .*, * -> [^/]*, ? -> [^/]
-              REGEX=$(echo "$INT_PATTERN" | sed 's/\./\\./g; s/\*\*/\x00/g; s/\*/[^\/]*/g; s/\x00/.*/g; s/?/[^\/]/g')
-              if echo "$FILE_PATH" | grep -qE "^${REGEX}$" 2>/dev/null; then
+              REGEX=$(echo "$INT_PATTERN" | sed 's/\./\\./g' | sed 's/\*\*/DBLSTAR/g' | sed 's/\*/[^\/]*/g' | sed 's/DBLSTAR/.*/g' | sed 's/?/[^\/]/g')
+              # Try relative path (anchored) first, then absolute path (unanchored)
+              if echo "$REL_PATH" | grep -qE "^${REGEX}$" 2>/dev/null || \
+                 echo "$FILE_PATH" | grep -qE "(^|/)${REGEX}$" 2>/dev/null; then
                 MATCHED_INT="$INT_NAME"
                 break
               fi
             done <<< "$INTERRUPTS"
 
             if [ -n "$MATCHED_INT" ]; then
-              # Trigger interrupt via gateway
-              INT_RESULT=$(mcp_call "$(jq -nc --arg evt "INTERRUPT:$MATCHED_INT" --arg fp "$FILE_PATH" '{jsonrpc:"2.0",method:"tools/call",params:{name:"statewright_transition",arguments:{event:$evt,data:{trigger_file:$fp}}},id:99}')")
-              # Refresh cache
-              STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":100}')
-              if [ -n "$STATE_JSON" ]; then
-                echo "$STATE_JSON" > "$CACHE_FILE"
-                NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
-                RETURN_TO=$(echo "$STATE_JSON" | jq -r '.interrupt_handler.return_state // empty' 2>/dev/null || true)
-                NEXT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
-                NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
-                INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
-                echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] INTERRUPT '${MATCHED_INT}' triggered by ${FILE_PATH}. State: ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Transitions: ${NEXT_TRANSITIONS}. Return to: ${RETURN_TO}.${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}\"}}"
-                exit 0
-              fi
+              # Get target state from cache
+              INT_TARGET=$(cat "$CACHE_FILE" | jq -r --arg name "$MATCHED_INT" '.interrupts[$name].target // empty' 2>/dev/null || true)
+              # Instruct agent to trigger interrupt via MCP tool (correct session)
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] INTERRUPT: file '${FILE_PATH}' matched interrupt '${MATCHED_INT}'. You MUST immediately call statewright_transition(event='INTERRUPT:${MATCHED_INT}', data={'rationale': 'File edit triggered interrupt', 'trigger_file': '${FILE_PATH}'}) before doing anything else. This will transition to '${INT_TARGET}' for validation.\"}}"
+              exit 0
             fi
           fi
         fi

@@ -6,48 +6,19 @@ State machine guardrails that control which tools your AI agent can use in each 
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
-## Quickstart
-
-Try it out in Claude Code on the free tier by running the following:
-```
-/plugin marketplace add statewright/statewright
-
-/plugin install statewright
-
-/reload-plugins
-```
-Then `start the bugfix workflow` or `/statewright start bugfix`. You'll need to paste your API key when prompted. The latest versions of Claude may complain -- paste the API key again and say you really mean it, Claude is just being cautious here.
-
 ## The problem
 
 AI agents are powerful but brittle. Give a model 40+ tools and an open-ended problem and it barely gets out of the gate. The common fix is bigger models and longer prompts... it helps sometimes. Observability tells you what went wrong after the fact; it doesn't prevent it.
 
 ## The approach
 
-Instead of making the model bigger, make the problem smaller.
+Instead of making the model bigger, make the problem smaller. State machines aren't DAGs — they loop and retry, which is what agentic work actually needs.
 
 State machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. When the agent transitions to implementation, edit tools unlock with limited shell access (write-via-redirect and destructive ops are blocked even when Bash is allowed). Testing only permits designated test commands. If you call a tool that's not in the current phase, you get rejected with a message telling you what IS available and how to transition.
 
 Works the same way on frontier models (fewer tokens to completion) and local models where 13B+ models start solving tasks they'd otherwise fail.
 
-## Research results
-
-| Model | Size | Bug Fix (26 lines) | SWE-bench (5 tasks) |
-|-------|------|--------------------|---------------------|
-| gemma3 | 3.3GB | FAIL | FAIL |
-| gemma4:e2b | 7.2GB | PASS* | FAIL |
-| gpt-oss:20b | 13.8GB | PASS | PASS (5/5) |
-| gemma4:31b | 19.9GB | PASS | PASS (5/5) |
-| llama3.3 | 42.5GB | PASS | PASS (2/2)† |
-
-*\*with specialized edit_line tool adaptation*
-*†tested on 2 of the 5 tasks (added after initial experiment run)*
-
-We validated on local models where the effect is most measurable. In our 5-task SWE-bench subset, two models (13.8GB and 19.9GB) **went from 2/10 to 10/10** with statewright constraints. Same tasks, same hardware. Below 13GB, models can produce tool calls but can't retain enough file content to produce accurate edits — that's the floor, not a statewright limitation.
-
-Frontier models with default system prompts handle the obvious catastrophic actions (database deletion, credential leaks)... most of the time. The structural win is bigger: breaking read-loop death spirals where models re-read the same file 5+ times without ever editing, and keeping the tool space small enough that the model actually reasons instead of flailing. [Research brief →](https://statewright.ai/research)
-
-## Quick start
+## Quickstart
 
 Install into Claude Code:
 
@@ -89,6 +60,23 @@ Then start a workflow:
 ```
 
 You can also use the slash command directly: `/statewright start bugfix`.
+
+## Research results
+
+| Model | Size | Bug Fix (26 lines) | SWE-bench (5 tasks) |
+|-------|------|--------------------|---------------------|
+| gemma3 | 3.3GB | FAIL | FAIL |
+| gemma4:e2b | 7.2GB | PASS* | FAIL |
+| gpt-oss:20b | 13.8GB | PASS | PASS (5/5) |
+| gemma4:31b | 19.9GB | PASS | PASS (5/5) |
+| llama3.3 | 42.5GB | PASS | PASS (2/2)† |
+
+*\*with specialized edit_line tool adaptation*
+*†tested on 2 of the 5 tasks (added after initial experiment run)*
+
+We validated on local models where the effect is most measurable. In our 5-task SWE-bench subset, two models (13.8GB and 19.9GB) **went from 2/10 to 10/10** with statewright constraints. Same tasks, same hardware. Below 13GB, models can produce tool calls but can't retain enough file content to produce accurate edits — that's the floor, not a statewright limitation.
+
+Frontier models with default system prompts handle the obvious catastrophic actions (database deletion, credential leaks)... most of the time. The structural win is bigger: breaking read-loop death spirals where models re-read the same file 5+ times without ever editing, and keeping the tool space small enough that the model actually reasons instead of flailing. [Research brief →](https://statewright.ai/research)
 
 ## How it works
 
@@ -147,25 +135,26 @@ Full guardrail reference in [the docs](https://docs.statewright.ai/tools/referen
 }
 ```
 
-State machines aren't DAGs — they loop and retry, which is what agentic work actually needs. Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.json) and it generates a workflow via `statewright_create_workflow`. Tweak tools, commands, and environment blocks in the [visual editor](https://statewright.ai/workflows).
+Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.json) and it generates a workflow via `statewright_create_workflow`. Tweak tools, commands, and environment blocks in the [visual editor](https://statewright.ai/workflows).
 
 ## Supported agents
 
 | Agent | Integration | Enforcement |
 |-------|------------|-------------|
-| [Claude Code](plugins/claude-code/) | Hooks + MCP | Hard (protocol layer) |
-| [Codex](plugins/codex/) | Hooks | Hard (alpha) |
+| [Claude Code](plugins/claude-code/) | Hooks + MCP | Hard |
+| [Codex](plugins/codex/) | Hooks + MCP | Hard |
+| [Oh My Codex](plugins/omx/) | Hooks + MCP | Hard |
+| [Pi](plugins/pi/) | TypeScript extension | Hard* |
 | [opencode](plugins/opencode/) | TypeScript plugin | Hard (alpha) |
-| [Pi](plugins/pi/) | Skills extension | Hard (alpha) |
-| [Cursor](plugins/cursor/) | MCP + rules | Advisory (alpha) |
+| [Cursor](plugins/cursor/) | MCP + rules | Advisory |
 
-Hard = tool calls blocked at the protocol layer before the model sees them. Advisory = rules injected into context but not enforced.
+**Hard**: tool calls intercepted at the hook/protocol layer. **Advisory**: rules injected into context, not enforced.
+
+*\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
 
 ## Pricing
 
-Free for individual developers. The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway.
-
-(these tiers are likely to be in flux: prices will not increase, tier grants can only increase)
+Free for individual developers. The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway. Prices will not increase; tier grants can only increase.
 
 | Plan | Workflows | Transitions/mo | Run History | Price |
 |------|-----------|-------------|----------------|-------|

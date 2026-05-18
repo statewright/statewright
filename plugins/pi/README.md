@@ -1,41 +1,59 @@
-# Statewright Extension for Pi
+# statewright-pi
 
-State machine guardrails for Pi coding agent. TypeScript extension that registers statewright tools as Pi skills and hooks into tool execution for enforcement.
+State machine guardrails for [Pi coding agent](https://pi.dev). TypeScript extension that registers statewright tools and enforces per-state tool restrictions.
+
+## Install
+
+```bash
+pi install /path/to/statewright/plugins/pi
+```
+
+Or copy to the extensions directory:
+
+```bash
+cp -r plugins/pi ~/.pi/agent/extensions/statewright
+```
 
 ## Setup
 
-1. Build the gateway: `cargo install statewright-gateway`
+1. Get an API key at [statewright.ai/keys](https://statewright.ai/keys)
+2. Save it: `echo 'sw_live_...' > ~/.statewright/api_key`
+3. Start Pi — the extension connects to the managed gateway automatically
 
-2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
+## Usage
 
-3. Install the extension:
-   ```bash
-   cp -r plugins/pi ~/.pi/agent/extensions/statewright
-   # Or project-level:
-   cp -r plugins/pi .pi/extensions/statewright
-   ```
+The extension is dormant until you activate a workflow:
 
-4. Configure MCP server in Pi's config:
-   ```json
-   {
-     "mcp": {
-       "statewright": {
-         "command": "statewright-gateway",
-         "args": ["--config", ".statewright/config.json", "--hook-server"]
-       }
-     }
-   }
-   ```
+```
+statewright_load_workflow(name='bugfix')
+statewright_list_workflows()
+```
 
-5. Run: `pi "Fix the staging credential mismatch"`
+Once active, the extension enforces which tools are available in each phase, injects workflow context into every turn, and displays state in the status bar.
 
-## What It Does
+## What it does
 
-- Registers `statewright_get_state` and `statewright_transition` as Pi skills
-- `onToolBefore` — blocks unauthorized tools, logs transitions
-- `onToolAfter` — tracks iterations, detects state changes, logs completion
-- Prints state summary on extension load
+- Registers `statewright_get_state`, `statewright_transition`, `statewright_list_workflows`, `statewright_load_workflow` as Pi tools
+- **before_agent_start** — injects phase context, instructions, and autonomous mode directive
+- **tool_call** — blocks unauthorized tools with case-insensitive name matching
+- **tool_result** — tracks state changes, detects file-edit interrupts
+- **message_end** — recovers when local models emit tool calls as JSON text instead of structured calls
 
-## Pi-Specific Features
+## Local model support
 
-Pi's skill system allows statewright tools to be invoked directly by the agent without MCP. The extension registers them as native Pi skills alongside the MCP server integration, providing redundant access.
+Pi + Ollama is a first-class use case. The extension handles two common issues with local models:
+
+**Tool name normalization**: The gateway returns Claude Code tool names (`Read`, `Edit`, `Write`). Pi uses lowercase (`read`, `edit`, `write`). The extension maps between them automatically.
+
+**Tool-call recovery**: Some local models (especially Llama variants via Ollama) intermittently output tool calls as JSON text in the response instead of using the structured tool calling API. The `message_end` hook detects this pattern and nudges the model to retry with native tool calling.
+
+## Development
+
+```bash
+npm test          # run tests (vitest)
+npm run test:watch
+```
+
+## License
+
+FSL-1.1-ALv2 (see plugins/LICENSE.md)

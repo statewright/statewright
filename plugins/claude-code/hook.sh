@@ -409,13 +409,16 @@ case "$ENDPOINT" in
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
 
           if [ "$IS_FORK" = "true" ]; then
-            # Fork transition — show branches and instructions
+            # Fork transition — show branches and agent coordination instructions
             BRANCHES=$(echo "$PARSED_RESULT" | jq -r '.branches | keys | join(", ")' 2>/dev/null || true)
+            BRANCH_COUNT=$(echo "$PARSED_RESULT" | jq -r '.branches | length' 2>/dev/null || true)
             CURRENT=$(echo "$PARSED_RESULT" | jq -r '.current_branch // empty' 2>/dev/null || true)
             NEXT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
-            NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
             INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] FORK: branches [${BRANCHES}]. Now working branch '${CURRENT}' (state: ${NEW_STATE}). Tools: ${NEXT_TOOLS}. Complete this branch, then call statewright_transition(event='BRANCH_DONE:${CURRENT}').${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}\"}}"
+            # For parallel execution: spawn N fork-branch-worker agents, then WAIT for all N task-notifications before proceeding.
+            # The gateway auto-joins via BRANCH_DONE MCP calls, but you must wait for all agent notifications to confirm completion.
+            # Do NOT check get_state to determine fork completion -- wait for the notifications.
+            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] FORK: ${BRANCH_COUNT} branches [${BRANCHES}]. For parallel: spawn ${BRANCH_COUNT} fork-branch-worker agents (one per branch), then WAIT for all ${BRANCH_COUNT} task-notification events before proceeding. Do NOT call get_state to check fork status -- the gateway joins via MCP but notifications arrive separately. For sequential: work branch '${CURRENT}' first.${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}\"}}"
           elif [ "$IS_JOIN" = "true" ]; then
             # Join completed — show post-join state
             JOIN_TO=$(echo "$PARSED_RESULT" | jq -r '.to // empty' 2>/dev/null || true)

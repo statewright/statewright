@@ -1,30 +1,55 @@
-# Statewright Plugin for Codex CLI
+# statewright-codex
 
-State machine guardrails for OpenAI Codex CLI. Per-state tool enforcement, interrupts, fork/join, approval gates.
+State machine guardrails for [OpenAI Codex CLI](https://github.com/openai/codex). Per-state tool enforcement, interrupts, fork/join, approval gates.
 
-## Setup (Managed Cloud)
+## Install
 
-1. Sign up at [statewright.ai](https://statewright.ai) and generate an API key
-2. Save the key: `mkdir -p ~/.statewright && echo "YOUR_KEY" > ~/.statewright/api_key`
+```bash
+codex plugin marketplace add statewright/statewright
+codex plugin install statewright
+```
+
+Or manual setup:
+
+1. Get an API key at [statewright.ai/keys](https://statewright.ai/keys)
+2. Save it: `echo 'sw_live_...' > ~/.statewright/api_key`
 3. Add the MCP server:
    ```bash
    codex mcp add statewright -- bash /path/to/plugins/codex/mcp-proxy.sh
    ```
-4. Merge `hooks.json` into `~/.codex/hooks.json`
-5. Start a workflow: use `statewright_load_workflow` MCP tool
+4. Enable hooks in `~/.codex/config.toml`:
+   ```toml
+   [features]
+   hooks = true
+   ```
+5. Merge `hooks.json` into `~/.codex/hooks.json`
 
-## Hook Events
+**Important**: Add `env_vars` to propagate API keys to the MCP server:
+
+```toml
+[mcp_servers.statewright]
+command = "bash"
+args = ["/path/to/mcp-proxy.sh"]
+env_vars = ["STATEWRIGHT_API_KEY", "STATEWRIGHT_GATEWAY_URL"]
+```
+
+Codex does not propagate parent environment variables to MCP child processes by default. The `env_vars` field explicitly forwards them.
+
+## Usage
+
+Start a workflow via MCP tool:
+
+```
+statewright_load_workflow(name='bugfix')
+statewright_list_workflows()
+```
+
+## Hook events
 
 - **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive
 - **PreToolUse**: enforces allowed_tools per state, bash discernment, command whitelisting
 - **PostToolUse**: interrupt detection (file pattern matching), fork/join status, capture
 - **Stop**: no-op (workflow persists across turns)
-
-## Differences from Claude Code Plugin
-
-- `tool_response` field instead of `tool_result` in PostToolUse
-- `apply_patch` matched alongside `Edit` for interrupt detection
-- `CODEX_SESSION_ID` env var for session scoping
 
 ## License
 

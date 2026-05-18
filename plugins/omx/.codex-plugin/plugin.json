@@ -9,5 +9,11 @@
   "homepage": "https://statewright.ai",
   "repository": "https://github.com/statewright/statewright",
   "license": "FSL-1.1-ALv2",
-  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"]
+  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"],
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "statewright",
+    "shortDescription": "State machine guardrails — per-state tool enforcement for coding workflows.",
+    "category": "Developer Tools"
+  }
 }

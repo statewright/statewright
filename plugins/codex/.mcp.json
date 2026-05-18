@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "statewright": {
+      "command": "bash",
+      "args": ["${PLUGIN_ROOT}/mcp-proxy.sh"]
+    }
+  }
+}

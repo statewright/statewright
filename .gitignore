@@ -42,3 +42,4 @@ plugins/pi/node_modules/
 .mcp.json
 plugins/claude-code/Taskfile.yml
 .omx/
+plugins/claude-code/test-bash-discernment.sh

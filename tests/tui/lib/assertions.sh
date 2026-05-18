@@ -19,6 +19,27 @@ assert_screen() {
   fi
 }
 
+# Poll-based assertion: check screen every interval until pattern appears or timeout
+# Adapts to model speed — fast models pass instantly, slow models get patience
+assert_screen_wait() {
+  local name="$1" pattern="$2" label="$3" timeout="${4:-120}" interval="${5:-5}"
+  TOTAL_COUNT=$((TOTAL_COUNT + 1))
+  local elapsed=0
+  while [ $elapsed -lt $timeout ]; do
+    if agent_view "$name" | grep -q "$pattern"; then
+      echo "  PASS: $label (${elapsed}s)"
+      PASS_COUNT=$((PASS_COUNT + 1))
+      return 0
+    fi
+    sleep $interval
+    elapsed=$((elapsed + interval))
+  done
+  echo "  FAIL: $label (expected: $pattern, timeout: ${timeout}s)"
+  echo "  Screen:"
+  agent_view "$name" | tail -8 | sed 's/^/    /'
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
 assert_screen_not() {
   local name="$1" pattern="$2" label="$3"
   TOTAL_COUNT=$((TOTAL_COUNT + 1))

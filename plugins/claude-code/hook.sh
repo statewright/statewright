@@ -221,28 +221,7 @@ case "$ENDPOINT" in
       if [ "$TOOL_NAME" = "Bash" ]; then
         COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
         if [ -n "$COMMAND" ]; then
-          # Check for file write operations (redirects, heredocs) when Write/Edit not allowed
-          HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
-          HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
-          if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
-            if echo "$COMMAND" | grep -qE '(^|[^0-9])>[^>&]|>>\s*\S'; then
-              REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
-              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
-              exit 0
-            fi
-            if echo "$COMMAND" | grep -qE 'sed\s+-i|perl\s+-p?i'; then
-              REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
-              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
-              exit 0
-            fi
-            # Block scripting interpreters that can write files
-            if echo "$COMMAND" | grep -qE '^\s*(python|python3|ruby|node|perl|php)\s'; then
-              REASON="Bash command blocked: scripting interpreter not permitted without Write/Edit in '$CURRENT' phase."
-              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
-              exit 0
-            fi
-          fi
-          # Check for destructive operations (always blocked in restricted states)
+          # Check for destructive operations first (always blocked regardless of allowed_commands)
           if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
             jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
@@ -251,17 +230,40 @@ case "$ENDPOINT" in
             jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
-          # Check allowed_commands from cache if present
+          # Check allowed_commands — if present, overrides heuristic blocks (glob patterns supported)
           ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
           if [ -n "$ALLOWED_CMDS" ]; then
             CMD_OK=false
-            while IFS= read -r prefix; do
-              case "$COMMAND" in "$prefix"|"$prefix "*) CMD_OK=true; break ;; esac
+            while IFS= read -r pattern; do
+              # shellcheck disable=SC2254 — intentional glob expansion for wildcard patterns
+              case "$COMMAND" in $pattern) CMD_OK=true; break ;; esac
             done <<< "$ALLOWED_CMDS"
             if [ "$CMD_OK" = false ]; then
               REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
+            fi
+          else
+            # Default heuristics when no explicit allowed_commands
+            HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
+            HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
+            if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
+              if echo "$COMMAND" | grep -qE '(^|[^0-9])>[^>&]|>>\s*\S'; then
+                REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+                exit 0
+              fi
+              if echo "$COMMAND" | grep -qE 'sed\s+-i|perl\s+-p?i'; then
+                REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+                exit 0
+              fi
+              # Block scripting interpreters that can write files
+              if echo "$COMMAND" | grep -qE '^\s*(python|python3|ruby|node|perl|php)\s'; then
+                REASON="Bash command blocked: scripting interpreter not permitted without Write/Edit in '$CURRENT' phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+                exit 0
+              fi
             fi
           fi
           # Check blocked_env — deny commands referencing blocked environment variables

@@ -23,6 +23,7 @@
       },
       "testing": {
         "allowed_tools": ["Read", "Bash"],
+        "allowed_commands": ["*test*"],
         "instructions": "Run the tests to verify your fix.",
         "max_iterations": 3,
         "on": {

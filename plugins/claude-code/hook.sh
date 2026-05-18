@@ -323,7 +323,8 @@ case "$ENDPOINT" in
             while IFS=$'\t' read -r INT_NAME INT_PATTERN; do
               [ -z "$INT_NAME" ] && continue
               # Convert glob to regex: ** -> .*, * -> [^/]*, ? -> [^/]
-              REGEX=$(echo "$INT_PATTERN" | sed 's/\./\\./g' | sed 's/\*\*/DBLSTAR/g' | sed 's/\*/[^\/]*/g' | sed 's/DBLSTAR/.*/g' | sed 's/?/[^\/]/g')
+              # Convert glob to regex: **/ -> (.*/)? (zero or more dirs), * -> [^/]*, ? -> [^/]
+              REGEX=$(echo "$INT_PATTERN" | sed 's/\./\\./g' | sed 's|\*\*/|DBLSLASH|g' | sed 's/\*\*/DBLSTAR/g' | sed 's/\*/[^\/]*/g' | sed 's|DBLSLASH|(.*\/)\{0,1\}|g' | sed 's/DBLSTAR/.*/g' | sed 's/?/[^\/]/g')
               # Try relative path (anchored) first, then absolute path (unanchored)
               if echo "$REL_PATH" | grep -qE "^${REGEX}$" 2>/dev/null || \
                  echo "$FILE_PATH" | grep -qE "(^|/)${REGEX}$" 2>/dev/null; then
@@ -440,8 +441,12 @@ case "$ENDPOINT" in
     ;;
 
   stop)
-    # Clean up session state on Claude Code exit
-    rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+    # Claude Code fires Stop after EVERY agent turn, not just session exit.
+    # Do NOT remove .active here — it kills the workflow between turns.
+    # Workflow deactivation is handled by:
+    #   - is_final detection in user-prompt (line ~135)
+    #   - is_final detection in post-tool transition handler
+    #   - explicit statewright_stop/deactivate/pause tools
     exit 0
     ;;
 

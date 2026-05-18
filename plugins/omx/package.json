@@ -1,0 +1,21 @@
+{
+  "name": "statewright-omx",
+  "version": "0.1.0",
+  "description": "Statewright state machine guardrails for Oh My Codex (OMX)",
+  "type": "module",
+  "main": "dist/hook.js",
+  "license": "FSL-1.1-ALv2",
+  "scripts": {
+    "build": "tsup src/hook.ts --format esm --out-dir dist --no-splitting",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
+  "dependencies": {
+    "minimatch": "^10.0.0"
+  }
+}

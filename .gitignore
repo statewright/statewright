@@ -41,3 +41,4 @@ site/dist/
 plugins/pi/node_modules/
 .mcp.json
 plugins/claude-code/Taskfile.yml
+.omx/

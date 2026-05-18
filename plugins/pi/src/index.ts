@@ -115,6 +115,24 @@ async function gwInit(): Promise<boolean> {
   }
 }
 
+// --- Tool name mapping ---
+// Gateway returns Claude Code tool names; Pi uses lowercase.
+// Map both directions for enforcement + display.
+
+const TOOL_NAME_MAP: Record<string, string> = {
+  Read: "read", Edit: "edit", Write: "write", Bash: "bash",
+  Grep: "grep", Glob: "glob", MultiEdit: "edit", LS: "ls",
+  Agent: "agent", WebFetch: "fetch", WebSearch: "search",
+}
+
+function normalizeToolName(name: string): string {
+  return TOOL_NAME_MAP[name] ?? name.toLowerCase()
+}
+
+function toolNamesMatch(gwName: string, piName: string): boolean {
+  return normalizeToolName(gwName) === piName.toLowerCase()
+}
+
 // --- State cache ---
 
 interface StateCache {
@@ -125,9 +143,9 @@ interface StateCache {
   transitions: Array<{ event: string; target: string }>
   maxIterations: number | null
   iteration: number
-  context: Record<string, any>
+  context: Record<string, unknown>
   interrupts: Record<string, { file_pattern: string; target: string }>
-  fork?: { active: boolean; current_branch: string; branches: Record<string, any> }
+  fork?: { active: boolean; current_branch: string; branches: Record<string, unknown> }
   interruptHandler?: { return_state: string }
 }
 
@@ -159,7 +177,7 @@ function formatContext(s: StateCache): string {
   const lines = [
     `Statewright workflow active. AUTONOMOUS MODE: work continuously through each state -- use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates or final states.`,
     `Phase: ${s.state} (iteration ${s.iteration}/${s.maxIterations ?? "none"}).`,
-    `Tools: ${s.allowedTools.join(", ")}.`,
+    `Tools: ${s.allowedTools.map(normalizeToolName).join(", ")}.`,
     `Transitions: ${transitions}.`,
     `MANDATORY: Every statewright_transition call MUST include data.rationale.`,
   ]
@@ -167,6 +185,66 @@ function formatContext(s: StateCache): string {
   if (s.interruptHandler) lines.push(`IN INTERRUPT HANDLER. Return to: ${s.interruptHandler.return_state}`)
   if (s.fork?.active) lines.push(`FORK active. Branch: ${s.fork.current_branch}`)
   return lines.join(" ")
+}
+
+// --- Tool call recovery (parse_llm_response equivalent) ---
+// Local models sometimes dump tool calls as JSON text in content
+// instead of using structured tool_calls. Detect and flag for the model.
+
+interface ParsedToolCall {
+  name: string
+  args: Record<string, unknown>
+}
+
+function extractToolCallsFromText(text: string): ParsedToolCall[] {
+  const trimmed = text.trim()
+
+  // Try direct JSON parse
+  let parsed: Record<string, unknown> | null = null
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    // Try stripping markdown code fences
+    const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
+    if (fenceMatch) {
+      try { parsed = JSON.parse(fenceMatch[1].trim()) } catch { /* noop */ }
+    }
+    // Try finding embedded JSON
+    if (!parsed) {
+      const start = trimmed.indexOf("{")
+      const end = trimmed.lastIndexOf("}")
+      if (start >= 0 && end > start) {
+        try { parsed = JSON.parse(trimmed.slice(start, end + 1)) } catch { /* noop */ }
+      }
+    }
+  }
+  if (!parsed) return []
+
+  // Format 1: {"tool_calls": [{"name": "...", "args": {...}}]}
+  if (Array.isArray(parsed.tool_calls)) {
+    return (parsed.tool_calls as Array<Record<string, unknown>>)
+      .filter((tc) => typeof tc.name === "string")
+      .map((tc) => ({ name: tc.name as string, args: (tc.args ?? tc.arguments ?? {}) as Record<string, unknown> }))
+  }
+
+  // Format 2: {"type": "function", "name": "...", "parameters": {...}}
+  if (parsed.type === "function" && typeof parsed.name === "string") {
+    return [{ name: parsed.name as string, args: (parsed.parameters ?? parsed.arguments ?? {}) as Record<string, unknown> }]
+  }
+
+  // Format 3: [{"type": "function", "name": "...", ...}, ...]
+  if (Array.isArray(parsed)) {
+    return (parsed as Array<Record<string, unknown>>)
+      .filter((item) => typeof item.name === "string")
+      .map((item) => ({ name: item.name as string, args: (item.parameters ?? item.arguments ?? item.args ?? {}) as Record<string, unknown> }))
+  }
+
+  // Format 4: {"transition": "EVENT_NAME"} (state machine nav)
+  if (typeof parsed.transition === "string") {
+    return [{ name: "statewright_transition", args: { event: parsed.transition, data: { rationale: parsed.error ?? "model-emitted transition" } } }]
+  }
+
+  return []
 }
 
 // --- Interrupt detection ---
@@ -297,8 +375,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     // No allowed_tools = no enforcement
     if (stateCache.allowedTools.length === 0) return
 
-    if (!stateCache.allowedTools.includes(event.toolName)) {
-      const available = stateCache.allowedTools.join(", ")
+    const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
+    if (!isAllowed) {
+      const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
       const transitions = stateCache.transitions.map((t) => t.event).join(", ")
       return {
         block: true,
@@ -350,6 +429,43 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           "statewright",
           `[sw] ${stateCache.state} (INTERRUPT → ${target})`,
         )
+      }
+    }
+  })
+
+  // --- Tool call recovery (message_end hook) ---
+  // When local models dump tool calls as JSON text instead of structured
+  // tool_calls, detect the pattern and notify the model to retry properly.
+
+  pi.on("message_end", async (event, ctx) => {
+    if (!stateCache) return
+    const msg = event.message
+    if (msg.role !== "assistant") return
+
+    // Check text content blocks for embedded tool call JSON
+    const textParts = (msg.content ?? []).filter(
+      (c: Record<string, unknown>) => c.type === "text" && typeof c.text === "string",
+    )
+    const toolCallParts = (msg.content ?? []).filter(
+      (c: Record<string, unknown>) => c.type === "toolCall",
+    )
+
+    // Only intervene if there are NO real tool calls but text looks like tool calls
+    if (toolCallParts.length > 0) return
+
+    for (const part of textParts) {
+      const extracted = extractToolCallsFromText(part.text as string)
+      if (extracted.length > 0) {
+        const toolNames = extracted.map((tc) => tc.name).join(", ")
+        ctx.ui.notify(
+          `[statewright] Model emitted tool calls as text (${toolNames}). Nudging to use native tool calling.`,
+          "warn",
+        )
+        // Can't rewrite the message into tool calls (format mismatch),
+        // but we can inject a system nudge for the next turn
+        return {
+          appendSystemPrompt: `IMPORTANT: Your previous response contained tool calls as JSON text instead of using the tool calling API. Do NOT output JSON tool calls as text. Use the native tool calling mechanism provided by the system. The tools you tried to call: ${toolNames}. Call them properly now.`,
+        }
       }
     }
   })

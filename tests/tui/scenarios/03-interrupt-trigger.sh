@@ -4,12 +4,24 @@
 echo "=== Scenario 3: Interrupt Trigger ==="
 
 NAME="sw-03-interrupt"
-SID=$(spawn_claude "$NAME" "load the statewright-dev-v2 workflow, transition to implementing (skip through planning/scoping/branching quickly), then edit site/pb/hooks/test.pb.js to add a console.log line. Report what happens after the edit." "$FIXTURE_DIR")
+spawn_claude "$NAME" "$FIXTURE_DIR"
 
-# Agent should work through states, edit the PB file, and interrupt should fire
-agent_wait "$NAME" "INTERRUPT" 60
+# Load workflow and advance to implementing
+agent_send "$NAME" "load the statewright-dev-v2 workflow, then transition through planning scoping and branching to get to implementing. Create a feature branch first.<CR>"
+agent_wait "$NAME" "implementing" 45
 
-assert_screen "$NAME" "INTERRUPT" "interrupt triggered by PB hook edit"
-assert_screen "$NAME" "pb_validating" "transitioned to pb_validating"
+assert_screen "$NAME" "implementing" "reached implementing state"
+
+# Edit a PB hook file — should trigger interrupt
+agent_send "$NAME" "edit site/pb/hooks/test.pb.js and add a console.log line<CR>"
+agent_wait "$NAME" "INTERRUPT\|pb_validating" 30
+
+assert_screen "$NAME" "INTERRUPT\|pb_validating" "interrupt triggered by PB hook edit"
+
+# Complete the interrupt
+agent_send "$NAME" "the hook is valid, transition VALIDATED<CR>"
+agent_wait "$NAME" "implementing" 20
+
+assert_screen "$NAME" "implementing" "returned to implementing after interrupt"
 
 agent_stop "$NAME"

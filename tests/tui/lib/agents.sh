@@ -8,12 +8,20 @@ STAGING_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/staging_api_key" 2
 STAGING_PB="${STATEWRIGHT_PB_URL:-https://statewright.casa.enhasa.cloud}"
 
 spawn_claude() {
-  local name="$1" prompt="$2" workdir="${3:-$(pwd)}"
+  local name="$1" workdir="${2:-$(pwd)}"
+  cd "$workdir"
   $HT run --name "$name" \
     env STATEWRIGHT_GATEWAY_URL="$STAGING_GW" \
     STATEWRIGHT_API_KEY="$STAGING_KEY" \
-    claude -p "$prompt" \
-    --dangerously-skip-permissions 2>&1 >/dev/null
+    claude --dangerously-skip-permissions 2>&1 >/dev/null
+  sleep 3
+  # Accept bypass permissions if the confirmation prompt is showing
+  if $HT view "$name" 2>/dev/null | grep -q "Yes, I accept"; then
+    $HT send "$name" "j<CR>" 2>/dev/null
+    sleep 5
+  fi
+  # Wait for interactive prompt to appear
+  sleep 3
   echo "$name"
 }
 

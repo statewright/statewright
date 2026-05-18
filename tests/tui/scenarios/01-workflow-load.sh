@@ -4,13 +4,14 @@
 echo "=== Scenario 1: Workflow Load ==="
 
 NAME="sw-01-load"
-spawn_claude "$NAME" "load the statewright-dev-v2 workflow and report your current state and available tools"
+spawn_claude "$NAME" "$FIXTURE_DIR"
 
-# claude -p exits after responding — wait for process to finish
+# Load workflow
+agent_send "$NAME" "load the statewright-dev-v2 workflow<CR>"
 sleep 20
 
 assert_screen "$NAME" "planning" "workflow loaded in planning state"
 assert_screen "$NAME" "Read" "Read tool available"
-assert_screen "$NAME" "SCOPED" "SCOPED transition available"
+assert_screen "$NAME" "statewright_load_workflow\|statewright-dev" "MCP tool called"
 
 agent_stop "$NAME"

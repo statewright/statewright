@@ -7,7 +7,8 @@
 #   ./harness.sh --agent codex      # run against codex
 #   ./harness.sh --scenario 03      # run specific scenario
 #   ./harness.sh --list             # list available scenarios
-set -euo pipefail
+set -uo pipefail
+# No set -e — assertions handle failures, don't abort on non-zero
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

@@ -1,19 +1,31 @@
 # Statewright Plugin for Codex CLI
 
-State machine guardrails for OpenAI Codex CLI.
+State machine guardrails for OpenAI Codex CLI. Per-state tool enforcement, interrupts, fork/join, approval gates.
 
-## Setup
+## Setup (Managed Cloud)
 
-1. Install the gateway: `cargo install statewright-gateway`
-2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
-3. Add the MCP server to `~/.codex/config.toml`:
-   ```toml
-   [mcp.statewright]
-   command = "statewright-gateway"
-   args = ["--config", ".statewright/config.json", "--hook-server"]
+1. Sign up at [statewright.ai](https://statewright.ai) and generate an API key
+2. Save the key: `mkdir -p ~/.statewright && echo "YOUR_KEY" > ~/.statewright/api_key`
+3. Add the MCP server:
+   ```bash
+   codex mcp add statewright -- bash /path/to/plugins/codex/mcp-proxy.sh
    ```
-4. Copy `hooks.json` to `~/.codex/hooks.json` or merge into existing hooks
+4. Merge `hooks.json` into `~/.codex/hooks.json`
+5. Start a workflow: use `statewright_load_workflow` MCP tool
 
-## Limitations
+## Hook Events
 
-Codex CLI's PreToolUse hook cannot inject `additionalContext` (issue #19385). Checkpoint prompts are injected via UserPromptSubmit instead. Tool blocking works identically to Claude Code.
+- **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive
+- **PreToolUse**: enforces allowed_tools per state, bash discernment, command whitelisting
+- **PostToolUse**: interrupt detection (file pattern matching), fork/join status, capture
+- **Stop**: no-op (workflow persists across turns)
+
+## Differences from Claude Code Plugin
+
+- `tool_response` field instead of `tool_result` in PostToolUse
+- `apply_patch` matched alongside `Edit` for interrupt detection
+- `CODEX_SESSION_ID` env var for session scoping
+
+## License
+
+FSL-1.1-ALv2 (see plugins/LICENSE.md)

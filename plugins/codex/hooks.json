@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh user-prompt",
+            "command": "bash $(dirname $0)/hook.sh user-prompt",
             "timeout": 5000
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh pre-tool",
+            "command": "bash $(dirname $0)/hook.sh pre-tool",
             "timeout": 5000
           }
         ]
@@ -30,7 +30,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh post-tool",
+            "command": "bash $(dirname $0)/hook.sh post-tool",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "bash $(dirname $0)/capture.sh",
             "timeout": 3000
           }
         ]
@@ -42,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".statewright/hook.sh stop",
+            "command": "bash $(dirname $0)/hook.sh stop",
             "timeout": 3000
           }
         ]

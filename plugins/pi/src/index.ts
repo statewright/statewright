@@ -1,227 +1,356 @@
 /**
  * Statewright extension for Pi coding agent
  *
- * Enforces state machine guardrails via the statewright MCP gateway's
- * hook HTTP server. Registers custom tools, blocks unauthorized tool
- * calls, injects state context before each agent turn.
+ * State machine guardrails — per-state tool enforcement, interrupts,
+ * fork/join (sequential), approval gates. Talks directly to the
+ * statewright gateway via HTTP (no MCP proxy needed).
  *
  * Install:
  *   ~/.pi/agent/extensions/statewright/index.ts  (global)
  *   .pi/extensions/statewright/index.ts           (project)
  *
- * Requires: statewright-gateway running with --hook-server
+ * Config:
+ *   ~/.statewright/api_key              API key (from statewright.ai/keys)
+ *   STATEWRIGHT_GATEWAY_URL env var     Override gateway URL (default: managed cloud)
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { Type } from "typebox"
-import { readFileSync } from "node:fs"
+import { readFileSync, existsSync } from "node:fs"
+import { join } from "node:path"
+import { homedir } from "node:os"
+import { minimatch } from "minimatch"
 
-interface HookResponse {
-  decision?: string
-  additionalContext?: string
-  statusMessage?: string
-  transition?: string
-  completed?: boolean
-}
+// --- Gateway client ---
 
-interface StateResponse {
-  state: string
-  isFinal: boolean
-  iteration: number
-  maxIterations: number | null
-  allowedTools: string[]
-  instructions: string | null
-  additionalContext: string
-}
+const GW_URL = process.env.STATEWRIGHT_GATEWAY_URL || "https://mcp.statewright.ai"
+const KEY_PATH = join(homedir(), ".statewright", "api_key")
 
-function getPort(): string | null {
+function getApiKey(): string | null {
+  if (process.env.STATEWRIGHT_API_KEY) return process.env.STATEWRIGHT_API_KEY.trim()
   try {
-    return readFileSync("/tmp/statewright-hook-port", "utf8").trim()
+    return readFileSync(KEY_PATH, "utf8").trim()
   } catch {
     return null
   }
 }
 
-async function hookRequest(
-  port: string,
-  endpoint: string,
-  body?: Record<string, unknown>,
-): Promise<HookResponse | null> {
-  try {
-    const url = `http://localhost:${port}/hooks/${endpoint}`
-    const opts: RequestInit = body
-      ? {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(3000),
-        }
-      : { signal: AbortSignal.timeout(3000) }
+let sessionId: string | null = null
+let rpcId = 1
 
-    const resp = await fetch(url, opts)
-    if (!resp.ok) return null
-    return (await resp.json()) as HookResponse
-  } catch {
-    return null
-  }
+interface JsonRpcResult {
+  result?: { content?: Array<{ type: string; text: string }> }
+  error?: { code: number; message: string }
 }
 
-async function getState(port: string): Promise<StateResponse | null> {
+async function gwCall(
+  toolName: string,
+  args: Record<string, unknown> = {},
+): Promise<Record<string, unknown> | null> {
+  const apiKey = getApiKey()
+  if (!apiKey) return null
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${apiKey}`,
+  }
+  if (sessionId) headers["Mcp-Session-Id"] = sessionId
+
   try {
-    const resp = await fetch(`http://localhost:${port}/hooks/state`, {
-      signal: AbortSignal.timeout(2000),
+    const resp = await fetch(`${GW_URL}/mcp`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: rpcId++,
+        method: "tools/call",
+        params: { name: toolName, arguments: args },
+      }),
+      signal: AbortSignal.timeout(8000),
     })
     if (!resp.ok) return null
-    return (await resp.json()) as StateResponse
+
+    // Capture session ID from first response
+    const sid = resp.headers.get("mcp-session-id")
+    if (sid) sessionId = sid
+
+    const data = (await resp.json()) as JsonRpcResult
+    if (data.error) return null
+    const text = data.result?.content?.[0]?.text
+    return text ? JSON.parse(text) : data.result
   } catch {
     return null
   }
 }
 
-function formatStateContext(state: StateResponse): string {
-  const lines = [
-    `Statewright state machine is active. Current phase: ${state.state} (iteration ${state.iteration}/${state.maxIterations ?? "∞"}).`,
-    `Tools available in this phase: ${state.allowedTools.join(", ")}.`,
-  ]
-  if (state.instructions) {
-    lines.push(`Phase instructions: ${state.instructions}`)
+async function gwInit(): Promise<boolean> {
+  const apiKey = getApiKey()
+  if (!apiKey) return false
+
+  try {
+    const resp = await fetch(`${GW_URL}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: rpcId++,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "statewright-pi", version: "1.0" },
+        },
+      }),
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!resp.ok) return false
+    const sid = resp.headers.get("mcp-session-id")
+    if (sid) sessionId = sid
+    return true
+  } catch {
+    return false
   }
-  lines.push(
-    "",
-    "State transition reporting convention:",
-    "- Before each call to statewright_transition, output a line: **[statewright]** CURRENT_STATE => TARGET_STATE",
-    "- When the workflow reaches a final state, output: **[statewright]** Workflow complete.",
-    "- Call statewright_get_state at the start to confirm the current phase.",
-  )
-  return lines.join("\n")
 }
 
+// --- State cache ---
+
+interface StateCache {
+  state: string
+  isFinal: boolean
+  allowedTools: string[]
+  instructions: string | null
+  transitions: Array<{ event: string; target: string }>
+  maxIterations: number | null
+  iteration: number
+  context: Record<string, any>
+  interrupts: Record<string, { file_pattern: string; target: string }>
+  fork?: { active: boolean; current_branch: string; branches: Record<string, any> }
+  interruptHandler?: { return_state: string }
+}
+
+let stateCache: StateCache | null = null
+
+async function refreshState(): Promise<StateCache | null> {
+  const raw = await gwCall("statewright_get_state")
+  if (!raw?.state) return stateCache
+  stateCache = {
+    state: raw.state,
+    isFinal: raw.is_final ?? false,
+    allowedTools: raw.allowed_tools ?? [],
+    instructions: raw.instructions ?? null,
+    transitions: raw.transitions ?? [],
+    maxIterations: raw.max_iterations ?? null,
+    iteration: raw.iteration ?? 0,
+    context: raw.context ?? {},
+    interrupts: raw.interrupts ?? {},
+    fork: raw.fork ?? undefined,
+    interruptHandler: raw.interrupt_handler ?? undefined,
+  }
+  return stateCache
+}
+
+// --- Formatting ---
+
+function formatContext(s: StateCache): string {
+  const transitions = s.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
+  const lines = [
+    `Statewright workflow active. AUTONOMOUS MODE: work continuously through each state -- use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates or final states.`,
+    `Phase: ${s.state} (iteration ${s.iteration}/${s.maxIterations ?? "none"}).`,
+    `Tools: ${s.allowedTools.join(", ")}.`,
+    `Transitions: ${transitions}.`,
+    `MANDATORY: Every statewright_transition call MUST include data.rationale.`,
+  ]
+  if (s.instructions) lines.push(`Instructions: ${s.instructions}`)
+  if (s.interruptHandler) lines.push(`IN INTERRUPT HANDLER. Return to: ${s.interruptHandler.return_state}`)
+  if (s.fork?.active) lines.push(`FORK active. Branch: ${s.fork.current_branch}`)
+  return lines.join(" ")
+}
+
+// --- Interrupt detection ---
+
+function checkInterrupts(filePath: string, interrupts: Record<string, { file_pattern: string; target: string }>): string | null {
+  if (!filePath || !interrupts || Object.keys(interrupts).length === 0) return null
+  // Don't re-trigger while in handler
+  if (stateCache?.context?._interrupt_return) return null
+
+  for (const [name, def] of Object.entries(interrupts)) {
+    if (minimatch(filePath, def.file_pattern, { matchBase: true }) ||
+        minimatch(filePath, `**/${def.file_pattern}`, { dot: true })) {
+      return name
+    }
+  }
+  return null
+}
+
+// --- Extension entry ---
+
 export default async function statewrightExtension(pi: ExtensionAPI) {
-  const port = getPort()
-  if (!port) {
-    console.warn("[statewright] Gateway not running — extension inactive")
+  const apiKey = getApiKey()
+  if (!apiKey) {
+    console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
     return
   }
 
-  // Verify connectivity
-  const initial = await getState(port)
-  if (!initial) {
-    console.warn("[statewright] Could not reach gateway on port", port)
+  // Initialize gateway session
+  if (!(await gwInit())) {
+    console.warn("[statewright] Could not connect to gateway at", GW_URL)
     return
   }
 
-  console.log(
-    `[statewright] Phase: ${initial.state} (${initial.iteration}/${initial.maxIterations ?? "∞"}) | Tools: ${initial.allowedTools.join(", ")}`,
-  )
+  console.log(`[statewright] Connected to ${GW_URL}`)
 
   // --- Custom tools ---
 
   pi.registerTool({
     name: "statewright_get_state",
-    label: "Get State",
-    description:
-      "Get the current state machine state, available tools, transitions, and iteration count.",
+    label: "Get Workflow State",
+    description: "Get the current state machine state, available tools, transitions, and iteration count.",
     parameters: Type.Object({}),
-    async execute(_toolCallId, _params, signal) {
-      const state = await getState(port)
+    async execute() {
+      const state = await refreshState()
       if (!state) return { content: [{ type: "text", text: "Gateway not reachable" }] }
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(state, null, 2),
-          },
-        ],
-      }
+      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] }
     },
   })
 
   pi.registerTool({
     name: "statewright_transition",
     label: "Transition State",
-    description:
-      "Transition the state machine to a new state by emitting an event (e.g., DONE, FAIL, PLAN_READY).",
+    description: "Transition the state machine by emitting an event. Include rationale in data.",
     parameters: Type.Object({
-      event: Type.String({
-        description: "The transition event name (e.g., DONE, FAIL, PLAN_READY)",
-      }),
+      event: Type.String({ description: "Event name (e.g., DONE, FAIL, READY)" }),
+      data: Type.Optional(Type.Object({}, { additionalProperties: true })),
     }),
-    async execute(_toolCallId, params: { event: string }, signal) {
-      const resp = await hookRequest(port, "pre-tool", {
-        tool_name: `statewright_transition:${params.event}`,
+    async execute(_id, params: { event: string; data?: Record<string, any> }) {
+      const result = await gwCall("statewright_transition", {
+        event: params.event,
+        data: params.data ?? {},
       })
-      if (!resp) return { content: [{ type: "text", text: "Gateway not reachable" }] }
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(resp, null, 2),
-          },
-        ],
-      }
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+
+      // Refresh state after transition
+      await refreshState()
+
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
 
-  // --- Context injection (equivalent to Claude Code UserPromptSubmit) ---
-
-  pi.on("before_agent_start", async (_event, ctx) => {
-    const state = await getState(port)
-    if (!state) return
-
-    // Update status bar
-    ctx.ui.setStatus(
-      "statewright",
-      `[statewright] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
-    )
-
-    // Inject state context as a system message
-    return {
-      appendSystemPrompt: formatStateContext(state),
-    }
+  pi.registerTool({
+    name: "statewright_list_workflows",
+    label: "List Workflows",
+    description: "List available workflows and which one is active.",
+    parameters: Type.Object({}),
+    async execute() {
+      const result = await gwCall("statewright_list_workflows")
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+    },
   })
 
-  // --- Tool enforcement (equivalent to Claude Code PreToolUse) ---
+  pi.registerTool({
+    name: "statewright_load_workflow",
+    label: "Load Workflow",
+    description: "Load a named workflow. Activates enforcement.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Workflow name (e.g., bugfix, tdd-feature)" }),
+      resume: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_id, params: { name: string; resume?: boolean }) {
+      const result = await gwCall("statewright_load_workflow", params)
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
 
-  pi.on("tool_call", async (event, ctx) => {
-    // Never gate statewright's own tools
+      // Refresh state after load
+      await refreshState()
+
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+    },
+  })
+
+  // --- Context injection (before each agent turn) ---
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const state = await refreshState()
+    if (!state) return
+
+    ctx.ui.setStatus(
+      "statewright",
+      `[sw] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
+    )
+
+    if (state.isFinal) {
+      ctx.ui.notify("[statewright] Workflow complete.", "success")
+      return
+    }
+
+    return { appendSystemPrompt: formatContext(state) }
+  })
+
+  // --- Tool enforcement (before each tool call) ---
+
+  pi.on("tool_call", async (event, _ctx) => {
     if (event.toolName.startsWith("statewright_")) return
+    if (!stateCache) return
 
-    const resp = await hookRequest(port, "pre-tool", {
-      tool_name: event.toolName,
-    })
-    if (!resp) return
+    // No allowed_tools = no enforcement
+    if (stateCache.allowedTools.length === 0) return
 
-    if (resp.decision === "deny") {
+    if (!stateCache.allowedTools.includes(event.toolName)) {
+      const available = stateCache.allowedTools.join(", ")
+      const transitions = stateCache.transitions.map((t) => t.event).join(", ")
       return {
         block: true,
-        reason: resp.additionalContext ?? "Tool not available in current phase",
+        reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase. Available: ${available}. To advance, use statewright_transition with: ${transitions}.`,
       }
     }
   })
 
-  // --- Post-tool tracking (equivalent to Claude Code PostToolUse) ---
+  // --- Post-tool: interrupt detection + state tracking ---
 
   pi.on("tool_result", async (event, ctx) => {
-    if (event.toolName.startsWith("statewright_")) return
-
-    const resp = await hookRequest(port, "post-tool", {
-      tool_name: event.toolName,
-    })
-    if (!resp) return
-
-    // Update status on state change
-    const state = await getState(port)
-    if (state) {
-      ctx.ui.setStatus(
-        "statewright",
-        `[statewright] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
-      )
+    if (event.toolName.startsWith("statewright_")) {
+      // Refresh state after statewright tool calls
+      await refreshState()
+      if (stateCache) {
+        ctx.ui.setStatus(
+          "statewright",
+          `[sw] ${stateCache.state} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`,
+        )
+        if (stateCache.isFinal) {
+          ctx.ui.notify("[statewright] Workflow complete.", "success")
+        }
+      }
+      return
     }
 
-    if (resp.completed) {
-      ctx.ui.notify("[statewright] Workflow complete.", "success")
-    } else if (resp.transition) {
-      ctx.ui.notify(`[statewright] ${resp.transition}`, "info")
+    // Interrupt detection for file-changing tools
+    if (!stateCache?.interrupts) return
+    const isFileEdit = ["Edit", "Write", "MultiEdit", "edit_file", "write_file", "apply_patch"].includes(event.toolName)
+    if (!isFileEdit) return
+
+    const filePath = event.toolInput?.file_path || event.toolInput?.path || event.toolInput?.file
+    if (!filePath) return
+
+    const matched = checkInterrupts(filePath, stateCache.interrupts)
+    if (matched) {
+      const target = stateCache.interrupts[matched].target
+      ctx.ui.notify(`[statewright] INTERRUPT '${matched}' triggered by ${filePath}`, "warn")
+
+      // Trigger the interrupt via gateway
+      await gwCall("statewright_transition", {
+        event: `INTERRUPT:${matched}`,
+        data: { rationale: "File edit triggered interrupt", trigger_file: filePath },
+      })
+      await refreshState()
+
+      if (stateCache) {
+        ctx.ui.setStatus(
+          "statewright",
+          `[sw] ${stateCache.state} (INTERRUPT → ${target})`,
+        )
+      }
     }
   })
 }

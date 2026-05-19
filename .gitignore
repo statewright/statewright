@@ -39,6 +39,9 @@ data/
 site/node_modules/
 site/dist/
 plugins/pi/node_modules/
+plugins/omx/node_modules/
+self-hosted/ui/node_modules/
+self-hosted/ui/dist/
 .mcp.json
 plugins/claude-code/Taskfile.yml
 .omx/

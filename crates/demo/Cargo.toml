@@ -4,6 +4,11 @@ description = "Demo: LLM creates its own state machine guardrails to fix a bug"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [lib]
 name = "statewright_demo"

@@ -4,6 +4,11 @@ description = "LLM agent coordinator — self-guardrailing state machine generat
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 statewright-engine = { path = "../engine" }

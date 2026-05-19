@@ -11,3 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/statewright/statewright"
+homepage = "https://statewright.ai"
+keywords = ["state-machine", "guardrails", "ai-agent", "mcp", "workflow"]
+categories = ["development-tools"]

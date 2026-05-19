@@ -4,6 +4,11 @@ description = "Pure state machine execution engine — guards, transitions, vali
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -120,9 +120,19 @@ async function gwInit(): Promise<boolean> {
 // Map both directions for enforcement + display.
 
 const TOOL_NAME_MAP: Record<string, string> = {
+  // Claude Code names
+  // Claude Code names → Pi names
   Read: "read", Edit: "edit", Write: "write", Bash: "bash",
-  Grep: "grep", Glob: "glob", MultiEdit: "edit", LS: "ls",
+  Grep: "grep", Glob: "find", MultiEdit: "edit", LS: "ls",
   Agent: "agent", WebFetch: "fetch", WebSearch: "search",
+  // OpenAI / Codex / generic model conventions
+  read_file: "read", write_file: "write", edit_file: "edit",
+  list_directory: "ls", run_test: "bash", run_command: "bash",
+  search_files: "grep", find_files: "find", glob: "find",
+  apply_patch: "edit", patch_file: "edit", edit_line: "edit",
+  edit_block: "edit", create_file: "write",
+  // Statewright Rust harness names
+  diff: "bash",
 }
 
 function normalizeToolName(name: string): string {
@@ -150,6 +160,7 @@ interface StateCache {
 }
 
 let stateCache: StateCache | null = null
+let lastNudgeTime = 0
 
 async function refreshState(): Promise<StateCache | null> {
   const raw = await gwCall("statewright_get_state")
@@ -170,16 +181,59 @@ async function refreshState(): Promise<StateCache | null> {
   return stateCache
 }
 
+// --- Transition descriptions ---
+// Infer intent from graph structure, not hardcoded event names.
+// Final target = terminal. Target already visited = retry. Otherwise = advance.
+
+function describeTransition(
+  t: { event: string; target: string },
+  cache: StateCache,
+): string {
+  const isFinal = cache.transitions.every((other) =>
+    other.target === t.target || cache.transitions.length === 1,
+  ) ? false : !cache.transitions.some((other) => other.target === t.target && other.event !== t.event)
+
+  // Check if target is a final state (no outgoing transitions — we approximate
+  // by checking if the target name suggests finality, since we don't have the
+  // full graph here, only the current state's transitions)
+  const targetLooksFinal = /^(completed|failed|done|error|aborted)$/i.test(t.target)
+  const targetIsCurrentOrPrior = t.target !== cache.state &&
+    !targetLooksFinal &&
+    cache.transitions.filter((o) => !(/^(completed|failed|done|error|aborted)$/i.test(o.target))).length > 1
+
+  if (targetLooksFinal && t.target.match(/fail|error|abort/i)) {
+    return `${t.event} (last resort, unrecoverable only)`
+  }
+  if (targetLooksFinal) {
+    return `${t.event} (done)`
+  }
+  // Non-final target that isn't forward progress = retry loop
+  const forwardTransitions = cache.transitions.filter((o) => !(/^(completed|failed|done|error|aborted)$/i.test(o.target)))
+  if (forwardTransitions.length > 1) {
+    // Multiple non-final targets — the one that goes "backward" is the retry
+    // Heuristic: if event name contains fail/retry/fix, it's the retry path
+    if (t.event.match(/fail|retry|fix|redo|back/i)) {
+      return `${t.event} (retry, go back to ${t.target})`
+    }
+  }
+  return `${t.event} (-> ${t.target})`
+}
+
 // --- Formatting ---
 
 function formatContext(s: StateCache): string {
-  const transitions = s.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
+  const transitionDescs = s.transitions.map((t) => describeTransition(t, s)).join(", ")
+
+  const toolList = s.allowedTools.map(normalizeToolName).join(", ")
   const lines = [
-    `Statewright workflow active. AUTONOMOUS MODE: work continuously through each state -- use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates or final states.`,
+    `STATEWRIGHT WORKFLOW ACTIVE.`,
+    `You MUST work autonomously. Do NOT stop, summarize, or ask the user between steps. When a tool call fails or is blocked, immediately retry with the correct tool and arguments. Keep working until you reach a final state or an approval gate.`,
     `Phase: ${s.state} (iteration ${s.iteration}/${s.maxIterations ?? "none"}).`,
-    `Tools: ${s.allowedTools.map(normalizeToolName).join(", ")}.`,
-    `Transitions: ${transitions}.`,
-    `MANDATORY: Every statewright_transition call MUST include data.rationale.`,
+    `ONLY these tools work right now: ${toolList}. Any other tool will be rejected. Do not invent tool names.`,
+    `CRITICAL: Use ONLY the native tool calling mechanism. NEVER output JSON like {"name":"tool"} or {"type":"function"} as text. It does not work. If you write tool calls as text they will be rejected and you will waste a turn. Just call the tool directly.`,
+    `Tool signatures: read(path: "file.py") -> file contents, ls(path: ".") -> directory listing, grep(pattern: "search", path?: "dir") -> matching lines, find(pattern: "**/*.py") -> matching file paths, edit(path: "file.py", edits: [{oldText: "old", newText: "new"}]) -> applies find-and-replace, write(path: "file.py", content: "full content") -> writes entire file, bash(command: "shell cmd") -> command output. To list files in the current directory, call ls(path: ".").`,
+    `To advance to the next phase, call: statewright_transition(event='EVENT_NAME', data={rationale: 'why'}).`,
+    `Available transitions: ${transitionDescs}.`,
   ]
   if (s.instructions) lines.push(`Instructions: ${s.instructions}`)
   if (s.interruptHandler) lines.push(`IN INTERRUPT HANDLER. Return to: ${s.interruptHandler.return_state}`)
@@ -237,6 +291,11 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
     return (parsed as Array<Record<string, unknown>>)
       .filter((item) => typeof item.name === "string")
       .map((item) => ({ name: item.name as string, args: (item.parameters ?? item.arguments ?? item.args ?? {}) as Record<string, unknown> }))
+  }
+
+  // Format 5: {"name": "tool_name", "parameters": {...}} (no type field)
+  if (typeof parsed.name === "string" && (parsed.parameters || parsed.arguments || parsed.args)) {
+    return [{ name: parsed.name as string, args: (parsed.parameters ?? parsed.arguments ?? parsed.args ?? {}) as Record<string, unknown> }]
   }
 
   // Format 4: {"transition": "EVENT_NAME"} (state machine nav)
@@ -360,7 +419,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
     if (state.isFinal) {
       ctx.ui.notify("[statewright] Workflow complete.", "success")
-      return
+      return {
+        appendSystemPrompt: `STATEWRIGHT WORKFLOW COMPLETE. State: ${state.state}. STOP WORKING. Do not use any tools. Do not edit, delete, or modify anything. Report what you accomplished and wait for the user.`,
+      }
     }
 
     return { appendSystemPrompt: formatContext(state) }
@@ -369,19 +430,52 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
+    // Block malformed tool calls (undefined/empty name from broken model output)
+    if (!event.toolName) {
+      return { block: true, reason: "Tool call has no name. Use a specific tool." }
+    }
     if (event.toolName.startsWith("statewright_")) return
     if (!stateCache) return
+
+    // Final state: block everything. Workflow is done, no more tool use.
+    if (stateCache.isFinal) {
+      return { block: true, reason: "Workflow complete. No tools available. Stop working." }
+    }
 
     // No allowed_tools = no enforcement
     if (stateCache.allowedTools.length === 0) return
 
     const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
-    if (!isAllowed) {
-      const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
-      const transitions = stateCache.transitions.map((t) => t.event).join(", ")
+
+    // Bash discernment: even when Bash isn't in allowed_tools, permit safe
+    // read-only commands. Block writes, destructive ops, and scripting interpreters.
+    if (!isAllowed && (event.toolName === "bash" || event.toolName === "Bash")) {
+      const cmd = (event.input?.command ?? "") as string
+      const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag)\b/.test(cmd)
+      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|python|node|ruby|perl|php|sed\s+-i|dd\s/.test(cmd)
+      const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
+      if (isSafe && !isDangerous && !leavesDir) {
+        return // allow safe read-only bash through
+      }
+      // Bash attempted but not safe — explain why
+      const reasons: string[] = []
+      if (isDangerous) reasons.push("contains destructive or write operations")
+      if (leavesDir) reasons.push("attempts to leave the working directory")
+      if (!isSafe) reasons.push("not a recognized read-only command")
       return {
         block: true,
-        reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase. Available: ${available}. To advance, use statewright_transition with: ${transitions}.`,
+        reason: `Bash command blocked: ${reasons.join(", ")}. Safe read-only commands (ls, cat, grep, git status, etc.) are allowed. Destructive commands, writes, and directory traversal are not.`,
+      }
+    }
+
+    if (!isAllowed) {
+      const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
+      const transitionHints = stateCache.transitions.map((t) =>
+        describeTransition(t, stateCache!),
+      ).join(", ")
+      return {
+        block: true,
+        reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase. Available: ${available}. To advance, use statewright_transition with: ${transitionHints}.`,
       }
     }
   })
@@ -435,14 +529,15 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
   // --- Tool call recovery (message_end hook) ---
   // When local models dump tool calls as JSON text instead of structured
-  // tool_calls, detect the pattern and notify the model to retry properly.
+  // tool_calls, DON'T ask the model to retry. Execute the intended tool
+  // ourselves and feed the result back. Same approach as the Rust harness's
+  // parse_llm_response → execute → feed results loop.
 
-  pi.on("message_end", async (event, ctx) => {
+  pi.on("message_end", async (event, _ctx) => {
     if (!stateCache) return
     const msg = event.message
     if (msg.role !== "assistant") return
 
-    // Check text content blocks for embedded tool call JSON
     const textParts = (msg.content ?? []).filter(
       (c: Record<string, unknown>) => c.type === "text" && typeof c.text === "string",
     )
@@ -450,23 +545,82 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       (c: Record<string, unknown>) => c.type === "toolCall",
     )
 
-    // Only intervene if there are NO real tool calls but text looks like tool calls
     if (toolCallParts.length > 0) return
 
     for (const part of textParts) {
       const extracted = extractToolCallsFromText(part.text as string)
-      if (extracted.length > 0) {
-        const toolNames = extracted.map((tc) => tc.name).join(", ")
-        ctx.ui.notify(
-          `[statewright] Model emitted tool calls as text (${toolNames}). Nudging to use native tool calling.`,
-          "warn",
-        )
-        // Can't rewrite the message into tool calls (format mismatch),
-        // but we can inject a system nudge for the next turn
-        return {
-          appendSystemPrompt: `IMPORTANT: Your previous response contained tool calls as JSON text instead of using the tool calling API. Do NOT output JSON tool calls as text. Use the native tool calling mechanism provided by the system. The tools you tried to call: ${toolNames}. Call them properly now.`,
+      if (extracted.length === 0) continue
+
+      // Execute each extracted tool call directly
+      const results: string[] = []
+      for (const tc of extracted) {
+        const name = normalizeToolName(tc.name)
+        const args = tc.args
+
+        try {
+          let result: string
+
+          // Statewright tools → call gateway directly
+          if (tc.name.startsWith("statewright_") || name.startsWith("statewright_")) {
+            const gwResult = await gwCall(tc.name, args)
+            result = gwResult ? JSON.stringify(gwResult, null, 2) : "Gateway not reachable"
+            // Refresh state after statewright calls
+            await refreshState()
+          }
+          // Shell-executable tools → pi.exec
+          else if (name === "ls" || name === "find" || tc.name === "list_directory") {
+            const path = (args.path ?? args.pattern ?? ".") as string
+            const execResult = await pi.exec("ls", ["-la", path])
+            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+          }
+          else if (name === "read" || tc.name === "read_file") {
+            const path = (args.path ?? args.file_path ?? args.filename) as string
+            const execResult = await pi.exec("cat", [path])
+            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+          }
+          else if (name === "grep" || tc.name === "search_files") {
+            const pattern = (args.pattern ?? args.query) as string
+            const path = (args.path ?? args.file ?? ".") as string
+            const execResult = await pi.exec("grep", ["-rn", pattern, path])
+            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+          }
+          else if (name === "bash" || tc.name === "run_command" || tc.name === "run_test") {
+            const cmd = (args.command ?? args.cmd) as string
+            const execResult = await pi.exec("bash", ["-c", cmd])
+            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+          }
+          else {
+            result = `Tool '${tc.name}' not executable via recovery. Use native tool calling.`
+          }
+
+          results.push(`[${tc.name}] ${result}`)
+        } catch (err) {
+          results.push(`[${tc.name}] Error: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
+
+      // Feed results back to the model with guidance
+      pi.sendUserMessage(
+        `I executed your tool calls. Results:\n${results.join("\n")}\n\nContinue working. If an edit fails because the old text didn't match, re-read the file first to get the exact current content, then try again with the exact text.`,
+        { deliverAs: "steer" },
+      )
+      return
+    }
+
+    // Auto-continuation: nudge the model to keep working if it stalled.
+    // Cooldown prevents flail loops — only fires once per 30 seconds.
+    if (!stateCache.isFinal && textParts.length > 0 && toolCallParts.length === 0) {
+      const now = Date.now()
+      if (now - lastNudgeTime < 30000) return
+      lastNudgeTime = now
+
+      const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
+      const transitionHints = stateCache.transitions.map((t) => describeTransition(t, stateCache!)).join(", ")
+      const instructions = stateCache.instructions ?? "Proceed with the task."
+      pi.sendUserMessage(
+        `Continue working. Phase: '${stateCache.state}'. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitionHints}. Start by reading the files in the current directory if you haven't already.`,
+        { deliverAs: "steer" },
+      )
     }
   })
 }

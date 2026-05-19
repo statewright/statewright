@@ -31,4 +31,8 @@ esac
 assert_screen_wait "$NAME" "not available\|blocked\|not permitted\|deny" "Edit blocked in planning state" 180
 assert_screen "$NAME" "planning" "still in planning state"
 
+# No malformed tool call errors (catches rewrite bugs where undefined tool names leak through)
+assert_screen_not "$NAME" "Tool undefined not found" "no undefined tool calls"
+assert_screen_not "$NAME" "400 invalid tool call" "no invalid tool call args"
+
 agent_stop "$NAME"

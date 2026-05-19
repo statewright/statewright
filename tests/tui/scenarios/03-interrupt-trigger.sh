@@ -27,4 +27,8 @@ agent_send "$NAME" "the hook is valid, transition VALIDATED<CR>"
 
 assert_screen_wait "$NAME" "implementing" "returned to implementing after interrupt" 60
 
+# No malformed tool calls from rewrite bugs
+assert_screen_not "$NAME" "Tool undefined not found" "no undefined tool calls"
+assert_screen_not "$NAME" "400 invalid tool call" "no invalid tool call args"
+
 agent_stop "$NAME"

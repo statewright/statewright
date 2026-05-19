@@ -24,7 +24,7 @@
       "testing": {
         "allowed_tools": ["Read", "Bash"],
         "allowed_commands": ["*test*"],
-        "instructions": "Run the tests to verify your fix.",
+        "instructions": "Run the tests. If they fail, use TESTS_FAIL to go back and fix. Only use FAIL for unrecoverable errors.",
         "max_iterations": 3,
         "on": {
           "TESTS_PASS": "completed",

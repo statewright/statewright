@@ -68,6 +68,9 @@ type EventHandler = (event: Record<string, unknown>, ctx: MockCtx) => Promise<un
 interface MockPi {
   registerTool: Mock
   on: Mock
+  sendUserMessage: Mock
+  exec: Mock
+  getActiveTools: () => string[]
   _tools: RegisteredTool[]
   _handlers: Record<string, EventHandler[]>
   _fire: (event: string, data: Record<string, unknown>, ctx: MockCtx) => Promise<unknown[]>
@@ -111,6 +114,9 @@ function createMockPi(): MockPi {
       if (!handlers[event]) handlers[event] = []
       handlers[event].push(handler)
     }),
+    sendUserMessage: vi.fn(),
+    exec: vi.fn(async () => "mock exec output"),
+    getActiveTools: () => ["read", "bash", "edit", "write", "find", "ls", "grep", "statewright_get_state", "statewright_transition", "statewright_list_workflows", "statewright_load_workflow"],
     _tools: tools,
     _handlers: handlers,
     _fire: async (event, data, ctx) => {
@@ -285,6 +291,24 @@ describe("statewright Pi extension", () => {
       expect(results[0]).toBeUndefined()
     })
 
+    it("blocks tool calls with undefined or empty name", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // undefined toolName
+      const results1 = await pi._fire("tool_call", { toolName: undefined }, ctx)
+      expect(results1[0]).toEqual(expect.objectContaining({ block: true }))
+
+      // empty string toolName
+      const results2 = await pi._fire("tool_call", { toolName: "" }, ctx)
+      expect(results2[0]).toEqual(expect.objectContaining({ block: true }))
+    })
+
     it("never blocks statewright_ tools", async () => {
       setupFetch([{ match: "/mcp", body: MOCK_STATE }])
       vi.spyOn(console, "log").mockImplementation(() => {})
@@ -312,10 +336,10 @@ describe("statewright Pi extension", () => {
       const result = results[0] as { appendSystemPrompt?: string }
 
       expect(result).toHaveProperty("appendSystemPrompt")
-      expect(result.appendSystemPrompt).toContain("AUTONOMOUS MODE")
+      expect(result.appendSystemPrompt).toContain("MUST work autonomously")
       expect(result.appendSystemPrompt).toContain("implementing")
       expect(result.appendSystemPrompt).toContain("read, edit, bash")
-      expect(result.appendSystemPrompt).toContain("DONE -> testing")
+      expect(result.appendSystemPrompt).toContain("DONE (-> testing)")
     })
 
     it("updates status bar", async () => {
@@ -469,6 +493,150 @@ describe("statewright Pi extension", () => {
         "[statewright] Workflow complete.",
         "success",
       )
+    })
+  })
+
+  describe("tool call recovery (message_end)", () => {
+    it("executes extracted tool calls via pi.exec and feeds results back", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '{"tool_calls": [{"name": "read", "args": {"path": "src/main.rs"}}]}' },
+          ],
+        },
+      }, ctx)
+
+      // Should have called pi.exec to execute the tool
+      expect(pi.exec).toHaveBeenCalledWith("cat", ["src/main.rs"])
+      // Should feed results back via sendUserMessage
+      expect(pi.sendUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining("executed your tool calls"),
+        expect.objectContaining({ deliverAs: "steer" }),
+      )
+    })
+
+    it("does not intervene when real toolCall blocks exist", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", toolCallId: "real-1", toolName: "read", args: { path: "test.txt" } },
+          ],
+        },
+      }, ctx)
+
+      expect(pi.exec).not.toHaveBeenCalled()
+      expect(pi.sendUserMessage).not.toHaveBeenCalled()
+    })
+
+    it("does not intervene on plain text responses", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "I will now read the file to understand the bug." },
+          ],
+        },
+      }, ctx)
+
+      expect(pi.exec).not.toHaveBeenCalled()
+    })
+
+    it("executes function-format JSON tool calls", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '{"type": "function", "name": "edit", "parameters": {"path": "app.py", "old": "foo", "new": "bar"}}' },
+          ],
+        },
+      }, ctx)
+
+      // edit is not shell-executable, should still send results back
+      expect(pi.sendUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining("executed your tool calls"),
+        expect.objectContaining({ deliverAs: "steer" }),
+      )
+    })
+
+    it("executes unrecognized tools with error message in results", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '{"tool_calls": [{"name": "deploy_to_prod", "args": {"env": "production"}}]}' },
+          ],
+        },
+      }, ctx)
+
+      // Should still execute (with error) and feed back
+      expect(pi.sendUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining("not executable via recovery"),
+        expect.objectContaining({ deliverAs: "steer" }),
+      )
+    })
+
+    it("normalizes tool names before execution (Read -> cat)", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '{"tool_calls": [{"name": "Read", "args": {"path": "src/main.rs"}}]}' },
+          ],
+        },
+      }, ctx)
+
+      // Read normalizes to "read", which executes via cat
+      expect(pi.exec).toHaveBeenCalledWith("cat", ["src/main.rs"])
     })
   })
 })

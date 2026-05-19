@@ -42,6 +42,8 @@ plugins/pi/node_modules/
 plugins/omx/node_modules/
 self-hosted/ui/node_modules/
 self-hosted/ui/dist/
+self-hosted/ui/test-results/
+self-hosted/ui/playwright-report/
 .mcp.json
 plugins/claude-code/Taskfile.yml
 .omx/

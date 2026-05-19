@@ -13,6 +13,8 @@
     <router-view />
     <footer class="border-t border-gray-100 py-4 text-center text-xs text-gray-400">
       Powered by <a href="https://statewright.ai" class="text-brand-500 hover:underline" target="_blank">Statewright</a>
+      <span class="mx-1">&middot;</span>
+      Anonymous usage analytics via <a href="https://umami.is" class="hover:underline" target="_blank">Umami</a>
     </footer>
   </div>
 </template>

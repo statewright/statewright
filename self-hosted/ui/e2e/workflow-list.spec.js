@@ -74,18 +74,18 @@ test.describe('Workflow List', () => {
   })
 
   test('workflow appears in list after creation', async ({ request, page }) => {
-    // Create via API
+    const uniqueName = 'e2e-list-' + Date.now().toString(36)
     const resp = await request.post(`${PB_URL}/api/collections/workflows/records`, {
       data: {
-        name: 'e2e-list-test',
-        definition: { id: 'e2e-list-test', initial: 'start', states: { start: { on: { DONE: 'end' } }, end: { type: 'final' } } },
+        name: uniqueName,
+        definition: { id: uniqueName, initial: 'start', states: { start: { on: { DONE: 'end' } }, end: { type: 'final' } } },
         active: false,
       },
     })
     expect(resp.ok()).toBeTruthy()
 
     await page.goto('/workflows')
-    await expect(page.getByText('e2e-list-test')).toBeVisible()
+    await expect(page.getByText(uniqueName)).toBeVisible()
   })
 
   test('delete workflow removes it from list', async ({ request, page }) => {
@@ -104,6 +104,6 @@ test.describe('Workflow List', () => {
     // Delete
     page.on('dialog', dialog => dialog.accept())
     await page.getByText('e2e-delete-test').locator('xpath=ancestor::div[contains(@class,"rounded-lg")]').getByRole('button', { name: 'Delete' }).click()
-    await expect(page.getByText('e2e-delete-test')).not.toBeVisible()
+    await expect(page.getByText('e2e-delete-test')).not.toBeVisible({ timeout: 5000 })
   })
 })

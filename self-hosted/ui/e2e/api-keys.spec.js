@@ -3,20 +3,27 @@ import { test, expect } from '@playwright/test'
 const PB_URL = process.env.PB_URL || 'http://localhost:8090'
 
 test.describe('API Keys', () => {
-  // Clean up keys created during tests
-  test.afterEach(async ({ request }) => {
+  // Clean state: remove all keys before and after each test
+  test.beforeEach(async ({ request }) => {
     try {
-      const resp = await request.fetch(`${PB_URL}/api/collections/api_keys/records`, {
-        params: { filter: 'name ~ "e2e-"' },
-      })
+      const resp = await request.fetch(`${PB_URL}/api/collections/api_keys/records`)
       if (!resp.ok()) return
       const data = await resp.json()
       for (const key of data.items || []) {
         await request.delete(`${PB_URL}/api/collections/api_keys/records/${key.id}`)
       }
-    } catch {
-      // Best-effort cleanup
-    }
+    } catch {}
+  })
+
+  test.afterEach(async ({ request }) => {
+    try {
+      const resp = await request.fetch(`${PB_URL}/api/collections/api_keys/records`)
+      if (!resp.ok()) return
+      const data = await resp.json()
+      for (const key of data.items || []) {
+        await request.delete(`${PB_URL}/api/collections/api_keys/records/${key.id}`)
+      }
+    } catch {}
   })
 
   test('keys page loads with heading', async ({ page }) => {
@@ -73,9 +80,15 @@ test.describe('API Keys', () => {
     await page.getByRole('button', { name: 'Generate Key' }).click()
     await expect(page.getByText("won't be shown again")).toBeVisible()
 
+    // Key should be in the list
+    const keyRow = page.locator('div.rounded-lg.bg-gray-50')
+    await expect(keyRow).toHaveCount(1)
+
     // Revoke it
-    await page.getByRole('button', { name: 'Revoke' }).click()
-    await expect(page.getByText('No API keys yet')).toBeVisible()
+    await page.getByRole('button', { name: 'Revoke' }).first().click()
+
+    // Key should be removed from the list
+    await expect(keyRow).toHaveCount(0)
   })
 
   test('API key CRUD via PocketBase API', async ({ request }) => {

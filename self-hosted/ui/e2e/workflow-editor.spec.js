@@ -19,9 +19,10 @@ test.describe('Workflow Editor', () => {
   test('new workflow editor loads with default states', async ({ page }) => {
     await page.goto('/workflows/new')
     // Default workflow has planning, implementing, testing, completed, failed
-    await expect(page.getByText('planning')).toBeVisible()
-    await expect(page.getByText('implementing')).toBeVisible()
-    await expect(page.getByText('testing')).toBeVisible()
+    // Use exact match to avoid tooltip text ("READY → implementing")
+    await expect(page.getByText('planning', { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('implementing', { exact: true }).first()).toBeVisible()
+    await expect(page.getByText('testing', { exact: true }).first()).toBeVisible()
   })
 
   test('workflow name input is editable', async ({ page }) => {
@@ -33,9 +34,12 @@ test.describe('Workflow Editor', () => {
 
   test('add state button creates new node', async ({ page }) => {
     await page.goto('/workflows/new')
+    // Wait for VueFlow to render default nodes
+    await expect(page.locator('.vue-flow__node').first()).toBeVisible()
     const stateCount = await page.locator('.vue-flow__node').count()
     await page.getByRole('button', { name: '+ State' }).click()
-    await expect(page.locator('.vue-flow__node')).toHaveCount(stateCount + 1)
+    // New node should appear — use a generous timeout for VueFlow re-render
+    await expect(page.locator('.vue-flow__node')).toHaveCount(stateCount + 1, { timeout: 5000 })
   })
 
   test('add final state button creates final node', async ({ page }) => {
@@ -103,7 +107,8 @@ test.describe('Workflow Editor', () => {
 
     await page.goto(`/workflows/${record.id}`)
     await expect(page.locator('input[placeholder="Workflow name"]')).toHaveValue('e2e-load-test')
-    await expect(page.getByText('start')).toBeVisible()
+    // "start" appears as both the node label and the "start" badge — target the label
+    await expect(page.locator('.state-node .font-bold', { hasText: 'start' })).toBeVisible()
   })
 
   test('delete workflow navigates back to list', async ({ request, page }) => {

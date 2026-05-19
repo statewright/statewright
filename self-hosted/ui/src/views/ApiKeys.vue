@@ -83,7 +83,11 @@ export default {
       try {
         // Generate a random key client-side, send it to PocketBase
         // The hook will hash it and store only the hash
-        const raw = 'sw_' + crypto.randomUUID().replace(/-/g, '')
+        // crypto.randomUUID() requires secure context — fallback for plain HTTP
+        const uuid = typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')
+        const raw = 'sw_' + uuid.replace(/-/g, '')
         const prefix = raw.slice(0, 7)
         await pocketbase.collection('api_keys').create({
           key_hash: raw, // Hook will hash this before storing

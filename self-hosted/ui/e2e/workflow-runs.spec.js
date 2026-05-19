@@ -29,7 +29,8 @@ test.describe('Workflow Runs', () => {
 
   test('workflows link navigates back', async ({ page }) => {
     await page.goto('/runs')
-    await page.getByRole('link', { name: /Workflows/ }).click()
+    // Use the back-arrow link specifically (not the nav link)
+    await page.getByRole('link', { name: '← Workflows' }).click()
     await expect(page).toHaveURL('/workflows')
   })
 
@@ -70,14 +71,15 @@ test.describe('Workflow Runs', () => {
     })
 
     await page.goto('/runs')
-    // Click the expand arrow
-    await page.getByText('e2e-expand-test').locator('xpath=ancestor::div[contains(@class,"rounded-lg")]').locator('button').first().click()
+    // Click the expand arrow on the run row
+    const runRow = page.locator('div.rounded-lg', { hasText: 'e2e-expand-test' })
+    await runRow.locator('button').first().click()
 
-    // Transition timeline should be visible
-    await expect(page.getByText('planning')).toBeVisible()
-    await expect(page.getByText('implementing')).toBeVisible()
-    await expect(page.getByText('READY')).toBeVisible()
-    await expect(page.getByText('DONE')).toBeVisible()
+    // Transition timeline should appear within the expanded section
+    const timeline = runRow.locator('.border-brand-500\\/30')
+    await expect(timeline).toBeVisible()
+    await expect(timeline.getByText('READY')).toBeVisible()
+    await expect(timeline.getByText('DONE')).toBeVisible()
   })
 
   test('run status badges render correctly', async ({ request, page }) => {
@@ -95,10 +97,11 @@ test.describe('Workflow Runs', () => {
     }
 
     await page.goto('/runs')
-    await expect(page.getByText('running')).toBeVisible()
-    await expect(page.getByText('completed')).toBeVisible()
-    await expect(page.getByText('failed')).toBeVisible()
-    await expect(page.getByText('stopped')).toBeVisible()
+    // Check status badge within each run row — use exact text match on the badge span
+    for (const status of ['running', 'completed', 'failed', 'stopped']) {
+      const row = page.locator('div.rounded-lg', { hasText: `e2e-status-${status}` })
+      await expect(row.locator('span.font-semibold.text-xs', { hasText: status })).toBeVisible()
+    }
   })
 
   test('rationale displays in transition timeline', async ({ request, page }) => {

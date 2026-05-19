@@ -591,7 +591,7 @@ mod tests {
             .oneshot(
                 Request::post("/message?session_id=nonexistent")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer sw_live_testkey123")
+                    .header("authorization", "Bearer sw_test_testkey123")
                     .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#))
                     .unwrap(),
             )
@@ -602,13 +602,13 @@ mod tests {
 
     #[tokio::test]
     async fn message_forbidden_for_wrong_api_key() {
-        let state = test_state_with_session("sess1", "sw_live_correct_key").await;
+        let state = test_state_with_session("sess1", "sw_test_correct_key").await;
         let app = build_router(state);
         let resp = app
             .oneshot(
                 Request::post("/message?session_id=sess1")
                     .header("content-type", "application/json")
-                    .header("authorization", "Bearer sw_live_wrong_key")
+                    .header("authorization", "Bearer sw_test_wrong_key")
                     .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#))
                     .unwrap(),
             )

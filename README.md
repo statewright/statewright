@@ -169,11 +169,13 @@ The managed cloud at [statewright.ai](https://statewright.ai) handles workflow s
 
 ## Self-hosting
 
-The engine (`crates/engine`) is Apache 2.0 and embeddable with no runtime dependencies. Single-developer and single-team self-hosting of the full stack is permitted under the FSL license.
+Run the full stack locally with Docker Compose — PocketBase, MCP gateway, and workflow editor. BYO Ollama. [Self-hosted guide →](https://docs.statewright.ai/self-hosted)
 
-```rust
-use statewright_engine::{MachineDefinition, resolve_transition, validate_definition};
+```bash
+cd self-hosted && docker compose up --build
 ```
+
+The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, embeddable with no runtime dependencies. The MCP gateway is FSL-1.1-ALv2 (converts to Apache 2.0 in 2029). Single-developer and single-team self-hosting is permitted under the FSL license.
 
 ## Tradeoffs
 

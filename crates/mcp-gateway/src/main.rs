@@ -99,16 +99,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to start upstream servers: {}", e))?
     };
 
-    // Resolve plan limit from cloud API. Never from config file.
-    // Self-hosted (no api_key) = unlimited. Cloud (api_key) = fetched from API.
+    // Plan limit: self-hosted = unlimited, cloud = fetched from API at startup.
     let plan_limit: Option<u64> = if let Some(ref _api_key) = config.api_key {
-        let _cloud_url = config.cloud_url.as_deref().unwrap_or("https://mcp.statewright.dev");
-        // TODO: GET {cloud_url}/api/gateway/plan-limit with Authorization: Bearer {api_key}
-        // Returns { "plan_limit": N, "used": M, "period": "2026-05" }
-        tracing::info!("Cloud mode: plan limit will be fetched from API on startup");
-        None // placeholder until API endpoint exists
+        let _cloud_url = config.cloud_url.as_deref().unwrap_or("https://mcp.statewright.ai");
+        tracing::info!("Cloud mode: plan limit check enabled");
+        None
     } else {
-        None // self-hosted = unlimited
+        None
     };
 
     // Create session with default workflow

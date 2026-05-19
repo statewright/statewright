@@ -1,0 +1,31 @@
+services:
+  pocketbase:
+    build: ./pocketbase
+    ports:
+      - "8090:8090"
+    volumes:
+      - pb_data:/pb/pb_data
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: self-hosted/gateway/Dockerfile
+    ports:
+      - "3001:3001"
+    depends_on:
+      - pocketbase
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  ui:
+    build: ./ui
+    ports:
+      - "8080:80"
+    depends_on:
+      - pocketbase
+    restart: unless-stopped
+
+volumes:
+  pb_data:

@@ -3,7 +3,7 @@ name = "statewright-mcp-gateway"
 description = "MCP proxy server enforcing state machine guardrails on LLM agent tool access"
 version.workspace = true
 edition.workspace = true
-license = "FSL-1.1-ALv2"
+license-file = "LICENSE.md"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -19,8 +19,8 @@ default = []
 metering = ["dep:sqlx"]
 
 [dependencies]
-statewright-engine = { path = "../engine" }
-statewright-agent = { path = "../agent", default-features = false }
+statewright-engine = { version = "0.1.0", path = "../engine" }
+statewright-agent = { version = "0.1.0", path = "../agent", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

@@ -36,6 +36,7 @@ dist/
 data/
 
 # Site build
+node_modules/
 site/node_modules/
 site/dist/
 plugins/pi/node_modules/

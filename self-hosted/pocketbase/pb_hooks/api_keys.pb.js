@@ -8,11 +8,9 @@ onRecordCreate((e) => {
   const raw = e.record.get('key_hash')
   if (!raw) return
 
-  // Hash the raw key for storage
   const hash = $security.sha256(raw)
   e.record.set('key_hash', hash)
 
-  // Ensure prefix is set (first 7 chars of raw key)
   if (!e.record.get('prefix')) {
     e.record.set('prefix', raw.substring(0, 7))
   }

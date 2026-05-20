@@ -28,18 +28,19 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p statewright-engine --no-verify
+          cargo publish -p statewright-engine --no-verify || true
           sleep 30
-          cargo publish -p statewright-agent --no-verify
+          cargo publish -p statewright-agent --no-verify || true
           sleep 30
-          cargo publish -p statewright-demo --no-verify
-          cargo publish -p statewright-tui --no-verify
+          cargo publish -p statewright-demo --no-verify || true
+          cargo publish -p statewright-tui --no-verify || true
           sleep 30
-          cargo publish -p statewright-mcp-gateway --no-verify
+          cargo publish -p statewright-mcp-gateway --no-verify || true
 
   binaries:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -48,7 +49,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: statewright-gateway_linux_arm64
-            cross: true
+            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             name: statewright-gateway_darwin_amd64
@@ -65,20 +66,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
-        if: matrix.cross
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list || true
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main restricted universe" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main restricted universe" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libssl-dev:arm64
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: |
+          cross build --release --target ${{ matrix.target }} -p statewright-mcp-gateway
+          cp target/${{ matrix.target }}/release/statewright-gateway ${{ matrix.name }}
+          zip ${{ matrix.name }}.zip ${{ matrix.name }}
+
+      - name: Build (native)
+        if: ${{ !matrix.use_cross }}
         run: |
           cargo build --release --target ${{ matrix.target }} -p statewright-mcp-gateway
           cp target/${{ matrix.target }}/release/statewright-gateway ${{ matrix.name }}

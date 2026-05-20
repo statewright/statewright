@@ -49,6 +49,25 @@ tasks:
       - rm -rf crates/demo/fixtures/buggy-calc/__pycache__
       - echo "buggy-calc fixture reset"
 
+  release:
+    desc: "Tag and push a release (triggers CI: tests, cargo publish, cross-arch binaries)"
+    preconditions:
+      - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]'
+        msg: "Releases must be from main branch"
+      - sh: '[ -z "$(git status --porcelain)" ]'
+        msg: "Working directory must be clean"
+    vars:
+      NEXT_VERSION:
+        sh: |
+          LATEST=$(git tag -l 'v[0-9]*' | sed 's/v//' | sort -n | tail -1)
+          if [ -z "$LATEST" ]; then echo "v1"; else echo "v$((LATEST + 1))"; fi
+    cmds:
+      - "{{.CARGO}} test --workspace"
+      - echo "Tagging {{.NEXT_VERSION}}..."
+      - git tag -a {{.NEXT_VERSION}} -m "Release {{.NEXT_VERSION}}"
+      - git push origin main --tags
+      - echo "Release {{.NEXT_VERSION}} pushed. CI will publish crates and build binaries."
+
   run:bugfix:
     desc: "Run bug-fix demo (OLLAMA_URL, MODEL, MODE, FIXTURE)"
     vars:

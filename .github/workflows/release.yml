@@ -73,7 +73,7 @@ jobs:
       - name: Build (cross)
         if: matrix.use_cross
         run: |
-          cross build --release --target ${{ matrix.target }} -p statewright-mcp-gateway
+          cross build --release --target ${{ matrix.target }} -p statewright-mcp-gateway --features vendored-openssl
           cp target/${{ matrix.target }}/release/statewright-gateway ${{ matrix.name }}
           zip ${{ matrix.name }}.zip ${{ matrix.name }}
 

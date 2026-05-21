@@ -119,6 +119,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
     let max_iterations = state_def.and_then(|s| s.max_iterations);
     let blocked_env = state_def.and_then(|s| s.blocked_env.as_ref()).cloned();
     let env_overrides = state_def.and_then(|s| s.env_overrides.as_ref()).cloned();
+    let thinking_level = state_def.and_then(|s| s.thinking_level.as_ref()).cloned();
 
     // Include guard definitions for transitions that use them
     let guard_info: serde_json::Value = state_def
@@ -157,6 +158,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "instructions": instructions,
         "model": model,
         "default_model": default_model,
+        "thinking_level": thinking_level,
         "transition_count": session.transition_count,
         "blocked_env": blocked_env,
         "env_overrides": env_overrides,

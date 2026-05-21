@@ -74,6 +74,10 @@ pub struct StateDef {
     /// Clients that support programmatic model switching enforce this; others treat it as advisory.
     #[serde(default)]
     pub model: Option<String>,
+    /// Thinking/reasoning effort level for this state (e.g. "high", "medium", "low", "off").
+    /// Clients that support programmatic effort control enforce this; others treat it as advisory.
+    #[serde(default)]
+    pub thinking_level: Option<String>,
 }
 
 /// A transition triggered by an event.
@@ -458,5 +462,30 @@ mod tests {
         assert_eq!(def.states["planning"].model, None);
         // implementing overrides
         assert_eq!(def.states["implementing"].model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn state_def_thinking_level_deserializes() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "thinking-test",
+            "initial": "planning",
+            "states": {
+                "planning": {
+                    "allowed_tools": ["Read"],
+                    "thinking_level": "high",
+                    "on": { "DONE": "testing" }
+                },
+                "testing": {
+                    "allowed_tools": ["Bash"],
+                    "thinking_level": "off",
+                    "on": { "DONE": "done" }
+                },
+                "done": { "type": "final" }
+            }
+        })).unwrap();
+
+        assert_eq!(def.states["planning"].thinking_level.as_deref(), Some("high"));
+        assert_eq!(def.states["testing"].thinking_level.as_deref(), Some("off"));
+        assert_eq!(def.states["done"].thinking_level, None);
     }
 }

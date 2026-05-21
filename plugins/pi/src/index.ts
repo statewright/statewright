@@ -159,6 +159,7 @@ interface StateCache {
   interruptHandler?: { return_state: string }
   model: string | null
   defaultModel: string | null
+  thinkingLevel: string | null
 }
 
 let stateCache: StateCache | null = null
@@ -181,6 +182,7 @@ async function refreshState(): Promise<StateCache | null> {
     interruptHandler: raw.interrupt_handler ?? undefined,
     model: raw.model ?? null,
     defaultModel: raw.default_model ?? null,
+    thinkingLevel: raw.thinking_level ?? null,
   }
   return stateCache
 }
@@ -362,10 +364,14 @@ function checkInterrupts(filePath: string, interrupts: Record<string, { file_pat
 // --- Extension entry ---
 
 export default async function statewrightExtension(pi: ExtensionAPI) {
-  // Per-instance model tracking (scoped to this extension load, not module-level)
+  // Per-instance state tracking (scoped to this extension load, not module-level)
   let lastSwitchedModel: string | null = null
   let originalModel: unknown = null  // saved before first statewright-driven switch
+  let originalTools: string[] | null = null  // saved before first tool restriction
+  let lastThinkingLevel: string | null = null
   let dormant = false  // true after deactivate — suppresses enforcement until next load
+  let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
+  const RAMBLING_TIMEOUT_MS = 15000  // 15s without a tool call = rambling
 
   const apiKey = getApiKey()
   if (!apiKey) {
@@ -391,7 +397,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     async execute() {
       const state = await refreshState()
       if (!state) return { content: [{ type: "text", text: "Gateway not reachable" }] }
-      return { content: [{ type: "text", text: JSON.stringify(state, null, 2) }] }
+      // Normalize tool names to Pi conventions (lowercase) so models don't see upcase/lowercase mismatch
+      const normalized = { ...state, allowedTools: state.allowedTools.map(normalizeToolName) }
+      return { content: [{ type: "text", text: JSON.stringify(normalized, null, 2) }] }
     },
   })
 
@@ -512,9 +520,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
         stateCache = null
         lastSwitchedModel = null
+        lastThinkingLevel = null
         if (originalModel) {
           await pi.setModel(originalModel as Parameters<typeof pi.setModel>[0])
           originalModel = null
+        }
+        if (originalTools) {
+          pi.setActiveTools(originalTools)
+          originalTools = null
         }
         ctx.ui.setStatus("statewright", "")
         ctx.ui.notify("[statewright] Workflow deactivated. All tools unrestricted.", "info")
@@ -594,6 +607,66 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       console.error(`[statewright:model] ERROR:`, err)
     }
 
+    // --- Per-state thinking level ---
+    try {
+      if (state.thinkingLevel && state.thinkingLevel !== lastThinkingLevel) {
+        const before = pi.getThinkingLevel()
+        pi.setThinkingLevel(state.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0])
+        const after = pi.getThinkingLevel()
+        lastThinkingLevel = state.thinkingLevel
+        if (after !== state.thinkingLevel) {
+          console.error(`[statewright:thinking] requested=${state.thinkingLevel} clamped=${after} (was ${before})`)
+        } else {
+          ctx.ui.notify(`[statewright] Thinking → ${after}`, "info")
+        }
+      } else if (!state.thinkingLevel && lastThinkingLevel) {
+        lastThinkingLevel = null
+      }
+    } catch (err) {
+      console.error(`[statewright:thinking] ERROR:`, err)
+    }
+
+    // --- Native tool restrictions ---
+    try {
+      if (state.allowedTools.length > 0) {
+        if (!originalTools) {
+          originalTools = pi.getActiveTools()
+          console.error(`[statewright:tools] saved original tools: ${originalTools.join(", ")}`)
+        }
+        // Map state tools to Pi names, keep statewright tools always active
+        const piTools = state.allowedTools.map(normalizeToolName)
+        const swTools = pi.getActiveTools().filter((t: string) => t.startsWith("statewright_"))
+        const activeSet = [...new Set([...piTools, ...swTools])]
+        console.error(`[statewright:tools] state=${state.state} setting active: ${activeSet.join(", ")}`)
+        pi.setActiveTools(activeSet)
+        console.error(`[statewright:tools] after set, active: ${pi.getActiveTools().join(", ")}`)
+      } else if (originalTools) {
+        pi.setActiveTools(originalTools)
+        originalTools = null
+      }
+    } catch (err) {
+      console.error(`[statewright:tools] ERROR:`, err)
+    }
+
+    // --- Rambling watchdog ---
+    // For grunt states (thinking off, or local models), set a timer.
+    // If the model doesn't make a tool call within RAMBLING_TIMEOUT_MS, interrupt it.
+    if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+    if (!state.isFinal) {
+      ramblingWatchdog = setTimeout(() => {
+        ramblingWatchdog = null
+        if (!stateCache || stateCache.isFinal || dormant) return
+        const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
+        const transitions = stateCache.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
+        pi.sendUserMessage(
+          `STOP DELIBERATING. You have been generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
+          `Execute the next action immediately using one of: ${tools}. ` +
+          `Or transition with: ${transitions}. Do not explain, just act.`,
+          { deliverAs: "steer" },
+        )
+      }, RAMBLING_TIMEOUT_MS)
+    }
+
     const modelLabel = formatModelLabel(state.model, state.defaultModel)
     ctx.ui.setStatus(
       "statewright",
@@ -623,6 +696,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
+    // Tool call happened — model isn't rambling, clear the watchdog
+    if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
     if (dormant) return
     // Block malformed tool calls (undefined/empty name from broken model output)
     if (!event.toolName) {

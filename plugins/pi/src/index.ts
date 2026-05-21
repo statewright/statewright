@@ -2,7 +2,7 @@
  * Statewright extension for Pi coding agent
  *
  * State machine guardrails — per-state tool enforcement, interrupts,
- * fork/join (sequential), approval gates. Talks directly to the
+ * fork/join (parallel via subagent spawn), approval gates. Talks directly to the
  * statewright gateway via HTTP (no MCP proxy needed).
  *
  * Install:
@@ -16,10 +16,16 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { Type } from "typebox"
-import { readFileSync, existsSync } from "node:fs"
-import { join } from "node:path"
-import { homedir } from "node:os"
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, unlinkSync, rmdirSync } from "node:fs"
+import { join, basename } from "node:path"
+import { homedir, tmpdir } from "node:os"
+import { spawn } from "node:child_process"
 import { minimatch } from "minimatch"
+
+// --- Debug logging (mauve-colored, gated behind STATEWRIGHT_DEBUG) ---
+const SW_LOG_COLOR = "\x1b[35m"
+const SW_LOG_RESET = "\x1b[0m"
+function swLog(msg: string) { if (process.env.STATEWRIGHT_DEBUG) console.error(`${SW_LOG_COLOR}[statewright] ${msg}${SW_LOG_RESET}`) }
 
 // --- Gateway client ---
 
@@ -371,7 +377,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let lastThinkingLevel: string | null = null
   let dormant = false  // true after deactivate — suppresses enforcement until next load
   let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
-  const RAMBLING_TIMEOUT_MS = 15000  // 15s without a tool call = rambling
+  const RAMBLING_TIMEOUT_MS = 30000  // 30s without a tool call = rambling
 
   const apiKey = getApiKey()
   if (!apiKey) {
@@ -386,6 +392,33 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   }
 
   console.log(`[statewright] Connected to ${GW_URL}`)
+
+  // --- Bootstrap: subagent extension for fork/join (disabled — WIP) ---
+  if (false) {
+  const piAgentDir = join(homedir(), ".pi", "agent")
+  const subagentExtDir = join(piAgentDir, "extensions", "subagent")
+  if (!existsSync(subagentExtDir)) {
+    const piSubagentExample = join(
+      require.resolve("@mariozechner/pi-coding-agent").replace(/\/[^/]+$/, ""),
+      "..", "examples", "extensions", "subagent",
+    )
+    if (existsSync(piSubagentExample)) {
+      try {
+        mkdirSync(subagentExtDir, { recursive: true })
+        for (const f of ["index.ts", "agents.ts"]) {
+          const src = join(piSubagentExample, f)
+          if (existsSync(src)) writeFileSync(join(subagentExtDir, f), readFileSync(src))
+        }
+        console.log("[statewright] Installed subagent extension for fork/join support")
+      } catch (e) {
+        console.warn("[statewright] Could not auto-install subagent extension:", e)
+        console.warn("[statewright] For fork/join, manually copy Pi's examples/extensions/subagent to ~/.pi/agent/extensions/subagent/")
+      }
+    } else {
+      console.warn("[statewright] Subagent extension not found. Fork/join parallel dispatch uses built-in statewright_fork tool.")
+    }
+  }
+  } // end disabled fork/join bootstrap
 
   // --- Custom tools ---
 
@@ -497,6 +530,214 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     },
   })
 
+  // --- Fork/Join: parallel sub-agent dispatch ---
+
+  function getPiInvocation(args: string[]): { command: string; args: string[] } {
+    const currentScript = process.argv[1]
+    if (currentScript && existsSync(currentScript)) {
+      return { command: process.execPath, args: [currentScript, ...args] }
+    }
+    return { command: "pi", args }
+  }
+
+  interface BranchResult {
+    branch: string
+    task: string
+    exitCode: number
+    output: string
+    usage: { input: number; output: number; cost: number; turns: number }
+  }
+
+  async function runBranch(
+    branch: string,
+    task: string,
+    cwd: string,
+    workflowName: string,
+    signal?: AbortSignal,
+  ): Promise<BranchResult> {
+    const systemPrompt = [
+      `You are a Statewright fork branch agent (branch: ${branch}).`,
+      `Load the workflow with: statewright_load_workflow(name="${workflowName}", branch="${branch}")`,
+      `Then complete the task. Work autonomously through all states until done.`,
+    ].join("\n")
+
+    const tmpDir = mkdtempSync(join(tmpdir(), "sw-fork-"))
+    const promptFile = join(tmpDir, `prompt-${branch}.md`)
+    writeFileSync(promptFile, systemPrompt, { encoding: "utf-8", mode: 0o600 })
+
+    const piArgs = [
+      "--mode", "json", "-p", "--no-session",
+      "--append-system-prompt", promptFile,
+      `Task: ${task}`,
+    ]
+
+    const result: BranchResult = {
+      branch, task, exitCode: 0, output: "",
+      usage: { input: 0, output: 0, cost: 0, turns: 0 },
+    }
+
+    let lastAssistantText = ""
+
+    try {
+      const exitCode = await new Promise<number>((resolve) => {
+        const invocation = getPiInvocation(piArgs)
+        const proc = spawn(invocation.command, invocation.args, {
+          cwd,
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            STATEWRIGHT_GATEWAY_URL: GW_URL,
+            STATEWRIGHT_API_KEY: getApiKey() ?? "",
+          },
+        })
+
+        let buffer = ""
+
+        proc.stdout.on("data", (data: Buffer) => {
+          buffer += data.toString()
+          const lines = buffer.split("\n")
+          buffer = lines.pop() || ""
+          for (const line of lines) {
+            if (!line.trim()) continue
+            try {
+              const event = JSON.parse(line)
+              if (event.type === "message_end" && event.message?.role === "assistant") {
+                const msg = event.message
+                for (const part of msg.content ?? []) {
+                  if (part.type === "text") lastAssistantText = part.text
+                }
+                const u = msg.usage
+                if (u) {
+                  result.usage.input += u.input ?? 0
+                  result.usage.output += u.output ?? 0
+                  result.usage.cost += u.cost?.total ?? 0
+                  result.usage.turns++
+                }
+              }
+            } catch { /* skip non-JSON lines */ }
+          }
+        })
+
+        proc.stderr.on("data", (data: Buffer) => {
+          // stderr is debug output, ignore
+        })
+
+        proc.on("close", (code) => {
+          if (buffer.trim()) {
+            try {
+              const event = JSON.parse(buffer)
+              if (event.type === "message_end" && event.message?.role === "assistant") {
+                for (const part of event.message.content ?? []) {
+                  if (part.type === "text") lastAssistantText = part.text
+                }
+              }
+            } catch { /* skip */ }
+          }
+          resolve(code ?? 0)
+        })
+
+        proc.on("error", () => resolve(1))
+
+        if (signal) {
+          const kill = () => { proc.kill("SIGTERM"); setTimeout(() => { if (!proc.killed) proc.kill("SIGKILL") }, 5000) }
+          if (signal.aborted) kill()
+          else signal.addEventListener("abort", kill, { once: true })
+        }
+      })
+
+      result.exitCode = exitCode
+      result.output = lastAssistantText || "(no output)"
+    } finally {
+      try { unlinkSync(promptFile) } catch { /* ignore */ }
+      try { rmdirSync(tmpDir) } catch { /* ignore */ }
+    }
+
+    return result
+  }
+
+  pi.registerTool({
+    name: "statewright_fork",
+    label: "Fork Branches",
+    description: "Dispatch parallel sub-agent branches. Each branch runs as a separate pi process with its own workflow session. Results are collected for the join state.",
+    parameters: Type.Object({
+      branches: Type.Array(
+        Type.Object({
+          branch: Type.String({ description: "Branch identifier (e.g., 'branch-1')" }),
+          task: Type.String({ description: "Task for this branch to complete" }),
+          cwd: Type.Optional(Type.String({ description: "Working directory (default: current)" })),
+        }),
+        { description: "Array of branches to dispatch in parallel", maxItems: 8 },
+      ),
+    }),
+    async execute(_id, params: { branches: Array<{ branch: string; task: string; cwd?: string }> }, signal) {
+      return { content: [{ type: "text", text: "Fork/join is under development and currently disabled. Use sequential state transitions instead." }], isError: true }
+      try {
+      if (!stateCache) {
+        return { content: [{ type: "text", text: "No active workflow. Load a workflow first." }], isError: true }
+      }
+
+      // Get current workflow name from gateway
+      const status = await gwCall("statewright_get_status") as { active_workflow?: string } | null
+      const workflowName = status?.active_workflow
+      if (!workflowName) {
+        return { content: [{ type: "text", text: "No active workflow found on gateway." }], isError: true }
+      }
+
+      const defaultCwd = process.cwd()
+      const MAX_CONCURRENCY = 4
+      const branches = params.branches.slice(0, 8)
+
+      // Run branches in parallel with concurrency limit
+      let nextIdx = 0
+      const results: BranchResult[] = new Array(branches.length)
+      const workers = Array.from({ length: Math.min(MAX_CONCURRENCY, branches.length) }, async () => {
+        while (true) {
+          const idx = nextIdx++
+          if (idx >= branches.length) return
+          const b = branches[idx]
+          results[idx] = await runBranch(b.branch, b.task, b.cwd ?? defaultCwd, workflowName, signal)
+
+          // Fire BRANCH_DONE on gateway for each completed branch
+          await gwCall("statewright_transition", {
+            event: "BRANCH_DONE",
+            data: {
+              rationale: `Branch ${b.branch} completed`,
+              branch: b.branch,
+              exit_code: results[idx].exitCode,
+              output_summary: results[idx].output.slice(0, 500),
+            },
+          })
+        }
+      })
+      await Promise.all(workers)
+
+      // Refresh state (gateway join logic may have advanced)
+      await refreshState()
+
+      const succeeded = results.filter(r => r.exitCode === 0).length
+      const totalCost = results.reduce((sum, r) => sum + r.usage.cost, 0)
+      const totalTurns = results.reduce((sum, r) => sum + r.usage.turns, 0)
+
+      const summaries = results.map(r => {
+        const icon = r.exitCode === 0 ? "OK" : "FAIL"
+        return `[${r.branch}] ${icon} (${r.usage.turns} turns, $${r.usage.cost.toFixed(4)})\n${r.output.slice(0, 200)}`
+      })
+
+      return {
+        content: [{
+          type: "text",
+          text: `Fork complete: ${succeeded}/${branches.length} branches succeeded.\nTotal: ${totalTurns} turns, $${totalCost.toFixed(4)}\n\n${summaries.join("\n\n")}`,
+        }],
+        details: { results },
+      }
+      } catch (err) {
+        const msg = err instanceof Error ? `${err.message}\n${err.stack}` : String(err)
+        return { content: [{ type: "text", text: `Fork error: ${msg}` }], isError: true }
+      }
+    },
+  })
+
   // --- /statewright command ---
 
   pi.registerCommand("statewright", {
@@ -535,7 +776,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         const result = await gwCall("statewright_pause")
         if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
         stateCache = null
-        ctx.ui.setStatus("statewright", "[sw] paused")
+        ctx.ui.setStatus("statewright", "[statewright] paused")
         ctx.ui.notify("[statewright] Workflow paused. Resume with /statewright load <name> --resume", "info")
       } else if (sub === "list" || sub === "ls") {
         const result = await gwCall("statewright_list_workflows")
@@ -562,7 +803,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   async function applyModelRouting(state: StateCache, ctx: { modelRegistry: { find: (p: string, m: string) => unknown; getAll: () => Array<{ provider: string; id: string }> }; model?: unknown; ui: { notify: (msg: string, level: string) => void; setStatus: (ns: string, text: string) => void } }) {
     try {
       const currentModel = ctx.model as { provider?: string; id?: string } | undefined
-      console.error(`[statewright:model] state=${state.state} want=${state.model} have=${currentModel?.provider}/${currentModel?.id} lastSwitched=${lastSwitchedModel}`)
+      swLog(`model] state=${state.state} want=${state.model} have=${currentModel?.provider}/${currentModel?.id} lastSwitched=${lastSwitchedModel}`)
       if (state.model && state.model !== lastSwitchedModel) {
         if (!originalModel && ctx.model) {
           originalModel = ctx.model
@@ -571,27 +812,27 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         let resolved: unknown = null
         if (parts.length === 2) {
           resolved = ctx.modelRegistry.find(parts[0], parts[1])
-          console.error(`[statewright:model] registry.find(${parts[0]}, ${parts[1]}) = ${resolved ? "FOUND" : "null"}`)
+          swLog(`model] registry.find(${parts[0]}, ${parts[1]}) = ${resolved ? "FOUND" : "null"}`)
         }
         if (!resolved) {
           const allModels = ctx.modelRegistry.getAll()
-          console.error(`[statewright:model] registry has ${allModels.length} models: ${allModels.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`).join(", ")}`)
+          swLog(`model] registry has ${allModels.length} models: ${allModels.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`).join(", ")}`)
           resolved = allModels.find((m: { id: string }) => m.id === state.model)
             ?? allModels.find((m: { id: string }) => m.id === parts[parts.length - 1])
         }
         if (resolved) {
           const r = resolved as { provider?: string; id?: string }
-          console.error(`[statewright:model] calling setModel(${r.provider}/${r.id})...`)
+          swLog(`model] calling setModel(${r.provider}/${r.id})...`)
           const success = await pi.setModel(resolved as Parameters<typeof pi.setModel>[0])
-          console.error(`[statewright:model] setModel returned: ${success}`)
+          swLog(`model] setModel returned: ${success}`)
           if (success) {
             lastSwitchedModel = state.model
             ctx.ui.notify(`[statewright] Model → ${state.model}`, "info")
           } else {
-            console.error(`[statewright:model] setModel FAILED — no API key for ${state.model}?`)
+            swLog(`model] setModel FAILED — no API key for ${state.model}?`)
           }
         } else {
-          console.error(`[statewright:model] Model '${state.model}' NOT FOUND in registry`)
+          swLog(`model] Model '${state.model}' NOT FOUND in registry`)
         }
       } else if (!state.model && lastSwitchedModel) {
         if (originalModel) {
@@ -604,7 +845,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         lastSwitchedModel = null
       }
     } catch (err) {
-      console.error(`[statewright:model] ERROR:`, err)
+      swLog(`model] ERROR:`, err)
     }
 
     // --- Per-state thinking level ---
@@ -615,7 +856,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         const after = pi.getThinkingLevel()
         lastThinkingLevel = state.thinkingLevel
         if (after !== state.thinkingLevel) {
-          console.error(`[statewright:thinking] requested=${state.thinkingLevel} clamped=${after} (was ${before})`)
+          ctx.ui.notify(`[statewright] Thinking '${state.thinkingLevel}' not supported by this model — clamped to '${after}'`, "warn")
         } else {
           ctx.ui.notify(`[statewright] Thinking → ${after}`, "info")
         }
@@ -623,7 +864,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         lastThinkingLevel = null
       }
     } catch (err) {
-      console.error(`[statewright:thinking] ERROR:`, err)
+      swLog(`thinking] ERROR:`, err)
     }
 
     // --- Native tool restrictions ---
@@ -631,46 +872,50 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (state.allowedTools.length > 0) {
         if (!originalTools) {
           originalTools = pi.getActiveTools()
-          console.error(`[statewright:tools] saved original tools: ${originalTools.join(", ")}`)
+          swLog(`tools] saved original tools: ${originalTools.join(", ")}`)
         }
         // Map state tools to Pi names, keep statewright tools always active
         const piTools = state.allowedTools.map(normalizeToolName)
         const swTools = pi.getActiveTools().filter((t: string) => t.startsWith("statewright_"))
         const activeSet = [...new Set([...piTools, ...swTools])]
-        console.error(`[statewright:tools] state=${state.state} setting active: ${activeSet.join(", ")}`)
+        swLog(`tools] state=${state.state} setting active: ${activeSet.join(", ")}`)
         pi.setActiveTools(activeSet)
-        console.error(`[statewright:tools] after set, active: ${pi.getActiveTools().join(", ")}`)
+        swLog(`tools] after set, active: ${pi.getActiveTools().join(", ")}`)
       } else if (originalTools) {
         pi.setActiveTools(originalTools)
         originalTools = null
       }
     } catch (err) {
-      console.error(`[statewright:tools] ERROR:`, err)
+      swLog(`tools] ERROR:`, err)
     }
 
     // --- Rambling watchdog ---
-    // For grunt states (thinking off, or local models), set a timer.
-    // If the model doesn't make a tool call within RAMBLING_TIMEOUT_MS, interrupt it.
+    // If the model generates text for too long without a tool call, abort + steer.
+    // sendUserMessage alone can't interrupt mid-stream — must abort first.
     if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
     if (!state.isFinal) {
+      const abortCtx = ctx  // capture for closure
       ramblingWatchdog = setTimeout(() => {
         ramblingWatchdog = null
         if (!stateCache || stateCache.isFinal || dormant) return
         const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
         const transitions = stateCache.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
+        swLog(`watchdog] firing after ${RAMBLING_TIMEOUT_MS / 1000}s — aborting stream`)
+        abortCtx.abort()
         pi.sendUserMessage(
-          `STOP DELIBERATING. You have been generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
+          `You were generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
           `Execute the next action immediately using one of: ${tools}. ` +
           `Or transition with: ${transitions}. Do not explain, just act.`,
           { deliverAs: "steer" },
         )
+        pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
       }, RAMBLING_TIMEOUT_MS)
     }
 
     const modelLabel = formatModelLabel(state.model, state.defaultModel)
     ctx.ui.setStatus(
       "statewright",
-      `[sw] ${state.state}${modelLabel} (${state.iteration}/${state.maxIterations ?? "∞"})`,
+      `[statewright] ${state.state}${modelLabel} (${state.iteration}/${state.maxIterations ?? "∞"})`,
     )
   }
 
@@ -788,7 +1033,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (stateCache) {
         ctx.ui.setStatus(
           "statewright",
-          `[sw] ${stateCache.state} (INTERRUPT → ${target})`,
+          `[statewright] ${stateCache.state} (INTERRUPT → ${target})`,
         )
       }
     }

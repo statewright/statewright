@@ -41,6 +41,7 @@ vi.mock("typebox", () => ({
     String: vi.fn((opts: unknown) => ({ type: "string", ...(opts as Record<string, unknown>) })),
     Boolean: vi.fn(() => ({ type: "boolean" })),
     Optional: vi.fn((inner: unknown) => inner),
+    Array: vi.fn((inner: unknown, opts?: unknown) => ({ type: "array", items: inner })),
   },
 }))
 
@@ -277,7 +278,7 @@ describe("statewright Pi extension", () => {
 
       await statewrightExtension(asPi(pi))
 
-      expect(pi.registerTool).toHaveBeenCalledTimes(7)
+      expect(pi.registerTool).toHaveBeenCalledTimes(8)
       const names = pi._tools.map((t) => t.name)
       expect(names).toContain("statewright_get_state")
       expect(names).toContain("statewright_transition")
@@ -739,6 +740,7 @@ describe("statewright Pi extension", () => {
       setupFetch([{ match: "/mcp", body: unknownState }])
       vi.spyOn(console, "log").mockImplementation(() => {})
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      process.env.STATEWRIGHT_DEBUG = "1"
       const pi = createMockPi()
       const ctx = createCtx()
 
@@ -748,6 +750,7 @@ describe("statewright Pi extension", () => {
       expect(pi.setModel).not.toHaveBeenCalled()
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("NOT FOUND in registry"))
       errorSpy.mockRestore()
+      delete process.env.STATEWRIGHT_DEBUG
     })
 
     it("does not switch when state has no model field", async () => {

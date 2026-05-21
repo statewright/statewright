@@ -160,6 +160,8 @@ case "$ENDPOINT" in
 
     BLOCKED_ENV=$(echo "$STATE_JSON" | jq -r '.blocked_env // [] | join(", ")' 2>/dev/null || true)
     ENV_OVERRIDES=$(echo "$STATE_JSON" | jq -r '.env_overrides // {} | to_entries | map(.key + "=" + .value) | join(", ")' 2>/dev/null || true)
+    MODEL=$(echo "$STATE_JSON" | jq -r '.model // empty' 2>/dev/null || true)
+    DEFAULT_MODEL=$(echo "$STATE_JSON" | jq -r '.default_model // empty' 2>/dev/null || true)
 
     # Command discovery: detect Taskfile/Makefile and list available commands
     AVAILABLE_CMDS=""
@@ -182,7 +184,15 @@ case "$ENDPOINT" in
     SM_CONTEXT=$(echo "$STATE_JSON" | jq -r '.context // {} | to_entries | map(.key + "=" + (.value | tostring)) | join(", ")' 2>/dev/null || true)
     GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
 
-    CONTEXT="Statewright workflow active. AUTONOMOUS MODE: work continuously through each state — use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates (requires_approval) or final states. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
+    MODEL_NOTE=""
+    if [ -n "$MODEL" ]; then
+      if [ -n "$DEFAULT_MODEL" ] && [ "$MODEL" != "$DEFAULT_MODEL" ]; then
+        MODEL_NOTE=" Recommended model for this phase: $MODEL (workflow default: $DEFAULT_MODEL). Use /model to switch if supported."
+      else
+        MODEL_NOTE=" Recommended model for this phase: $MODEL. Use /model to switch if supported."
+      fi
+    fi
+    CONTEXT="Statewright workflow active. AUTONOMOUS MODE: work continuously through each state — use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates (requires_approval) or final states. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${MODEL_NOTE}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
     jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
@@ -383,7 +393,10 @@ case "$ENDPOINT" in
         INIT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
         INIT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
         INIT_INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}. KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
+        INIT_MODEL=$(echo "$STATE_JSON" | jq -r '.model // empty' 2>/dev/null || true)
+        INIT_MODEL_NOTE=""
+        [ -n "$INIT_MODEL" ] && INIT_MODEL_NOTE=" Recommended model: $INIT_MODEL."
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}.${INIT_MODEL_NOTE} KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
         ;;
       stop)
         # Deactivate enforcement

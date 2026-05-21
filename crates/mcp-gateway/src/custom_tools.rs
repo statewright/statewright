@@ -142,6 +142,11 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         })
         .unwrap_or(serde_json::Value::Null);
 
+    let default_model = session.definition.meta.as_ref()
+        .and_then(|m| m.default_model.as_ref());
+    let state_model = state_def.and_then(|s| s.model.as_ref());
+    let model = state_model.or(default_model).cloned();
+
     let mut response = json!({
         "state": session.current_state,
         "is_final": session.is_final(),
@@ -150,6 +155,8 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "iteration": session.iteration_count,
         "max_iterations": max_iterations,
         "instructions": instructions,
+        "model": model,
+        "default_model": default_model,
         "transition_count": session.transition_count,
         "blocked_env": blocked_env,
         "env_overrides": env_overrides,
@@ -311,6 +318,10 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                     "definition": {
                         "type": "object",
                         "description": "Full workflow definition matching the schema at /workflow-schema.json"
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "If true, overwrite an existing workflow with the same name"
                     }
                 },
                 "required": ["name", "definition"]
@@ -596,5 +607,114 @@ mod tests {
         let session = new_session();
         let state = handle_get_state(&session);
         assert!(state.get("interrupt_handler").is_none() || state["interrupt_handler"].is_null());
+    }
+
+    // --- Per-state model routing tests ---
+
+    fn model_routing_definition() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "model-routing",
+            "initial": "diagnose",
+            "states": {
+                "diagnose": {
+                    "allowed_tools": ["Read", "Bash"],
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_iterations": 8,
+                    "on": { "DIAGNOSED": "propose_fix" }
+                },
+                "propose_fix": {
+                    "allowed_tools": ["Read"],
+                    "model": "anthropic/claude-opus-4-6",
+                    "max_iterations": 3,
+                    "on": { "DONE": "execute" }
+                },
+                "execute": {
+                    "allowed_tools": ["Read", "Edit", "Bash"],
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn get_state_includes_model_when_defined() {
+        let session = GatewaySession::new("test".into(), model_routing_definition());
+        let state = handle_get_state(&session);
+        assert_eq!(state["model"], "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn get_state_model_null_when_not_defined() {
+        let mut session = GatewaySession::new("test".into(), model_routing_definition());
+        // Transition to "execute" which has no model
+        handle_transition(&mut session, "DIAGNOSED").unwrap();
+        handle_transition(&mut session, "DONE").unwrap();
+        assert_eq!(session.current_state, "execute");
+        let state = handle_get_state(&session);
+        assert!(state["model"].is_null());
+    }
+
+    #[test]
+    fn get_state_model_changes_after_transition() {
+        let mut session = GatewaySession::new("test".into(), model_routing_definition());
+        let state1 = handle_get_state(&session);
+        assert_eq!(state1["model"], "claude-haiku-4-5-20251001");
+
+        handle_transition(&mut session, "DIAGNOSED").unwrap();
+        let state2 = handle_get_state(&session);
+        assert_eq!(state2["model"], "anthropic/claude-opus-4-6");
+    }
+
+    // --- default_model inheritance tests ---
+
+    fn default_model_definition() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "default-model",
+            "initial": "planning",
+            "meta": {
+                "default_model": "anthropic/claude-opus-4-6"
+            },
+            "states": {
+                "planning": {
+                    "allowed_tools": ["Read"],
+                    "on": { "READY": "grunt_work" }
+                },
+                "grunt_work": {
+                    "allowed_tools": ["Read", "Edit"],
+                    "model": "claude-haiku-4-5-20251001",
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn get_state_inherits_default_model_when_state_has_none() {
+        let session = GatewaySession::new("test".into(), default_model_definition());
+        let state = handle_get_state(&session);
+        // planning has no model — inherits default_model
+        assert_eq!(state["model"], "anthropic/claude-opus-4-6");
+        assert_eq!(state["default_model"], "anthropic/claude-opus-4-6");
+    }
+
+    #[test]
+    fn get_state_state_model_overrides_default() {
+        let mut session = GatewaySession::new("test".into(), default_model_definition());
+        handle_transition(&mut session, "READY").unwrap();
+        let state = handle_get_state(&session);
+        // grunt_work has explicit model — overrides default
+        assert_eq!(state["model"], "claude-haiku-4-5-20251001");
+        assert_eq!(state["default_model"], "anthropic/claude-opus-4-6");
+    }
+
+    #[test]
+    fn get_state_no_default_model_when_meta_absent() {
+        let session = new_session(); // test_definition() has no meta
+        let state = handle_get_state(&session);
+        assert!(state["default_model"].is_null());
     }
 }

@@ -157,6 +157,8 @@ interface StateCache {
   interrupts: Record<string, { file_pattern: string; target: string }>
   fork?: { active: boolean; current_branch: string; branches: Record<string, unknown> }
   interruptHandler?: { return_state: string }
+  model: string | null
+  defaultModel: string | null
 }
 
 let stateCache: StateCache | null = null
@@ -177,6 +179,8 @@ async function refreshState(): Promise<StateCache | null> {
     interrupts: raw.interrupts ?? {},
     fork: raw.fork ?? undefined,
     interruptHandler: raw.interrupt_handler ?? undefined,
+    model: raw.model ?? null,
+    defaultModel: raw.default_model ?? null,
   }
   return stateCache
 }
@@ -219,6 +223,38 @@ function describeTransition(
   return `${t.event} (-> ${t.target})`
 }
 
+// --- Model tier detection ---
+// Rough cost tier for override indicators. Higher = more expensive.
+// Ordered most-specific first. First match wins.
+const MODEL_TIER_RULES: Array<[string, number]> = [
+  // Tier 1: cheap / local / free
+  ["mini", 1], ["nano", 1], ["spark", 1], ["haiku", 1], ["flash", 1],
+  // Tier 2: mid-tier workhorses
+  ["gemma", 2], ["sonnet", 2], ["gpt-4o", 2], ["gpt-4.1", 2],
+  ["gpt-5.1", 2], ["gpt-5.2", 2], ["gpt-5.3", 2], ["gpt-5.4", 2],
+  // Tier 3: frontier / expensive
+  ["opus", 3], ["gpt-5.5", 3], ["o3", 3], ["o4", 3],
+]
+
+function modelTier(model: string): number {
+  const lower = model.toLowerCase()
+  for (const [key, tier] of MODEL_TIER_RULES) {
+    if (lower.includes(key)) return tier
+  }
+  return 2 // unknown → middle
+}
+
+function formatModelLabel(model: string | null, defaultModel: string | null): string {
+  if (!model) return ""
+  const shortName = model.split("/").pop()!
+  if (!defaultModel || model === defaultModel) return ` [${shortName}]`
+  const tier = modelTier(model)
+  const defaultTier = modelTier(defaultModel)
+  if (tier < defaultTier) return ` [${shortName} \u2193]`  // ↓ cheaper
+  if (tier > defaultTier) return ` [${shortName} \u2191]`  // ↑ more expensive
+  return ` [${shortName}]`
+}
+
 // --- Formatting ---
 
 function formatContext(s: StateCache): string {
@@ -235,6 +271,7 @@ function formatContext(s: StateCache): string {
     `To advance to the next phase, call: statewright_transition(event='EVENT_NAME', data={rationale: 'why'}).`,
     `Available transitions: ${transitionDescs}.`,
   ]
+  if (s.model) lines.push(`Model for this phase: ${s.model}.`)
   if (s.instructions) lines.push(`Instructions: ${s.instructions}`)
   if (s.interruptHandler) lines.push(`IN INTERRUPT HANDLER. Return to: ${s.interruptHandler.return_state}`)
   if (s.fork?.active) lines.push(`FORK active. Branch: ${s.fork.current_branch}`)
@@ -325,6 +362,11 @@ function checkInterrupts(filePath: string, interrupts: Record<string, { file_pat
 // --- Extension entry ---
 
 export default async function statewrightExtension(pi: ExtensionAPI) {
+  // Per-instance model tracking (scoped to this extension load, not module-level)
+  let lastSwitchedModel: string | null = null
+  let originalModel: unknown = null  // saved before first statewright-driven switch
+  let dormant = false  // true after deactivate — suppresses enforcement until next load
+
   const apiKey = getApiKey()
   if (!apiKey) {
     console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
@@ -399,23 +441,174 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const result = await gwCall("statewright_load_workflow", params)
       if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
 
-      // Refresh state after load
+      dormant = false
       await refreshState()
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
 
+  pi.registerTool({
+    name: "statewright_deactivate",
+    label: "Deactivate Workflow",
+    description: "Deactivate workflow enforcement. All tools pass through without restriction.",
+    parameters: Type.Object({}),
+    async execute() {
+      const result = await gwCall("statewright_deactivate")
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      stateCache = null
+      lastSwitchedModel = null
+      dormant = true
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+    },
+  })
+
+  pi.registerTool({
+    name: "statewright_pause",
+    label: "Pause Workflow",
+    description: "Pause the current workflow. Resume later with statewright_load_workflow(name, resume=true).",
+    parameters: Type.Object({}),
+    async execute() {
+      const result = await gwCall("statewright_pause")
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      stateCache = null
+      dormant = true
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+    },
+  })
+
+  pi.registerTool({
+    name: "statewright_get_status",
+    label: "Gateway Status",
+    description: "Get gateway status: active workflow, current state, available workflows.",
+    parameters: Type.Object({}),
+    async execute() {
+      const result = await gwCall("statewright_get_status")
+      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+    },
+  })
+
+  // --- /statewright command ---
+
+  pi.registerCommand("statewright", {
+    description: "Statewright workflow control: load, deactivate, pause, status, list",
+    async handler(args, ctx) {
+      const parts = args.trim().split(/\s+/)
+      const sub = parts[0]?.toLowerCase() ?? "status"
+
+      if (sub === "load" || sub === "start") {
+        const name = parts[1]
+        if (!name) { ctx.ui.notify("[statewright] Usage: /statewright load <workflow-name>", "warn"); return }
+        const resume = parts.includes("--resume")
+        const result = await gwCall("statewright_load_workflow", { name, resume })
+        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        dormant = false
+        await refreshState()
+        if (stateCache) await applyModelRouting(stateCache, ctx)
+        ctx.ui.notify(`[statewright] Workflow '${name}' loaded. State: ${stateCache?.state ?? "unknown"}`, "success")
+      } else if (sub === "deactivate" || sub === "stop" || sub === "off") {
+        const result = await gwCall("statewright_deactivate")
+        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        stateCache = null
+        lastSwitchedModel = null
+        if (originalModel) {
+          await pi.setModel(originalModel as Parameters<typeof pi.setModel>[0])
+          originalModel = null
+        }
+        ctx.ui.setStatus("statewright", "")
+        ctx.ui.notify("[statewright] Workflow deactivated. All tools unrestricted.", "info")
+      } else if (sub === "pause") {
+        const result = await gwCall("statewright_pause")
+        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        stateCache = null
+        ctx.ui.setStatus("statewright", "[sw] paused")
+        ctx.ui.notify("[statewright] Workflow paused. Resume with /statewright load <name> --resume", "info")
+      } else if (sub === "list" || sub === "ls") {
+        const result = await gwCall("statewright_list_workflows")
+        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        const wfs = (result as { workflows?: string[] }).workflows ?? []
+        const active = (result as { active?: string }).active
+        const lines = wfs.map((w: string) => w === active ? `  * ${w} (active)` : `    ${w}`)
+        ctx.ui.notify(`[statewright] Workflows:\n${lines.join("\n")}`, "info")
+      } else {
+        // Default: status
+        const result = await gwCall("statewright_get_status")
+        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        ctx.ui.notify(`[statewright] ${JSON.stringify(result, null, 2)}`, "info")
+      }
+    },
+    getArgumentCompletions(prefix) {
+      const subs = ["load", "deactivate", "pause", "status", "list"]
+      return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ label: s, value: s }))
+    },
+  })
+
+  // --- Model switching (shared by before_agent_start and tool_result) ---
+
+  async function applyModelRouting(state: StateCache, ctx: { modelRegistry: { find: (p: string, m: string) => unknown; getAll: () => Array<{ provider: string; id: string }> }; model?: unknown; ui: { notify: (msg: string, level: string) => void; setStatus: (ns: string, text: string) => void } }) {
+    try {
+      const currentModel = ctx.model as { provider?: string; id?: string } | undefined
+      console.error(`[statewright:model] state=${state.state} want=${state.model} have=${currentModel?.provider}/${currentModel?.id} lastSwitched=${lastSwitchedModel}`)
+      if (state.model && state.model !== lastSwitchedModel) {
+        if (!originalModel && ctx.model) {
+          originalModel = ctx.model
+        }
+        const parts = state.model.split("/")
+        let resolved: unknown = null
+        if (parts.length === 2) {
+          resolved = ctx.modelRegistry.find(parts[0], parts[1])
+          console.error(`[statewright:model] registry.find(${parts[0]}, ${parts[1]}) = ${resolved ? "FOUND" : "null"}`)
+        }
+        if (!resolved) {
+          const allModels = ctx.modelRegistry.getAll()
+          console.error(`[statewright:model] registry has ${allModels.length} models: ${allModels.map((m: { provider: string; id: string }) => `${m.provider}/${m.id}`).join(", ")}`)
+          resolved = allModels.find((m: { id: string }) => m.id === state.model)
+            ?? allModels.find((m: { id: string }) => m.id === parts[parts.length - 1])
+        }
+        if (resolved) {
+          const r = resolved as { provider?: string; id?: string }
+          console.error(`[statewright:model] calling setModel(${r.provider}/${r.id})...`)
+          const success = await pi.setModel(resolved as Parameters<typeof pi.setModel>[0])
+          console.error(`[statewright:model] setModel returned: ${success}`)
+          if (success) {
+            lastSwitchedModel = state.model
+            ctx.ui.notify(`[statewright] Model → ${state.model}`, "info")
+          } else {
+            console.error(`[statewright:model] setModel FAILED — no API key for ${state.model}?`)
+          }
+        } else {
+          console.error(`[statewright:model] Model '${state.model}' NOT FOUND in registry`)
+        }
+      } else if (!state.model && lastSwitchedModel) {
+        if (originalModel) {
+          const success = await pi.setModel(originalModel as Parameters<typeof pi.setModel>[0])
+          if (success) {
+            const orig = originalModel as { id?: string }
+            ctx.ui.notify(`[statewright] Model → ${orig.id ?? "previous"} (restored)`, "info")
+          }
+        }
+        lastSwitchedModel = null
+      }
+    } catch (err) {
+      console.error(`[statewright:model] ERROR:`, err)
+    }
+
+    const modelLabel = formatModelLabel(state.model, state.defaultModel)
+    ctx.ui.setStatus(
+      "statewright",
+      `[sw] ${state.state}${modelLabel} (${state.iteration}/${state.maxIterations ?? "∞"})`,
+    )
+  }
+
   // --- Context injection (before each agent turn) ---
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    if (dormant) return
     const state = await refreshState()
     if (!state) return
 
-    ctx.ui.setStatus(
-      "statewright",
-      `[sw] ${state.state} (${state.iteration}/${state.maxIterations ?? "∞"})`,
-    )
+    await applyModelRouting(state, ctx)
 
     if (state.isFinal) {
       ctx.ui.notify("[statewright] Workflow complete.", "success")
@@ -430,6 +623,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
+    if (dormant) return
     // Block malformed tool calls (undefined/empty name from broken model output)
     if (!event.toolName) {
       return { block: true, reason: "Tool call has no name. Use a specific tool." }
@@ -483,14 +677,12 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Post-tool: interrupt detection + state tracking ---
 
   pi.on("tool_result", async (event, ctx) => {
+    if (dormant) return
     if (event.toolName.startsWith("statewright_")) {
       // Refresh state after statewright tool calls
       await refreshState()
       if (stateCache) {
-        ctx.ui.setStatus(
-          "statewright",
-          `[sw] ${stateCache.state} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`,
-        )
+        await applyModelRouting(stateCache, ctx)
         if (stateCache.isFinal) {
           ctx.ui.notify("[statewright] Workflow complete.", "success")
         }
@@ -534,7 +726,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // parse_llm_response → execute → feed results loop.
 
   pi.on("message_end", async (event, _ctx) => {
-    if (!stateCache) return
+    if (dormant || !stateCache) return
     const msg = event.message
     if (msg.role !== "assistant") return
 
@@ -589,6 +781,63 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             const execResult = await pi.exec("bash", ["-c", cmd])
             result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
           }
+          // Edit tool — normalize parameter variants from local models
+          // Local models emit {file, old, new}, {path, old_text, new_text}, {edits: [{file, oldText, newText}]}, etc.
+          // Pi expects: edit(path, edits: [{oldText, newText}])
+          else if (name === "edit" || tc.name === "edit_file" || tc.name === "apply_patch" || tc.name === "patch_file") {
+            const filePath = (args.path ?? args.file ?? args.file_path ?? args.filename) as string | undefined
+            const oldText = (args.old ?? args.old_text ?? args.oldText ?? args.original) as string | undefined
+            const newText = (args.new ?? args.new_text ?? args.newText ?? args.replacement) as string | undefined
+            const editsArr = args.edits as Array<Record<string, unknown>> | undefined
+
+            let editPath = filePath
+            let edits: Array<{ oldText: string; newText: string }> = []
+
+            if (editsArr && Array.isArray(editsArr)) {
+              // {edits: [{file/path, oldText/old, newText/new}]}
+              for (const e of editsArr) {
+                editPath = editPath ?? (e.path ?? e.file ?? e.file_path) as string
+                const o = (e.oldText ?? e.old ?? e.old_text) as string
+                const n = (e.newText ?? e.new ?? e.new_text) as string
+                if (o && n) edits.push({ oldText: o, newText: n })
+              }
+            } else if (oldText && newText) {
+              // {path, old, new} flat format
+              edits = [{ oldText, newText }]
+            } else if (args.patch && typeof args.patch === "string") {
+              // Unified diff — execute via sed-like approach
+              const execResult = await pi.exec("bash", ["-c",
+                `cd "${process.cwd()}" && echo ${JSON.stringify(args.patch)} | patch -p0 --no-backup-if-mismatch 2>&1`])
+              result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+              results.push(`[${tc.name}] ${result}`)
+              continue
+            }
+
+            if (editPath && edits.length > 0) {
+              // Read current file, apply replacements, write back
+              try {
+                const readResult = await pi.exec("cat", [editPath])
+                let content = typeof readResult === "string" ? readResult : JSON.stringify(readResult)
+                let applied = 0
+                for (const edit of edits) {
+                  if (content.includes(edit.oldText)) {
+                    content = content.replace(edit.oldText, edit.newText)
+                    applied++
+                  }
+                }
+                if (applied > 0) {
+                  await pi.exec("bash", ["-c", `cat > ${JSON.stringify(editPath)} << 'STATEWRIGHT_EOF'\n${content}\nSTATEWRIGHT_EOF`])
+                  result = `Applied ${applied}/${edits.length} edit(s) to ${editPath}`
+                } else {
+                  result = `No matches found in ${editPath}. Re-read the file to get exact current content.`
+                }
+              } catch (err) {
+                result = `Edit failed: ${err instanceof Error ? err.message : String(err)}`
+              }
+            } else {
+              result = `Could not parse edit parameters. Use: edit(path="file.py", edits=[{oldText: "old", newText: "new"}])`
+            }
+          }
           else {
             result = `Tool '${tc.name}' not executable via recovery. Use native tool calling.`
           }
@@ -618,7 +867,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const transitionHints = stateCache.transitions.map((t) => describeTransition(t, stateCache!)).join(", ")
       const instructions = stateCache.instructions ?? "Proceed with the task."
       pi.sendUserMessage(
-        `Continue working. Phase: '${stateCache.state}'. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitionHints}. Start by reading the files in the current directory if you haven't already.`,
+        `Continue working. Phase: '${stateCache.state}'. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitionHints}. Do NOT re-read files you have already read. Continue from where you left off.`,
         { deliverAs: "steer" },
       )
     }

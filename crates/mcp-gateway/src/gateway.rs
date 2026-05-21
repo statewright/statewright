@@ -1375,6 +1375,7 @@ impl Gateway {
             "statewright_create_workflow" => {
                 let wf_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let definition = arguments.get("definition").cloned().unwrap_or(json!({}));
+                let overwrite = arguments.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 if wf_name.is_empty() {
                     return JsonRpcResponse::success(id,
@@ -1406,24 +1407,30 @@ impl Gateway {
                     let owner = self.owner_id.clone();
                     let name = wf_name.to_string();
                     let def_json = definition.to_string();
-                    let result = sqlx::query(
+                    let sql = if overwrite {
+                        "INSERT INTO workflows (id, owner, name, definition, active, created, updated) \
+                         VALUES (gen_random_uuid()::text, $1, $2, $3::json, false, NOW()::text, NOW()::text) \
+                         ON CONFLICT (owner, name) DO UPDATE SET definition = $3::json, updated = NOW()::text"
+                    } else {
                         "INSERT INTO workflows (id, owner, name, definition, active, created, updated) \
                          VALUES (gen_random_uuid()::text, $1, $2, $3::json, false, NOW()::text, NOW()::text)"
-                    )
-                    .bind(&owner)
-                    .bind(&name)
-                    .bind(&def_json)
-                    .execute(&pool)
-                    .await;
+                    };
+                    let result = sqlx::query(sql)
+                        .bind(&owner)
+                        .bind(&name)
+                        .bind(&def_json)
+                        .execute(&pool)
+                        .await;
 
                     match result {
                         Ok(_) => {
+                            let verb = if overwrite && self.workflows.contains_key(&name) { "updated" } else { "created" };
                             if let Ok(def) = serde_json::from_value(definition.clone()) {
                                 self.workflows.insert(name.clone(), def);
                             }
                             Some(JsonRpcResponse::success(id.clone(),
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                    format!("Workflow '{}' created. Use statewright_load_workflow(name='{}') to activate it.", name, name)
+                                    format!("Workflow '{}' {}. Use statewright_load_workflow(name='{}') to activate it.", name, verb, name)
                                 )).unwrap()))
                         }
                         Err(e) => {
@@ -1431,7 +1438,7 @@ impl Gateway {
                             if msg.contains("unique") || msg.contains("duplicate") {
                                 Some(JsonRpcResponse::success(id.clone(),
                                     serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                        format!("Workflow '{}' already exists. Choose a different name.", name)
+                                        format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
                                     )).unwrap()))
                             } else {
                                 Some(JsonRpcResponse::success(id.clone(),
@@ -1452,11 +1459,17 @@ impl Gateway {
                 } else {
                     // In-memory only (no database)
                     let name = wf_name.to_string();
-                    if let Ok(def) = serde_json::from_value(definition) {
+                    if !overwrite && self.workflows.contains_key(&name) {
+                        JsonRpcResponse::success(id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
+                            )).unwrap())
+                    } else if let Ok(def) = serde_json::from_value(definition) {
+                        let verb = if self.workflows.contains_key(&name) { "updated" } else { "created" };
                         self.workflows.insert(name.clone(), def);
                         JsonRpcResponse::success(id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                format!("Workflow '{}' created (in-memory). Use statewright_load_workflow(name='{}') to activate it.", name, name)
+                                format!("Workflow '{}' {} (in-memory). Use statewright_load_workflow(name='{}') to activate it.", name, verb, name)
                             )).unwrap())
                     } else {
                         JsonRpcResponse::success(id,

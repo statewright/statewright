@@ -54,6 +54,17 @@ interface RegisteredTool {
   execute: (id: string, params: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>
 }
 
+interface MockModel {
+  provider: string
+  id: string
+  name: string
+}
+
+interface MockModelRegistry {
+  find: Mock
+  getAll: Mock
+}
+
 interface MockUI {
   setStatus: Mock
   notify: Mock
@@ -61,6 +72,8 @@ interface MockUI {
 
 interface MockCtx {
   ui: MockUI
+  modelRegistry: MockModelRegistry
+  model: MockModel | undefined
 }
 
 type EventHandler = (event: Record<string, unknown>, ctx: MockCtx) => Promise<unknown>
@@ -70,6 +83,7 @@ interface MockPi {
   on: Mock
   sendUserMessage: Mock
   exec: Mock
+  setModel: Mock
   getActiveTools: () => string[]
   _tools: RegisteredTool[]
   _handlers: Record<string, EventHandler[]>
@@ -116,6 +130,8 @@ function createMockPi(): MockPi {
     }),
     sendUserMessage: vi.fn(),
     exec: vi.fn(async () => "mock exec output"),
+    setModel: vi.fn(async () => true),
+    registerCommand: vi.fn(),
     getActiveTools: () => ["read", "bash", "edit", "write", "find", "ls", "grep", "statewright_get_state", "statewright_transition", "statewright_list_workflows", "statewright_load_workflow"],
     _tools: tools,
     _handlers: handlers,
@@ -127,8 +143,27 @@ function createMockPi(): MockPi {
   }
 }
 
-function createCtx(): MockCtx {
-  return { ui: { setStatus: vi.fn(), notify: vi.fn() } }
+const MOCK_MODELS: MockModel[] = [
+  { provider: "anthropic", id: "claude-haiku-4-5-20251001", name: "Haiku" },
+  { provider: "anthropic", id: "claude-sonnet-4-6", name: "Sonnet" },
+  { provider: "anthropic", id: "claude-opus-4-6", name: "Opus" },
+  { provider: "openai-codex", id: "gpt-5.4-mini", name: "GPT-5.4 Mini" },
+  { provider: "openai-codex", id: "gpt-5.4", name: "GPT-5.4" },
+  { provider: "openai-codex", id: "gpt-5.5", name: "GPT-5.5" },
+  { provider: "ollama", id: "gemma4:12b", name: "Gemma 4 12B" },
+]
+
+function createCtx(currentModel?: MockModel): MockCtx {
+  return {
+    ui: { setStatus: vi.fn(), notify: vi.fn() },
+    modelRegistry: {
+      find: vi.fn((provider: string, modelId: string) =>
+        MOCK_MODELS.find((m) => m.provider === provider && m.id === modelId) ?? undefined,
+      ),
+      getAll: vi.fn(() => MOCK_MODELS),
+    },
+    model: currentModel ?? MOCK_MODELS[2], // default to opus
+  }
 }
 
 function asPi(mock: MockPi): Parameters<typeof statewrightExtension>[0] {
@@ -239,7 +274,7 @@ describe("statewright Pi extension", () => {
 
       await statewrightExtension(asPi(pi))
 
-      expect(pi.registerTool).toHaveBeenCalledTimes(4)
+      expect(pi.registerTool).toHaveBeenCalledTimes(7)
       const names = pi._tools.map((t) => t.name)
       expect(names).toContain("statewright_get_state")
       expect(names).toContain("statewright_transition")
@@ -637,6 +672,217 @@ describe("statewright Pi extension", () => {
 
       // Read normalizes to "read", which executes via cat
       expect(pi.exec).toHaveBeenCalledWith("cat", ["src/main.rs"])
+    })
+  })
+
+  describe("per-state model switching", () => {
+    const MODEL_STATE = {
+      ...MOCK_STATE,
+      model: "anthropic/claude-haiku-4-5-20251001",
+    }
+
+    it("switches model when state has model field (provider/id format)", async () => {
+      setupFetch([{ match: "/mcp", body: MODEL_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(pi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "anthropic", id: "claude-haiku-4-5-20251001" }),
+      )
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("Model"),
+        "info",
+      )
+    })
+
+    it("finds model by bare id when provider/id format not found", async () => {
+      const bareState = { ...MOCK_STATE, model: "claude-opus-4-6" }
+      setupFetch([{ match: "/mcp", body: bareState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(pi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "anthropic", id: "claude-opus-4-6" }),
+      )
+    })
+
+    it("does not switch model when already on the correct model", async () => {
+      setupFetch([{ match: "/mcp", body: MODEL_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+
+      // First call — switches
+      await pi._fire("before_agent_start", {}, ctx)
+      expect(pi.setModel).toHaveBeenCalledTimes(1)
+
+      // Second call — same model, no switch
+      await pi._fire("before_agent_start", {}, ctx)
+      expect(pi.setModel).toHaveBeenCalledTimes(1)
+    })
+
+    it("warns when model not found in registry", async () => {
+      const unknownState = { ...MOCK_STATE, model: "deepseek/deepseek-r3" }
+      setupFetch([{ match: "/mcp", body: unknownState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(pi.setModel).not.toHaveBeenCalled()
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("NOT FOUND in registry"))
+      errorSpy.mockRestore()
+    })
+
+    it("does not switch when state has no model field", async () => {
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(pi.setModel).not.toHaveBeenCalled()
+    })
+
+    it("shows model in status bar", async () => {
+      setupFetch([{ match: "/mcp", body: MODEL_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        "statewright",
+        expect.stringContaining("claude-haiku-4-5-20251001"),
+      )
+    })
+
+    it("shows downgrade indicator when model is cheaper than default", async () => {
+      const stateWithDefault = {
+        ...MOCK_STATE,
+        model: "anthropic/claude-haiku-4-5-20251001",
+        default_model: "anthropic/claude-opus-4-6",
+      }
+      setupFetch([{ match: "/mcp", body: stateWithDefault }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Should show ↓ for cheaper model
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        "statewright",
+        expect.stringContaining("\u2193"),
+      )
+    })
+
+    it("shows upgrade indicator when model is more expensive than default", async () => {
+      const stateWithDefault = {
+        ...MOCK_STATE,
+        model: "anthropic/claude-opus-4-6",
+        default_model: "claude-haiku-4-5-20251001",
+      }
+      setupFetch([{ match: "/mcp", body: stateWithDefault }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Should show ↑ for more expensive model
+      expect(ctx.ui.setStatus).toHaveBeenCalledWith(
+        "statewright",
+        expect.stringContaining("\u2191"),
+      )
+    })
+
+    it("restores original model when entering state with no model", async () => {
+      // Simulate: start on opus, switch to haiku for one state, then enter state with no model
+      const opusModel = MOCK_MODELS[2] // opus — user's starting model
+      setupFetch([{ match: "/mcp", body: MODEL_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx(opusModel)
+
+      await statewrightExtension(asPi(pi))
+
+      // First turn: state has model → switch to haiku, save opus as original
+      await pi._fire("before_agent_start", {}, ctx)
+      expect(pi.setModel).toHaveBeenCalledTimes(1)
+      expect(pi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "claude-haiku-4-5-20251001" }),
+      )
+
+      // Now gateway returns a state with no model (simulating transition)
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])  // MOCK_STATE has no model field
+
+      // Second turn: state has no model → restore opus
+      await pi._fire("before_agent_start", {}, ctx)
+      expect(pi.setModel).toHaveBeenCalledTimes(2)
+      expect(pi.setModel).toHaveBeenLastCalledWith(opusModel)
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("restored"),
+        "info",
+      )
+    })
+
+    it("does nothing when no model set anywhere", async () => {
+      // Pure backward compat: no model fields, no switching, no restore
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+      await pi._fire("before_agent_start", {}, ctx)
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect(pi.setModel).not.toHaveBeenCalled()
+    })
+
+    it("switches across providers (openai-codex to anthropic)", async () => {
+      // Start on gpt-5.4, state routes to opus — cross-provider switch
+      const crossProviderState = { ...MOCK_STATE, model: "anthropic/claude-opus-4-6" }
+      setupFetch([{ match: "/mcp", body: crossProviderState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const gptModel = MOCK_MODELS.find((m) => m.id === "gpt-5.4")!
+      const ctx = createCtx(gptModel)
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Should switch to opus (different provider)
+      expect(pi.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "anthropic", id: "claude-opus-4-6" }),
+      )
+
+      // Transition to state with no model — should restore gpt-5.4
+      setupFetch([{ match: "/mcp", body: MOCK_STATE }])
+      await pi._fire("before_agent_start", {}, ctx)
+      expect(pi.setModel).toHaveBeenCalledTimes(2)
+      expect(pi.setModel).toHaveBeenLastCalledWith(gptModel)
     })
   })
 })

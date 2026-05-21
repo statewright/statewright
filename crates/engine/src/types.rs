@@ -70,6 +70,10 @@ pub struct StateDef {
     /// Environment variable overrides for this state (injected as context, not enforced).
     #[serde(default, alias = "env")]
     pub env_overrides: Option<BTreeMap<String, String>>,
+    /// Recommended model for this state (e.g. "claude-haiku-4-5-20251001", "anthropic/claude-sonnet-4-6").
+    /// Clients that support programmatic model switching enforce this; others treat it as advisory.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// A transition triggered by an event.
@@ -282,6 +286,10 @@ pub struct MachineMeta {
     pub requires_human_approval: Option<bool>,
     #[serde(default)]
     pub capture_output: Option<bool>,
+    /// Default model for states that don't specify their own.
+    /// States with an explicit `model` field override this.
+    #[serde(default)]
+    pub default_model: Option<String>,
     /// Catch-all for forward compatibility with new meta fields.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
@@ -365,3 +373,90 @@ impl std::fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn state_def_deserializes_model_field() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "model-routing-test",
+            "initial": "diagnose",
+            "states": {
+                "diagnose": {
+                    "allowed_tools": ["Read", "Bash"],
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_iterations": 8,
+                    "on": { "DIAGNOSED": "propose_fix" }
+                },
+                "propose_fix": {
+                    "allowed_tools": ["Read"],
+                    "model": "anthropic/claude-opus-4-6",
+                    "max_iterations": 3,
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            }
+        })).unwrap();
+
+        assert_eq!(
+            def.states["diagnose"].model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            def.states["propose_fix"].model.as_deref(),
+            Some("anthropic/claude-opus-4-6")
+        );
+        // Final state has no model — should be None
+        assert_eq!(def.states["completed"].model, None);
+    }
+
+    #[test]
+    fn state_def_model_defaults_to_none() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "no-model",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "allowed_tools": ["Read"],
+                    "on": { "DONE": "done" }
+                },
+                "done": { "type": "final" }
+            }
+        })).unwrap();
+
+        assert_eq!(def.states["working"].model, None);
+    }
+
+    #[test]
+    fn meta_default_model_deserializes() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "default-model-test",
+            "initial": "planning",
+            "meta": {
+                "default_model": "anthropic/claude-opus-4-6"
+            },
+            "states": {
+                "planning": {
+                    "allowed_tools": ["Read"],
+                    "on": { "DONE": "implementing" }
+                },
+                "implementing": {
+                    "model": "claude-haiku-4-5-20251001",
+                    "allowed_tools": ["Read", "Edit"],
+                    "on": { "DONE": "done" }
+                },
+                "done": { "type": "final" }
+            }
+        })).unwrap();
+
+        let meta = def.meta.unwrap();
+        assert_eq!(meta.default_model.as_deref(), Some("anthropic/claude-opus-4-6"));
+        // planning inherits default (no explicit model)
+        assert_eq!(def.states["planning"].model, None);
+        // implementing overrides
+        assert_eq!(def.states["implementing"].model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+}

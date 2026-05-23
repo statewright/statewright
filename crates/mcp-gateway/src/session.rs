@@ -133,6 +133,10 @@ impl SessionManager {
         self.sessions.read().unwrap_or_else(|p| p.into_inner()).get(instance_id).cloned()
     }
 
+    pub fn exists(&self, instance_id: &str) -> bool {
+        self.sessions.read().unwrap_or_else(|p| p.into_inner()).contains_key(instance_id)
+    }
+
     pub fn update_state(
         &self,
         instance_id: &str,

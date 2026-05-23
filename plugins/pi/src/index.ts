@@ -41,7 +41,7 @@ function getApiKey(): string | null {
   }
 }
 
-let sessionId: string | null = null
+let sessionId: string | null = process.env.STATEWRIGHT_BRANCH_SESSION_ID ?? null
 let rpcId = 1
 
 interface JsonRpcResult {
@@ -93,13 +93,18 @@ async function gwInit(): Promise<boolean> {
   const apiKey = getApiKey()
   if (!apiKey) return false
 
+  const presetSessionId = sessionId  // preserve branch session ID from env if set
+
   try {
+    const initHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    }
+    if (presetSessionId) initHeaders["Mcp-Session-Id"] = presetSessionId
+
     const resp = await fetch(`${GW_URL}/mcp`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: initHeaders,
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: rpcId++,
@@ -113,8 +118,11 @@ async function gwInit(): Promise<boolean> {
       signal: AbortSignal.timeout(5000),
     })
     if (!resp.ok) return false
-    const sid = resp.headers.get("mcp-session-id")
-    if (sid) sessionId = sid
+    // Only capture session ID from response if we didn't have a preset branch ID
+    if (!presetSessionId) {
+      const sid = resp.headers.get("mcp-session-id")
+      if (sid) sessionId = sid
+    }
     return true
   } catch {
     return false
@@ -420,6 +428,15 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   }
   } // end disabled fork/join bootstrap
 
+  // --- Branch subprocess auto-init ---
+  // If this is a fork branch subprocess, the branch session is already created on the gateway.
+  // Just refresh state — no need for the model to call statewright_load_workflow.
+  if (process.env.STATEWRIGHT_BRANCH_SESSION_ID) {
+    await refreshState()
+    dormant = false
+    console.log(`[statewright] Branch subprocess connected (session: ${sessionId})`)
+  }
+
   // --- Custom tools ---
 
   pi.registerTool({
@@ -557,7 +574,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   ): Promise<BranchResult> {
     const systemPrompt = [
       `You are a Statewright fork branch agent (branch: ${branch}).`,
-      `Load the workflow with: statewright_load_workflow(name="${workflowName}", branch="${branch}")`,
+      `The workflow is already loaded. Work autonomously on your assigned task.`,
       `Then complete the task. Work autonomously through all states until done.`,
     ].join("\n")
 
@@ -577,6 +594,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     let lastAssistantText = ""
+    let stderrBuf = ""
 
     try {
       const exitCode = await new Promise<number>((resolve) => {
@@ -589,6 +607,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             ...process.env,
             STATEWRIGHT_GATEWAY_URL: GW_URL,
             STATEWRIGHT_API_KEY: getApiKey() ?? "",
+            STATEWRIGHT_BRANCH_SESSION_ID: `br_${branch}`,
           },
         })
 
@@ -620,7 +639,12 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         })
 
         proc.stderr.on("data", (data: Buffer) => {
-          // stderr is debug output, ignore
+          stderrBuf += data.toString()
+          if (process.env.STATEWRIGHT_DEBUG) {
+            for (const line of data.toString().split("\n").filter((l: string) => l.trim())) {
+              swLog(`[branch:${branch}] ${line}`)
+            }
+          }
         })
 
         proc.on("close", (code) => {
@@ -648,6 +672,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
       result.exitCode = exitCode
       result.output = lastAssistantText || "(no output)"
+      if (stderrBuf.trim()) {
+        result.output += `\n--- stderr ---\n${stderrBuf.slice(-2000)}`
+      }
     } finally {
       try { unlinkSync(promptFile) } catch { /* ignore */ }
       try { rmdirSync(tmpDir) } catch { /* ignore */ }
@@ -671,7 +698,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params: { branches: Array<{ branch: string; task: string; cwd?: string }> }, signal) {
-      return { content: [{ type: "text", text: "Fork/join is under development and currently disabled. Use sequential state transitions instead." }], isError: true }
+      // Suspend the rambling watchdog — fork execution takes minutes
+      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
       try {
       if (!stateCache) {
         return { content: [{ type: "text", text: "No active workflow. Load a workflow first." }], isError: true }
@@ -684,9 +712,46 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "No active workflow found on gateway." }], isError: true }
       }
 
+      // Trigger the engine-level FORK transition to create branch sessions on the gateway.
+      // Skip if fork is already active (agent may have called statewright_transition(FORK) first).
+      const forkAlreadyActive = stateCache.fork?.active || stateCache.context?._fork
+      if (!forkAlreadyActive) {
+        const forkEvent = stateCache.transitions.find((t) => {
+          return t.event === "FORK" || t.event.startsWith("FORK")
+        })?.event
+        if (forkEvent) {
+          const forkResult = await gwCall("statewright_transition", {
+            event: forkEvent,
+            data: { rationale: "Dispatching parallel fork branches" },
+          })
+          if (forkResult) {
+            await refreshState()
+            swLog(`fork: engine transition fired (${forkEvent}), branches created on gateway`)
+          }
+        }
+      } else {
+        swLog("fork: engine fork already active, skipping transition")
+      }
+
       const defaultCwd = process.cwd()
       const MAX_CONCURRENCY = 4
-      const branches = params.branches.slice(0, 8)
+
+      // Use the gateway's branch names from _fork context, not the model's names.
+      // The model provides tasks, the workflow provides branch names.
+      const forkCtx = stateCache?.context?._fork as { branches?: Record<string, unknown> } | undefined
+      const gatewayBranches = forkCtx?.branches ? Object.keys(forkCtx.branches) : []
+      const modelBranches = params.branches.slice(0, 8)
+
+      // Map model tasks to gateway branch names (by order, with fallback to model names)
+      const branches = gatewayBranches.length > 0
+        ? gatewayBranches.map((gwName, i) => ({
+            branch: gwName,
+            task: modelBranches[i]?.task ?? `Complete the ${gwName} branch`,
+            cwd: modelBranches[i]?.cwd,
+          }))
+        : modelBranches  // no gateway fork context — use model's names as-is
+
+      swLog(`fork: using branch names: ${branches.map(b => b.branch).join(", ")} (gateway: ${gatewayBranches.join(", ") || "none"})`)
 
       // Run branches in parallel with concurrency limit
       let nextIdx = 0
@@ -698,9 +763,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           const b = branches[idx]
           results[idx] = await runBranch(b.branch, b.task, b.cwd ?? defaultCwd, workflowName, signal)
 
-          // Fire BRANCH_DONE on gateway for each completed branch
+          // Fire BRANCH_DONE on gateway using the GATEWAY's branch name (not model's)
           await gwCall("statewright_transition", {
-            event: "BRANCH_DONE",
+            event: `BRANCH_DONE:${b.branch}`,
             data: {
               rationale: `Branch ${b.branch} completed`,
               branch: b.branch,
@@ -714,6 +779,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
       // Refresh state (gateway join logic may have advanced)
       await refreshState()
+      // Suppress watchdog for one cycle — the agent needs time to process fork results
+      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
 
       const succeeded = results.filter(r => r.exitCode === 0).length
       const totalCost = results.reduce((sum, r) => sum + r.usage.cost, 0)
@@ -901,14 +968,16 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
         const transitions = stateCache.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
         swLog(`watchdog] firing after ${RAMBLING_TIMEOUT_MS / 1000}s — aborting stream`)
-        abortCtx.abort()
-        pi.sendUserMessage(
-          `You were generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
-          `Execute the next action immediately using one of: ${tools}. ` +
-          `Or transition with: ${transitions}. Do not explain, just act.`,
-          { deliverAs: "steer" },
-        )
-        pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
+        try {
+          abortCtx.abort()
+          pi.sendUserMessage(
+            `You were generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
+            `Execute the next action immediately using one of: ${tools}. ` +
+            `Or transition with: ${transitions}. Do not explain, just act.`,
+            { deliverAs: "steer" },
+          )
+          pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
+        } catch { /* ctx may be stale after session reset or rate limit */ }
       }, RAMBLING_TIMEOUT_MS)
     }
 
@@ -965,17 +1034,21 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     // read-only commands. Block writes, destructive ops, and scripting interpreters.
     if (!isAllowed && (event.toolName === "bash" || event.toolName === "Bash")) {
       const cmd = (event.input?.command ?? "") as string
-      const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag)\b/.test(cmd)
-      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|python|node|ruby|perl|php|sed\s+-i|dd\s/.test(cmd)
+      const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
+      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/.test(cmd)
+      // Block scripting interpreters when Edit/Write aren't in allowed_tools (they can write files)
+      const hasWriteTools = stateCache.allowedTools.some((t) => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
+      const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
       const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
-      if (isSafe && !isDangerous && !leavesDir) {
+      if (isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
         return // allow safe read-only bash through
       }
       // Bash attempted but not safe — explain why
       const reasons: string[] = []
       if (isDangerous) reasons.push("contains destructive or write operations")
+      if (isScriptWrite) reasons.push("scripting interpreter can write files — use edit tool instead")
       if (leavesDir) reasons.push("attempts to leave the working directory")
-      if (!isSafe) reasons.push("not a recognized read-only command")
+      if (!isSafe && !isDangerous && !isScriptWrite) reasons.push("not a recognized read-only command")
       return {
         block: true,
         reason: `Bash command blocked: ${reasons.join(", ")}. Safe read-only commands (ls, cat, grep, git status, etc.) are allowed. Destructive commands, writes, and directory traversal are not.`,

@@ -23,12 +23,31 @@ use crate::upstream::UpstreamManager;
 pub struct RemoteState {
     /// Active SSE sessions: session_id -> sender for SSE events.
     sessions: RwLock<HashMap<String, RemoteSession>>,
+    /// Per-API-key session managers, shared across parent and branch sessions.
+    session_managers: RwLock<HashMap<String, SessionManager>>,
     /// PocketBase URL for workflow loading.
     pb_url: String,
     /// Database pool for run recording and step metering.
     db_pool: crate::DbPool,
     /// Approval callback secret (from APPROVAL_CALLBACK_SECRET env var at startup).
     approval_secret: String,
+}
+
+impl RemoteState {
+    /// Get or create a SessionManager for a given API key fingerprint.
+    /// All sessions (parent + branches) for the same API key share one SessionManager.
+    async fn get_session_manager(&self, api_key_fingerprint: &str) -> SessionManager {
+        {
+            let mgrs = self.session_managers.read().await;
+            if let Some(mgr) = mgrs.get(api_key_fingerprint) {
+                return mgr.clone();
+            }
+        }
+        let mut mgrs = self.session_managers.write().await;
+        mgrs.entry(api_key_fingerprint.to_string())
+            .or_insert_with(SessionManager::new)
+            .clone()
+    }
 }
 
 struct RemoteSession {
@@ -78,6 +97,7 @@ pub async fn start_remote_server(
 
     let state = Arc::new(RemoteState {
         sessions: RwLock::new(HashMap::new()),
+        session_managers: RwLock::new(HashMap::new()),
         pb_url: config.pb_url,
         db_pool,
         approval_secret,
@@ -126,8 +146,9 @@ async fn handle_sse(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Create session
-    let session_manager = SessionManager::new();
+    // Create session (shared SessionManager per API key for fork/join branch visibility)
+    let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
+    let session_manager = state.get_session_manager(&api_key_hash.to_string()).await;
     let session_id = uuid::Uuid::new_v4().to_string();
 
     let default_def = result.workflows
@@ -198,8 +219,27 @@ async fn handle_streamable_http(
         None => return (StatusCode::UNAUTHORIZED, "Authorization header required").into_response(),
     };
 
-    // Deterministic session key from API key (UUID v5 = SHA-1 namespace hash, no prefix leak)
-    let session_key = format!("http_{}", uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes()));
+    // Deterministic base key from API key
+    let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
+    let api_key_fingerprint = api_key_hash.to_string();
+
+    // Accept Mcp-Session-Id header for branch subprocess isolation.
+    // Only branch IDs (starting with "br_") create separate sessions.
+    // Regular session IDs (echoed back from prior responses) are ignored for key computation
+    // to maintain backward compatibility with clients that send the header on every request.
+    let branch_session_id = headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| s.starts_with("br_"))
+        .map(|s| s.to_string());
+
+    let session_key = match &branch_session_id {
+        Some(bid) => format!("http_{}_{}", api_key_fingerprint, bid),
+        None => format!("http_{}", api_key_fingerprint),
+    };
+
+    // Use shared SessionManager for this API key (parent + branches share state)
+    let session_manager = state.get_session_manager(&api_key_fingerprint).await;
 
     let mut sessions = state.sessions.write().await;
 
@@ -217,20 +257,23 @@ async fn handle_streamable_http(
             return (StatusCode::NOT_FOUND, "No workflows found").into_response();
         }
 
-        let session_manager = SessionManager::new();
         let session_id = session_key.clone();
         let default_def = match result.workflows.get(&result.default) {
             Some(d) => d.clone(),
             None => return (StatusCode::INTERNAL_SERVER_ERROR, "Default workflow not found").into_response(),
         };
 
-        session_manager.create(session_id.clone(), default_def);
-        if let Some(limit) = result.plan_limit {
-            session_manager.set_plan_limit(&session_id, limit);
+        // Check if this session key already exists in the shared SessionManager
+        // (e.g., a branch session created by the parent's fork handler)
+        if !session_manager.exists(&session_id) {
+            session_manager.create(session_id.clone(), default_def);
+            if let Some(limit) = result.plan_limit {
+                session_manager.set_plan_limit(&session_id, limit);
+            }
         }
 
         let mut gateway = Gateway::new(
-            session_manager,
+            session_manager.clone(),
             UpstreamManager::empty(),
             session_id,
             result.workflows,
@@ -470,6 +513,7 @@ mod tests {
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
             sessions: RwLock::new(HashMap::new()),
+            session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
             db_pool: None,
             approval_secret: String::new(),
@@ -479,6 +523,7 @@ mod tests {
     fn test_state_with_secret(secret: &str) -> Arc<RemoteState> {
         Arc::new(RemoteState {
             sessions: RwLock::new(HashMap::new()),
+            session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
             db_pool: None,
             approval_secret: secret.into(),

@@ -227,15 +227,28 @@ async fn handle_streamable_http(
     // Only branch IDs (starting with "br_") create separate sessions.
     // Regular session IDs (echoed back from prior responses) are ignored for key computation
     // to maintain backward compatibility with clients that send the header on every request.
-    let branch_session_id = headers
+    let client_session_header = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
-        .filter(|s| s.starts_with("br_"))
         .map(|s| s.to_string());
 
-    let session_key = match &branch_session_id {
-        Some(bid) => format!("http_{}_{}", api_key_fingerprint, bid),
-        None => format!("http_{}", api_key_fingerprint),
+    // Detect branch session IDs: either "br_*" prefix (from subprocess env)
+    // or echoed-back full keys containing "_br_" (defense in depth).
+    let session_key = if let Some(ref hdr) = client_session_header {
+        if hdr.starts_with("br_") {
+            format!("http_{}_{}", api_key_fingerprint, hdr)
+        } else if hdr.contains("_br_") {
+            // Echoed-back full key — use as-is if it's scoped to this API key
+            if hdr.starts_with(&format!("http_{}", api_key_fingerprint)) {
+                hdr.clone()
+            } else {
+                format!("http_{}", api_key_fingerprint)
+            }
+        } else {
+            format!("http_{}", api_key_fingerprint)
+        }
+    } else {
+        format!("http_{}", api_key_fingerprint)
     };
 
     // Use shared SessionManager for this API key (parent + branches share state)

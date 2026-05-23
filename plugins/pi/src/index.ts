@@ -77,8 +77,11 @@ async function gwCall(
     if (!resp.ok) return null
 
     // Capture session ID from first response
-    const sid = resp.headers.get("mcp-session-id")
-    if (sid) sessionId = sid
+    // Only update sessionId from response if not a branch subprocess
+    if (!process.env.STATEWRIGHT_BRANCH_SESSION_ID) {
+      const sid = resp.headers.get("mcp-session-id")
+      if (sid) sessionId = sid
+    }
 
     const data = (await resp.json()) as JsonRpcResult
     if (data.error) return null
@@ -714,6 +717,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
       // Trigger the engine-level FORK transition to create branch sessions on the gateway.
       // Skip if fork is already active (agent may have called statewright_transition(FORK) first).
+      let gatewayBranches: string[] = []
       const forkAlreadyActive = stateCache.fork?.active || stateCache.context?._fork
       if (!forkAlreadyActive) {
         const forkEvent = stateCache.transitions.find((t) => {
@@ -723,23 +727,24 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           const forkResult = await gwCall("statewright_transition", {
             event: forkEvent,
             data: { rationale: "Dispatching parallel fork branches" },
-          })
-          if (forkResult) {
-            await refreshState()
-            swLog(`fork: engine transition fired (${forkEvent}), branches created on gateway`)
+          }) as { forked?: boolean; branches?: Record<string, unknown> } | null
+          if (forkResult?.forked && forkResult.branches) {
+            gatewayBranches = Object.keys(forkResult.branches)
+            swLog(`fork: engine transition fired (${forkEvent}), branches: ${gatewayBranches.join(", ")}`)
           }
+          await refreshState()
         }
       } else {
-        swLog("fork: engine fork already active, skipping transition")
+        // Fork already active — extract branch names from state
+        const forkCtx = stateCache.fork?.branches || stateCache.context?._fork?.branches
+        if (forkCtx && typeof forkCtx === "object") {
+          gatewayBranches = Object.keys(forkCtx as Record<string, unknown>)
+        }
+        swLog(`fork: already active, branches: ${gatewayBranches.join(", ")}`)
       }
 
       const defaultCwd = process.cwd()
       const MAX_CONCURRENCY = 4
-
-      // Use the gateway's branch names from _fork context, not the model's names.
-      // The model provides tasks, the workflow provides branch names.
-      const forkCtx = stateCache?.context?._fork as { branches?: Record<string, unknown> } | undefined
-      const gatewayBranches = forkCtx?.branches ? Object.keys(forkCtx.branches) : []
       const modelBranches = params.branches.slice(0, 8)
 
       // Map model tasks to gateway branch names (by order, with fallback to model names)

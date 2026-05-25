@@ -1,0 +1,21 @@
+{
+  "name": "statewright",
+  "interface": {
+    "displayName": "Statewright"
+  },
+  "plugins": [
+    {
+      "name": "statewright",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/statewright/statewright.git",
+        "path": "./plugins/codex",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

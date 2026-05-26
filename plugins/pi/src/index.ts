@@ -56,40 +56,56 @@ async function gwCall(
   const apiKey = getApiKey()
   if (!apiKey) return null
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${apiKey}`,
-  }
-  if (sessionId) headers["Mcp-Session-Id"] = sessionId
+  const MAX_RETRIES = 3
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    }
+    if (sessionId) headers["Mcp-Session-Id"] = sessionId
 
-  try {
-    const resp = await fetch(`${GW_URL}/mcp`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: rpcId++,
-        method: "tools/call",
-        params: { name: toolName, arguments: args },
-      }),
-      signal: AbortSignal.timeout(8000),
-    })
-    if (!resp.ok) return null
+    try {
+      const resp = await fetch(`${GW_URL}/mcp`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: rpcId++,
+          method: "tools/call",
+          params: { name: toolName, arguments: args },
+        }),
+        signal: AbortSignal.timeout(8000),
+      })
 
-    // Capture session ID from first response
-    // Only update sessionId from response if not a branch subprocess
-    if (!process.env.STATEWRIGHT_BRANCH_SESSION_ID) {
-      const sid = resp.headers.get("mcp-session-id")
-      if (sid) sessionId = sid
+      if (resp.ok) {
+        if (!process.env.STATEWRIGHT_BRANCH_SESSION_ID) {
+          const sid = resp.headers.get("mcp-session-id")
+          if (sid) sessionId = sid
+        }
+        const data = (await resp.json()) as JsonRpcResult
+        if (data.error) return null
+        const text = data.result?.content?.[0]?.text
+        return text ? JSON.parse(text) : data.result
+      }
+
+      // 5xx = server error, retry. 4xx = client error, don't retry.
+      if (resp.status < 500) {
+        swLog(`gwCall] ${toolName} returned ${resp.status}`)
+        return null
+      }
+      swLog(`gwCall] ${toolName} got ${resp.status}, will retry`)
+    } catch (err) {
+      // Network error — retry
+      swLog(`gwCall] ${toolName} network error: ${err instanceof Error ? err.message : String(err)}`)
     }
 
-    const data = (await resp.json()) as JsonRpcResult
-    if (data.error) return null
-    const text = data.result?.content?.[0]?.text
-    return text ? JSON.parse(text) : data.result
-  } catch {
-    return null
+    if (attempt < MAX_RETRIES) {
+      const delay = Math.min(1000 * 2 ** attempt, 8000)
+      swLog(`gwCall] ${toolName} failed, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`)
+      await new Promise((r) => setTimeout(r, delay))
+    }
   }
+  return null
 }
 
 async function gwInit(): Promise<boolean> {
@@ -184,7 +200,10 @@ let lastNudgeTime = 0
 
 async function refreshState(): Promise<StateCache | null> {
   const raw = await gwCall("statewright_get_state")
-  if (!raw?.state) return stateCache
+  if (!raw?.state) {
+    swLog(`refreshState] gwCall returned null — returning stale cache (state=${stateCache?.state})`)
+    return stateCache
+  }
   stateCache = {
     state: raw.state,
     isFinal: raw.is_final ?? false,
@@ -520,6 +539,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       stateCache = null
       lastSwitchedModel = null
       dormant = true
+      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -534,6 +554,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
       stateCache = null
       dormant = true
+      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -575,10 +596,21 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     workflowName: string,
     signal?: AbortSignal,
   ): Promise<BranchResult> {
+    // Build branch system prompt with the state machine context
+    const branchState = stateCache ? stateCache.allowedTools.map(normalizeToolName).join(", ") : "read, edit, write, bash"
     const systemPrompt = [
-      `You are a Statewright fork branch agent (branch: ${branch}).`,
-      `The workflow is already loaded. Work autonomously on your assigned task.`,
-      `Then complete the task. Work autonomously through all states until done.`,
+      `You are a parallel branch agent. Your branch: "${branch}".`,
+      ``,
+      `YOUR TASK:`,
+      `${task}`,
+      ``,
+      `RULES:`,
+      `1. The statewright workflow is already loaded. You start in the "implementing" state.`,
+      `2. Available tools: ${branchState}. Use them to complete the task.`,
+      `3. When your task is DONE, call: statewright_transition(event="DONE", data={rationale: "what you did"})`,
+      `4. This will advance you to the terminal state and signal completion.`,
+      `5. Do NOT call statewright_load_workflow or statewright_fork. Just implement and transition.`,
+      `6. Work autonomously. Do not stop or ask for confirmation.`,
     ].join("\n")
 
     const tmpDir = mkdtempSync(join(tmpdir(), "sw-fork-"))
@@ -643,6 +675,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
         proc.stderr.on("data", (data: Buffer) => {
           stderrBuf += data.toString()
+          if (stderrBuf.length > 8192) stderrBuf = stderrBuf.slice(-8192)
           if (process.env.STATEWRIGHT_DEBUG) {
             for (const line of data.toString().split("\n").filter((l: string) => l.trim())) {
               swLog(`[branch:${branch}] ${line}`)
@@ -747,13 +780,16 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const MAX_CONCURRENCY = 4
       const modelBranches = params.branches.slice(0, 8)
 
-      // Map model tasks to gateway branch names (by order, with fallback to model names)
+      // Map model tasks to gateway branch names (name match first, positional fallback)
       const branches = gatewayBranches.length > 0
-        ? gatewayBranches.map((gwName, i) => ({
-            branch: gwName,
-            task: modelBranches[i]?.task ?? `Complete the ${gwName} branch`,
-            cwd: modelBranches[i]?.cwd,
-          }))
+        ? gatewayBranches.map((gwName, i) => {
+            const nameMatch = modelBranches.find((b) => b.branch === gwName)
+            return {
+              branch: gwName,
+              task: nameMatch?.task ?? modelBranches[i]?.task ?? `Complete the ${gwName} branch`,
+              cwd: nameMatch?.cwd ?? modelBranches[i]?.cwd,
+            }
+          })
         : modelBranches  // no gateway fork context — use model's names as-is
 
       swLog(`fork: using branch names: ${branches.map(b => b.branch).join(", ")} (gateway: ${gatewayBranches.join(", ") || "none"})`)
@@ -769,7 +805,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           results[idx] = await runBranch(b.branch, b.task, b.cwd ?? defaultCwd, workflowName, signal)
 
           // Fire BRANCH_DONE on gateway using the GATEWAY's branch name (not model's)
-          await gwCall("statewright_transition", {
+          const branchDoneArgs = {
             event: `BRANCH_DONE:${b.branch}`,
             data: {
               rationale: `Branch ${b.branch} completed`,
@@ -777,13 +813,31 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
               exit_code: results[idx].exitCode,
               output_summary: results[idx].output.slice(0, 500),
             },
-          })
+          }
+          let doneResult = await gwCall("statewright_transition", branchDoneArgs)
+          if (!doneResult) {
+            // Retry once after a pause — lock contention may have caused timeout
+            swLog(`fork] BRANCH_DONE:${b.branch} failed, retrying after 2s`)
+            await new Promise((r) => setTimeout(r, 2000))
+            doneResult = await gwCall("statewright_transition", branchDoneArgs)
+          }
+          if (!doneResult) {
+            swLog(`fork] BRANCH_DONE:${b.branch} FAILED after retry — join may not fire`)
+            results[idx].exitCode = 2  // mark as degraded
+          } else {
+            swLog(`fork] BRANCH_DONE:${b.branch} accepted`)
+          }
         }
       })
       await Promise.all(workers)
 
-      // Refresh state (gateway join logic may have advanced)
-      await refreshState()
+      // Refresh state — retry until _fork is cleared (join completed)
+      for (let retry = 0; retry < 5; retry++) {
+        await refreshState()
+        if (stateCache && !stateCache.context?._fork && !stateCache.fork?.active) break
+        swLog(`fork] _fork still active after join (state=${stateCache?.state}), retrying refresh (${retry + 1}/5)`)
+        await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
+      }
       // Suppress watchdog for one cycle — the agent needs time to process fork results
       if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
 
@@ -963,8 +1017,13 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
     // --- Rambling watchdog ---
     // If the model generates text for too long without a tool call, abort + steer.
-    // sendUserMessage alone can't interrupt mid-stream — must abort first.
+    // Watchdog: always active, scaled by thinking level.
+    // States with thinking get 3x timeout (reasoning takes time).
+    // States without thinking get base timeout (should be acting, not deliberating).
+    // Always fires — even reasoning models can spiral.
     if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+    const thinkingMultiplier = (state.thinkingLevel && state.thinkingLevel !== "off") ? 3 : 1
+    const watchdogTimeout = RAMBLING_TIMEOUT_MS * thinkingMultiplier
     if (!state.isFinal) {
       const abortCtx = ctx  // capture for closure
       ramblingWatchdog = setTimeout(() => {
@@ -972,18 +1031,18 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         if (!stateCache || stateCache.isFinal || dormant) return
         const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
         const transitions = stateCache.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
-        swLog(`watchdog] firing after ${RAMBLING_TIMEOUT_MS / 1000}s — aborting stream`)
+        swLog(`watchdog] firing after ${watchdogTimeout / 1000}s — aborting stream`)
         try {
           abortCtx.abort()
           pi.sendUserMessage(
-            `You were generating text for ${RAMBLING_TIMEOUT_MS / 1000}s without calling a tool. ` +
+            `You were generating text for ${watchdogTimeout / 1000}s without calling a tool. ` +
             `Execute the next action immediately using one of: ${tools}. ` +
             `Or transition with: ${transitions}. Do not explain, just act.`,
             { deliverAs: "steer" },
           )
           pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
         } catch { /* ctx may be stale after session reset or rate limit */ }
-      }, RAMBLING_TIMEOUT_MS)
+      }, watchdogTimeout)
     }
 
     const modelLabel = formatModelLabel(state.model, state.defaultModel)

@@ -41,7 +41,12 @@ pub struct GatewaySession {
 impl GatewaySession {
     pub fn new(instance_id: String, definition: MachineDefinition) -> Self {
         let initial = definition.initial.clone();
-        let context = definition.context.clone();
+        // Ensure context is always an object, never null — downstream code uses as_object_mut()
+        let context = if definition.context.is_object() {
+            definition.context.clone()
+        } else {
+            serde_json::json!({})
+        };
         Self {
             instance_id,
             definition,
@@ -122,10 +127,15 @@ impl SessionManager {
 
     pub fn create(&self, instance_id: String, definition: MachineDefinition) -> GatewaySession {
         let session = GatewaySession::new(instance_id.clone(), definition);
-        self.sessions
-            .write()
-            .unwrap()
-            .insert(instance_id, session.clone());
+        let mut sessions = self.sessions.write().unwrap();
+        // Don't overwrite a session with an active fork — the fork handler stored _fork
+        // in the context and overwriting would lose it (race between load_workflow and fork)
+        if let Some(existing) = sessions.get(&instance_id) {
+            if existing.context.get("_fork").is_some() {
+                return existing.clone();
+            }
+        }
+        sessions.insert(instance_id, session.clone());
         session
     }
 

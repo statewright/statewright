@@ -254,10 +254,11 @@ async fn handle_streamable_http(
     // Use shared SessionManager for this API key (parent + branches share state)
     let session_manager = state.get_session_manager(&api_key_fingerprint).await;
 
-    let mut sessions = state.sessions.write().await;
+    // Check if session exists WITHOUT holding the write lock
+    let needs_create = !state.sessions.read().await.contains_key(&session_key);
 
-    // Create session if it doesn't exist
-    if !sessions.contains_key(&session_key) {
+    // If we need a new session, do the expensive fetch_workflows OUTSIDE any lock
+    let new_session = if needs_create {
         let result = match fetch_workflows(&state.pb_url, &api_key).await {
             Ok(r) => r,
             Err(e) => {
@@ -296,9 +297,21 @@ async fn handle_streamable_http(
         );
         gateway.set_api_key_fingerprint(&api_key);
 
-        let (tx, _rx) = mpsc::channel::<String>(1); // dummy channel, not used for HTTP
-        sessions.insert(session_key.clone(), RemoteSession { gateway, tx });
-        tracing::info!(session = session_key, "HTTP session created");
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        Some(RemoteSession { gateway, tx })
+    } else {
+        None
+    };
+
+    // Now acquire write lock only for the brief insert + handle_message
+    let mut sessions = state.sessions.write().await;
+
+    if let Some(rs) = new_session {
+        // Double-check: another request may have created it while we were fetching
+        if !sessions.contains_key(&session_key) {
+            sessions.insert(session_key.clone(), rs);
+            tracing::info!(session = session_key, "HTTP session created");
+        }
     }
 
     let session = sessions.get_mut(&session_key).unwrap();

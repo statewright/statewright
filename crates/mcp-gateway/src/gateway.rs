@@ -588,6 +588,13 @@ impl Gateway {
                 // Handle plugin-triggered branch completion (BRANCH_DONE:name format)
                 if event.starts_with("BRANCH_DONE:") {
                     let branch_name = &event[12..]; // after "BRANCH_DONE:"
+                    tracing::info!(
+                        session_id = %self.session_id,
+                        branch = branch_name,
+                        has_fork = session.context.get("_fork").is_some(),
+                        session_state = %session.current_state,
+                        "BRANCH_DONE received"
+                    );
                     let fork_ctx = session.context.get("_fork").cloned();
 
                     if let Some(ref fork) = fork_ctx {
@@ -607,14 +614,6 @@ impl Gateway {
 
                         // Check join condition
                         let join = fork["join"].as_str().unwrap_or("all");
-                        let branches = fork["branches"].as_object().unwrap();
-                        let all_completed = branches.values().all(|b| {
-                            let status = new_fork["branches"][b["session_key"].as_str().unwrap_or("")].as_str();
-                            // Check against updated fork, not original
-                            true // will check below properly
-                        });
-
-                        // Recount from new_fork
                         let new_branches = new_fork["branches"].as_object().unwrap();
                         let completed_count = new_branches.values()
                             .filter(|b| b["status"].as_str() == Some("completed"))
@@ -874,7 +873,11 @@ impl Gateway {
                             fork_ctx["current_branch"] = json!(first_branch);
 
                             // Update parent context with _fork tracking
-                            let mut parent_ctx = session.context.clone();
+                            let mut parent_ctx = if session.context.is_object() {
+                                session.context.clone()
+                            } else {
+                                json!({})  // ensure context is an object, not null
+                            };
                             if event_data.is_object() && event_data.as_object().map_or(false, |o| !o.is_empty()) {
                                 parent_ctx = statewright_engine::apply_context_patch(&parent_ctx, &event_data);
                             }
@@ -958,27 +961,41 @@ impl Gateway {
                     let branch_key = fork["branches"][current_branch]["session_key"]
                         .as_str().unwrap_or("");
 
+                    let branches_status: serde_json::Value = fork["branches"].as_object()
+                        .map(|bs| {
+                            bs.iter().map(|(name, b)| {
+                                (name.clone(), json!({
+                                    "status": b["status"],
+                                    "initial": b["initial"],
+                                    "terminal": b["terminal"],
+                                }))
+                            }).collect::<serde_json::Map<String, serde_json::Value>>().into()
+                        })
+                        .unwrap_or(json!({}));
+
+                    let fork_info = json!({
+                        "active": true,
+                        "current_branch": current_branch,
+                        "branches": branches_status,
+                        "join": fork["join"],
+                    });
+
                     if let Some(branch_session) = self.session_manager.get(branch_key) {
                         let mut state = custom_tools::handle_get_state(&branch_session);
-                        // Add fork status info
-                        let branches_status: serde_json::Value = fork["branches"].as_object()
-                            .map(|bs| {
-                                bs.iter().map(|(name, b)| {
-                                    (name.clone(), json!({
-                                        "status": b["status"],
-                                        "initial": b["initial"],
-                                        "terminal": b["terminal"],
-                                    }))
-                                }).collect::<serde_json::Map<String, serde_json::Value>>().into()
-                            })
-                            .unwrap_or(json!({}));
-
-                        state["fork"] = json!({
-                            "active": true,
-                            "current_branch": current_branch,
-                            "branches": branches_status,
-                            "join": fork["join"],
-                        });
+                        state["fork"] = fork_info;
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::text(
+                                serde_json::to_string_pretty(&state).unwrap(),
+                            ))
+                            .unwrap(),
+                        );
+                    } else {
+                        // Branch session not found — return parent state WITH fork info
+                        // so the plugin knows a fork is active but degraded
+                        tracing::warn!(branch = current_branch, key = branch_key, "Fork branch session not found");
+                        let mut state = custom_tools::handle_get_state(&session);
+                        state["fork"] = fork_info;
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -1183,6 +1200,16 @@ impl Gateway {
                     );
                 }
 
+                // Guard: don't overwrite a session with an active fork
+                if let Some(existing) = self.session_manager.get(&self.session_id) {
+                    if existing.context.get("_fork").is_some() {
+                        return JsonRpcResponse::success(id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                "Cannot load workflow while a fork is active. Complete or deactivate the fork first."
+                            )).unwrap());
+                    }
+                }
+
                 // Preserve plan_limit across workflow swaps
                 let old_limit = self.session_manager.get(&self.session_id)
                     .and_then(|s| s.plan_limit);
@@ -1277,6 +1304,18 @@ impl Gateway {
                 // Record run end before deactivating
                 if let Some(session) = self.session_manager.get(&self.session_id) {
                     self.record_run_end(&session.current_state, "stopped");
+                    // Clear _fork context so the session isn't permanently stuck
+                    if session.context.get("_fork").is_some() {
+                        let mut ctx = session.context.clone();
+                        if let Some(obj) = ctx.as_object_mut() {
+                            obj.remove("_fork");
+                        }
+                        self.session_manager.update_state(
+                            &self.session_id,
+                            session.current_state.clone(),
+                            ctx,
+                        );
+                    }
                 }
                 self.active_workflow = None;
                 let result = json!({ "deactivated": true });

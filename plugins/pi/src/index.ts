@@ -306,7 +306,7 @@ function formatContext(s: StateCache): string {
     `ONLY these tools work right now: ${toolList}. Any other tool will be rejected. Do not invent tool names.`,
     `CRITICAL: Use ONLY the native tool calling mechanism. NEVER output JSON like {"name":"tool"} or {"type":"function"} as text. It does not work. If you write tool calls as text they will be rejected and you will waste a turn. Just call the tool directly.`,
     `Tool signatures: read(path: "file.py") -> file contents, ls(path: ".") -> directory listing, grep(pattern: "search", path?: "dir") -> matching lines, find(pattern: "**/*.py") -> matching file paths, edit(path: "file.py", edits: [{oldText: "old", newText: "new"}]) -> applies find-and-replace, write(path: "file.py", content: "full content") -> writes entire file, bash(command: "shell cmd") -> command output. To list files in the current directory, call ls(path: ".").`,
-    `To advance to the next phase, call: statewright_transition(event='EVENT_NAME', data={rationale: 'why'}).`,
+    `MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT_NAME', data={"rationale": "specific reason"}).`,
     `Available transitions: ${transitionDescs}.`,
   ]
   if (s.model) lines.push(`Model for this phase: ${s.model}.`)
@@ -484,6 +484,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       data: Type.Optional(Type.Object({}, { additionalProperties: true })),
     }),
     async execute(_id, params: { event: string; data?: Record<string, any> }) {
+      // Flag missing rationale so the model learns to include it
+      if (!params.data?.rationale) {
+        return {
+          content: [{ type: "text", text: `Transition rejected: you MUST include data.rationale explaining WHY you are transitioning. Call again with: statewright_transition(event="${params.event}", data={"rationale": "your reason here"})` }],
+          isError: true,
+        }
+      }
+
       const result = await gwCall("statewright_transition", {
         event: params.event,
         data: params.data ?? {},

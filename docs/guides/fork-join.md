@@ -1,6 +1,6 @@
-# Fork/Join — Parallel Branch Execution
+# Fork/Join
 
-Split work into parallel branches, join when all complete.
+Your agent needs to lint, test, and update docs. Sequentially, that's three round trips through the state machine. Fork runs them simultaneously — one subprocess per branch, join when all complete.
 
 ## Workflow Definition
 
@@ -46,7 +46,7 @@ Split work into parallel branches, join when all complete.
 
 ### Sequential (Claude Code, Codex, OMX)
 
-The agent calls `statewright_transition(event="FORK")`. The gateway creates branch sessions. The agent works through branches one at a time using `statewright_load_workflow(branch="lint")`. After each branch completes, the agent fires `BRANCH_DONE:lint`. After all branches complete, the gateway auto-joins and advances to `on_complete`.
+The agent calls `statewright_transition(event="FORK")`. The gateway creates branch sessions. The agent works through branches one at a time using `statewright_load_workflow(name="my-workflow", branch="lint")`. After each branch completes, the agent fires `BRANCH_DONE:lint`. After all branches complete, the gateway auto-joins and advances to `on_complete`.
 
 ### Parallel (Pi)
 
@@ -78,12 +78,12 @@ The Pi plugin has a `statewright_fork` tool that spawns parallel sub-agent proce
 The event must include the branch name after a colon:
 
 ```
-statewright_transition(event="BRANCH_DONE:lint", data={rationale: "lint passed"})
+statewright_transition(event="BRANCH_DONE:lint", data={"rationale": "lint passed"})
 ```
 
 The gateway matches the branch name against `_fork.branches` and marks it complete.
 
-## Per-Branch Model Routing (Pi)
+## Branch Model Inheritance (Pi)
 
 Branches inherit the `implementing` state's model and tool restrictions. In Pi, each branch subprocess gets the state's model via `setModel()` and tools via `setActiveTools()`.
 
@@ -95,6 +95,11 @@ Branches inherit the `implementing` state's model and tool restrictions. In Pi, 
 }
 ```
 
-## Context
+## Limitations
 
-The `_fork` context is stored in the parent session during fork execution. It tracks branch status and join progress. The context is automatically cleaned up after join or deactivation.
+- Max 8 branches per fork (Pi plugin limit)
+- Max 4 concurrent subprocesses (Pi serializes the rest)
+- `join: "any"` completes on the first branch — remaining branches continue but their results are ignored
+- Branch failures mark the branch as `"failed"` in the join tally. Under `join: "all"`, any failed branch triggers `on_fail` instead of `on_complete`
+- No branch timeout — a hanging branch blocks the join indefinitely. Use workflow-level `max_iterations` to bound branch execution
+- Branch sessions are in-memory only — a gateway restart during fork execution loses all branch state

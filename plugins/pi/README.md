@@ -1,11 +1,11 @@
 # statewright-pi
 
-State machine guardrails for [Pi coding agent](https://pi.dev). Per-state model routing, thinking level control, native tool restrictions, parallel fork/join, and a corrective layer for local models.
+State machine guardrails for [Pi coding agent](https://pi.dev). Enforces which tools the model can use in each workflow phase at the API layer — the model can't see restricted tools, not just told not to use them. Routes models per state, controls reasoning effort, dispatches parallel fork branches, and includes a corrective layer for local models that struggle with structured tool calling.
 
 ## Install
 
 ```bash
-pi install /path/to/statewright/plugins/pi
+cp -r plugins/pi ~/.pi/agent/extensions/statewright
 ```
 
 Or add to `~/.pi/agent/settings.json`:
@@ -59,11 +59,11 @@ Tools not in `allowed_tools` are removed from the schema — the model can't see
 
 ## Local model corrective layer
 
-**Tool execution recovery.** Parses JSON tool calls from text output, executes via shell. Normalizes edit parameter variants (`{file, old, new}` etc.) to Pi's schema.
+When local models dump tool calls as JSON text instead of structured calls, the plugin parses the JSON and executes the intended tool directly — the model never needs to retry. Edit parameter variants (`{file, old, new}`, `{path, old_text, new_text}`, etc.) are normalized to Pi's schema automatically.
 
-**Bash discernment.** Read-only commands pass through. Writes, destructive ops, and scripting interpreters blocked when Edit/Write aren't in allowed_tools.
+Bash commands are classified: read-only commands (`ls`, `cat`, `pytest`) pass through even in restricted states, but writes, destructive ops, and scripting interpreters are blocked when Edit/Write aren't in allowed_tools.
 
-**Rambling watchdog.** Aborts + steers models that generate text without tool calls. Scaled by thinking level.
+If the model generates text for 30 seconds without calling a tool, the plugin aborts the stream, injects a steering message with available tools and transitions, and triggers a follow-up turn. States with thinking levels get 90 seconds instead.
 
 ## Development
 

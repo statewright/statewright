@@ -1,6 +1,6 @@
-# Pi Plugin — Advanced Features
+# Pi Plugin
 
-The statewright Pi plugin extends Pi's extension API with per-state model routing, thinking level control, native tool restrictions, and parallel fork/join dispatch.
+AI agents ignore tool restrictions given via prompts. The Pi plugin enforces state machine constraints at the API layer — the model cannot see or call tools that aren't allowed in the current workflow phase. It also routes models per state, controls reasoning effort, and dispatches parallel fork branches.
 
 ## Installation
 
@@ -140,7 +140,7 @@ If the model generates text for 30 seconds without calling a tool, the plugin ab
 Set `STATEWRIGHT_DEBUG=1` to enable mauve-colored diagnostic output:
 
 ```bash
-STATEWRIGHT_DEBUG=1 spi --cwd /path/to/project
+STATEWRIGHT_DEBUG=1 pi
 ```
 
 Shows model switches, tool set changes, fork branch connections, BRANCH_DONE events.

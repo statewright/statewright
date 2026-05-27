@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>State Machines for AI Agents</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/night.css" id="theme">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+  <style>
+    /* Tight code blocks for slides */
+    .reveal { font-size: 30px; }
+    .reveal p { font-size: 0.85em; line-height: 1.6; margin-bottom: 0.6em; }
+    .reveal li { font-size: 0.85em; line-height: 1.5; margin-bottom: 0.5em; }
+    .reveal pre { width: 100%; font-size: 0.52em; margin: 0.8em 0; }
+    .reveal pre code { max-height: 500px; padding: 16px 20px; line-height: 1.5; }
+    .reveal table { font-size: 0.78em; margin: 0.8em 0; }
+    .reveal table td, .reveal table th { padding: 10px 18px; }
+    .reveal blockquote { font-size: 0.95em; width: 90%; margin: 0.8em auto; padding: 0.4em 1em; }
+    .reveal blockquote p { font-size: 1em; }
+    .reveal .slides section { text-align: left; }
+    .reveal .slides section { display: flex !important; flex-direction: column; justify-content: flex-start; padding: 30px 40px 20px; }
+    .reveal h1 { text-align: center; text-transform: none; font-size: 1.4em; margin-bottom: 0.6em; }
+    .reveal h2 { text-align: left; text-transform: none; font-size: 0.9em; font-weight: 600; color: #7aa2f7; margin-bottom: 0.8em; letter-spacing: 0.02em; }
+    .reveal h3 { text-transform: none; font-size: 0.8em; color: #7aa2f7; margin-bottom: 0.6em; }
+    .reveal strong { color: #e0af68; }
+    .reveal .slide-number { font-size: 14px; }
+    /* Print / PDF — light mode */
+    @media print {
+      .reveal, .reveal h1, .reveal h2, .reveal h3,
+      .reveal p, .reveal li, .reveal td, .reveal th,
+      .reveal blockquote { color: #222 !important; }
+      .reveal .slides section { background: #fff !important; }
+      .reveal pre { background: #f5f5f5 !important; }
+      .reveal pre code { color: #222 !important; }
+      .reveal table th { background: #e0e0e0 !important; color: #222 !important; }
+      .reveal table td { border-color: #ccc !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="reveal">
+    <div class="slides">
+      <section data-markdown="ai-meetup-2026-05-28.md"
+               data-separator="^---$"
+               data-separator-vertical="^--$"
+               data-separator-notes="^Note:">
+      </section>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/markdown/markdown.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+  <script>
+    Reveal.initialize({
+      hash: true,
+      slideNumber: 'c/t',
+      width: 960,
+      height: 700,
+      margin: 0.08,
+      plugins: [RevealMarkdown, RevealHighlight, RevealNotes],
+      // PDF export: append ?print-pdf to URL, then Ctrl+P
+      pdfSeparateFragments: false,
+    });
+  </script>
+</body>
+</html>

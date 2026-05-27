@@ -587,6 +587,42 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     },
   })
 
+  pi.registerTool({
+    name: "statewright_search_docs",
+    label: "Search Docs",
+    description: "Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query (e.g., fork join, model routing, allowed_tools)" }),
+    }),
+    async execute(_id, params: { query: string }) {
+      try {
+        const resp = await fetch("https://docs.statewright.ai/search-index.json", {
+          signal: AbortSignal.timeout(5000),
+        })
+        if (!resp.ok) return { content: [{ type: "text", text: "Docs not available" }] }
+        const index = await resp.json() as Array<{ url: string; title: string; section: string; content: string }>
+        const terms = params.query.toLowerCase().split(/\s+/)
+        const scored = index
+          .map((chunk) => {
+            const t = chunk.title.toLowerCase()
+            const s = chunk.section.toLowerCase()
+            const c = chunk.content.toLowerCase()
+            const titleHits = terms.filter((term) => t.includes(term) || s.includes(term)).length
+            const contentHits = terms.filter((term) => c.includes(term)).length
+            return { ...chunk, score: titleHits * 3 + contentHits }
+          })
+          .filter((c) => c.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 5)
+          .map((c) => ({ url: c.url, title: c.title, section: c.section, snippet: c.content.slice(0, 500) }))
+        if (scored.length === 0) return { content: [{ type: "text", text: "No results found." }] }
+        return { content: [{ type: "text", text: JSON.stringify(scored, null, 2) }] }
+      } catch {
+        return { content: [{ type: "text", text: "Docs search failed." }] }
+      }
+    },
+  })
+
   // --- Fork/Join: parallel sub-agent dispatch ---
 
   function getPiInvocation(args: string[]): { command: string; args: string[] } {

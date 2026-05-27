@@ -154,7 +154,7 @@ while IFS= read -r line; do
       echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Missing required parameter: query"}]},"id":'"$ID"'}'
     else
       # Fetch search index and do keyword matching
-      INDEX=$(curl -sf --max-time 5 "$PB_URL/docs/search-index.json" 2>/dev/null)
+      INDEX=$(curl -sf --max-time 5 "https://docs.statewright.ai/search-index.json" 2>/dev/null)
       if [ -n "$INDEX" ]; then
         RESULTS=$(echo "$INDEX" | jq --arg q "$QUERY" '
           ($q | ascii_downcase | split(" ")) as $terms |

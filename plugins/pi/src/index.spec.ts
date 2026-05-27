@@ -278,7 +278,7 @@ describe("statewright Pi extension", () => {
 
       await statewrightExtension(asPi(pi))
 
-      expect(pi.registerTool).toHaveBeenCalledTimes(8)
+      expect(pi.registerTool).toHaveBeenCalledTimes(9)
       const names = pi._tools.map((t) => t.name)
       expect(names).toContain("statewright_get_state")
       expect(names).toContain("statewright_transition")

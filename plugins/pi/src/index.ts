@@ -84,8 +84,11 @@ async function gwCall(
         }
         const data = (await resp.json()) as JsonRpcResult
         if (data.error) return null
+        // Check MCP tool result isError flag (gateway returns errors as successful JSON-RPC with isError: true)
+        if ((data.result as Record<string, unknown>)?.isError) return null
         const text = data.result?.content?.[0]?.text
-        return text ? JSON.parse(text) : data.result
+        if (!text) return data.result
+        try { return JSON.parse(text) } catch { return { _raw: text } }
       }
 
       // 5xx = server error, retry. 4xx = client error, don't retry.
@@ -193,6 +196,7 @@ interface StateCache {
   model: string | null
   defaultModel: string | null
   thinkingLevel: string | null
+  runId: string | null
 }
 
 let stateCache: StateCache | null = null
@@ -219,6 +223,7 @@ async function refreshState(): Promise<StateCache | null> {
     model: raw.model ?? null,
     defaultModel: raw.default_model ?? null,
     thinkingLevel: raw.thinking_level ?? null,
+    runId: (raw.run_id as string) ?? null,
   }
   return stateCache
 }
@@ -406,6 +411,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let originalTools: string[] | null = null  // saved before first tool restriction
   let lastThinkingLevel: string | null = null
   let dormant = false  // true after deactivate — suppresses enforcement until next load
+  let currentRunId: string | null = null  // tracks active workflow run for log capture
   let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
   const RAMBLING_TIMEOUT_MS = 30000  // 30s without a tool call = rambling
 
@@ -526,10 +532,12 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       resume: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params: { name: string; resume?: boolean }) {
-      const result = await gwCall("statewright_load_workflow", params)
+      const result = await gwCall("statewright_load_workflow", params) as { run_id?: string } & Record<string, unknown> | null
       if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
 
       dormant = false
+      currentRunId = (result as { run_id?: string }).run_id ?? null
+      logSequence = 0
       await refreshState()
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
@@ -1139,10 +1147,52 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
   })
 
+  // --- Log capture: submit tool calls to PocketBase workflow_logs ---
+  let logSequence = 0
+  const PB_URL = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
+
+  async function captureToolLog(toolName: string, toolInput: unknown, toolOutput: unknown) {
+    if (!stateCache || dormant || !getApiKey()) return
+    if (toolName.startsWith("statewright_")) return  // skip control tools
+    // Only capture if a run is active
+    const runId = currentRunId ?? stateCache.runId
+    if (!runId) return
+
+    logSequence++
+    const payload = {
+      phase: stateCache.state,
+      tool_name: toolName,
+      tool_input: toolInput ?? {},
+      tool_output: typeof toolOutput === "string" ? toolOutput.slice(0, 102400) : JSON.stringify(toolOutput ?? "").slice(0, 102400),
+      sequence: logSequence,
+      duration_ms: 0,
+      run_id: runId,
+    }
+    try {
+      await fetch(`${PB_URL}/api/collections/workflow_logs/records`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${getApiKey()}`,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch { /* async, best-effort */ }
+  }
+
   // --- Post-tool: interrupt detection + state tracking ---
 
   pi.on("tool_result", async (event, ctx) => {
     if (dormant) return
+
+    // Capture tool log (async, non-blocking)
+    const toolOutput = (event.content ?? [])
+      .filter((c: { type: string; text?: string }) => c.type === "text")
+      .map((c: { text?: string }) => c.text ?? "")
+      .join("\n")
+    captureToolLog(event.toolName, event.input, toolOutput).catch(() => {})
+
     if (event.toolName.startsWith("statewright_")) {
       // Refresh state after statewright tool calls
       await refreshState()

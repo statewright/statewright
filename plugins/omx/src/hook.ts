@@ -479,6 +479,44 @@ export async function handlePostTool(
 ): Promise<HookOutput | null> {
   const toolName = input.tool_name ?? ""
 
+  // --- Log capture: submit tool call to PocketBase workflow_logs ---
+  try {
+    if (
+      isActive(opts.sessionDir) &&
+      !toolName.includes("statewright_") &&
+      opts.apiKey
+    ) {
+      const rawCache = readCache(opts.sessionDir)
+      const runIdFile = join(opts.sessionDir, ".run_id")
+      const seqFile = join(opts.sessionDir, ".log_seq")
+      const runId = existsSync(runIdFile) ? readFileSync(runIdFile, "utf8").trim() : ""
+      if (runId && rawCache) {
+        const seq = existsSync(seqFile) ? parseInt(readFileSync(seqFile, "utf8").trim(), 10) + 1 : 1
+        writeFileSync(seqFile, String(seq))
+        const phase = rawCache.state ?? "unknown"
+        const toolOutput = typeof input.tool_result === "string"
+          ? input.tool_result.slice(0, 102400)
+          : JSON.stringify(input.tool_result ?? "").slice(0, 102400)
+        const pbUrl = process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai"
+        // Fire and forget — don't block the hook response
+        fetch(`${pbUrl}/api/collections/workflow_logs/records`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${opts.apiKey}` },
+          body: JSON.stringify({
+            phase,
+            tool_name: toolName,
+            tool_input: input.tool_input ?? {},
+            tool_output: toolOutput,
+            sequence: seq,
+            duration_ms: 0,
+            run_id: runId,
+          }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {})
+      }
+    }
+  } catch { /* log capture is best-effort */ }
+
   // Classify statewright tool action
   let swAction = ""
   if (/statewright_start|statewright_load_workflow/.test(toolName))

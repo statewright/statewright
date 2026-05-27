@@ -601,6 +601,83 @@ describe("handlePostTool", () => {
     expect(result!.hookSpecificOutput!.additionalContext).toContain("3 branches")
   })
 
+  it("captures tool logs to PocketBase workflow_logs", async () => {
+    // Active workflow with run_id → non-statewright tool calls should POST to PB
+    ;(existsSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && (p.includes(".active") || p.includes(".state_cache") || p.includes(".run_id"))) return true
+      return false
+    })
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(MOCK_GW_STATE)
+      if (typeof p === "string" && p.includes(".run_id")) return "run_abc123"
+      throw new Error("ENOENT")
+    })
+
+    const input: HookInput = {
+      tool_name: "Edit",
+      tool_input: { file_path: "/project/src/main.ts" },
+      tool_result: "File edited successfully",
+    }
+
+    // Set up fetch to capture the log POST alongside normal gateway calls
+    const logPosts: { url: string; body: Record<string, unknown> }[] = []
+    fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url.toString()
+      const body = init?.body ? JSON.parse(init.body as string) : null
+      if (urlStr.includes("workflow_logs")) {
+        logPosts.push({ url: urlStr, body })
+        return { ok: true, headers: new Headers(), json: async () => ({}) } as Response
+      }
+      // Gateway calls for state refresh
+      return {
+        ok: true,
+        headers: new Headers({ "mcp-session-id": "test-session" }),
+        json: async () => ({
+          jsonrpc: "2.0", id: body?.id ?? 1,
+          result: { content: [{ type: "text", text: JSON.stringify(MOCK_GW_STATE) }] },
+        }),
+      } as Response
+    })
+    globalThis.fetch = fetchMock
+
+    await handlePostTool(input, makeOpts())
+
+    // Verify log POST was fired
+    expect(logPosts.length).toBe(1)
+    expect(logPosts[0].url).toContain("workflow_logs")
+    expect(logPosts[0].body.tool_name).toBe("Edit")
+    expect(logPosts[0].body.phase).toBe("implementing")
+    expect(logPosts[0].body.run_id).toBe("run_abc123")
+    expect(logPosts[0].body.sequence).toBe(1)
+    // Verify sequence file was written
+    expect(writeFileSync).toHaveBeenCalledWith(expect.stringContaining(".log_seq"), "1")
+  })
+
+  it("skips log capture for statewright_ tools", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && (p.includes(".active") || p.includes(".state_cache") || p.includes(".run_id"))) return true
+      return false
+    })
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(MOCK_GW_STATE)
+      if (typeof p === "string" && p.includes(".run_id")) return "run_abc123"
+      throw new Error("ENOENT")
+    })
+    setupGateway()
+
+    const input: HookInput = {
+      tool_name: "mcp__plugin_statewright_statewright__statewright_get_state",
+    }
+
+    await handlePostTool(input, makeOpts())
+
+    // No POST to workflow_logs for statewright tools
+    const logCalls = fetchMock.mock.calls.filter(
+      ([url]: [string]) => typeof url === "string" && url.includes("workflow_logs")
+    )
+    expect(logCalls.length).toBe(0)
+  })
+
   it("detects interrupt from file edit", async () => {
     ;(existsSync as Mock).mockImplementation((p: string) =>
       p.includes(".active") || p.includes(".state_cache") ? true : false

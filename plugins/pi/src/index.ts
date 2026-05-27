@@ -413,7 +413,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let dormant = false  // true after deactivate — suppresses enforcement until next load
   let currentRunId: string | null = null  // tracks active workflow run for log capture
   let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
-  const RAMBLING_TIMEOUT_MS = 30000  // 30s without a tool call = rambling
+  const RAMBLING_TIMEOUT_MS = 45000  // 45s without a tool call = rambling
 
   const apiKey = getApiKey()
   if (!apiKey) {

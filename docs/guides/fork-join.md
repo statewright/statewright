@@ -103,3 +103,23 @@ Branches inherit the `implementing` state's model and tool restrictions. In Pi, 
 - Branch failures mark the branch as `"failed"` in the join tally. Under `join: "all"`, any failed branch triggers `on_fail` instead of `on_complete`
 - No branch timeout — a hanging branch blocks the join indefinitely. Use workflow-level `max_iterations` to bound branch execution
 - Branch sessions are in-memory only — a gateway restart during fork execution loses all branch state
+
+## Tool Enforcement by Plugin
+
+### Pi (full per-branch enforcement)
+
+Each fork branch runs as a separate Pi subprocess with its own MCP session (`br_` prefix). The gateway routes each branch to an isolated session with its own state, `allowed_tools`, and context. Tool restrictions are structurally enforced per-branch.
+
+### Claude Code (sequential: per-branch; parallel: cooperative)
+
+**Sequential forks** have full per-branch structural enforcement. The hook caches the active branch's state (via `get_state`), and enforces that branch's `allowed_tools` for all tool calls until the branch completes.
+
+**Parallel forks** share a single MCP session and hook context. All branch workers read the same cached state, so per-branch `allowed_tools` cannot be structurally enforced independently. Instead:
+
+- The hook enforces whichever branch state was last cached
+- Per-branch tool scoping is cooperative: the `fork-branch-worker` agent's prompt restricts which tools it uses
+- The agent definition's `tools` frontmatter controls structural tool availability
+
+This means during parallel fork execution, a branch worker could theoretically use a tool allowed by another branch but not by its own. For workflows where branches have different tool restrictions and this matters, use sequential execution or the Pi plugin.
+
+A design spec for per-branch MCP session isolation in Claude Code is at `docs/specs/fork-branch-sessions.md`.

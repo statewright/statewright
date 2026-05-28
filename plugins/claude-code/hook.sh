@@ -216,6 +216,13 @@ case "$ENDPOINT" in
     fi
 
     STATE_JSON=$(cat "$CACHE_FILE")
+
+    # Fork enforcement: during an active fork, the cached state is already branch-specific
+    # (get_state returns the current branch's state for sequential execution). For parallel
+    # forks, multiple workers share the cache — use the cached allowed_tools as-is since
+    # it reflects the most recently fetched branch state. Per-branch structural enforcement
+    # for parallel forks requires per-branch MCP sessions (see docs/specs/fork-branch-sessions.md).
+    # Until then, parallel branch scoping is cooperative (prompt-based).
     ALLOWED=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | .[]' 2>/dev/null || true)
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // "unknown"' 2>/dev/null || true)
     TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event) | join(", ")' 2>/dev/null || true)

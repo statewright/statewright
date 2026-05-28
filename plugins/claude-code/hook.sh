@@ -234,7 +234,7 @@ case "$ENDPOINT" in
     # (get_state returns the current branch's state for sequential execution). For parallel
     # forks, multiple workers share the cache — use the cached allowed_tools as-is since
     # it reflects the most recently fetched branch state. Per-branch structural enforcement
-    # for parallel forks requires per-branch MCP sessions (see docs/specs/fork-branch-sessions.md).
+    # for parallel forks requires per-branch MCP sessions.
     # Until then, parallel branch scoping is cooperative (prompt-based).
     ALLOWED=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | .[]' 2>/dev/null || true)
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // "unknown"' 2>/dev/null || true)

@@ -205,9 +205,22 @@ case "$ENDPOINT" in
 
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
+    # Block Agent calls with worktree isolation during active forks — branches must edit in-place
+    if [ "$TOOL_NAME" = "Agent" ]; then
+      AGENT_ISOLATION=$(echo "$HOOK_INPUT" | jq -r '.tool_input.isolation // empty' 2>/dev/null || true)
+      if [ "$AGENT_ISOLATION" = "worktree" ] && [ -f "$CACHE_FILE" ]; then
+        HAS_FORK=$(cat "$CACHE_FILE" | jq -r '.context._fork // .fork.active // empty' 2>/dev/null || true)
+        if [ -n "$HAS_FORK" ]; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"BLOCKED: Do not use isolation: worktree for fork branches. Fork-branch-workers must edit files in-place in the working directory. Remove the isolation parameter and retry."}}'
+          exit 0
+        fi
+      fi
+      exit 0
+    fi
+
     # Always allow system/internal/MCP tools
     case "$TOOL_NAME" in
-      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)

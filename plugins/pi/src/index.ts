@@ -540,6 +540,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       logSequence = 0
       await refreshState()
 
+      // If gateway didn't create a run (self-hosted, no metering), create via PB REST
+      if (!currentRunId) {
+        await ensureRunRecord(params.name)
+      }
+
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -1183,9 +1188,86 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
   })
 
-  // --- Log capture: submit tool calls to PocketBase workflow_logs ---
+  // --- Run + log capture: submit to PocketBase ---
   let logSequence = 0
-  const PB_URL = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
+  let runCreatedLocally = false  // true = self-hosted (plugin created run); false = gateway metering
+  const PB_URL = process.env.STATEWRIGHT_PB_URL || process.env.STATEWRIGHT_GATEWAY_URL?.replace(/:\d+$/, ':8090') || "https://statewright.ai"
+
+  async function ensureRunRecord(workflowName: string): Promise<string | null> {
+    // If gateway already created a run (metering enabled), use that
+    if (currentRunId) return currentRunId
+    const apiKey = getApiKey()
+    if (!apiKey) return null
+    try {
+      const resp = await fetch(`${PB_URL}/api/collections/workflow_runs/records`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          workflow_name: workflowName,
+          status: "running",
+          started_at: new Date().toISOString(),
+          transitions: [],
+          transition_count: 0,
+          session_id: sessionId ?? "",
+        }),
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!resp.ok) return null
+      const data = await resp.json() as { id?: string }
+      if (data.id) {
+        currentRunId = data.id
+        runCreatedLocally = true
+        swLog(`run] Created run ${data.id} via PB REST`)
+      }
+      return data.id ?? null
+    } catch { return null }
+  }
+
+  async function updateRunTransition(event: string, from: string, to: string) {
+    // Only update when plugin owns the run (self-hosted); gateway handles its own transitions
+    const runId = currentRunId
+    if (!runCreatedLocally || !runId || !getApiKey()) return
+    try {
+      // Fetch current, append transition, update
+      const resp = await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+        headers: { Authorization: `Bearer ${getApiKey()}` },
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!resp.ok) return
+      const run = await resp.json() as { transitions?: unknown[]; transition_count?: number }
+      const transitions = Array.isArray(run.transitions) ? run.transitions : []
+      transitions.push({ event, from, to, timestamp: new Date().toISOString() })
+      await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getApiKey()}` },
+        body: JSON.stringify({
+          transitions,
+          transition_count: transitions.length,
+          updated: new Date().toISOString(),
+        }),
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch { /* best effort */ }
+  }
+
+  async function completeRun(finalState: string, status: string) {
+    // Only update when plugin owns the run (self-hosted); gateway handles its own completion
+    const runId = currentRunId
+    if (!runCreatedLocally || !runId || !getApiKey()) return
+    try {
+      await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getApiKey()}` },
+        body: JSON.stringify({
+          status,
+          final_state: finalState,
+          completed_at: new Date().toISOString(),
+          updated: new Date().toISOString(),
+        }),
+        signal: AbortSignal.timeout(5000),
+      })
+    } catch { /* best effort */ }
+  }
 
   async function captureToolLog(toolName: string, toolInput: unknown, toolOutput: unknown) {
     if (!stateCache || dormant || !getApiKey()) return
@@ -1230,11 +1312,34 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     captureToolLog(event.toolName, event.input, toolOutput).catch(() => {})
 
     if (event.toolName.startsWith("statewright_")) {
-      // Refresh state after statewright tool calls
+      const prevState = stateCache?.state
+      // For transition calls, extract event name and parse the response for from/to
+      if (event.toolName === "statewright_transition") {
+        const transEvent = (event.input as Record<string, unknown>)?.event as string ?? "unknown"
+        // Parse the tool result content for the transition details
+        const resultText = (event.content ?? []).find((c: { type: string }) => c.type === "text") as { text?: string } | undefined
+        let fromState = prevState ?? "unknown"
+        let toState = "unknown"
+        try {
+          const parsed = JSON.parse(resultText?.text ?? "{}")
+          fromState = parsed.from ?? parsed.previous_state ?? fromState
+          toState = parsed.state ?? parsed.to ?? toState
+        } catch { /* use prevState fallback */ }
+        swLog(`run] transition: ${fromState} → ${toState} (${transEvent}), runId=${currentRunId}`)
+        updateRunTransition(transEvent, fromState, toState).catch(() => {})
+      }
+
       await refreshState()
       if (stateCache) {
         await applyModelRouting(stateCache, ctx)
+        if (event.toolName === "statewright_load_workflow" && stateCache.state) {
+          swLog(`run] workflow loaded, initial state: ${stateCache.state}, runId=${currentRunId}`)
+          updateRunTransition("LOAD", "start", stateCache.state).catch(() => {})
+        }
         if (stateCache.isFinal) {
+          const status = stateCache.state === "completed" ? "completed" : "failed"
+          swLog(`run] final state: ${stateCache.state} (${status}), runId=${currentRunId}`)
+          completeRun(stateCache.state, status).catch(() => {})
           ctx.ui.notify("[statewright] Workflow complete.", "success")
         }
       }

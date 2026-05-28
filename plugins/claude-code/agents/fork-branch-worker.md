@@ -1,6 +1,6 @@
 ---
 name: fork-branch-worker
-description: Executes a single fork branch task (lint, type check, test, etc.) with full tool access including Bash and MCP. Use for statewright fork/join parallel execution.
+description: Executes a single fork branch task with full tool access. Edits files in-place in the working directory — do NOT use worktree isolation. Use for statewright fork/join execution.
 tools: Bash, Read, Edit, Write, MultiEdit, Grep, Glob, LS, mcp__plugin_statewright_statewright__statewright_transition, mcp__plugin_statewright_statewright__statewright_get_state, mcp__plugin_statewright_statewright__statewright_load_workflow
 maxTurns: 10
 hooks:

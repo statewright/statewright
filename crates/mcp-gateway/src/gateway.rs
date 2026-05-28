@@ -1421,8 +1421,8 @@ impl Gateway {
                         serde_json::to_value(crate::protocol::ToolCallResult::error("Workflow name is required")).unwrap());
                 }
 
-                // Validate the definition parses
-                match serde_json::from_value::<statewright_engine::MachineDefinition>(definition.clone()) {
+                // Validate + parse the definition upfront — reuse for in-memory insert
+                let parsed_def = match serde_json::from_value::<statewright_engine::MachineDefinition>(definition.clone()) {
                     Err(e) => {
                         return JsonRpcResponse::success(id,
                             serde_json::to_value(crate::protocol::ToolCallResult::error(
@@ -1436,8 +1436,9 @@ impl Gateway {
                                     format!("Workflow validation failed: {}. See schema at https://statewright.ai/workflow-schema.json", e)
                                 )).unwrap());
                         }
+                        def
                     }
-                }
+                };
 
                 // Persist workflow record
                 #[cfg(feature = "metering")]
@@ -1464,9 +1465,7 @@ impl Gateway {
                     match result {
                         Ok(_) => {
                             let verb = if overwrite && self.workflows.contains_key(&name) { "updated" } else { "created" };
-                            if let Ok(def) = serde_json::from_value(definition.clone()) {
-                                self.workflows.insert(name.clone(), def);
-                            }
+                            self.workflows.insert(name.clone(), parsed_def.clone());
                             Some(JsonRpcResponse::success(id.clone(),
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
                                     format!("Workflow '{}' {}. Use statewright_load_workflow(name='{}') to activate it.", name, verb, name)
@@ -1503,17 +1502,12 @@ impl Gateway {
                             serde_json::to_value(crate::protocol::ToolCallResult::error(
                                 format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
                             )).unwrap())
-                    } else if let Ok(def) = serde_json::from_value(definition) {
+                    } else {
                         let verb = if self.workflows.contains_key(&name) { "updated" } else { "created" };
-                        self.workflows.insert(name.clone(), def);
+                        self.workflows.insert(name.clone(), parsed_def);
                         JsonRpcResponse::success(id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
                                 format!("Workflow '{}' {} (in-memory). Use statewright_load_workflow(name='{}') to activate it.", name, verb, name)
-                            )).unwrap())
-                    } else {
-                        JsonRpcResponse::success(id,
-                            serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                "Failed to parse workflow definition."
                             )).unwrap())
                     }
                 }

@@ -83,9 +83,16 @@ async function gwCall(
           if (sid) sessionId = sid
         }
         const data = (await resp.json()) as JsonRpcResult
-        if (data.error) return null
+        if (data.error) {
+          swLog(`gwCall] ${toolName} JSON-RPC error: ${JSON.stringify(data.error)}`)
+          return null
+        }
         // Check MCP tool result isError flag (gateway returns errors as successful JSON-RPC with isError: true)
-        if ((data.result as Record<string, unknown>)?.isError) return null
+        if ((data.result as Record<string, unknown>)?.isError) {
+          const errText = data.result?.content?.[0]?.text ?? "unknown error"
+          swLog(`gwCall] ${toolName} tool error: ${errText}`)
+          return null
+        }
         const text = data.result?.content?.[0]?.text
         if (!text) return data.result
         try { return JSON.parse(text) } catch { return { _raw: text } }
@@ -413,6 +420,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let dormant = false  // true after deactivate — suppresses enforcement until next load
   let currentRunId: string | null = null  // tracks active workflow run for log capture
   let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
+  let watchdogPendingMessage: string | null = null  // deferred corrective message after abort
   const RAMBLING_TIMEOUT_MS = 45000  // 45s without a tool call = rambling
 
   const apiKey = getApiKey()
@@ -793,6 +801,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     async execute(_id, params: { branches: Array<{ branch: string; task: string; cwd?: string }> }, signal) {
       // Suspend the rambling watchdog — fork execution takes minutes
       if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+      watchdogPendingMessage = null  // clear any stale deferred message
       try {
       if (!stateCache) {
         return { content: [{ type: "text", text: "No active workflow. Load a workflow first." }], isError: true }
@@ -813,17 +822,25 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         const forkEvent = stateCache.transitions.find((t) => {
           return t.event === "FORK" || t.event.startsWith("FORK")
         })?.event
-        if (forkEvent) {
-          const forkResult = await gwCall("statewright_transition", {
-            event: forkEvent,
-            data: { rationale: "Dispatching parallel fork branches" },
-          }) as { forked?: boolean; branches?: Record<string, unknown> } | null
-          if (forkResult?.forked && forkResult.branches) {
-            gatewayBranches = Object.keys(forkResult.branches)
-            swLog(`fork: engine transition fired (${forkEvent}), branches: ${gatewayBranches.join(", ")}`)
+        if (!forkEvent) {
+          return {
+            content: [{ type: "text", text: `No FORK transition available from state '${stateCache.state}'. Cannot dispatch branches without a FORK transition or an active fork context.` }],
+            isError: true,
           }
-          await refreshState()
         }
+        const forkResult = await gwCall("statewright_transition", {
+          event: forkEvent,
+          data: { rationale: "Dispatching parallel fork branches" },
+        }) as { forked?: boolean; branches?: Record<string, unknown> } | null
+        if (!forkResult?.forked || !forkResult.branches) {
+          return {
+            content: [{ type: "text", text: `FORK transition '${forkEvent}' fired but did not create branch sessions. The transition likely points to a target state (e.g. "FORK": "forking") instead of a fork definition (e.g. "FORK": { "fork": { "branches": {...}, "join": "all", "on_complete": "...", "on_fail": "..." } }). Fix the workflow definition so the FORK event includes branch definitions.` }],
+            isError: true,
+          }
+        }
+        gatewayBranches = Object.keys(forkResult.branches)
+        swLog(`fork: engine transition fired (${forkEvent}), branches: ${gatewayBranches.join(", ")}`)
+        await refreshState()
       } else {
         // Fork already active — extract branch names from state
         const forkCtx = stateCache.fork?.branches || stateCache.context?._fork?.branches
@@ -1091,13 +1108,13 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         swLog(`watchdog] firing after ${watchdogTimeout / 1000}s — aborting stream`)
         try {
           abortCtx.abort()
-          pi.sendUserMessage(
+          // Defer corrective message to agent_end — abort kills the stream immediately,
+          // steer/followUp messages are orphaned if sent now (agent loop exits without
+          // draining the queue). Send as a new prompt when the agent is idle.
+          watchdogPendingMessage =
             `You were generating text for ${watchdogTimeout / 1000}s without calling a tool. ` +
             `Execute the next action immediately using one of: ${tools}. ` +
-            `Or transition with: ${transitions}. Do not explain, just act.`,
-            { deliverAs: "steer" },
-          )
-          pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
+            `Or transition with: ${transitions}. Do not explain, just act.`
         } catch { /* ctx may be stale after session reset or rate limit */ }
       }, watchdogTimeout)
     }
@@ -1527,5 +1544,26 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         { deliverAs: "steer" },
       )
     }
+  })
+
+  // --- Watchdog recovery: send deferred corrective message after abort settles ---
+  // agent_end fires BEFORE finishRun() clears isStreaming/activeRun (it's inside
+  // processEvents, which is awaited before the finally block). sendUserMessage()
+  // without deliverAs requires idle state. setTimeout(0) defers to the next
+  // macrotask — after finishRun() completes and the agent is truly idle.
+  pi.on("agent_end", async () => {
+    if (!watchdogPendingMessage) return
+    const msg = watchdogPendingMessage
+    watchdogPendingMessage = null
+    swLog("watchdog] agent_end — deferring corrective prompt to next tick")
+    setTimeout(() => {
+      // Guard: skip if fork started or workflow deactivated between schedule and execution
+      if (dormant) return
+      try {
+        pi.sendUserMessage(msg)
+      } catch (err) {
+        swLog(`watchdog] deferred sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    }, 0)
   })
 }

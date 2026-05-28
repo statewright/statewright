@@ -65,8 +65,21 @@ with open(settings_path, "w") as f:
 
 print(f"Statewright hooks + MCP permissions installed in {settings_path}")
 
+# Install agent definitions (fork-branch-worker etc.)
+import os, shutil
+agents_dir = os.path.expanduser("~/.claude/agents")
+os.makedirs(agents_dir, exist_ok=True)
+plugin_cache = os.path.dirname(hook_script)
+plugin_agents = os.path.join(plugin_cache, "agents")
+if os.path.isdir(plugin_agents):
+    for agent_file in os.listdir(plugin_agents):
+        if agent_file.endswith(".md"):
+            src = os.path.join(plugin_agents, agent_file)
+            dst = os.path.join(agents_dir, agent_file)
+            shutil.copy2(src, dst)
+            print(f"Installed agent: {agent_file}")
+
 # Generate MCP config with auth from saved API key
-import os
 key_path = os.path.expanduser("~/.statewright/api_key")
 if os.path.exists(key_path):
     with open(key_path) as kf:

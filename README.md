@@ -169,7 +169,7 @@ The managed cloud at [statewright.ai](https://statewright.ai) handles workflow s
 
 ## Self-hosting
 
-Run the full stack locally with Docker Compose — PocketBase, MCP gateway, and workflow editor. BYO Ollama. [Self-hosted guide →](https://docs.statewright.ai/self-hosted)
+Run the full stack locally with Docker Compose — PocketBase, MCP gateway, and workflow editor. BYO Ollama. [Self-hosted guide →](https://docs.statewright.ai/getting-started/self-hosted)
 
 ```bash
 cd self-hosted && docker compose up --build

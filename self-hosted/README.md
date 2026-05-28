@@ -1,6 +1,6 @@
 # Statewright Self-Hosted
 
-Full setup guide: [docs.statewright.ai/self-hosted](https://docs.statewright.ai/self-hosted)
+Full setup guide: [docs.statewright.ai/getting-started/self-hosted](https://docs.statewright.ai/getting-started/self-hosted)
 
 ## Quick Start
 
@@ -9,8 +9,7 @@ cd self-hosted
 docker compose up --build
 ```
 
-- **UI** — http://localhost:8080
-- **PocketBase** — http://localhost:8090
+- **UI + PocketBase** — http://localhost:8090
 - **Gateway** — localhost:3001
 
-Generate an API key at http://localhost:8080/keys, then connect your agent. See the [full guide](https://docs.statewright.ai/self-hosted) for agent config snippets and Ollama setup.
+API key and `lspi` alias are printed to `docker compose logs` on first run. See the [full guide](https://docs.statewright.ai/getting-started/self-hosted) for agent config snippets and Ollama setup.

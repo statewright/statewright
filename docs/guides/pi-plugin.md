@@ -63,6 +63,23 @@ Add to `~/.pi/agent/models.json`:
 }
 ```
 
+### Model Size Requirements
+
+Models below ~7B parameters generally lack reliable tool calling. They tend to dump JSON as text instead of structured tool calls, ignore transition instructions, or spiral on multi-step tasks. The Pi plugin includes a tool call recovery layer (`message_end` handler) that parses JSON tool calls from text output and executes them, but this is best-effort.
+
+Recommended minimums by workflow phase:
+
+| Phase | Minimum | Why |
+|---|---|---|
+| Planning / analysis | 20B+ | Needs to reason about codebase, identify bugs, plan branches |
+| Implementing / editing | 7B+ | Must follow edit instructions precisely, call tools correctly |
+| Testing / validation | 4B+ | Mostly running commands and reading output |
+| Fork branches | 7B+ | Must operate independently without human correction |
+
+Ultra-small models (< 4B) are usable for tier 3 bash discernment classification (structured JSON output with constrained schema) but not as primary agents in workflow states.
+
+If routing to a local model that struggles with tool calling, set `"thinking_level": "off"` on that state — thinking tokens consume context and degrade small model performance further.
+
 ## Per-State Thinking Level
 
 Control reasoning effort per state:
@@ -133,7 +150,7 @@ Pi slash command for workflow control:
 
 ## Rambling Watchdog
 
-If the model generates text for 30 seconds without calling a tool, the plugin aborts the stream and steers the model to act. States with thinking levels set get 3x the timeout (90s) since reasoning takes time.
+If the model generates text for 45 seconds without calling a tool, the plugin aborts the stream and sends a corrective prompt on the next turn. States with thinking levels set get 3x the timeout (135s) since reasoning takes time. Ultra-small models may trigger the watchdog frequently — consider increasing the timeout via `RAMBLING_TIMEOUT_MS` or routing those states to a more capable model.
 
 ## Debug Logging
 

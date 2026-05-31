@@ -400,6 +400,38 @@ fn parse_llm_response(raw: &str) -> LlmAction {
         }
     }
 
+    // Markdown code blocks → tool calls (gemma4 and small models write ```bash ... ``` as text)
+    let mut tool_calls = Vec::new();
+    let mut search = trimmed;
+    while let Some(fence_start) = search.find("```") {
+        let after_fence = &search[fence_start + 3..];
+        // Check if this is a bash/sh/shell code block
+        let lang_end = after_fence.find('\n').unwrap_or(0);
+        let lang = after_fence[..lang_end].trim();
+        if lang == "bash" || lang == "sh" || lang == "shell" {
+            let content_start = lang_end + 1;
+            if let Some(close) = after_fence[content_start..].find("```") {
+                let cmd = after_fence[content_start..content_start + close].trim();
+                if !cmd.is_empty() {
+                    tool_calls.push(ToolCall {
+                        name: "bash".into(),
+                        args: serde_json::json!({ "command": cmd }),
+                    });
+                }
+                search = &after_fence[content_start + close + 3..];
+                continue;
+            }
+        }
+        search = &after_fence[lang_end..];
+    }
+    if !tool_calls.is_empty() {
+        return LlmAction {
+            transition: None,
+            error: None,
+            tool_calls: Some(tool_calls),
+        };
+    }
+
     // No structured action found — LLM is just talking
     LlmAction {
         transition: None,
@@ -798,6 +830,34 @@ mod tests {
         let calls = action.tool_calls.unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn parse_llm_response_extracts_bash_code_blocks() {
+        let raw = "Let me check the files.\n\n```bash\nls -R\n```\n\nThat should show everything.";
+        let action = parse_llm_response(raw);
+        assert!(action.transition.is_none());
+        let calls = action.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].args["command"], "ls -R");
+    }
+
+    #[test]
+    fn parse_llm_response_extracts_multiple_code_blocks() {
+        let raw = "First:\n```bash\npytest -q\n```\nThen:\n```sh\ngrep -r TODO src/\n```";
+        let action = parse_llm_response(raw);
+        let calls = action.tool_calls.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].args["command"], "pytest -q");
+        assert_eq!(calls[1].args["command"], "grep -r TODO src/");
+    }
+
+    #[test]
+    fn parse_llm_response_ignores_non_bash_code_blocks() {
+        let raw = "Here's the fix:\n```python\nprint('hello')\n```";
+        let action = parse_llm_response(raw);
+        assert!(action.tool_calls.is_none());
     }
 
     // invoke tests

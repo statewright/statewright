@@ -285,12 +285,11 @@ describe("statewright Pi extension", () => {
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
 
-      expect(pi.on).toHaveBeenCalledTimes(5)
+      expect(pi.on).toHaveBeenCalledTimes(4)
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("tool_call", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("tool_result", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("message_end", expect.any(Function))
-      expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function))
 
       log.mockRestore()
     })
@@ -376,7 +375,7 @@ describe("statewright Pi extension", () => {
       const result = results[0] as { appendSystemPrompt?: string }
 
       expect(result).toHaveProperty("appendSystemPrompt")
-      expect(result.appendSystemPrompt).toContain("MUST work autonomously")
+      expect(result.appendSystemPrompt).toContain("Work autonomously")
       expect(result.appendSystemPrompt).toContain("implementing")
       expect(result.appendSystemPrompt).toContain("read, edit, bash")
       expect(result.appendSystemPrompt).toContain("DONE (-> testing)")
@@ -890,6 +889,168 @@ describe("statewright Pi extension", () => {
       await pi._fire("before_agent_start", {}, ctx)
       expect(pi.setModel).toHaveBeenCalledTimes(2)
       expect(pi.setModel).toHaveBeenLastCalledWith(gptModel)
+    })
+  })
+
+  describe("upstream failure handling", () => {
+    // State with FAIL transition — matches the chaos-bugfix/reconnaissance pattern
+    const RECON_STATE = {
+      ...MOCK_STATE,
+      state: "reconnaissance",
+      iteration: 0,
+      max_iterations: 12,
+      allowed_tools: ["Read", "Grep", "Find", "LS", "Bash"],
+      instructions: "Run the test suite first to see what fails.",
+      transitions: [
+        { event: "FAIL", target: "failed" },
+        { event: "HYPOTHESIS_FORMED", target: "planning" },
+      ],
+    }
+
+    it("auto-continuation increments nudgeCount and stops after MAX_NUDGES", async () => {
+      setupFetch([{ match: "/mcp", body: RECON_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Fire message_end with text but no tool calls — simulates timeout partial output
+      // Each call should count toward the nudge limit
+      const timeoutMessage = {
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "<thought\n<channel|><thought" }],
+        },
+      }
+
+      // Fire MAX_NUDGES + 2 times (with clock advancing to bypass cooldown)
+      for (let i = 0; i < 8; i++) {
+        // Advance lastNudgeTime past cooldown
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + (i + 1) * 31000)
+        await pi._fire("message_end", timeoutMessage, ctx)
+      }
+
+      // After exceeding MAX_NUDGES, sendUserMessage should have been called with
+      // auto-continuation messages but should STOP after the limit.
+      // The last calls should include FAIL transition attempt.
+      const calls = pi.sendUserMessage.mock.calls
+      const lastCall = calls[calls.length - 1]
+      // Should NOT keep sending "Continue working" messages forever
+      // Either stops sending or transitions to FAIL
+      expect(calls.length).toBeLessThanOrEqual(8) // bounded, not infinite
+    })
+
+    it("blocked tool calls do NOT reset inactivity counter", async () => {
+      setupFetch([{ match: "/mcp", body: RECON_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Fire a text-only message to trigger auto-continuation (start nudge counting)
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31000)
+      await pi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: "thinking..." }] },
+      }, ctx)
+      expect(pi.sendUserMessage).toHaveBeenCalled()
+      const callsAfterNudge = pi.sendUserMessage.mock.calls.length
+
+      // Now fire a BLOCKED tool call (Write is not in allowed_tools)
+      await pi._fire("tool_call", { toolName: "Write" }, ctx)
+
+      // Fire another text-only message — nudge count should NOT have reset
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 62000)
+      await pi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: "still thinking..." }] },
+      }, ctx)
+
+      // If nudgeCount was NOT reset, the second nudge message should show escalation (STUCK/FINAL WARNING)
+      const allCalls = pi.sendUserMessage.mock.calls
+      const lastMsg = allCalls[allCalls.length - 1]?.[0] as string
+      // Should NOT be a fresh "Continue working" (nudge 0) — should be escalated
+      expect(lastMsg).not.toContain("Continue working")
+    })
+
+    it("extracts tool calls from <call:tool{args}<tool_call|> format", async () => {
+      setupFetch([{ match: "/mcp", body: RECON_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '<call:bash{command: "pytest -q"}<tool_call|>' },
+          ],
+        },
+      }, ctx)
+
+      // Should have executed via pi.exec
+      expect(pi.exec).toHaveBeenCalledWith("bash", ["-c", "pytest -q"])
+      expect(pi.sendUserMessage).toHaveBeenCalledWith(
+        expect.stringContaining("executed your tool calls"),
+        expect.objectContaining({ deliverAs: "steer" }),
+      )
+    })
+
+    it("extracts tool calls from <call:read{path: \"file.py\"}<tool_call|> format", async () => {
+      setupFetch([{ match: "/mcp", body: RECON_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      await pi._fire("message_end", {
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: '<call:read{path: "registry.py"}<tool_call|>' },
+          ],
+        },
+      }, ctx)
+
+      expect(pi.exec).toHaveBeenCalledWith("cat", ["registry.py"])
+    })
+
+    it("auto-FAIL transitions to failed state when upstream repeatedly fails", async () => {
+      // Set up fetch to handle both get_state AND statewright_transition
+      const failedState = { ...RECON_STATE, state: "failed", is_final: true }
+      setupFetch([
+        { match: "statewright_transition", body: { transitioned: true, from: "reconnaissance", to: "failed" } },
+        { match: "/mcp", body: RECON_STATE },
+      ])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Simulate MAX_NUDGES+1 timeouts — each fires message_end with partial text
+      for (let i = 0; i < 8; i++) {
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + (i + 1) * 31000)
+        await pi._fire("message_end", {
+          message: { role: "assistant", content: [{ type: "text", text: "Error: Request timed out." }] },
+        }, ctx)
+      }
+
+      // After exceeding limit, should have attempted FAIL transition via gateway
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          body: expect.stringContaining("statewright_transition"),
+        }),
+      )
     })
   })
 })

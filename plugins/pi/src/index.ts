@@ -188,10 +188,19 @@ function toolNamesMatch(gwName: string, piName: string): boolean {
 
 // --- State cache ---
 
+interface WorkflowMeta {
+  autonomous?: boolean
+  danger_level?: "safe" | "moderate" | "dangerous"
+  capture_output?: boolean
+  task_type?: string
+  requires_human_approval?: boolean
+}
+
 interface StateCache {
   state: string
   isFinal: boolean
   allowedTools: string[]
+  allowedCommands: string[]
   instructions: string | null
   transitions: Array<{ event: string; target: string }>
   maxIterations: number | null
@@ -204,6 +213,7 @@ interface StateCache {
   defaultModel: string | null
   thinkingLevel: string | null
   runId: string | null
+  meta: WorkflowMeta
 }
 
 let stateCache: StateCache | null = null
@@ -231,6 +241,8 @@ async function refreshState(): Promise<StateCache | null> {
     defaultModel: raw.default_model ?? null,
     thinkingLevel: raw.thinking_level ?? null,
     runId: (raw.run_id as string) ?? null,
+    meta: (raw.meta as WorkflowMeta) ?? {},
+    allowedCommands: raw.allowed_commands ?? [],
   }
   return stateCache
 }
@@ -312,14 +324,10 @@ function formatContext(s: StateCache): string {
 
   const toolList = s.allowedTools.map(normalizeToolName).join(", ")
   const lines = [
-    `STATEWRIGHT WORKFLOW ACTIVE.`,
-    `You MUST work autonomously. Do NOT stop, summarize, or ask the user between steps. When a tool call fails or is blocked, immediately retry with the correct tool and arguments. Keep working until you reach a final state or an approval gate.`,
-    `Phase: ${s.state} (iteration ${s.iteration}/${s.maxIterations ?? "none"}).`,
-    `ONLY these tools work right now: ${toolList}. Any other tool will be rejected. Do not invent tool names.`,
-    `CRITICAL: Use ONLY the native tool calling mechanism. NEVER output JSON like {"name":"tool"} or {"type":"function"} as text. It does not work. If you write tool calls as text they will be rejected and you will waste a turn. Just call the tool directly.`,
-    `Tool signatures: read(path: "file.py") -> file contents, ls(path: ".") -> directory listing, grep(pattern: "search", path?: "dir") -> matching lines, find(pattern: "**/*.py") -> matching file paths, edit(path: "file.py", edits: [{oldText: "old", newText: "new"}]) -> applies find-and-replace, write(path: "file.py", content: "full content") -> writes entire file, bash(command: "shell cmd") -> command output. To list files in the current directory, call ls(path: ".").`,
-    `MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT_NAME', data={"rationale": "specific reason"}).`,
-    `Available transitions: ${transitionDescs}.`,
+    `STATEWRIGHT WORKFLOW ACTIVE. Phase: ${s.state} (${s.iteration}/${s.maxIterations ?? "∞"}).`,
+    `Work autonomously. Do not stop or ask the user between steps.`,
+    `Tools: ${toolList}. Transitions: ${transitionDescs}.`,
+    `To advance to the next phase, respond with JSON: {"transition": "EVENT_NAME", "rationale": "why"}`,
   ]
   if (s.model) lines.push(`Model for this phase: ${s.model}.`)
   if (s.instructions) lines.push(`Instructions: ${s.instructions}`)
@@ -339,6 +347,56 @@ interface ParsedToolCall {
 
 function extractToolCallsFromText(text: string): ParsedToolCall[] {
   const trimmed = text.trim()
+
+  // Pi-style tool call tags: <call:toolName{key: "value", ...}<tool_call|>
+  // Gemma4 emits this format instead of structured tool calls in Pi TUI.
+  const piCallRegex = /<call:(\w+)\{([^}]*)\}<tool_call\|>/g
+  const piCalls: ParsedToolCall[] = []
+  let piMatch
+  while ((piMatch = piCallRegex.exec(trimmed)) !== null) {
+    const toolName = piMatch[1]
+    const argsStr = piMatch[2].trim()
+    try {
+      // Parse JS-object-like args: key: "value" → {"key": "value"}
+      const jsonStr = argsStr.replace(/(\w+)\s*:/g, '"$1":')
+      const args = JSON.parse(`{${jsonStr}}`)
+      piCalls.push({ name: toolName, args })
+    } catch {
+      // Fallback: treat entire args string as the command for bash
+      if (toolName === "bash" || toolName === "sh") {
+        const cmdMatch = argsStr.match(/command:\s*"([^"]*)"/)
+        if (cmdMatch) piCalls.push({ name: "bash", args: { command: cmdMatch[1] } })
+      } else {
+        const pathMatch = argsStr.match(/path:\s*"([^"]*)"/)
+        if (pathMatch) piCalls.push({ name: toolName, args: { path: pathMatch[1] } })
+      }
+    }
+  }
+  if (piCalls.length > 0) return piCalls
+
+  // Markdown code blocks → tool calls (gemma4, small models write ```bash ... ``` instead of calling tools)
+  const codeBlockCalls: ParsedToolCall[] = []
+  const codeBlockRegex = /```(bash|sh|shell|python|python3|node)\s*\n([\s\S]*?)```/g
+  let cbMatch
+  while ((cbMatch = codeBlockRegex.exec(trimmed)) !== null) {
+    const lang = cbMatch[1]
+    const code = cbMatch[2].trim()
+    if (!code) continue
+    if (lang === "bash" || lang === "sh" || lang === "shell") {
+      codeBlockCalls.push({ name: "bash", args: { command: code } })
+    } else if (lang === "python" || lang === "python3") {
+      codeBlockCalls.push({ name: "bash", args: { command: `python3 -c ${JSON.stringify(code)}` } })
+    } else if (lang === "node") {
+      codeBlockCalls.push({ name: "bash", args: { command: `node -e ${JSON.stringify(code)}` } })
+    }
+  }
+  if (codeBlockCalls.length > 0) return codeBlockCalls
+
+  // Inline command patterns: "I'll run `ls -R`" or "Let me execute `pytest -q`"
+  const inlineCmd = trimmed.match(/(?:run|execute|try|call|use)\s+`([^`]+)`/i)
+  if (inlineCmd) {
+    return [{ name: "bash", args: { command: inlineCmd[1] } }]
+  }
 
   // Try direct JSON parse
   let parsed: Record<string, unknown> | null = null
@@ -409,6 +467,156 @@ function checkInterrupts(filePath: string, interrupts: Record<string, { file_pat
   return null
 }
 
+// --- Tier 3: Local model disambiguation ---
+
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434"
+const TIER3_MODEL = process.env.STATEWRIGHT_TIER3_MODEL || "qwen3:0.6b"
+const TIER3_TIMEOUT_MS = 1500
+
+const TIER3_REASONING_MODEL = process.env.STATEWRIGHT_TIER3_REASONING_MODEL || "qwen3:4b"
+const TIER3_REASONING_TIMEOUT_MS = 5000
+
+interface Tier3Result {
+  decision: "allow" | "deny"
+  reason: string
+  steeringPrompt?: string  // reasoning model provides guidance on deny
+}
+
+function buildTier3Prompt(command: string, state: StateCache): string {
+  return [
+    `You are a security gate for an AI coding agent.`,
+    `Current workflow phase: ${state.state}`,
+    `Allowed commands: ${state.allowedCommands.join(", ") || "(any)"}`,
+    `Phase instructions: ${state.instructions || "none"}`,
+    ``,
+    `The agent wants to run: ${command}`,
+    ``,
+    `Only approve if this command is within the declared allowed commands and is not destructive.`,
+    `When in doubt, deny.`,
+  ].join("\n")
+}
+
+async function callOllamaClassifier(
+  model: string, prompt: string, timeout: number,
+): Promise<{ decision: string; reason: string } | null> {
+  try {
+    const resp = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        format: {
+          type: "object",
+          properties: {
+            decision: { type: "string", enum: ["allow", "deny"] },
+            reason: { type: "string" },
+          },
+          required: ["decision", "reason"],
+        },
+        options: { temperature: 0 },
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: AbortSignal.timeout(timeout),
+    })
+    if (!resp.ok) return null
+    const data = await resp.json() as { message?: { content?: string } }
+    if (!data.message?.content) return null
+    return JSON.parse(data.message.content)
+  } catch { return null }
+}
+
+async function consultLocalModel(
+  command: string,
+  state: StateCache,
+): Promise<Tier3Result> {
+  // Only consult if danger_level is "safe" — moderate/dangerous deny by default
+  if (state.meta.danger_level && state.meta.danger_level !== "safe") {
+    return { decision: "deny", reason: `danger_level is ${state.meta.danger_level}` }
+  }
+
+  const prompt = buildTier3Prompt(command, state)
+
+  // Fast classifier: Qwen3:0.6B
+  const fast = await callOllamaClassifier(TIER3_MODEL, prompt, TIER3_TIMEOUT_MS)
+
+  if (!fast) {
+    swLog(`tier3] fast model unreachable — defaulting to deny`)
+    return { decision: "deny", reason: "classifier unavailable" }
+  }
+
+  if (fast.decision === "allow") {
+    swLog(`tier3] ALLOW: ${command} — ${fast.reason}`)
+    return { decision: "allow", reason: fast.reason }
+  }
+
+  // Fast model said deny — escalate to reasoning model for a steering prompt
+  swLog(`tier3] fast DENY: ${command} — ${fast.reason}. Escalating to reasoning model.`)
+
+  const reasoningPrompt = [
+    prompt,
+    ``,
+    `The fast classifier DENIED this command with reason: "${fast.reason}"`,
+    ``,
+    `Provide a brief steering message (1-2 sentences) telling the agent what it should do instead.`,
+    `Include a concrete alternative command if possible.`,
+    `Format: {"decision": "deny", "reason": "your steering guidance"}`,
+  ].join("\n")
+
+  const reasoning = await callOllamaClassifier(
+    TIER3_REASONING_MODEL, reasoningPrompt, TIER3_REASONING_TIMEOUT_MS,
+  )
+
+  if (reasoning) {
+    swLog(`tier3] reasoning: ${reasoning.reason}`)
+    return { decision: "deny", reason: fast.reason, steeringPrompt: reasoning.reason }
+  }
+
+  return { decision: "deny", reason: fast.reason }
+}
+
+// --- Command tier evaluation ---
+
+function evaluateCommandTier(
+  command: string,
+  state: StateCache,
+): "allow" | "deny" | "ambiguous" {
+  const safePattern = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/
+  const dangerousPattern = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/
+  const scriptPattern = /\b(python3?|node|ruby|perl|php)\b/
+  const leavesDir = /\.\.\/?|^\s*cd\s/
+
+  // Tier 1: safe read-only
+  if (safePattern.test(command) && !dangerousPattern.test(command) && !leavesDir.test(command)) {
+    return "allow"
+  }
+
+  // Tier 2: clearly destructive
+  if (dangerousPattern.test(command) || leavesDir.test(command)) {
+    return "deny"
+  }
+
+  // Tier 2b: scripting interpreter without write tools
+  const hasWriteTools = state.allowedTools.some(t =>
+    toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
+  if (!hasWriteTools && scriptPattern.test(command)) {
+    return "deny"
+  }
+
+  // Tier 2c: check against allowed_commands if present
+  if (state.allowedCommands.length > 0) {
+    const matchesAllowed = state.allowedCommands.some(pattern => {
+      // Support glob patterns via minimatch
+      return minimatch(command, pattern, { matchBase: true }) ||
+             minimatch(command.split(/\s+/)[0], pattern, { matchBase: true })
+    })
+    if (!matchesAllowed) return "deny"
+  }
+
+  // Tier 3: ambiguous
+  return "ambiguous"
+}
+
 // --- Extension entry ---
 
 export default async function statewrightExtension(pi: ExtensionAPI) {
@@ -419,9 +627,121 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let lastThinkingLevel: string | null = null
   let dormant = false  // true after deactivate — suppresses enforcement until next load
   let currentRunId: string | null = null  // tracks active workflow run for log capture
-  let ramblingWatchdog: ReturnType<typeof setTimeout> | null = null  // kills rambling output
-  let watchdogPendingMessage: string | null = null  // deferred corrective message after abort
-  const RAMBLING_TIMEOUT_MS = 45000  // 45s without a tool call = rambling
+  let yoloWasEnabled = false  // track if we enabled YOLO so we can restore on deactivate
+
+  // --- Permission system integration (pi-permission-system) ---
+  function setAutonomousPermissions(enabled: boolean) {
+    const ps = (globalThis as any).__piPermissionSystem
+    if (!ps) {
+      swLog(`permissions] pi-permission-system not installed — YOLO toggle skipped`)
+      return
+    }
+    if (enabled && !yoloWasEnabled) {
+      ps.setYoloMode(true, { persist: false, source: "statewright" })
+      yoloWasEnabled = true
+      swLog(`permissions] YOLO enabled (autonomous workflow)`)
+    } else if (!enabled && yoloWasEnabled) {
+      ps.setYoloMode(false, { persist: false, source: "statewright" })
+      yoloWasEnabled = false
+      swLog(`permissions] YOLO disabled (workflow ended/deactivated)`)
+    }
+  }
+
+  // --- Unified inactivity monitor ---
+  // Single timer replaces the separate rambling watchdog + idle loop timer.
+  // Fires when the model goes too long without a tool call, whether it's
+  // streaming text or completely silent. Uses deliverAs to avoid "Agent is
+  // already processing" errors — never bare sendUserMessage().
+  const INACTIVITY_TIMEOUT_MS = 60000  // 60s base
+  const MAX_NUDGES = 5
+  let inactivityTimer: ReturnType<typeof setTimeout> | null = null
+  let nudgeCount = 0
+  let lastNudgeTime = 0
+
+  function deliverCorrective(msg: string) {
+    if (dormant || !stateCache || stateCache.isFinal) return
+    const now = Date.now()
+    if (now - lastNudgeTime < 5000) return  // debounce: min 5s between correctives
+    lastNudgeTime = now
+    try {
+      // steer interrupts mid-stream; followUp queues for next turn. Both are safe
+      // during streaming — neither throws "Agent is already processing".
+      pi.sendUserMessage(msg, { deliverAs: "steer" })
+    } catch {
+      try { pi.sendUserMessage(msg, { deliverAs: "followUp" }) } catch {
+        swLog(`corrective] all delivery modes failed`)
+      }
+    }
+  }
+
+  function armInactivityTimer() {
+    if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
+    if (!stateCache || stateCache.isFinal || dormant) return
+    const thinkingMultiplier = (stateCache.thinkingLevel && stateCache.thinkingLevel !== "off") ? 3 : 1
+    const timeout = INACTIVITY_TIMEOUT_MS * thinkingMultiplier
+
+    inactivityTimer = setTimeout(() => {
+      inactivityTimer = null
+      if (!stateCache || stateCache.isFinal || dormant) return
+
+      // Abort the current stream — steer messages queue behind a running stream
+      // and never get delivered. Abort kills the stream, then the corrective
+      // fires as a fresh prompt via agent_end or the next turn.
+      if (currentAbortCtx) {
+        try { currentAbortCtx.abort() } catch { /* ctx may be stale */ }
+      }
+
+      nudgeCount++
+      swLog(`inactivity] fired after ${timeout / 1000}s (nudge ${nudgeCount}/${MAX_NUDGES})`)
+
+      if (nudgeCount > MAX_NUDGES) {
+        swLog(`inactivity] max nudges exceeded — auto-transitioning FAIL`)
+        const failEvent = stateCache.transitions.find(t => t.event === "FAIL")?.event ?? "FAIL"
+        gwCall("statewright_transition", {
+          event: failEvent,
+          data: { rationale: `Agent stuck: ${nudgeCount} consecutive turns without a successful tool call` },
+        }).then(async () => {
+          await refreshState()
+          if (stateCache) {
+            swLog(`auto-FAIL] transitioned to ${stateCache.state} (isFinal=${stateCache.isFinal})`)
+          }
+        }).catch((err) => {
+          swLog(`auto-FAIL] FAIL transition failed: ${err instanceof Error ? err.message : String(err)}`)
+          // Force local state to final to break the loop even if gateway is unreachable
+          if (stateCache) stateCache.isFinal = true
+        })
+        return
+      }
+
+      const instructions = stateCache.instructions ?? "Proceed with the task."
+      const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
+      const transitions = stateCache.transitions.map(t => `${t.event} -> ${t.target}`).join(", ")
+
+      let msg: string
+      if (nudgeCount === 1) {
+        msg = `Your task: ${instructions} Tools: ${tools}. Transitions: ${transitions}. Do not explain — call a tool now.`
+      } else if (nudgeCount === 2) {
+        const firstTool = stateCache.allowedTools[0] ? normalizeToolName(stateCache.allowedTools[0]) : "bash"
+        const suggestion = firstTool === "bash" ? "Run the test suite or list files." : `Use ${firstTool} on the most relevant file.`
+        msg = `STUCK (${nudgeCount}/${MAX_NUDGES}). ${suggestion} Instructions: ${instructions}. Act now.`
+      } else {
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). Run "pytest -q", "npm test", or "ls". Call one tool. If stuck, respond with: {"transition": "FAIL", "rationale": "why"}.`
+      }
+
+      deliverCorrective(msg)
+      armInactivityTimer()  // re-arm for next cycle
+    }, timeout)
+  }
+
+  function disarmInactivityTimer() {
+    if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
+  }
+
+  function resetInactivity() {
+    disarmInactivityTimer()
+    nudgeCount = 0
+    lastNudgeTime = 0
+  }
 
   const apiKey = getApiKey()
   if (!apiKey) {
@@ -553,6 +873,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         await ensureRunRecord(params.name)
       }
 
+      // Autonomous mode: enable YOLO permissions + start idle detector
+      swLog(`load] meta=${JSON.stringify(stateCache?.meta)}, autonomous=${stateCache?.meta?.autonomous}`)
+      if (stateCache?.meta?.autonomous) {
+        swLog(`load] autonomous mode ENABLED — YOLO + idle timer active`)
+        setAutonomousPermissions(true)
+        armInactivityTimer()
+      }
+
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -568,7 +896,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       stateCache = null
       lastSwitchedModel = null
       dormant = true
-      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+      setAutonomousPermissions(false)
+      disarmInactivityTimer()
+      disarmInactivityTimer()
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -583,7 +913,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
       stateCache = null
       dormant = true
-      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+      disarmInactivityTimer()
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
   })
@@ -799,9 +1129,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params: { branches: Array<{ branch: string; task: string; cwd?: string }> }, signal) {
-      // Suspend the rambling watchdog — fork execution takes minutes
-      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
-      watchdogPendingMessage = null  // clear any stale deferred message
+      // Suspend inactivity timer — fork execution takes minutes
+      resetInactivity()
       try {
       if (!stateCache) {
         return { content: [{ type: "text", text: "No active workflow. Load a workflow first." }], isError: true }
@@ -913,7 +1242,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
       }
       // Suppress watchdog for one cycle — the agent needs time to process fork results
-      if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
+      disarmInactivityTimer()
 
       const succeeded = results.filter(r => r.exitCode === 0).length
       const totalCost = results.reduce((sum, r) => sum + r.usage.cost, 0)
@@ -955,13 +1284,33 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         dormant = false
         await refreshState()
         if (stateCache) await applyModelRouting(stateCache, ctx)
+
+        // Autonomous mode: enable YOLO + idle detector
+        if (stateCache?.meta?.autonomous) {
+          setAutonomousPermissions(true)
+          armInactivityTimer()
+        }
+
         ctx.ui.notify(`[statewright] Workflow '${name}' loaded. State: ${stateCache?.state ?? "unknown"}`, "success")
+
+        // Kick off: send the state instructions as a followUp so the model acts immediately
+        if (stateCache && !stateCache.isFinal) {
+          const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
+          const transitions = stateCache.transitions.map(t => describeTransition(t, stateCache!)).join(", ")
+          const taskHint = parts.slice(2).join(" ")  // optional task after workflow name
+          const kickoff = taskHint
+            ? `${taskHint}\n\nPhase: '${stateCache.state}'. Tools: ${tools}. Transitions: ${transitions}.${stateCache.instructions ? ` Instructions: ${stateCache.instructions}` : ""} Begin immediately.`
+            : `Phase: '${stateCache.state}'. Tools: ${tools}. Transitions: ${transitions}.${stateCache.instructions ? ` Instructions: ${stateCache.instructions}` : ""} Begin immediately.`
+          pi.sendUserMessage(kickoff, { deliverAs: "followUp" })
+        }
       } else if (sub === "deactivate" || sub === "stop" || sub === "off") {
         const result = await gwCall("statewright_deactivate")
         if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
         stateCache = null
         lastSwitchedModel = null
         lastThinkingLevel = null
+        setAutonomousPermissions(false)
+        disarmInactivityTimer()
         if (originalModel) {
           await pi.setModel(originalModel as Parameters<typeof pi.setModel>[0])
           originalModel = null
@@ -1089,35 +1438,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       swLog(`tools] ERROR:`, err)
     }
 
-    // --- Rambling watchdog ---
-    // If the model generates text for too long without a tool call, abort + steer.
-    // Watchdog: always active, scaled by thinking level.
-    // States with thinking get 3x timeout (reasoning takes time).
-    // States without thinking get base timeout (should be acting, not deliberating).
-    // Always fires — even reasoning models can spiral.
-    if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
-    const thinkingMultiplier = (state.thinkingLevel && state.thinkingLevel !== "off") ? 3 : 1
-    const watchdogTimeout = RAMBLING_TIMEOUT_MS * thinkingMultiplier
-    if (!state.isFinal) {
-      const abortCtx = ctx  // capture for closure
-      ramblingWatchdog = setTimeout(() => {
-        ramblingWatchdog = null
-        if (!stateCache || stateCache.isFinal || dormant) return
-        const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
-        const transitions = stateCache.transitions.map((t) => `${t.event} -> ${t.target}`).join(", ")
-        swLog(`watchdog] firing after ${watchdogTimeout / 1000}s — aborting stream`)
-        try {
-          abortCtx.abort()
-          // Defer corrective message to agent_end — abort kills the stream immediately,
-          // steer/followUp messages are orphaned if sent now (agent loop exits without
-          // draining the queue). Send as a new prompt when the agent is idle.
-          watchdogPendingMessage =
-            `You were generating text for ${watchdogTimeout / 1000}s without calling a tool. ` +
-            `Execute the next action immediately using one of: ${tools}. ` +
-            `Or transition with: ${transitions}. Do not explain, just act.`
-        } catch { /* ctx may be stale after session reset or rate limit */ }
-      }, watchdogTimeout)
-    }
+    // --- Inactivity monitor ---
+    // Single timer: fires when model goes too long without a tool call.
+    // Uses deliverAs (steer/followUp) instead of bare sendUserMessage to avoid
+    // "Agent is already processing" errors.
+    armInactivityTimer()
 
     const modelLabel = formatModelLabel(state.model, state.defaultModel)
     ctx.ui.setStatus(
@@ -1128,12 +1453,22 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
   // --- Context injection (before each agent turn) ---
 
+  // Capture the latest abort context so the inactivity timer can kill runaway streams
+  let currentAbortCtx: { abort: () => void } | null = null
+
   pi.on("before_agent_start", async (_event, ctx) => {
     if (dormant) return
+    currentAbortCtx = ctx as unknown as { abort: () => void }
     const state = await refreshState()
     if (!state) return
 
     await applyModelRouting(state, ctx)
+
+    // Arm inactivity timer only if not already running.
+    // Recovery-triggered turns (sendUserMessage from message_end) fire
+    // before_agent_start — those should NOT reset the countdown.
+    // Only genuine tool calls through the enforcement layer reset it.
+    if (!inactivityTimer) armInactivityTimer()
 
     if (state.isFinal) {
       ctx.ui.notify("[statewright] Workflow complete.", "success")
@@ -1148,14 +1483,17 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
-    // Tool call happened — model isn't rambling, clear the watchdog
-    if (ramblingWatchdog) { clearTimeout(ramblingWatchdog); ramblingWatchdog = null }
     if (dormant) return
     // Block malformed tool calls (undefined/empty name from broken model output)
     if (!event.toolName) {
       return { block: true, reason: "Tool call has no name. Use a specific tool." }
     }
-    if (event.toolName.startsWith("statewright_")) return
+    if (event.toolName.startsWith("statewright_")) {
+      // Statewright tools always allowed, and they indicate progress
+      resetInactivity()
+      armInactivityTimer()
+      return
+    }
     if (!stateCache) return
 
     // Final state: block everything. Workflow is done, no more tool use.
@@ -1164,7 +1502,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     // No allowed_tools = no enforcement
-    if (stateCache.allowedTools.length === 0) return
+    if (stateCache.allowedTools.length === 0) {
+      resetInactivity()
+      armInactivityTimer()
+      return
+    }
 
     const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
 
@@ -1179,6 +1521,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
       const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
       if (isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
+        resetInactivity()
+        armInactivityTimer()
         return // allow safe read-only bash through
       }
       // Bash attempted but not safe — explain why
@@ -1203,6 +1547,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase. Available: ${available}. To advance, use statewright_transition with: ${transitionHints}.`,
       }
     }
+
+    // Tool call is allowed through — model is making progress, reset inactivity
+    resetInactivity()
+    armInactivityTimer()
   })
 
   // --- Run + log capture: submit to PocketBase ---
@@ -1357,6 +1705,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           const status = stateCache.state === "completed" ? "completed" : "failed"
           swLog(`run] final state: ${stateCache.state} (${status}), runId=${currentRunId}`)
           completeRun(stateCache.state, status).catch(() => {})
+          setAutonomousPermissions(false)
+          disarmInactivityTimer()
           ctx.ui.notify("[statewright] Workflow complete.", "success")
         }
       }
@@ -1451,8 +1801,19 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           }
           else if (name === "bash" || tc.name === "run_command" || tc.name === "run_test") {
             const cmd = (args.command ?? args.cmd) as string
-            const execResult = await pi.exec("bash", ["-c", cmd])
-            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+            // Apply the same bash discernment as the tool_call enforcement layer.
+            // Recovery-executed commands must not bypass write/destructive restrictions.
+            const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
+            const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/.test(cmd)
+            const hasWriteTools = stateCache.allowedTools.some(t => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
+            const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
+            const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
+            if (isDangerous || isScriptWrite || leavesDir || (!isSafe && !stateCache.allowedTools.some(t => toolNamesMatch(t, "bash")))) {
+              result = `Bash command blocked by enforcement: "${cmd}". Only safe read-only commands are allowed in recovery mode.`
+            } else {
+              const execResult = await pi.exec("bash", ["-c", cmd])
+              result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+            }
           }
           // Edit tool — normalize parameter variants from local models
           // Local models emit {file, old, new}, {path, old_text, new_text}, {edits: [{file, oldText, newText}]}, etc.
@@ -1530,40 +1891,52 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     // Auto-continuation: nudge the model to keep working if it stalled.
-    // Cooldown prevents flail loops — only fires once per 30 seconds.
+    // Shares nudgeCount with the inactivity timer — both paths escalate toward
+    // the same MAX_NUDGES auto-FAIL. Prevents infinite loops during upstream timeouts.
     if (!stateCache.isFinal && textParts.length > 0 && toolCallParts.length === 0) {
       const now = Date.now()
       if (now - lastNudgeTime < 30000) return
-      lastNudgeTime = now
+
+      nudgeCount++
+      swLog(`auto-continuation] message_end nudge (${nudgeCount}/${MAX_NUDGES})`)
+
+      if (nudgeCount > MAX_NUDGES) {
+        swLog(`auto-continuation] max nudges exceeded — auto-transitioning FAIL`)
+        const failEvent = stateCache.transitions.find(t => t.event === "FAIL")?.event ?? "FAIL"
+        gwCall("statewright_transition", {
+          event: failEvent,
+          data: { rationale: `Agent stuck: ${nudgeCount} consecutive turns without a successful tool call` },
+        }).then(async () => {
+          await refreshState()
+          if (stateCache) {
+            swLog(`auto-FAIL] transitioned to ${stateCache.state} (isFinal=${stateCache.isFinal})`)
+          }
+        }).catch((err) => {
+          swLog(`auto-FAIL] FAIL transition failed: ${err instanceof Error ? err.message : String(err)}`)
+          // Force local state to final to break the loop even if gateway is unreachable
+          if (stateCache) stateCache.isFinal = true
+        })
+        disarmInactivityTimer()
+        return
+      }
 
       const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
-      const transitionHints = stateCache.transitions.map((t) => describeTransition(t, stateCache!)).join(", ")
+      const transitions = stateCache.transitions.map(t => `${t.event} -> ${t.target}`).join(", ")
       const instructions = stateCache.instructions ?? "Proceed with the task."
-      pi.sendUserMessage(
-        `Continue working. Phase: '${stateCache.state}'. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitionHints}. Do NOT re-read files you have already read. Continue from where you left off.`,
-        { deliverAs: "steer" },
-      )
+
+      // Same escalation as inactivity timer — unified progression
+      let msg: string
+      if (nudgeCount <= 1) {
+        msg = `Your task: ${instructions} Tools: ${available}. Transitions: ${transitions}. Do not explain — call a tool now.`
+      } else if (nudgeCount === 2) {
+        const firstTool = stateCache.allowedTools[0] ? normalizeToolName(stateCache.allowedTools[0]) : "bash"
+        const suggestion = firstTool === "bash" ? "Run the test suite or list files." : `Use ${firstTool} on the most relevant file.`
+        msg = `STUCK (${nudgeCount}/${MAX_NUDGES}). ${suggestion} Instructions: ${instructions}. Act now.`
+      } else {
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). Run "pytest -q", "npm test", or "ls". Call one tool. If stuck, respond with: {"transition": "FAIL", "rationale": "why"}.`
+      }
+      deliverCorrective(msg)
     }
   })
 
-  // --- Watchdog recovery: send deferred corrective message after abort settles ---
-  // agent_end fires BEFORE finishRun() clears isStreaming/activeRun (it's inside
-  // processEvents, which is awaited before the finally block). sendUserMessage()
-  // without deliverAs requires idle state. setTimeout(0) defers to the next
-  // macrotask — after finishRun() completes and the agent is truly idle.
-  pi.on("agent_end", async () => {
-    if (!watchdogPendingMessage) return
-    const msg = watchdogPendingMessage
-    watchdogPendingMessage = null
-    swLog("watchdog] agent_end — deferring corrective prompt to next tick")
-    setTimeout(() => {
-      // Guard: skip if fork started or workflow deactivated between schedule and execution
-      if (dormant) return
-      try {
-        pi.sendUserMessage(msg)
-      } catch (err) {
-        swLog(`watchdog] deferred sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }, 0)
-  })
 }

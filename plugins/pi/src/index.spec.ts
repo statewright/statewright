@@ -285,7 +285,7 @@ describe("statewright Pi extension", () => {
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
 
-      expect(pi.on).toHaveBeenCalledTimes(6)
+      expect(pi.on).toHaveBeenCalledTimes(7)
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("context", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("before_provider_request", expect.any(Function))
@@ -1178,7 +1178,15 @@ describe("statewright Pi extension", () => {
       await statewrightExtension(asPi(pi))
       await pi._fire("before_agent_start", {}, ctx)
 
-      // Simulate passing test output
+      // Push nudge count near limit — auto-transition is last-resort only
+      for (let i = 0; i < 5; i++) {
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + (i + 1) * 31000)
+        await pi._fire("message_end", {
+          message: { role: "assistant", content: [{ type: "text", text: "thinking..." }] },
+        }, ctx)
+      }
+
+      // Simulate passing test output — should auto-fire near limit
       await pi._fire("tool_result", {
         toolName: "bash",
         input: { command: "pytest -q" },
@@ -1215,6 +1223,14 @@ describe("statewright Pi extension", () => {
 
       await statewrightExtension(asPi(pi))
       await pi._fire("before_agent_start", {}, ctx)
+
+      // Push nudge count near limit
+      for (let i = 0; i < 5; i++) {
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + (i + 1) * 31000)
+        await pi._fire("message_end", {
+          message: { role: "assistant", content: [{ type: "text", text: "thinking..." }] },
+        }, ctx)
+      }
 
       // Simulate failing test output
       await pi._fire("tool_result", {

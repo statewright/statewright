@@ -38,6 +38,100 @@ const ANSI = {
   diffAdd: "\x1b[42m\x1b[30m",  // green bg for +lines
   diffDel: "\x1b[41m\x1b[37m",  // red bg for -lines
 }
+
+// 256-color helpers: \x1b[38;5;Nm (fg) and \x1b[48;5;Nm (bg)
+const fg256 = (n: number) => `\x1b[38;5;${n}m`
+const bg256 = (n: number) => `\x1b[48;5;${n}m`
+
+// Powerline color palette (256-color for proper contrast)
+const PL_COLORS: Record<string, { bg: number; fg: number }> = {
+  recon:      { bg: 33,  fg: 255 },  // dodger blue, white
+  plan:       { bg: 37,  fg: 16  },  // cyan, black
+  implement:  { bg: 135, fg: 255 },  // purple, white
+  verify:     { bg: 214, fg: 16  },  // orange, black
+  completed:  { bg: 34,  fg: 255 },  // green, white
+  failed:     { bg: 196, fg: 255 },  // red, white
+  paused:     { bg: 226, fg: 16  },  // yellow, black
+  model:      { bg: 238, fg: 252 },  // dark grey, light grey
+  git:        { bg: 240, fg: 252 },  // medium grey, light grey
+  iter:       { bg: 241, fg: 255 },  // mid grey, white
+}
+
+// Powerline separator (U+E0B0)
+const PL = process.env.STATEWRIGHT_POWERLINE !== "0" ? "\uE0B0" : "|"
+
+// Build a powerline segment with proper arrow coloring
+function plSegment(text: string, colorKey: string, nextColorKey?: string): string {
+  const c = PL_COLORS[colorKey] ?? PL_COLORS.recon
+  const segment = `${bg256(c.bg)}${fg256(c.fg)}${ANSI.bold} ${text} ${ANSI.reset}`
+  if (nextColorKey) {
+    const next = PL_COLORS[nextColorKey] ?? PL_COLORS.model
+    return segment + `${fg256(c.bg)}${bg256(next.bg)}${PL}${ANSI.reset}`
+  }
+  // Last segment: arrow to terminal default bg
+  return segment + `${fg256(c.bg)}${ANSI.reset}${PL}${ANSI.reset}`
+}
+
+// Map state name to color key
+function stateColorKey(s: StateCache): string {
+  if (s.isFinal && s.state === "completed") return "completed"
+  if (s.isFinal) return "failed"
+  if (/implement|edit/i.test(s.state)) return "implement"
+  if (/test|verif/i.test(s.state)) return "verify"
+  if (/plan/i.test(s.state)) return "plan"
+  return "recon"
+}
+
+// Track last-known model so final states still show it
+let lastKnownModel: string | null = null
+let lastKnownProvider: string | null = null
+let pluginStepCount = 0
+
+// Centralized status bar formatter
+function formatStatusBar(s: StateCache | null, extra?: string): string {
+  if (!s) return plSegment("statewright", "recon", "iter") + plSegment("inactive", "iter")
+  if (extra === "paused") {
+    return plSegment("statewright", "recon", "paused") + plSegment("⏸ paused", "paused")
+  }
+
+  // Track model for display in final states
+  if (s.model) {
+    const parts = s.model.split("/")
+    lastKnownProvider = parts.length > 1 ? parts[0] : null
+    lastKnownModel = parts.length > 1 ? parts.slice(1).join("/") : s.model
+  }
+
+  if (extra === "programmatic") {
+    return plSegment("statewright", "recon", stateColorKey(s)) +
+           plSegment(`⚡ ${s.state}`, stateColorKey(s), "model") +
+           plSegment("programmatic", "model")
+  }
+
+  const colorKey = stateColorKey(s)
+  const iter = `${pluginStepCount}/${s.maxIterations ?? "∞"}`
+
+  // Separate segments: state > provider > model > thinking > iter
+  const provider = lastKnownProvider ?? null
+  const model = lastKnownModel ?? s.defaultModel ?? null
+  const tierLabel = formatModelLabel(s.model, s.defaultModel)?.trim()
+  const modelName = tierLabel || model
+  const thinking = s.thinkingLevel && s.thinkingLevel !== "off" ? s.thinkingLevel : null
+
+  let result = plSegment("statewright", "recon", colorKey)
+  result += plSegment(s.state, colorKey, provider ? "git" : (modelName ? "model" : "iter"))
+
+  if (provider) {
+    result += plSegment(provider, "git", modelName ? "model" : "iter")
+  }
+  if (modelName) {
+    result += plSegment(modelName, "model", thinking ? "paused" : "iter")
+  }
+  if (thinking) {
+    result += plSegment(`💭${thinking}`, "paused", "iter")
+  }
+  result += plSegment(iter, "iter")
+  return result
+}
 function swLog(msg: string) { if (process.env.STATEWRIGHT_DEBUG) console.error(`${SW_LOG_COLOR}[statewright] ${msg}${SW_LOG_RESET}`) }
 
 // --- Gateway client ---
@@ -62,10 +156,13 @@ interface JsonRpcResult {
   error?: { code: number; message: string }
 }
 
+let lastGwError = ""
+
 async function gwCall(
   toolName: string,
   args: Record<string, unknown> = {},
 ): Promise<Record<string, unknown> | null> {
+  lastGwError = ""
   const apiKey = getApiKey()
   if (!apiKey) return null
 
@@ -98,12 +195,14 @@ async function gwCall(
         const data = (await resp.json()) as JsonRpcResult
         if (data.error) {
           swLog(`gwCall] ${toolName} JSON-RPC error: ${JSON.stringify(data.error)}`)
+          lastGwError = data.error.message ?? JSON.stringify(data.error)
           return null
         }
         // Check MCP tool result isError flag (gateway returns errors as successful JSON-RPC with isError: true)
         if ((data.result as Record<string, unknown>)?.isError) {
           const errText = data.result?.content?.[0]?.text ?? "unknown error"
           swLog(`gwCall] ${toolName} tool error: ${errText}`)
+          lastGwError = errText
           return null
         }
         const text = data.result?.content?.[0]?.text
@@ -329,12 +428,12 @@ function modelTier(model: string): number {
 function formatModelLabel(model: string | null, defaultModel: string | null): string {
   if (!model) return ""
   const shortName = model.split("/").pop()!
-  if (!defaultModel || model === defaultModel) return ` [${shortName}]`
+  if (!defaultModel || model === defaultModel) return ` ${shortName}`
   const tier = modelTier(model)
   const defaultTier = modelTier(defaultModel)
-  if (tier < defaultTier) return ` [${shortName} \u2193]`  // ↓ cheaper
-  if (tier > defaultTier) return ` [${shortName} \u2191]`  // ↑ more expensive
-  return ` [${shortName}]`
+  if (tier < defaultTier) return ` ${shortName} \u2193`  // ↓ cheaper
+  if (tier > defaultTier) return ` ${shortName} \u2191`  // ↑ more expensive
+  return ` ${shortName}`
 }
 
 // --- Formatting ---
@@ -390,11 +489,10 @@ function buildFreshSystemPrompt(s: StateCache): string {
     `- edit: {"name": "edit", "args": {"path": "file.py", "old": "exact old text", "new": "replacement text"}}`,
     `- grep: {"name": "grep", "args": {"pattern": "search", "path": "."}}`,
     `- ls: {"name": "ls", "args": {"path": "."}}`,
-    `- transition: {"name": "transition", "args": {"event": "EVENT_NAME"}}`,
+    `- statewright_transition: statewright_transition(event="EVENT_NAME", data={"rationale": "why"})`,
     ``,
     `## How to Respond`,
-    `Respond with JSON: {"thought": "brief reasoning", "tool_calls": [{"name": "tool", "args": {...}}]}`,
-    `To advance to the next state: include {"name": "transition", "args": {"event": "EVENT_NAME"}} in tool_calls.`,
+    `Use your allowed tools to make progress. When ready to advance, call statewright_transition.`,
     `Do NOT use sed, python, or shell scripts to edit files. Use the edit tool.`,
     `Do NOT skip states. Do NOT use tools not in your allowed list.`,
   ].join("\n")
@@ -823,7 +921,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (nudgeCount <= 2) {
         msg = `State: ${stateCache.state}. Instructions: ${instructions}. Tools: ${tools}. Transitions: ${transitions}. Respond with JSON tool_calls now.`
       } else {
-        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${tools}. Transitions: ${transitions}. Call a tool or transition NOW. If stuck: {"tool_calls": [{"name": "transition", "args": {"event": "FAIL"}}]}`
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${tools}. Transitions: ${transitions}. Call a tool or use statewright_transition to advance. If stuck: statewright_transition(event="FAIL", data={"rationale": "why"})`
       }
 
       deliverCorrective(msg)
@@ -854,6 +952,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   }
 
   console.log(`[statewright] Connected to ${GW_URL}`)
+
+  // Show status bar immediately on startup
+  pi.on("session_start" as any, async (_event: unknown, ctx: any) => {
+    ctx.ui?.setStatus?.("statewright", formatStatusBar(stateCache))
+  })
 
   // --- Bootstrap: subagent extension for fork/join (disabled — WIP) ---
   if (false) {
@@ -900,7 +1003,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       const state = await refreshState()
-      if (!state) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      if (!state) return { content: [{ type: "text", text: "No active workflow. Use statewright_load_workflow to start one." }] }
       // Normalize tool names to Pi conventions (lowercase) so models don't see upcase/lowercase mismatch
       const normalized = { ...state, allowedTools: state.allowedTools.map(normalizeToolName) }
       return { content: [{ type: "text", text: JSON.stringify(normalized, null, 2) }] }
@@ -959,9 +1062,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }),
     async execute(_id, params: { name: string; resume?: boolean }) {
       const result = await gwCall("statewright_load_workflow", params) as { run_id?: string } & Record<string, unknown> | null
-      if (!result) return { content: [{ type: "text", text: "Gateway not reachable" }] }
+      if (!result) return { content: [{ type: "text", text: lastGwError || "Gateway not reachable" }], isError: true }
 
       dormant = false
+      pluginStepCount = 0
       currentRunId = (result as { run_id?: string }).run_id ?? null
       logSequence = 0
       await refreshState()
@@ -1378,8 +1482,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         if (!name) { ctx.ui.notify("[statewright] Usage: /statewright load <workflow-name>", "warn"); return }
         const resume = parts.includes("--resume")
         const result = await gwCall("statewright_load_workflow", { name, resume })
-        if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
+        if (!result) { ctx.ui.notify(`[statewright] ${lastGwError || "Gateway not reachable"}`, "error"); return }
+        if ((result as Record<string, unknown>)._error) { ctx.ui.notify(`[statewright] ${(result as Record<string, unknown>)._error}`, "error"); return }
         dormant = false
+        pluginStepCount = 0
         await refreshState()
         if (stateCache) await applyModelRouting(stateCache, ctx)
 
@@ -1423,7 +1529,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         const result = await gwCall("statewright_pause")
         if (!result) { ctx.ui.notify("[statewright] Gateway not reachable", "error"); return }
         stateCache = null
-        ctx.ui.setStatus("statewright", "[statewright] paused")
+        ctx.ui.setStatus("statewright", formatStatusBar(stateCache, "paused"))
         ctx.ui.notify("[statewright] Workflow paused. Resume with /statewright load <name> --resume", "info")
       } else if (sub === "list" || sub === "ls") {
         const result = await gwCall("statewright_list_workflows")
@@ -1542,11 +1648,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     // must NOT reset the countdown or the timer never fires.
     if (!inactivityTimer) armInactivityTimer()
 
-    const modelLabel = formatModelLabel(state.model, state.defaultModel)
-    ctx.ui.setStatus(
-      "statewright",
-      `[statewright] ${state.state}${modelLabel} (${state.iteration}/${state.maxIterations ?? "∞"})`,
-    )
+    ctx.ui.setStatus("statewright", formatStatusBar(state))
   }
 
   // --- Context injection (before each agent turn) ---
@@ -1557,6 +1659,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (_event, ctx) => {
     if (dormant) return
     currentAbortCtx = ctx as unknown as { abort: () => void }
+    pluginStepCount++
     const state = await refreshState()
     if (!state) return
 
@@ -1585,17 +1688,18 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       )
       if (isReconState && hasHypothesisTransition) {
         swLog(`programmatic] running reconnaissance — no LLM needed`)
-        ctx.ui.setStatus("statewright", `[statewright] ${state.state} (programmatic)`)
+        ctx.ui.setStatus("statewright", formatStatusBar(state, "programmatic"))
+        ctx.ui.notify("[statewright] ⚡ Programmatic reconnaissance — running tests, reading source files", "info")
 
         try {
           // 1. Run tests
           const testResult = await pi.exec("bash", ["-c", "pytest -q 2>&1 || npm test 2>&1 || cargo test 2>&1 || echo 'no test runner found'"])
-          const testOutput = typeof testResult === "string" ? testResult : JSON.stringify(testResult)
+          const testOutput = execText(testResult)
           swLog(`programmatic] test output: ${testOutput.slice(0, 200)}`)
 
           // 2. List source files
-          const lsResult = await pi.exec("bash", ["-c", "find . -type f -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.rs' | grep -v __pycache__ | grep -v node_modules | grep -v .git | sort"])
-          const files = (typeof lsResult === "string" ? lsResult : JSON.stringify(lsResult)).trim().split("\n").filter(Boolean)
+          const lsResult = await pi.exec("bash", ["-c", "find . -type f \\( -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.rs' \\) | grep -v __pycache__ | grep -v node_modules | grep -v .git | sort"])
+          const files = execText(lsResult).trim().split("\n").filter(Boolean)
           swLog(`programmatic] found ${files.length} source files`)
 
           // 3. Read all source files (up to 20)
@@ -1617,7 +1721,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             ].join("\n\n").slice(0, 8000),
           }
 
-          // 5. Auto-transition
+          // 5. Show summary + auto-transition
+          const failCount = (testOutput.match(/(\d+) failed/)?.[1]) ?? "?"
+          const passCount = (testOutput.match(/(\d+) passed/)?.[1]) ?? "?"
+          ctx.ui.notify(`[statewright] Tests: ${failCount} failed, ${passCount} passed. Read ${files.length} source files.`, "info")
+
           const transEvent = state.transitions.find(t =>
             t.event === "HYPOTHESIS_FORMED" || t.event === "LOCALIZED"
           )!.event
@@ -1629,7 +1737,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           await refreshState()
 
           if (stateCache) {
-            ctx.ui.setStatus("statewright", `[statewright] ${stateCache.state} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`)
+            ctx.ui.setStatus("statewright", formatStatusBar(stateCache))
+            ctx.ui.notify(`[statewright] ✓ ${state.state} → ${stateCache.state}`, "success")
             return { systemPrompt: buildFreshSystemPrompt(stateCache) }
           }
         } catch (err) {
@@ -1657,13 +1766,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     // but prevents the 33k accumulation that kills small models
     const windowed = messages.slice(-PLUGIN_CONTEXT_WINDOW)
 
-    // If we have recon results and the window doesn't include them, prepend
-    if (lastToolResult && windowed.length === 0) {
-      return {
-        messages: [
-          { role: "user", content: [{ type: "text", text: `Previous result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}\n\nProceed with the next action.` }] },
-        ] as unknown[],
-      }
+    // Always prepend lastToolResult if available — ensures recon results
+    // carry into the next state even when the sliding window has stale messages
+    if (lastToolResult) {
+      const reconMsg = { role: "user", content: [{ type: "text", text: `Previous result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}\n\nProceed with the next action.` }] }
+      return { messages: [reconMsg, ...windowed].slice(0, PLUGIN_CONTEXT_WINDOW + 1) as unknown[] }
     }
 
     return { messages: windowed as unknown[] }
@@ -1709,9 +1816,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
     const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
 
-    // Bash discernment: even when Bash isn't in allowed_tools, permit safe
-    // read-only commands. Block writes, destructive ops, and scripting interpreters.
-    if (!isAllowed && (event.toolName === "bash" || event.toolName === "Bash")) {
+    // Bash discernment: applies whether Bash is allowed or not.
+    // When allowed: still block sed -i (use edit tool instead).
+    // When not allowed: permit safe read-only commands, block everything else.
+    if (event.toolName === "bash" || event.toolName === "Bash") {
       const cmd = (event.input?.command ?? "") as string
       const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
       const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/.test(cmd)
@@ -1719,8 +1827,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const hasWriteTools = stateCache.allowedTools.some((t) => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
       const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
       const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
-      if (isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
-        return // allow safe read-only bash through
+      if (isAllowed && !isDangerous) {
+        return // Bash is allowed and command isn't destructive — pass through
+      }
+      if (!isAllowed && isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
+        return // Bash not allowed but command is safe read-only — pass through
       }
       // Bash attempted but not safe — explain why
       const reasons: string[] = []
@@ -1883,29 +1994,49 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         : ""
       const isTestRunner = /\b(pytest|npm\s+test|cargo\s+test|make\s+test|jest|vitest|mocha)\b/i.test(cmd)
 
+      // When test results are detected, steer the model with what to do next.
+      // This is NOT an auto-transition — it's guidance so the model doesn't spiral
+      // trying to reconcile "fix failing tests" with "tests now pass."
       if (isTestRunner) {
         const hasFailures = /\bfailed\b|FAILED|ERROR|error:/i.test(toolOutput)
         const hasPasses = /\bpassed\b/i.test(toolOutput)
+        const nearLimit = nudgeCount >= MAX_NUDGES - 1
 
         if (hasPasses && !hasFailures) {
           const passEvent = stateCache.transitions.find(t => t.event === "TESTS_PASS")
-          if (passEvent) {
-            swLog(`auto-transition] tests passed — firing ${passEvent.event}`)
-            await gwCall("statewright_transition", {
-              event: passEvent.event,
-              data: { rationale: "All tests passed (auto-detected by plugin orchestrator)" },
-            })
-            await refreshState()
+          const doneEvent = stateCache.transitions.find(t => t.event === "DONE")
+          const targetEvent = passEvent ?? doneEvent
+          if (targetEvent) {
+            if (nearLimit) {
+              // Last resort: auto-transition
+              swLog(`auto-transition] tests passed (last resort, nudge ${nudgeCount}/${MAX_NUDGES}) — firing ${targetEvent.event}`)
+              await gwCall("statewright_transition", {
+                event: targetEvent.event,
+                data: { rationale: "All tests passed (auto-detected — model failed to transition after repeated nudges)" },
+              })
+              await refreshState()
+            } else {
+              // Steer: tell the model what happened and what to do
+              deliverCorrective(
+                `Tests PASSED. Transition now: statewright_transition(event="${targetEvent.event}", data={"rationale": "all tests passing"})`,
+              )
+            }
           }
         } else if (hasFailures) {
           const failEvent = stateCache.transitions.find(t => t.event === "TESTS_FAIL")
           if (failEvent) {
-            swLog(`auto-transition] tests failed — firing ${failEvent.event}`)
-            await gwCall("statewright_transition", {
-              event: failEvent.event,
-              data: { rationale: "Tests failed (auto-detected by plugin orchestrator)" },
-            })
-            await refreshState()
+            if (nearLimit) {
+              swLog(`auto-transition] tests failed (last resort, nudge ${nudgeCount}/${MAX_NUDGES}) — firing ${failEvent.event}`)
+              await gwCall("statewright_transition", {
+                event: failEvent.event,
+                data: { rationale: "Tests failed (auto-detected by plugin orchestrator)" },
+              })
+              await refreshState()
+            } else {
+              deliverCorrective(
+                `Tests FAILED. Transition now: statewright_transition(event="${failEvent.event}", data={"rationale": "tests still failing"})`,
+              )
+            }
           }
         }
       }
@@ -2004,8 +2135,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       // After any state change in recovery, update status bar + detect final state
       const checkStateAfterTransition = () => {
         if (!stateCache) return
-        const modelLabel = formatModelLabel(stateCache.model, stateCache.defaultModel)
-        _ctx.ui.setStatus("statewright", `[statewright] ${stateCache.state}${modelLabel} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`)
+        _ctx.ui.setStatus("statewright", formatStatusBar(stateCache))
         if (stateCache.isFinal) {
           const status = stateCache.state === "completed" ? "completed" : "failed"
           swLog(`recovery] workflow reached final state: ${stateCache.state}`)
@@ -2188,7 +2318,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
                   content = JSON.stringify(readResult)
                 }
                 let applied = 0
+                swLog(`edit] file content length: ${content.length}, type: ${typeof readResult}`)
                 for (const edit of edits) {
+                  swLog(`edit] searching for oldText (${edit.oldText.length} chars): "${edit.oldText.slice(0, 80)}..."`)
+                  swLog(`edit] match: ${content.includes(edit.oldText)}`)
                   if (content.includes(edit.oldText)) {
                     content = content.replace(edit.oldText, edit.newText)
                     applied++
@@ -2303,7 +2436,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       if (nudgeCount <= 2) {
         msg = `State: ${stateCache.state}. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitions}. Respond with JSON tool_calls now.`
       } else {
-        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${available}. Transitions: ${transitions}. Call a tool or transition NOW. If stuck: {"tool_calls": [{"name": "transition", "args": {"event": "FAIL"}}]}`
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${available}. Transitions: ${transitions}. Call a tool or use statewright_transition to advance. If stuck: statewright_transition(event="FAIL", data={"rationale": "why"})`
       }
       deliverCorrective(msg)
     }

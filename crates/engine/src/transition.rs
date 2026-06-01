@@ -20,23 +20,61 @@ pub fn resolve_transition(
     let transition = match state_def.on.get(event) {
         Some(t) => t,
         None => {
-            // Event not recognized — check for safe_next fallback
-            if let Some(safe_target) = &state_def.safe_next {
-                let new_context = apply_context_patch(context, event_data);
-                return Ok(TransitionResult {
-                    new_state: safe_target.clone(),
-                    new_context,
-                    transitioned: true,
-                    requires_approval: false,
-                    approval_message: None,
-                    invoke: None,
-                    fork: None,
+            // Fuzzy resolution: model may have sent a target state name instead of an event.
+            // e.g. "completed" when the event is "TESTS_PASS" → "completed"
+            let by_target: Vec<(&String, &TransitionDef)> = state_def
+                .on
+                .iter()
+                .filter(|(_, t)| t.target().eq_ignore_ascii_case(event))
+                .collect();
+
+            if by_target.len() == 1 {
+                // Unambiguous: exactly one event leads to this target
+                by_target[0].1
+            } else if by_target.len() > 1 {
+                // Ambiguous: multiple events reach this target
+                let options: Vec<&str> = by_target.iter().map(|(e, _)| e.as_str()).collect();
+                return Err(TransitionError::NoMatchingTransition {
+                    state: current_state.to_string(),
+                    event: format!(
+                        "'{}' is a state name, not an event. Multiple events reach it: {}",
+                        event,
+                        options.join(", ")
+                    ),
                 });
+            } else {
+                // Try substring match: "PASS" → "TESTS_PASS"
+                let by_substring: Vec<(&String, &TransitionDef)> = state_def
+                    .on
+                    .iter()
+                    .filter(|(e, _)| {
+                        let el = e.to_lowercase();
+                        let evl = event.to_lowercase();
+                        el.contains(&evl) || evl.contains(&el)
+                    })
+                    .collect();
+
+                if by_substring.len() == 1 {
+                    by_substring[0].1
+                } else if let Some(safe_target) = &state_def.safe_next {
+                    // safe_next fallback
+                    let new_context = apply_context_patch(context, event_data);
+                    return Ok(TransitionResult {
+                        new_state: safe_target.clone(),
+                        new_context,
+                        transitioned: true,
+                        requires_approval: false,
+                        approval_message: None,
+                        invoke: None,
+                        fork: None,
+                    });
+                } else {
+                    return Err(TransitionError::NoMatchingTransition {
+                        state: current_state.to_string(),
+                        event: event.to_string(),
+                    });
+                }
             }
-            return Err(TransitionError::NoMatchingTransition {
-                state: current_state.to_string(),
-                event: event.to_string(),
-            });
         }
     };
 
@@ -756,5 +794,81 @@ mod tests {
         let def = fork_machine();
         let result = resolve_transition("lint_run", "PASS", &json!({}), &json!({}), &def).unwrap();
         assert!(result.fork.is_none());
+    }
+
+    // --- Fuzzy transition matching ---
+
+    fn verification_machine() -> MachineDefinition {
+        serde_json::from_value(json!({
+            "id": "fuzzy-test",
+            "initial": "verification",
+            "states": {
+                "verification": {
+                    "on": {
+                        "TESTS_PASS": "completed",
+                        "TESTS_FAIL": "implementing",
+                        "FAIL": "failed"
+                    }
+                },
+                "implementing": { "on": { "DONE": "verification", "FAIL": "failed" } },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn fuzzy_resolves_target_name_to_event() {
+        // "completed" is a target, not an event — should resolve to TESTS_PASS
+        let def = verification_machine();
+        let result = resolve_transition("verification", "completed", &json!({}), &json!({}), &def).unwrap();
+        assert_eq!(result.new_state, "completed");
+        assert!(result.transitioned);
+    }
+
+    #[test]
+    fn fuzzy_resolves_substring_match() {
+        // "PASS" is a substring of "TESTS_PASS"
+        let def = verification_machine();
+        let result = resolve_transition("verification", "PASS", &json!({}), &json!({}), &def).unwrap();
+        assert_eq!(result.new_state, "completed");
+    }
+
+    #[test]
+    fn fuzzy_rejects_ambiguous_target() {
+        // Machine where two events lead to the same target
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "ambiguous",
+            "initial": "review",
+            "states": {
+                "review": {
+                    "on": {
+                        "AUTO_APPROVE": "completed",
+                        "MANUAL_APPROVE": "completed",
+                        "FAIL": "failed"
+                    }
+                },
+                "completed": { "type": "final" },
+                "failed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let result = resolve_transition("review", "completed", &json!({}), &json!({}), &def);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("AUTO_APPROVE"));
+        assert!(err.contains("MANUAL_APPROVE"));
+    }
+
+    #[test]
+    fn exact_match_takes_priority_over_fuzzy() {
+        // Event "FAIL" exists exactly — should not fuzzy-match to "TESTS_FAIL"
+        let def = verification_machine();
+        let result = resolve_transition("verification", "FAIL", &json!({}), &json!({}), &def).unwrap();
+        assert_eq!(result.new_state, "failed");
     }
 }

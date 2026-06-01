@@ -40,6 +40,25 @@ Every prompt, statewright checks your workflow state and tells Claude which tool
 
 Build your own at [statewright.ai/workflows](https://statewright.ai/workflows).
 
+## Status line
+
+Show the current workflow state in your Claude Code status bar. Add to `~/.claude/settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "/path/to/statusline.sh"
+}
+```
+
+An example script is in [`examples/statusline.sh`](examples/statusline.sh). It renders a powerline segment with the active state and iteration count, colored by phase:
+
+```
+ ~/project  main  Opus 4.6  03:42         implementing 2/8  ⚙ statewright 
+```
+
+When no workflow is running, just the brand pill shows. Append the statewright segment to your existing statusline script — see the comments in the example for integration.
+
 ## License
 
 Apache 2.0. Cloud at [statewright.ai](https://statewright.ai).

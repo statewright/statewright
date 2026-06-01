@@ -285,8 +285,10 @@ describe("statewright Pi extension", () => {
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
 
-      expect(pi.on).toHaveBeenCalledTimes(4)
+      expect(pi.on).toHaveBeenCalledTimes(6)
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))
+      expect(pi.on).toHaveBeenCalledWith("context", expect.any(Function))
+      expect(pi.on).toHaveBeenCalledWith("before_provider_request", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("tool_call", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("tool_result", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("message_end", expect.any(Function))
@@ -372,13 +374,13 @@ describe("statewright Pi extension", () => {
 
       await statewrightExtension(asPi(pi))
       const results = await pi._fire("before_agent_start", {}, ctx)
-      const result = results[0] as { appendSystemPrompt?: string }
+      const result = results[0] as { systemPrompt?: string }
 
-      expect(result).toHaveProperty("appendSystemPrompt")
-      expect(result.appendSystemPrompt).toContain("Work autonomously")
-      expect(result.appendSystemPrompt).toContain("implementing")
-      expect(result.appendSystemPrompt).toContain("read, edit, bash")
-      expect(result.appendSystemPrompt).toContain("DONE (-> testing)")
+      expect(result).toHaveProperty("systemPrompt")
+      expect(result.systemPrompt).toContain("Work autonomously")
+      expect(result.systemPrompt).toContain("implementing")
+      expect(result.systemPrompt).toContain("read, edit, bash")
+      expect(result.systemPrompt).toContain("DONE (-> testing)")
     })
 
     it("updates status bar", async () => {
@@ -558,7 +560,7 @@ describe("statewright Pi extension", () => {
       expect(pi.exec).toHaveBeenCalledWith("cat", ["src/main.rs"])
       // Should feed results back via sendUserMessage
       expect(pi.sendUserMessage).toHaveBeenCalledWith(
-        expect.stringContaining("executed your tool calls"),
+        expect.stringContaining("Continue with the next action"),
         expect.objectContaining({ deliverAs: "steer" }),
       )
     })
@@ -626,7 +628,7 @@ describe("statewright Pi extension", () => {
 
       // edit is not shell-executable, should still send results back
       expect(pi.sendUserMessage).toHaveBeenCalledWith(
-        expect.stringContaining("executed your tool calls"),
+        expect.stringContaining("Continue with the next action"),
         expect.objectContaining({ deliverAs: "steer" }),
       )
     })
@@ -996,7 +998,7 @@ describe("statewright Pi extension", () => {
       // Should have executed via pi.exec
       expect(pi.exec).toHaveBeenCalledWith("bash", ["-c", "pytest -q"])
       expect(pi.sendUserMessage).toHaveBeenCalledWith(
-        expect.stringContaining("executed your tool calls"),
+        expect.stringContaining("Continue with the next action"),
         expect.objectContaining({ deliverAs: "steer" }),
       )
     })
@@ -1051,6 +1053,267 @@ describe("statewright Pi extension", () => {
           body: expect.stringContaining("statewright_transition"),
         }),
       )
+    })
+  })
+
+  describe("plugin orchestration", () => {
+    const PLUGIN_STATE = {
+      ...MOCK_STATE,
+      meta: { orchestration: "plugin", task_description: "Fix the LIFO bug in hooks.py" },
+    }
+
+    const AGENTIC_STATE = {
+      ...MOCK_STATE,
+      // no meta.orchestration — default agentic behavior
+    }
+
+    it("context hook replaces messages with fresh prompt in plugin mode", async () => {
+      setupFetch([{ match: "/mcp", body: PLUGIN_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Simulate 50 accumulated messages (33k tokens worth)
+      const accumulated = Array.from({ length: 50 }, (_, i) => ({
+        role: "user",
+        content: [{ type: "text", text: `Accumulated message ${i} with lots of context padding` }],
+      }))
+
+      const results = await pi._fire("context", { messages: accumulated }, ctx)
+      const result = results[0] as { messages?: unknown[] }
+
+      // Should window to at most PLUGIN_CONTEXT_WINDOW (6) messages
+      expect(result).toHaveProperty("messages")
+      expect(result.messages!.length).toBeLessThanOrEqual(6)
+    })
+
+    it("context hook is no-op in agentic mode", async () => {
+      setupFetch([{ match: "/mcp", body: AGENTIC_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const results = await pi._fire("context", {
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      }, ctx)
+
+      // Should return undefined — no modification
+      expect(results[0]).toBeUndefined()
+    })
+
+    it("windows messages to at most PLUGIN_CONTEXT_WINDOW entries", async () => {
+      setupFetch([{ match: "/mcp", body: PLUGIN_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // 20 messages — should be windowed down
+      const messages = Array.from({ length: 20 }, (_, i) => ({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: [{ type: "text", text: `Message ${i}` }],
+      }))
+
+      const results = await pi._fire("context", { messages }, ctx)
+      const result = results[0] as { messages?: unknown[] }
+
+      expect(result).toHaveProperty("messages")
+      expect(result.messages!.length).toBeLessThanOrEqual(6)
+      // Should keep the LAST messages, not the first
+      const lastMsg = JSON.stringify(result.messages![result.messages!.length - 1])
+      expect(lastMsg).toContain("Message 19")
+    })
+
+    it("includes last tool result in fresh prompt", async () => {
+      setupFetch([{ match: "/mcp", body: PLUGIN_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Simulate a tool result
+      await pi._fire("tool_result", {
+        toolName: "bash",
+        input: { command: "ls -la" },
+        content: [{ type: "text", text: "total 42\ndrwxr-xr-x  5 user staff 160 hooks.py" }],
+      }, ctx)
+
+      // Now fire context — should include last tool result
+      const results = await pi._fire("context", { messages: [] }, ctx)
+      const result = results[0] as { messages?: Array<{ role: string; content: unknown }> }
+      const allText = JSON.stringify(result.messages)
+
+      expect(allText).toContain("hooks.py")
+    })
+
+    it("auto-transitions TESTS_PASS when tests pass", async () => {
+      const testingState = {
+        ...PLUGIN_STATE,
+        state: "testing",
+        allowed_tools: ["Read", "Bash"],
+        transitions: [
+          { event: "TESTS_PASS", target: "review" },
+          { event: "TESTS_FAIL", target: "implementing" },
+          { event: "FAIL", target: "failed" },
+        ],
+      }
+      setupFetch([
+        { match: "statewright_transition", body: { transitioned: true, from: "testing", to: "review" } },
+        { match: "/mcp", body: testingState },
+      ])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Simulate passing test output
+      await pi._fire("tool_result", {
+        toolName: "bash",
+        input: { command: "pytest -q" },
+        content: [{ type: "text", text: "12 passed in 0.05s" }],
+      }, ctx)
+
+      // Should have attempted TESTS_PASS transition
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          body: expect.stringContaining("TESTS_PASS"),
+        }),
+      )
+    })
+
+    it("auto-transitions TESTS_FAIL when tests fail", async () => {
+      const testingState = {
+        ...PLUGIN_STATE,
+        state: "testing",
+        allowed_tools: ["Read", "Bash"],
+        transitions: [
+          { event: "TESTS_PASS", target: "review" },
+          { event: "TESTS_FAIL", target: "implementing" },
+          { event: "FAIL", target: "failed" },
+        ],
+      }
+      setupFetch([
+        { match: "statewright_transition", body: { transitioned: true, from: "testing", to: "implementing" } },
+        { match: "/mcp", body: testingState },
+      ])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Simulate failing test output
+      await pi._fire("tool_result", {
+        toolName: "bash",
+        input: { command: "pytest tests/" },
+        content: [{ type: "text", text: "3 failed, 9 passed in 0.02s" }],
+      }, ctx)
+
+      // Should have attempted TESTS_FAIL transition
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          body: expect.stringContaining("TESTS_FAIL"),
+        }),
+      )
+    })
+
+    it("does not auto-transition when event not available in state", async () => {
+      // State has no TESTS_PASS/TESTS_FAIL transitions
+      const planningState = {
+        ...PLUGIN_STATE,
+        state: "planning",
+        allowed_tools: ["Read", "Bash"],
+        transitions: [
+          { event: "PLAN_READY", target: "implementing" },
+          { event: "FAIL", target: "failed" },
+        ],
+      }
+      setupFetch([{ match: "/mcp", body: planningState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      // Run tests — output looks like pass
+      await pi._fire("tool_result", {
+        toolName: "bash",
+        input: { command: "pytest -q" },
+        content: [{ type: "text", text: "12 passed in 0.05s" }],
+      }, ctx)
+
+      // Should NOT have attempted any transition (no TESTS_PASS in this state)
+      const calls = (fetchMock.mock.calls as Array<[string, RequestInit]>).filter(c => {
+        if (!c[1]?.body) return false
+        return (c[1].body as string).includes("TESTS_PASS")
+      })
+      expect(calls).toHaveLength(0)
+    })
+
+    it("rewrites tool role for Gemma models in before_provider_request", async () => {
+      setupFetch([{ match: "/mcp", body: PLUGIN_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const gemmaModel = { provider: "ollama", id: "gemma4:31b", name: "Gemma 4 31B" }
+      const ctx = createCtx(gemmaModel)
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const payload = {
+        model: "gemma4:31b",
+        messages: [
+          { role: "system", content: "You are..." },
+          { role: "user", content: "Fix the bug" },
+          { role: "tool", content: "file contents", tool_call_id: "1" },
+          { role: "tool", content: "more contents", tool_call_id: "2" },
+        ],
+      }
+
+      await pi._fire("before_provider_request", { payload }, ctx)
+
+      // Both tool messages should be rewritten
+      expect(payload.messages[2].role).toBe("tool_responses")
+      expect(payload.messages[3].role).toBe("tool_responses")
+      // Non-tool messages unchanged
+      expect(payload.messages[0].role).toBe("system")
+      expect(payload.messages[1].role).toBe("user")
+    })
+
+    it("does not rewrite roles for non-Gemma models", async () => {
+      setupFetch([{ match: "/mcp", body: PLUGIN_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx() // default opus
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const payload = {
+        model: "claude-opus-4-6",
+        messages: [
+          { role: "tool", content: "file contents", tool_call_id: "1" },
+        ],
+      }
+
+      await pi._fire("before_provider_request", { payload }, ctx)
+      expect(payload.messages[0].role).toBe("tool") // unchanged
     })
   })
 })

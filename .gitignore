@@ -49,3 +49,6 @@ self-hosted/ui/playwright-report/
 plugins/claude-code/Taskfile.yml
 .omx/
 plugins/claude-code/test-bash-discernment.sh
+
+# Test fixtures with their own git repos
+self-hosted/fixtures/

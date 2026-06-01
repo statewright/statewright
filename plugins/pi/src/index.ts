@@ -22,9 +22,22 @@ import { homedir, tmpdir } from "node:os"
 import { spawn } from "node:child_process"
 import { minimatch } from "minimatch"
 
-// --- Debug logging (mauve-colored, gated behind STATEWRIGHT_DEBUG) ---
+// --- ANSI colors for TUI rendering ---
 const SW_LOG_COLOR = "\x1b[35m"
 const SW_LOG_RESET = "\x1b[0m"
+const ANSI = {
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  cyan: "\x1b[36m",
+  dim: "\x1b[2m",
+  bold: "\x1b[1m",
+  reset: "\x1b[0m",
+  eol: "\x1b[K",                // fill to end of line with current bg
+  bgGreen: "\x1b[42m\x1b[30m",  // green bg, black text
+  bgRed: "\x1b[41m\x1b[37m",    // red bg, white text
+  diffAdd: "\x1b[42m\x1b[30m",  // green bg for +lines
+  diffDel: "\x1b[41m\x1b[37m",  // red bg for -lines
+}
 function swLog(msg: string) { if (process.env.STATEWRIGHT_DEBUG) console.error(`${SW_LOG_COLOR}[statewright] ${msg}${SW_LOG_RESET}`) }
 
 // --- Gateway client ---
@@ -194,6 +207,8 @@ interface WorkflowMeta {
   capture_output?: boolean
   task_type?: string
   requires_human_approval?: boolean
+  orchestration?: "plugin" | "agentic"
+  task_description?: string
 }
 
 interface StateCache {
@@ -218,6 +233,11 @@ interface StateCache {
 
 let stateCache: StateCache | null = null
 let lastNudgeTime = 0
+let lastToolResult: { toolName: string; output: string } | null = null
+
+function isPluginOrchestrated(): boolean {
+  return stateCache?.meta?.orchestration === "plugin"
+}
 
 async function refreshState(): Promise<StateCache | null> {
   const raw = await gwCall("statewright_get_state")
@@ -336,6 +356,65 @@ function formatContext(s: StateCache): string {
   return lines.join(" ")
 }
 
+// --- Fresh prompt builder (plugin orchestration mode) ---
+// Mirrors crates/agent/src/prompt_templates.rs:163-186
+// Each LLM call gets a clean prompt with no accumulated history.
+function buildFreshSystemPrompt(s: StateCache): string {
+  const toolList = s.allowedTools.length > 0
+    ? s.allowedTools.map(normalizeToolName).join(", ")
+    : "No tools available in this state."
+  const transitionsList = s.transitions
+    .map(t => `  ${t.event} → ${t.target}${/fail|error|abort/i.test(t.target) ? " (UNRECOVERABLE ERROR ONLY — do NOT use when task succeeds)" : ""}`)
+    .join("\n")
+  const stateInstructions = s.instructions ?? "Proceed with the task."
+  const taskDesc = s.meta.task_description ?? s.instructions ?? "Complete the current task."
+
+  return [
+    `You are executing a task under state machine constraints. You are in the "${s.state}" state.`,
+    ``,
+    `## Task`,
+    taskDesc,
+    ``,
+    `## Current State Instructions`,
+    stateInstructions,
+    ``,
+    `## Allowed Tools`,
+    toolList,
+    ``,
+    `## Available Transitions`,
+    transitionsList,
+    ``,
+    `## Tool Signatures`,
+    `- read: {"name": "read", "args": {"path": "file.py"}}`,
+    `- bash: {"name": "bash", "args": {"command": "pytest -q"}}`,
+    `- edit: {"name": "edit", "args": {"path": "file.py", "old": "exact old text", "new": "replacement text"}}`,
+    `- grep: {"name": "grep", "args": {"pattern": "search", "path": "."}}`,
+    `- ls: {"name": "ls", "args": {"path": "."}}`,
+    `- transition: {"name": "transition", "args": {"event": "EVENT_NAME"}}`,
+    ``,
+    `## How to Respond`,
+    `Respond with JSON: {"thought": "brief reasoning", "tool_calls": [{"name": "tool", "args": {...}}]}`,
+    `To advance to the next state: include {"name": "transition", "args": {"event": "EVENT_NAME"}} in tool_calls.`,
+    `Do NOT use sed, python, or shell scripts to edit files. Use the edit tool.`,
+    `Do NOT skip states. Do NOT use tools not in your allowed list.`,
+  ].join("\n")
+}
+
+// --- Helper: extract clean text from pi.exec result ---
+// pi.exec returns {stdout, stderr, code} objects, not raw strings.
+function execText(r: unknown): string {
+  if (typeof r === "string") return r
+  const obj = r as Record<string, unknown>
+  if (obj?.stdout !== undefined) {
+    const out = (obj.stdout as string) || ""
+    const err = (obj.stderr as string) || ""
+    const code = obj.code as number ?? 0
+    if (code !== 0 && err) return `${out}\n[exit ${code}] ${err}`.trim()
+    return out || err || "(no output)"
+  }
+  return JSON.stringify(r)
+}
+
 // --- Tool call recovery (parse_llm_response equivalent) ---
 // Local models sometimes dump tool calls as JSON text in content
 // instead of using structured tool_calls. Detect and flag for the model.
@@ -374,7 +453,41 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
   }
   if (piCalls.length > 0) return piCalls
 
+  // JSON parsing FIRST — takes priority over code block extraction.
+  // When model outputs {"thought": "...code...", "tool_calls": [...]},
+  // code blocks inside the thought field must NOT be executed as tools.
+  let parsed: Record<string, unknown> | null = null
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    // Try stripping markdown code fences
+    const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
+    if (fenceMatch) {
+      try { parsed = JSON.parse(fenceMatch[1].trim()) } catch { /* noop */ }
+    }
+    // Try finding embedded JSON
+    if (!parsed) {
+      const start = trimmed.indexOf("{")
+      const end = trimmed.lastIndexOf("}")
+      if (start >= 0 && end > start) {
+        try { parsed = JSON.parse(trimmed.slice(start, end + 1)) } catch { /* noop */ }
+      }
+    }
+  }
+
+  // If we found valid JSON with tool_calls or transition, use those — don't fall through to code blocks
+  if (parsed) {
+    // Format 1: {"tool_calls": [{"name": "...", "args": {...}}]}
+    if (Array.isArray(parsed.tool_calls)) {
+      return (parsed.tool_calls as Array<Record<string, unknown>>)
+        .filter((tc) => typeof tc.name === "string")
+        .map((tc) => ({ name: tc.name as string, args: (tc.args ?? tc.arguments ?? {}) as Record<string, unknown> }))
+    }
+    // Check other JSON formats below (transition, function, etc.)
+  }
+
   // Markdown code blocks → tool calls (gemma4, small models write ```bash ... ``` instead of calling tools)
+  // Only reached if JSON parsing didn't find tool_calls
   const codeBlockCalls: ParsedToolCall[] = []
   const codeBlockRegex = /```(bash|sh|shell|python|python3|node)\s*\n([\s\S]*?)```/g
   let cbMatch
@@ -398,33 +511,10 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
     return [{ name: "bash", args: { command: inlineCmd[1] } }]
   }
 
-  // Try direct JSON parse
-  let parsed: Record<string, unknown> | null = null
-  try {
-    parsed = JSON.parse(trimmed)
-  } catch {
-    // Try stripping markdown code fences
-    const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
-    if (fenceMatch) {
-      try { parsed = JSON.parse(fenceMatch[1].trim()) } catch { /* noop */ }
-    }
-    // Try finding embedded JSON
-    if (!parsed) {
-      const start = trimmed.indexOf("{")
-      const end = trimmed.lastIndexOf("}")
-      if (start >= 0 && end > start) {
-        try { parsed = JSON.parse(trimmed.slice(start, end + 1)) } catch { /* noop */ }
-      }
-    }
-  }
+  // Remaining JSON formats (only if parsed succeeded but no tool_calls found)
   if (!parsed) return []
 
-  // Format 1: {"tool_calls": [{"name": "...", "args": {...}}]}
-  if (Array.isArray(parsed.tool_calls)) {
-    return (parsed.tool_calls as Array<Record<string, unknown>>)
-      .filter((tc) => typeof tc.name === "string")
-      .map((tc) => ({ name: tc.name as string, args: (tc.args ?? tc.arguments ?? {}) as Record<string, unknown> }))
-  }
+  // Format 1 (tool_calls) already handled above — before code block extraction
 
   // Format 2: {"type": "function", "name": "...", "parameters": {...}}
   if (parsed.type === "function" && typeof parsed.name === "string") {
@@ -678,8 +768,12 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
     if (!stateCache || stateCache.isFinal || dormant) return
     const thinkingMultiplier = (stateCache.thinkingLevel && stateCache.thinkingLevel !== "off") ? 3 : 1
-    const timeout = INACTIVITY_TIMEOUT_MS * thinkingMultiplier
+    // Plugin mode: 90s — model needs time to think + produce JSON tool calls.
+    // Agentic mode: standard 60s timeout.
+    const baseTimeout = isPluginOrchestrated() ? 90000 : INACTIVITY_TIMEOUT_MS
+    const timeout = baseTimeout * thinkingMultiplier
 
+    swLog(`inactivity] arming timer: ${timeout / 1000}s (plugin=${isPluginOrchestrated()})`)
     inactivityTimer = setTimeout(() => {
       inactivityTimer = null
       if (!stateCache || stateCache.isFinal || dormant) return
@@ -688,7 +782,15 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       // and never get delivered. Abort kills the stream, then the corrective
       // fires as a fresh prompt via agent_end or the next turn.
       if (currentAbortCtx) {
-        try { currentAbortCtx.abort() } catch { /* ctx may be stale */ }
+        try {
+          swLog(`inactivity] calling abort()`)
+          currentAbortCtx.abort()
+          swLog(`inactivity] abort() returned`)
+        } catch (err) {
+          swLog(`inactivity] abort() threw: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      } else {
+        swLog(`inactivity] no abort context available`)
       }
 
       nudgeCount++
@@ -718,14 +820,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const transitions = stateCache.transitions.map(t => `${t.event} -> ${t.target}`).join(", ")
 
       let msg: string
-      if (nudgeCount === 1) {
-        msg = `Your task: ${instructions} Tools: ${tools}. Transitions: ${transitions}. Do not explain — call a tool now.`
-      } else if (nudgeCount === 2) {
-        const firstTool = stateCache.allowedTools[0] ? normalizeToolName(stateCache.allowedTools[0]) : "bash"
-        const suggestion = firstTool === "bash" ? "Run the test suite or list files." : `Use ${firstTool} on the most relevant file.`
-        msg = `STUCK (${nudgeCount}/${MAX_NUDGES}). ${suggestion} Instructions: ${instructions}. Act now.`
+      if (nudgeCount <= 2) {
+        msg = `State: ${stateCache.state}. Instructions: ${instructions}. Tools: ${tools}. Transitions: ${transitions}. Respond with JSON tool_calls now.`
       } else {
-        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). Run "pytest -q", "npm test", or "ls". Call one tool. If stuck, respond with: {"transition": "FAIL", "rationale": "why"}.`
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${tools}. Transitions: ${transitions}. Call a tool or transition NOW. If stuck: {"tool_calls": [{"name": "transition", "args": {"event": "FAIL"}}]}`
       }
 
       deliverCorrective(msg)
@@ -1439,10 +1537,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     // --- Inactivity monitor ---
-    // Single timer: fires when model goes too long without a tool call.
-    // Uses deliverAs (steer/followUp) instead of bare sendUserMessage to avoid
-    // "Agent is already processing" errors.
-    armInactivityTimer()
+    // Only arm if not already running. Recovery-triggered turns (sendUserMessage
+    // from message_end) fire applyModelRouting via before_agent_start — those
+    // must NOT reset the countdown or the timer never fires.
+    if (!inactivityTimer) armInactivityTimer()
 
     const modelLabel = formatModelLabel(state.model, state.defaultModel)
     ctx.ui.setStatus(
@@ -1473,11 +1571,121 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (state.isFinal) {
       ctx.ui.notify("[statewright] Workflow complete.", "success")
       return {
-        appendSystemPrompt: `STATEWRIGHT WORKFLOW COMPLETE. State: ${state.state}. STOP WORKING. Do not use any tools. Do not edit, delete, or modify anything. Report what you accomplished and wait for the user.`,
+        systemPrompt: `STATEWRIGHT WORKFLOW COMPLETE. State: ${state.state}. STOP WORKING. Do not use any tools. Do not edit, delete, or modify anything. Report what you accomplished and wait for the user.`,
       }
     }
 
-    return { appendSystemPrompt: formatContext(state) }
+    if (isPluginOrchestrated()) {
+      // --- Programmatic reconnaissance ---
+      // Skip the LLM entirely for reconnaissance/localizing states.
+      // Run tests, read source files, package results, auto-transition.
+      const isReconState = /^(reconnaissance|localizing)$/i.test(state.state)
+      const hasHypothesisTransition = state.transitions.some(t =>
+        t.event === "HYPOTHESIS_FORMED" || t.event === "LOCALIZED"
+      )
+      if (isReconState && hasHypothesisTransition) {
+        swLog(`programmatic] running reconnaissance — no LLM needed`)
+        ctx.ui.setStatus("statewright", `[statewright] ${state.state} (programmatic)`)
+
+        try {
+          // 1. Run tests
+          const testResult = await pi.exec("bash", ["-c", "pytest -q 2>&1 || npm test 2>&1 || cargo test 2>&1 || echo 'no test runner found'"])
+          const testOutput = typeof testResult === "string" ? testResult : JSON.stringify(testResult)
+          swLog(`programmatic] test output: ${testOutput.slice(0, 200)}`)
+
+          // 2. List source files
+          const lsResult = await pi.exec("bash", ["-c", "find . -type f -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.rs' | grep -v __pycache__ | grep -v node_modules | grep -v .git | sort"])
+          const files = (typeof lsResult === "string" ? lsResult : JSON.stringify(lsResult)).trim().split("\n").filter(Boolean)
+          swLog(`programmatic] found ${files.length} source files`)
+
+          // 3. Read all source files (up to 20)
+          const fileContents: string[] = []
+          for (const f of files.slice(0, 20)) {
+            try {
+              const content = await pi.exec("cat", [f])
+              const text = typeof content === "string" ? content : JSON.stringify(content)
+              fileContents.push(`--- ${f} ---\n${text}`)
+            } catch { /* skip unreadable files */ }
+          }
+
+          // 4. Package into lastToolResult for the planning prompt
+          lastToolResult = {
+            toolName: "programmatic_reconnaissance",
+            output: [
+              `## Test Results\n${testOutput}`,
+              `## Source Files (${files.length} files)\n${fileContents.join("\n\n")}`,
+            ].join("\n\n").slice(0, 8000),
+          }
+
+          // 5. Auto-transition
+          const transEvent = state.transitions.find(t =>
+            t.event === "HYPOTHESIS_FORMED" || t.event === "LOCALIZED"
+          )!.event
+          swLog(`programmatic] auto-transitioning ${transEvent}`)
+          await gwCall("statewright_transition", {
+            event: transEvent,
+            data: { rationale: "Programmatic reconnaissance complete — tests run, source files read" },
+          })
+          await refreshState()
+
+          if (stateCache) {
+            ctx.ui.setStatus("statewright", `[statewright] ${stateCache.state} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`)
+            return { systemPrompt: buildFreshSystemPrompt(stateCache) }
+          }
+        } catch (err) {
+          swLog(`programmatic] reconnaissance failed: ${err instanceof Error ? err.message : String(err)}`)
+          // Fall through to LLM-based handling
+        }
+      }
+
+      return { systemPrompt: buildFreshSystemPrompt(state) }
+    }
+
+    return { systemPrompt: formatContext(state) }
+  })
+
+  // --- Plugin orchestration: sliding window context ---
+  // Keep last N messages for short-term memory (model needs to remember its plan
+  // and recent tool results) but cap total to prevent context accumulation.
+  // The system prompt (set above) provides all state machine context.
+  const PLUGIN_CONTEXT_WINDOW = 6  // last 6 messages ≈ 3 turn pairs (user+assistant)
+  pi.on("context", async (_event, _ctx) => {
+    if (dormant || !stateCache || !isPluginOrchestrated()) return
+
+    const messages = _event.messages as Array<Record<string, unknown>>
+    // Keep only the last N messages — enough for short-term memory
+    // but prevents the 33k accumulation that kills small models
+    const windowed = messages.slice(-PLUGIN_CONTEXT_WINDOW)
+
+    // If we have recon results and the window doesn't include them, prepend
+    if (lastToolResult && windowed.length === 0) {
+      return {
+        messages: [
+          { role: "user", content: [{ type: "text", text: `Previous result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}\n\nProceed with the next action.` }] },
+        ] as unknown[],
+      }
+    }
+
+    return { messages: windowed as unknown[] }
+  })
+
+  // --- Provider request modifications ---
+  // Gemma: rewrite role: "tool" → "tool_responses" to prevent infinite loops.
+  pi.on("before_provider_request", async (_event, ctx) => {
+    if (dormant || !stateCache) return
+    const payload = _event.payload as Record<string, unknown>
+
+    // Gemma role fix
+    const model = (ctx as unknown as { model?: { id?: string } }).model
+    const isGemma = model?.id?.toLowerCase().includes("gemma") ?? false
+    if (isGemma && payload?.messages) {
+      for (const msg of payload.messages) {
+        if (msg.role === "tool") msg.role = "tool_responses"
+      }
+    }
+
+    swLog(`before_provider_request] payload keys: ${Object.keys(payload).join(", ")}`)
+    return payload
   })
 
   // --- Tool enforcement (before each tool call) ---
@@ -1488,12 +1696,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (!event.toolName) {
       return { block: true, reason: "Tool call has no name. Use a specific tool." }
     }
-    if (event.toolName.startsWith("statewright_")) {
-      // Statewright tools always allowed, and they indicate progress
-      resetInactivity()
-      armInactivityTimer()
-      return
-    }
+    if (event.toolName.startsWith("statewright_")) return
     if (!stateCache) return
 
     // Final state: block everything. Workflow is done, no more tool use.
@@ -1502,11 +1705,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     // No allowed_tools = no enforcement
-    if (stateCache.allowedTools.length === 0) {
-      resetInactivity()
-      armInactivityTimer()
-      return
-    }
+    if (stateCache.allowedTools.length === 0) return
 
     const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
 
@@ -1521,8 +1720,6 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
       const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
       if (isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
-        resetInactivity()
-        armInactivityTimer()
         return // allow safe read-only bash through
       }
       // Bash attempted but not safe — explain why
@@ -1548,9 +1745,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       }
     }
 
-    // Tool call is allowed through — model is making progress, reset inactivity
-    resetInactivity()
-    armInactivityTimer()
+    // Tool call allowed through. Inactivity timer is NOT reset here —
+    // it only resets on state transitions (via applyModelRouting).
+    // A model calling tools without transitioning is still stuck.
   })
 
   // --- Run + log capture: submit to PocketBase ---
@@ -1676,6 +1873,44 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       .join("\n")
     captureToolLog(event.toolName, event.input, toolOutput).catch(() => {})
 
+    // Plugin orchestration: capture last tool result + auto-transition on test outcomes
+    if (isPluginOrchestrated() && stateCache && !stateCache.isFinal) {
+      lastToolResult = { toolName: event.toolName, output: toolOutput.slice(0, 4000) }
+
+      // Detect test runners and auto-transition
+      const cmd = (event.toolName === "bash" || event.toolName === "Bash")
+        ? ((event.input as Record<string, unknown>)?.command ?? "") as string
+        : ""
+      const isTestRunner = /\b(pytest|npm\s+test|cargo\s+test|make\s+test|jest|vitest|mocha)\b/i.test(cmd)
+
+      if (isTestRunner) {
+        const hasFailures = /\bfailed\b|FAILED|ERROR|error:/i.test(toolOutput)
+        const hasPasses = /\bpassed\b/i.test(toolOutput)
+
+        if (hasPasses && !hasFailures) {
+          const passEvent = stateCache.transitions.find(t => t.event === "TESTS_PASS")
+          if (passEvent) {
+            swLog(`auto-transition] tests passed — firing ${passEvent.event}`)
+            await gwCall("statewright_transition", {
+              event: passEvent.event,
+              data: { rationale: "All tests passed (auto-detected by plugin orchestrator)" },
+            })
+            await refreshState()
+          }
+        } else if (hasFailures) {
+          const failEvent = stateCache.transitions.find(t => t.event === "TESTS_FAIL")
+          if (failEvent) {
+            swLog(`auto-transition] tests failed — firing ${failEvent.event}`)
+            await gwCall("statewright_transition", {
+              event: failEvent.event,
+              data: { rationale: "Tests failed (auto-detected by plugin orchestrator)" },
+            })
+            await refreshState()
+          }
+        }
+      }
+    }
+
     if (event.toolName.startsWith("statewright_")) {
       const prevState = stateCache?.state
       // For transition calls, extract event name and parse the response for from/to
@@ -1766,6 +2001,21 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const extracted = extractToolCallsFromText(part.text as string)
       if (extracted.length === 0) continue
 
+      // After any state change in recovery, update status bar + detect final state
+      const checkStateAfterTransition = () => {
+        if (!stateCache) return
+        const modelLabel = formatModelLabel(stateCache.model, stateCache.defaultModel)
+        _ctx.ui.setStatus("statewright", `[statewright] ${stateCache.state}${modelLabel} (${stateCache.iteration}/${stateCache.maxIterations ?? "∞"})`)
+        if (stateCache.isFinal) {
+          const status = stateCache.state === "completed" ? "completed" : "failed"
+          swLog(`recovery] workflow reached final state: ${stateCache.state}`)
+          completeRun(stateCache.state, status).catch(() => {})
+          setAutonomousPermissions(false)
+          disarmInactivityTimer()
+          _ctx.ui.notify(`[statewright] Workflow ${status}.`, status === "completed" ? "success" : "warn")
+        }
+      }
+
       // Execute each extracted tool call directly
       const results: string[] = []
       for (const tc of extracted) {
@@ -1779,25 +2029,102 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           if (tc.name.startsWith("statewright_") || name.startsWith("statewright_")) {
             const gwResult = await gwCall(tc.name, args)
             result = gwResult ? JSON.stringify(gwResult, null, 2) : "Gateway not reachable"
-            // Refresh state after statewright calls
             await refreshState()
+            checkStateAfterTransition()
+          }
+          // Transition tool — Rust harness uses {"name": "transition", "args": {"event": "PLAN_READY"}}
+          // Map to statewright_transition gateway call.
+          else if (name === "transition" || tc.name === "navigate" || tc.name === "state_transition") {
+            const event = (args.event ?? args.transition ?? args.name) as string
+            // Try to extract thought from the full message text as rationale
+            let rationale = (args.rationale ?? args.reason) as string | undefined
+            if (!rationale) {
+              const fullText = textParts.map((c: { text?: string }) => c.text ?? "").join("\n")
+              try {
+                const start = fullText.indexOf("{")
+                const end = fullText.lastIndexOf("}")
+                if (start >= 0 && end > start) {
+                  const j = JSON.parse(fullText.slice(start, end + 1))
+                  if (typeof j.thought === "string") rationale = j.thought
+                }
+              } catch { /* ignore parse errors */ }
+              rationale = rationale ?? "model-requested transition"
+            }
+            if (event) {
+              // Fuzzy-match: if the model used a target name or partial event name,
+              // resolve to the actual event. e.g. "completed" → TESTS_PASS, "PASS" → TESTS_PASS
+              let resolvedEvent = event
+              let fuzzyHint = ""
+              if (stateCache && !stateCache.isFinal) {
+                const exact = stateCache.transitions.find(t => t.event === event)
+                if (!exact) {
+                  // Try: model used target name → find events that lead there
+                  const byTarget = stateCache.transitions.filter(t => t.target.toLowerCase() === event.toLowerCase())
+                  if (byTarget.length === 1) {
+                    resolvedEvent = byTarget[0].event
+                    fuzzyHint = `${ANSI.dim}(resolved '${event}' → event '${resolvedEvent}' — use event names, not state names)${ANSI.reset}\n`
+                    swLog(`recovery] fuzzy-matched target '${event}' → event '${resolvedEvent}'`)
+                  } else if (byTarget.length > 1) {
+                    // Ambiguous — multiple events lead to same target
+                    const options = byTarget.map(t => t.event).join(", ")
+                    result = `${ANSI.bgRed} ✗ '${event}' is a state name, not an event ${ANSI.eol}${ANSI.reset}\n${ANSI.dim}Multiple events reach '${event}': ${options}. Use the specific event name.${ANSI.reset}`
+                    results.push(`${header}\n\n${result}`)
+                    continue
+                  } else {
+                    // Try: partial event name → substring match
+                    const bySubstring = stateCache.transitions.find(t =>
+                      t.event.toLowerCase().includes(event.toLowerCase()) ||
+                      event.toLowerCase().includes(t.event.toLowerCase())
+                    )
+                    if (bySubstring) {
+                      resolvedEvent = bySubstring.event
+                      fuzzyHint = `${ANSI.dim}(resolved '${event}' → '${resolvedEvent}')${ANSI.reset}\n`
+                      swLog(`recovery] fuzzy-matched substring '${event}' → '${resolvedEvent}'`)
+                    }
+                  }
+                }
+              }
+
+              swLog(`recovery] transition tool call: ${resolvedEvent} (rationale: ${rationale.slice(0, 200)})`)
+              if (stateCache?.isFinal) {
+                result = `${ANSI.dim}Workflow already complete (state: ${stateCache.state}). No further transitions possible.${ANSI.reset}`
+              } else {
+                const gwResult = await gwCall("statewright_transition", { event: resolvedEvent, data: { rationale } })
+                if (gwResult) {
+                  const r = gwResult as { from?: string; to?: string }
+                  // Show rationale below transition only if it's not already visible as the formatted thought
+                  const isDefaultRationale = rationale === "model-requested transition"
+                  const isAlreadyDisplayed = isPluginOrchestrated()  // thought is shown above via message formatting
+                  const shortRationale = (!isDefaultRationale && !isAlreadyDisplayed) ? `\n${ANSI.dim}${rationale.slice(0, 200)}${ANSI.reset}` : ""
+                  result = `${fuzzyHint}${ANSI.bgGreen} ✓ ${r.from ?? "?"} → ${r.to ?? "?"} ${ANSI.eol}${ANSI.reset}${shortRationale}`
+                } else {
+                  const available = stateCache?.transitions.map(t => `${t.event} → ${t.target}`).join(", ") ?? "none"
+                  result = `${ANSI.bgRed} ✗ '${event}' failed ${ANSI.eol}${ANSI.reset}\n${ANSI.dim}Available: ${available}${ANSI.reset}`
+                }
+              }
+              await refreshState()
+              checkStateAfterTransition()
+              if (stateCache?.isFinal) break  // stop processing more tool calls
+            } else {
+              result = "Transition requires an 'event' argument, e.g. {\"name\": \"transition\", \"args\": {\"event\": \"PLAN_READY\"}}"
+            }
           }
           // Shell-executable tools → pi.exec
           else if (name === "ls" || name === "find" || tc.name === "list_directory") {
             const path = (args.path ?? args.pattern ?? ".") as string
             const execResult = await pi.exec("ls", ["-la", path])
-            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+            result = execText(execResult)
           }
           else if (name === "read" || tc.name === "read_file") {
             const path = (args.path ?? args.file_path ?? args.filename) as string
             const execResult = await pi.exec("cat", [path])
-            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+            result = execText(execResult)
           }
           else if (name === "grep" || tc.name === "search_files") {
             const pattern = (args.pattern ?? args.query) as string
             const path = (args.path ?? args.file ?? ".") as string
             const execResult = await pi.exec("grep", ["-rn", pattern, path])
-            result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+            result = execText(execResult)
           }
           else if (name === "bash" || tc.name === "run_command" || tc.name === "run_test") {
             const cmd = (args.command ?? args.cmd) as string
@@ -1812,7 +2139,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
               result = `Bash command blocked by enforcement: "${cmd}". Only safe read-only commands are allowed in recovery mode.`
             } else {
               const execResult = await pi.exec("bash", ["-c", cmd])
-              result = typeof execResult === "string" ? execResult : JSON.stringify(execResult)
+              result = execText(execResult)
             }
           }
           // Edit tool — normalize parameter variants from local models
@@ -1851,7 +2178,15 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
               // Read current file, apply replacements, write back
               try {
                 const readResult = await pi.exec("cat", [editPath])
-                let content = typeof readResult === "string" ? readResult : JSON.stringify(readResult)
+                // pi.exec returns {stdout, stderr, code} — extract stdout
+                let content: string
+                if (typeof readResult === "string") {
+                  content = readResult
+                } else if (readResult && typeof readResult === "object" && "stdout" in (readResult as Record<string, unknown>)) {
+                  content = (readResult as { stdout: string }).stdout
+                } else {
+                  content = JSON.stringify(readResult)
+                }
                 let applied = 0
                 for (const edit of edits) {
                   if (content.includes(edit.oldText)) {
@@ -1861,12 +2196,22 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
                 }
                 if (applied > 0) {
                   await pi.exec("bash", ["-c", `cat > ${JSON.stringify(editPath)} << 'STATEWRIGHT_EOF'\n${content}\nSTATEWRIGHT_EOF`])
-                  result = `Applied ${applied}/${edits.length} edit(s) to ${editPath}`
+                  // Format as colored diff
+                  const diffLines: string[] = [`${ANSI.bgGreen} Applied ${applied}/${edits.length} edit(s) to ${editPath} ${ANSI.eol}${ANSI.reset}`]
+                  for (const edit of edits) {
+                    for (const line of edit.oldText.split("\n")) {
+                      diffLines.push(`${ANSI.diffDel}- ${line}${ANSI.eol}${ANSI.reset}`)
+                    }
+                    for (const line of edit.newText.split("\n")) {
+                      diffLines.push(`${ANSI.diffAdd}+ ${line}${ANSI.eol}${ANSI.reset}`)
+                    }
+                  }
+                  result = diffLines.join("\n")
                 } else {
-                  result = `No matches found in ${editPath}. Re-read the file to get exact current content.`
+                  result = `${ANSI.red}No matches found in ${editPath}. Re-read the file to get exact current content.${ANSI.reset}`
                 }
               } catch (err) {
-                result = `Edit failed: ${err instanceof Error ? err.message : String(err)}`
+                result = `${ANSI.red}Edit failed: ${err instanceof Error ? err.message : String(err)}${ANSI.reset}`
               }
             } else {
               result = `Could not parse edit parameters. Use: edit(path="file.py", edits=[{oldText: "old", newText: "new"}])`
@@ -1876,17 +2221,47 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             result = `Tool '${tc.name}' not executable via recovery. Use native tool calling.`
           }
 
-          results.push(`[${tc.name}] ${result}`)
+          const argSummary = Object.values(args).map(v => typeof v === "string" ? v : JSON.stringify(v)).join(" ")
+          const header = `${ANSI.cyan}${ANSI.bold}$ ${tc.name}${argSummary ? " " + argSummary : ""}${ANSI.eol}${ANSI.reset}`
+          results.push(`${header}\n\n${result}`)
         } catch (err) {
-          results.push(`[${tc.name}] Error: ${err instanceof Error ? err.message : String(err)}`)
+          results.push(`${ANSI.red}$ ${tc.name} — ERROR: ${err instanceof Error ? err.message : String(err)}${ANSI.reset}`)
         }
       }
 
-      // Feed results back to the model with guidance
-      pi.sendUserMessage(
-        `I executed your tool calls. Results:\n${results.join("\n")}\n\nContinue working. If an edit fails because the old text didn't match, re-read the file first to get the exact current content, then try again with the exact text.`,
-        { deliverAs: "steer" },
-      )
+      // Feed results back — unless workflow just completed
+      if (!stateCache?.isFinal) {
+        pi.sendUserMessage(
+          results.join("\n\n") + "\n\nContinue with the next action.",
+          { deliverAs: "steer" },
+        )
+      }
+
+      // Plugin mode: reformat the raw JSON output for display after recovery processed it.
+      // Replace the assistant message with a pretty version — thought + tool arrows.
+      if (isPluginOrchestrated()) {
+        const fullText = textParts.map((c: { text?: string }) => c.text ?? "").join("\n")
+        try {
+          const start = fullText.indexOf("{")
+          const end = fullText.lastIndexOf("}")
+          if (start >= 0 && end > start) {
+            const j = JSON.parse(fullText.slice(start, end + 1))
+            if (j.thought || j.tool_calls) {
+              const lines: string[] = []
+              if (j.thought) lines.push(`${ANSI.dim}${j.thought}${ANSI.reset}`)
+              if (j.tool_calls && Array.isArray(j.tool_calls)) {
+                for (const tc of j.tool_calls as Array<{ name?: string; args?: Record<string, unknown> }>) {
+                  if (!tc.name) continue
+                  const argStr = tc.args ? Object.values(tc.args).map((v: unknown) => typeof v === "string" ? v : JSON.stringify(v)).join(" ") : ""
+                  lines.push(`${ANSI.cyan}${ANSI.bold}→ ${tc.name}${argStr ? " " + argStr : ""}${ANSI.reset}`)
+                }
+              }
+              msg.content = [{ type: "text", text: lines.join("\n") }]
+            }
+          }
+        } catch { /* leave original */ }
+      }
+
       return
     }
 
@@ -1924,16 +2299,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const transitions = stateCache.transitions.map(t => `${t.event} -> ${t.target}`).join(", ")
       const instructions = stateCache.instructions ?? "Proceed with the task."
 
-      // Same escalation as inactivity timer — unified progression
       let msg: string
-      if (nudgeCount <= 1) {
-        msg = `Your task: ${instructions} Tools: ${available}. Transitions: ${transitions}. Do not explain — call a tool now.`
-      } else if (nudgeCount === 2) {
-        const firstTool = stateCache.allowedTools[0] ? normalizeToolName(stateCache.allowedTools[0]) : "bash"
-        const suggestion = firstTool === "bash" ? "Run the test suite or list files." : `Use ${firstTool} on the most relevant file.`
-        msg = `STUCK (${nudgeCount}/${MAX_NUDGES}). ${suggestion} Instructions: ${instructions}. Act now.`
+      if (nudgeCount <= 2) {
+        msg = `State: ${stateCache.state}. Instructions: ${instructions}. Tools: ${available}. Transitions: ${transitions}. Respond with JSON tool_calls now.`
       } else {
-        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). Run "pytest -q", "npm test", or "ls". Call one tool. If stuck, respond with: {"transition": "FAIL", "rationale": "why"}.`
+        msg = `FINAL WARNING (${nudgeCount}/${MAX_NUDGES}). State: ${stateCache.state}. Tools: ${available}. Transitions: ${transitions}. Call a tool or transition NOW. If stuck: {"tool_calls": [{"name": "transition", "args": {"event": "FAIL"}}]}`
       }
       deliverCorrective(msg)
     }

@@ -40,6 +40,10 @@ pub struct StateDef {
     pub state_type: Option<StateType>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Blacklist: tools explicitly blocked in this state (complement of allowed_tools).
+    /// When set, all tools EXCEPT these are permitted. Takes precedence if both are set.
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]

@@ -1,0 +1,71 @@
+{
+  "definition": {
+    "id": "research",
+    "initial": "scoping",
+    "meta": {
+      "task_type": "research",
+      "danger_level": "safe",
+      "capture_output": true,
+      "autonomous": true,
+      "orchestration": "plugin",
+      "task_description": "Research the given topic thoroughly using web search, source extraction, and structured synthesis."
+    },
+    "states": {
+      "scoping": {
+        "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
+        "instructions": "Break the research question into 3-5 specific sub-queries. List them clearly. Do NOT search yet.",
+        "max_iterations": 3,
+        "thinking_level": "medium",
+        "on": {
+          "QUERIES_READY": "searching",
+          "FAIL": "failed"
+        }
+      },
+      "searching": {
+        "disallowed_tools": ["Edit", "Write", "MultiEdit"],
+        "instructions": "Execute each sub-query via web search. Collect URLs and snippets. Do NOT synthesize yet — just gather raw results.",
+        "max_iterations": 15,
+        "thinking_level": "low",
+        "on": {
+          "SOURCES_COLLECTED": "extracting",
+          "FAIL": "failed"
+        }
+      },
+      "extracting": {
+        "disallowed_tools": ["Edit", "Write", "MultiEdit"],
+        "instructions": "Fetch the top 5-10 most relevant URLs. Extract key facts, quotes, and data points. Record source URL for each fact.",
+        "max_iterations": 12,
+        "thinking_level": "low",
+        "on": {
+          "EXTRACTED": "synthesizing",
+          "FAIL": "failed"
+        }
+      },
+      "synthesizing": {
+        "allowed_tools": ["Read", "Write", "Edit", "Bash"],
+        "instructions": "Synthesize all extracted data into a structured answer. Use tables where appropriate. Cite sources inline. Flag gaps or conflicting information. Write the final output.",
+        "max_iterations": 5,
+        "thinking_level": "high",
+        "on": {
+          "DONE": "verifying",
+          "FAIL": "failed"
+        }
+      },
+      "verifying": {
+        "allowed_tools": ["Read", "Bash"],
+        "instructions": "Review the synthesis for accuracy. Verify that every claim has a cited source. Check for hallucinated facts. If gaps found, note them explicitly.",
+        "max_iterations": 3,
+        "thinking_level": "medium",
+        "on": {
+          "VERIFIED": "completed",
+          "GAPS_FOUND": "searching",
+          "FAIL": "failed"
+        }
+      },
+      "completed": { "type": "final" },
+      "failed": { "type": "final" }
+    },
+    "guards": {}
+  },
+  "upstream_servers": []
+}

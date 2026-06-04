@@ -344,6 +344,7 @@ let stateCache: StateCache | null = null
 let dormant = false  // module-level: true after deactivate, suppresses all enforcement + refreshState
 let lastNudgeTime = 0
 let lastToolResult: { toolName: string; output: string } | null = null
+let reconResult: { toolName: string; output: string } | null = null  // preserved across tool calls, never overwritten
 
 function isPluginOrchestrated(): boolean {
   return stateCache?.meta?.orchestration === "plugin"
@@ -505,9 +506,10 @@ function buildFreshSystemPrompt(s: StateCache, localModelHint = false): string {
     // Local models need explicit tool signatures — large-context models use native calling
     ...(localModelHint ? [
       `## Tool Signatures (for JSON text output)`,
-      `- read: {"name": "read", "args": {"path": "file.py"}}`,
+      `- read: {"name": "read", "args": {"path": "file.py"}} or {"name": "read", "args": {"path": "file.py", "start_line": 15, "end_line": 150}} for large files`,
       `- bash: {"name": "bash", "args": {"command": "pytest -q"}}`,
       `- edit: {"name": "edit", "args": {"path": "file.py", "old": "exact old text", "new": "replacement text"}}`,
+      `- patch_file: {"name": "patch_file", "args": {"path": "file.py", "patches": [{"old": "if max(powers.values())", "new": "if sum(powers.values())"}]}}`,
       `- grep: {"name": "grep", "args": {"pattern": "search", "path": "."}}`,
       `- ls: {"name": "ls", "args": {"path": "."}}`,
       `- statewright_transition: {"name": "statewright_transition", "args": {"event": "EVENT", "data": {"rationale": "why"}}}`,
@@ -934,7 +936,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     const thinkingMultiplier = (stateCache.thinkingLevel && stateCache.thinkingLevel !== "off") ? 3 : 1
     // Plugin mode: 90s — model needs time to think + produce JSON tool calls.
     // Agentic mode: standard 60s timeout.
-    const baseTimeout = isPluginOrchestrated() ? 90000 : INACTIVITY_TIMEOUT_MS
+    const baseTimeout = isPluginOrchestrated() ? 600000 : INACTIVITY_TIMEOUT_MS  // 10min safety net in plugin mode
     const timeout = baseTimeout * thinkingMultiplier
 
     swLog(`inactivity] arming timer: ${timeout / 1000}s (plugin=${isPluginOrchestrated()})`)
@@ -1037,8 +1039,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       api: "openai-completions" as any,
       streamSimple(model, context, options) {
         const stream = createAssistantMessageEventStream()
-        const base = (model.baseUrl || "").replace(/\/+$/, "")
-        const url = base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`
+        const base = (model.baseUrl || "").replace(/\/v1\/?$/, "").replace(/\/+$/, "")
+        const url = `${base}/api/chat`
         const apiKey = model.apiKey || "ollama"
 
         const makeMessage = (text: string, stopReason: string, errorMsg?: string): any => ({
@@ -1055,37 +1057,44 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
         ;(async () => {
           try {
-            // Convert Pi's internal messages to OpenAI chat format
+            // Exact Rust harness architecture: system prompt + recon + last tool result. Nothing else.
             const chatMessages: Array<{role: string; content: string}> = []
             if (context.systemPrompt) chatMessages.push({ role: "system", content: context.systemPrompt })
-            for (const msg of (context.messages ?? [])) {
-              if (msg.role === "assistant") {
-                const text = (msg.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-                if (text) chatMessages.push({ role: "assistant", content: text })
-              } else if (msg.role === "user") {
-                const text = typeof msg.content === "string" ? msg.content
-                  : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-                  : String(msg.content ?? "")
-                if (text) chatMessages.push({ role: "user", content: text })
-              } else {
-                const text = typeof msg.content === "string" ? msg.content
-                  : Array.isArray(msg.content) ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-                  : String(msg.content ?? "")
-                if (text) chatMessages.push({ role: "user", content: text })
+
+            // Recon context (persistent — never overwritten by subsequent tool calls)
+            if (reconResult) {
+              chatMessages.push({ role: "user", content: `${reconResult.toolName}:\n${reconResult.output.slice(0, 6000)}` })
+            }
+
+            // Last user message only (most recent tool result or initial prompt)
+            const allMsgs = context.messages ?? []
+            const lastMsg = [...allMsgs].reverse().find(m => m.role === "user")
+            if (lastMsg) {
+              const text = typeof lastMsg.content === "string" ? lastMsg.content
+                : Array.isArray(lastMsg.content) ? (lastMsg.content as any[]).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+                : String(lastMsg.content ?? "")
+              if (text && text !== lastToolResult?.output?.slice(0, 100)) {
+                chatMessages.push({ role: "user", content: text })
               }
             }
+            if (chatMessages.length < 2) chatMessages.push({ role: "user", content: "Begin." })
 
             const body = JSON.stringify({
               model: model.id,
               messages: chatMessages,
               stream: true,
+              options: {
+                num_ctx: 16384,
+                temperature: 0.3,
+                num_predict: 4096,
+              },
             })
 
             const resp = await fetch(url, {
               method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
               body,
-              signal: options?.signal,
+              signal: options?.signal ?? AbortSignal.timeout(300000),  // 5min max per request
             })
 
             if (!resp.ok || !resp.body) {
@@ -1101,28 +1110,41 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             const decoder = new TextDecoder()
             let buffer = ""
             let fullText = ""
+            let lastContentTime = Date.now()
+            const CONTENT_TIMEOUT = 90000  // 90s with no text content = stalled generation
 
             while (true) {
               const { done, value } = await reader.read()
               if (done) break
+              // Check for stalled generation — stream alive but no content
+              if (Date.now() - lastContentTime > CONTENT_TIMEOUT) {
+                reader.cancel().catch(() => {})
+                throw new Error(`Ollama stalled: no text content for ${Math.round(CONTENT_TIMEOUT / 1000)}s (stream alive but empty)`)
+              }
               buffer += decoder.decode(value, { stream: true })
 
               const lines = buffer.split("\n")
               buffer = lines.pop() || ""
 
               for (const line of lines) {
-                if (!line.startsWith("data: ")) continue
-                const data = line.slice(6).trim()
-                if (data === "[DONE]") continue
+                const trimLine = line.trim()
+                if (!trimLine) continue
+                // Support both Ollama native NDJSON and OpenAI SSE formats
+                const jsonStr = trimLine.startsWith("data: ") ? trimLine.slice(6).trim() : trimLine
+                if (jsonStr === "[DONE]") continue
                 try {
-                  const chunk = JSON.parse(data)
-                  const delta = chunk.choices?.[0]?.delta?.content || ""
+                  const chunk = JSON.parse(jsonStr)
+                  // Ollama native: { message: { content: "delta" }, done: false }
+                  // OpenAI compat: { choices: [{ delta: { content: "delta" } }] }
+                  const delta = chunk.message?.content || chunk.choices?.[0]?.delta?.content || ""
+                  if (chunk.done === true) continue
                   if (delta) {
                     fullText += delta
+                    lastContentTime = Date.now()  // reset stall timer on actual content
                     output.content = [{ type: "text", text: fullText }]
                     stream.push({ type: "text_delta", contentIndex: 0, delta, partial: output })
                   }
-                } catch { /* skip */ }
+                } catch { /* skip unparseable */ }
               }
             }
 
@@ -2097,13 +2119,20 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
           swLog(`programmatic] localized ${fileContents.length} file sections, ${uniqueKeywords.length} keywords`)
 
-          // 4. Package into lastToolResult
+          // 4. Package into lastToolResult with actionable hints
+          const hints: string[] = []
+          hints.push(`You already have the relevant source code above. Analyze the bug and call statewright_transition(event="READY") when you know the fix.`)
+          hints.push(`Do NOT call read on the full file — the localized sections above contain the bug.`)
+
           lastToolResult = {
             toolName: "programmatic_reconnaissance",
             output: [
               `## Test Results\n${testOutput}`,
               `## Localized Source (${sourceFiles.length} source files, ${testFiles.length} test files)\n${fileContents.join("\n\n")}`,
+              `## Next Steps\n${hints.join("\n")}`,
             ].join("\n\n").slice(0, 12000),
+          }
+          reconResult = { ...lastToolResult  // preserve recon separately — never overwritten by tool calls
           }
 
           // 5. Show summary + auto-transition
@@ -2243,7 +2272,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (event.toolName === "bash" || event.toolName === "Bash") {
       const cmd = (event.input?.command ?? "") as string
       const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
-      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/.test(cmd)
+      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s|docker\s|podman\s|nerdctl\s|crictl\s/.test(cmd)
       // Block scripting interpreters when writes are disallowed (blacklist or not in whitelist)
       const writesBlacklisted = stateCache.disallowedTools.some((t) => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
       const hasWriteTools = !writesBlacklisted && (
@@ -2550,6 +2579,15 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     const msg = event.message
     if (msg.role !== "assistant") return
 
+    // Auto-retry on connection errors (Ollama stall, timeout, etc.)
+    if (isPluginOrchestrated() && !stateCache.isFinal && msg.stopReason === "error") {
+      swLog(`recovery] connection error detected — auto-retrying`)
+      try {
+        pi.sendUserMessage("Connection error occurred. Retry the last action.", { deliverAs: "followUp" })
+      } catch { /* followUp may fail */ }
+      return
+    }
+
     const textParts = (msg.content ?? []).filter(
       (c: Record<string, unknown>) => c.type === "text" && typeof c.text === "string",
     )
@@ -2567,16 +2605,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         // Parse failed — model produced text without valid tool calls.
         // Rust harness behavior: don't nudge/steer. Just send a fresh prompt
         // with state instructions so the model gets a clean retry.
-        if (isPluginOrchestrated() && !stateCache.isFinal) {
-          const tools = stateCache.allowedTools.map(normalizeToolName).join(", ")
-          const transitions = stateCache.transitions.map(t => `${t.event} → ${t.target}`).join(", ")
-          swLog(`recovery] parse failed — sending fresh prompt (Rust harness behavior)`)
-          try {
-            pi.sendUserMessage(
-              `State: ${stateCache.state}. Tools: ${tools}. Transitions: ${transitions}. Respond with ONLY a JSON object: {"tool_calls": [{"name": "TOOL", "args": {...}}]}`,
-              { deliverAs: "followUp" },
-            )
-          } catch { /* followUp may fail */ }
+        if (isPluginOrchestrated()) {
+          swLog(`recovery] parse failed — no retry message (let before_agent_start handle next turn)`)
         }
         continue
       }
@@ -2666,6 +2696,27 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
               }
 
               swLog(`recovery] transition tool call: ${resolvedEvent} (rationale: ${rationale.slice(0, 200)})`)
+
+              // PROGRAMMATIC MINIMIZER: when leaving implementing, check diff size.
+              // If too many lines changed, reject and tell the model to make a smaller change.
+              const MAX_DIFF_LINES = 5
+              if (stateCache?.state === "implementing" && resolvedEvent !== "FAIL") {
+                try {
+                  const diffStat = execText(await pi.exec("bash", ["-c", "git diff --stat 2>/dev/null | tail -1"]))
+                  const insertions = parseInt(diffStat.match(/(\d+) insertion/)?.[1] ?? "0", 10)
+                  const deletions = parseInt(diffStat.match(/(\d+) deletion/)?.[1] ?? "0", 10)
+                  const totalChanged = insertions + deletions
+                  if (totalChanged > MAX_DIFF_LINES) {
+                    swLog(`minimizer] REJECTED: ${totalChanged} lines changed (max ${MAX_DIFF_LINES}). Restoring.`)
+                    await pi.exec("bash", ["-c", "git checkout -- . 2>/dev/null"])
+                    const diffDetail = execText(await pi.exec("bash", ["-c", "git diff 2>/dev/null | head -40"]))
+                    result = `${ANSI.bgRed} REJECTED: ${totalChanged} lines changed (max ${MAX_DIFF_LINES}) ${ANSI.eol}${ANSI.reset}\nFile restored. Change ONLY the line(s) with the bug. Do NOT rename variables, remove comments, or rewrite working functions.\n${diffDetail ? `Your rejected change:\n${diffDetail}` : ""}`
+                    results.push(result)
+                    continue  // skip the transition, stay in implementing
+                  }
+                } catch { /* git not available, skip minimizer */ }
+              }
+
               if (stateCache?.isFinal) {
                 result = `${ANSI.dim}Workflow already complete (state: ${stateCache.state}). No further transitions possible.${ANSI.reset}`
               } else {
@@ -2697,8 +2748,29 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           }
           else if (name === "read" || tc.name === "read_file") {
             const path = (args.path ?? args.file_path ?? args.filename) as string
-            const execResult = await pi.exec("cat", [path])
-            result = execText(execResult)
+            const startLine = args.start_line as number | undefined
+            const endLine = args.end_line as number | undefined
+            if (startLine && endLine) {
+              const lines = execText(await pi.exec("bash", ["-c", `sed -n '${startLine},${endLine}p' "${path}"`]))
+              const numbered = lines.split("\n").map((l, i) => `${String(startLine + i).padStart(4)}: ${l}`).join("\n")
+              result = `(lines ${startLine}-${endLine})\n${numbered}`
+            } else if (startLine) {
+              const lines = execText(await pi.exec("bash", ["-c", `tail -n +${startLine} "${path}" | head -200`]))
+              const numbered = lines.split("\n").map((l, i) => `${String(startLine + i).padStart(4)}: ${l}`).join("\n")
+              result = `(from line ${startLine})\n${numbered}`
+            } else {
+              const content = execText(await pi.exec("cat", [path]))
+              const lines = content.split("\n")
+              if (lines.length > 200 && isPluginOrchestrated() && stateCache?.state !== "implementing") {
+                // In planning: refuse full dump, force line ranges
+                result = `File "${path}" is ${lines.length} lines. Too large to read in full.\nYou already have localized code from reconnaissance. Use start_line/end_line to read specific sections:\n  {"tool_calls": [{"name": "read", "args": {"path": "${path}", "start_line": 15, "end_line": 152}}]}\nOr use grep to find specific patterns:\n  {"tool_calls": [{"name": "grep", "args": {"pattern": "max(powers", "path": "${path}"}}]}`
+              } else if (lines.length > 100) {
+                const numbered = lines.map((l, i) => `${String(i + 1).padStart(4)}: ${l}`).join("\n")
+                result = `(${lines.length} lines)\n${numbered}`
+              } else {
+                result = content
+              }
+            }
           }
           else if (name === "grep" || tc.name === "search_files") {
             const pattern = (args.pattern ?? args.query) as string
@@ -2711,7 +2783,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             // Apply the same bash discernment as the tool_call enforcement layer.
             // Recovery-executed commands must not bypass write/destructive restrictions.
             const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
-            const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/.test(cmd)
+            const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s|docker\s|podman\s|nerdctl\s|crictl\s/.test(cmd)
             const hasWriteTools = stateCache.allowedTools.some(t => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
             const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
             const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
@@ -2755,49 +2827,92 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             }
 
             if (editPath && edits.length > 0) {
-              // Read current file, apply replacements, write back
               try {
-                const readResult = await pi.exec("cat", [editPath])
-                // pi.exec returns {stdout, stderr, code} — extract stdout
-                let content: string
-                if (typeof readResult === "string") {
-                  content = readResult
-                } else if (readResult && typeof readResult === "object" && "stdout" in (readResult as Record<string, unknown>)) {
-                  content = (readResult as { stdout: string }).stdout
-                } else {
-                  content = JSON.stringify(readResult)
-                }
+                let content = execText(await pi.exec("cat", [editPath]))
+                const lines = content.split("\n")
                 let applied = 0
-                swLog(`edit] file content length: ${content.length}, type: ${typeof readResult}`)
+                const diffLines: string[] = []
+
                 for (const edit of edits) {
-                  swLog(`edit] searching for oldText (${edit.oldText.length} chars): "${edit.oldText.slice(0, 80)}..."`)
-                  swLog(`edit] match: ${content.includes(edit.oldText)}`)
+                  const oldTrimmed = edit.oldText.trim()
+                  const newTrimmed = edit.newText.trim()
+
+                  // 1. Exact match
                   if (content.includes(edit.oldText)) {
                     content = content.replace(edit.oldText, edit.newText)
                     applied++
+                    diffLines.push(`${ANSI.diffDel}- ${oldTrimmed}${ANSI.eol}${ANSI.reset}`)
+                    diffLines.push(`${ANSI.diffAdd}+ ${newTrimmed}${ANSI.eol}${ANSI.reset}`)
+                    continue
+                  }
+
+                  // 2. Whitespace-normalized match (Rust harness behavior)
+                  const matchIdx = lines.findIndex(l => l.trim() === oldTrimmed)
+                  if (matchIdx >= 0) {
+                    const indent = lines[matchIdx].match(/^(\s*)/)?.[1] ?? ""
+                    lines[matchIdx] = `${indent}${newTrimmed}`
+                    content = lines.join("\n")
+                    applied++
+                    diffLines.push(`${ANSI.diffDel}- L${matchIdx + 1}: ${oldTrimmed}${ANSI.eol}${ANSI.reset}`)
+                    diffLines.push(`${ANSI.diffAdd}+ L${matchIdx + 1}: ${indent}${newTrimmed}${ANSI.eol}${ANSI.reset}`)
+                    continue
+                  }
+
+                  // 3. Partial match hints (help model correct)
+                  const partials = lines
+                    .map((l, i) => ({ i, l }))
+                    .filter(({ l }) => l.includes(oldTrimmed) || oldTrimmed.includes(l.trim()))
+                    .slice(0, 3)
+                  if (partials.length > 0) {
+                    const hints = partials.map(({ i, l }) => `  L${i + 1}: ${l.trim()}`).join("\n")
+                    diffLines.push(`${ANSI.red}No exact match for "${oldTrimmed.slice(0, 60)}". Partial matches:\n${hints}\nRe-read the file to find exact content.${ANSI.reset}`)
+                  } else {
+                    diffLines.push(`${ANSI.red}'${oldTrimmed.slice(0, 60)}' not found in ${editPath}. Re-read the file.${ANSI.reset}`)
                   }
                 }
+
                 if (applied > 0) {
                   await pi.exec("bash", ["-c", `cat > ${JSON.stringify(editPath)} << 'STATEWRIGHT_EOF'\n${content}\nSTATEWRIGHT_EOF`])
-                  // Format as colored diff
-                  const diffLines: string[] = [`${ANSI.bgGreen} Applied ${applied}/${edits.length} edit(s) to ${editPath} ${ANSI.eol}${ANSI.reset}`]
-                  for (const edit of edits) {
-                    for (const line of edit.oldText.split("\n")) {
-                      diffLines.push(`${ANSI.diffDel}- ${line}${ANSI.eol}${ANSI.reset}`)
-                    }
-                    for (const line of edit.newText.split("\n")) {
-                      diffLines.push(`${ANSI.diffAdd}+ ${line}${ANSI.eol}${ANSI.reset}`)
-                    }
-                  }
-                  result = diffLines.join("\n")
+                  result = `${ANSI.bgGreen} Applied ${applied}/${edits.length} edit(s) to ${editPath} ${ANSI.eol}${ANSI.reset}\n${diffLines.join("\n")}`
                 } else {
-                  result = `${ANSI.red}No matches found in ${editPath}. Re-read the file to get exact current content.${ANSI.reset}`
+                  result = diffLines.join("\n")
                 }
               } catch (err) {
                 result = `${ANSI.red}Edit failed: ${err instanceof Error ? err.message : String(err)}${ANSI.reset}`
               }
+            } else if (args.patches && Array.isArray(args.patches)) {
+              // patch_file format: {path, patches: [{old, new}]}
+              const patchPath = (args.path ?? args.file) as string
+              try {
+                let content = execText(await pi.exec("cat", [patchPath]))
+                const pLines = content.split("\n")
+                let applied = 0
+                for (const p of (args.patches as Array<{old?: string; new?: string}>)) {
+                  const o = (p.old ?? "").trim()
+                  const n = (p.new ?? "").trim()
+                  if (!o || !n) continue
+                  const idx = pLines.findIndex(l => l.trim() === o)
+                  if (idx >= 0) {
+                    const indent = pLines[idx].match(/^(\s*)/)?.[1] ?? ""
+                    pLines[idx] = `${indent}${n}`
+                    applied++
+                  } else if (content.includes(o)) {
+                    content = content.replace(o, n)
+                    applied++
+                  }
+                }
+                if (applied > 0) {
+                  content = pLines.join("\n")
+                  await pi.exec("bash", ["-c", `cat > ${JSON.stringify(patchPath)} << 'STATEWRIGHT_EOF'\n${content}\nSTATEWRIGHT_EOF`])
+                  result = `${applied} patch(es) applied to ${patchPath}`
+                } else {
+                  result = `No patches matched in ${patchPath}. Re-read the file.`
+                }
+              } catch (err) {
+                result = `Patch failed: ${err instanceof Error ? err.message : String(err)}`
+              }
             } else {
-              result = `Could not parse edit parameters. Use: edit(path="file.py", edits=[{oldText: "old", newText: "new"}])`
+              result = `Could not parse edit parameters. Use: edit(path="file.py", old="exact old text", new="replacement") or patch_file(path="file.py", patches=[{old:"old", new:"new"}])`
             }
           }
           else {
@@ -2816,10 +2931,50 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       disarmInactivityTimer()
       armInactivityTimer()
 
-      // Feed results back — unless workflow just completed
+      // Track recovery iterations per state — enforce safe_next when exhausted
+      pluginStepCount++
+      const maxIter = stateCache?.maxIterations ?? 10
+      if (pluginStepCount > maxIter && stateCache && !stateCache.isFinal) {
+        const safeTarget = stateCache.transitions.find(t => t.target !== "failed")?.target
+        if (safeTarget) {
+          swLog(`recovery] max iterations (${pluginStepCount}/${maxIter}) — safe_next to ${safeTarget}`)
+          const gwResult = await gwCall("statewright_transition", {
+            event: stateCache.transitions.find(t => t.target === safeTarget)?.event ?? "DONE",
+            data: { rationale: `Max iterations exceeded (${pluginStepCount}/${maxIter}) — safe_next` },
+          })
+          if (gwResult) {
+            await refreshState()
+            pluginStepCount = 0
+            if (stateCache) {
+              _ctx.ui.setStatus("!statewright", formatStatusBar(stateCache))
+              _ctx.ui.notify(`[statewright] safe_next → ${stateCache.state}`, "warn")
+            }
+          }
+        }
+      }
+
+      // Feed results back with state-aware guidance
       if (!stateCache?.isFinal) {
+        let guidance = "Continue."
+        const state = stateCache?.state ?? ""
+        const lastTool = extracted[extracted.length - 1]?.name ?? ""
+        if (state === "planning" || state === "localizing") {
+          if (lastTool === "read" || lastTool === "read_file" || lastTool === "grep") {
+            guidance = "You have the code. If you found the bug, call statewright_transition(event=\"READY\") now."
+          } else {
+            guidance = "Call statewright_transition(event=\"READY\") to move to implementing."
+          }
+        } else if (state === "implementing") {
+          if (lastTool === "read" || lastTool === "read_file") {
+            guidance = "You have the code. Call edit or patch_file to fix the bug now."
+          } else if (lastTool === "edit" || lastTool === "patch_file" || lastTool === "edit_file") {
+            guidance = "Edit applied. Call statewright_transition(event=\"DONE\") to run tests."
+          }
+        } else if (state === "testing") {
+          guidance = "Check test results. Call statewright_transition(event=\"TESTS_PASS\") or statewright_transition(event=\"TESTS_FAIL\")."
+        }
         pi.sendUserMessage(
-          results.join("\n\n") + "\n\nContinue with the next action.",
+          results.join("\n\n") + `\n\n${guidance}`,
           { deliverAs: "steer" },
         )
       }

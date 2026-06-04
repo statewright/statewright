@@ -24,6 +24,8 @@
     "vitest": "^3.2.0"
   },
   "dependencies": {
-    "minimatch": "^10.2.5"
+    "minimatch": "^10.2.5",
+    "tree-sitter-wasm": "^1.0.6",
+    "web-tree-sitter": "^0.26.9"
   }
 }

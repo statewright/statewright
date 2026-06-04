@@ -1,0 +1,12 @@
+{
+  "fixture": "requests-1963",
+  "condition": "C",
+  "model": "gemma4:31b",
+  "success": false,
+  "tests_passed": 0,
+  "tests_failed": 1,
+  "tool_calls": 00,
+  "files_changed": 1,
+  "duration_seconds": 451,
+  "timestamp": "2026-06-02T19:35:00Z"
+}

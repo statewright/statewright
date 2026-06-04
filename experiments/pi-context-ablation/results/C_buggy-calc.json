@@ -1,0 +1,12 @@
+{
+  "fixture": "buggy-calc",
+  "condition": "C",
+  "model": "gemma4:31b",
+  "success": true,
+  "tests_passed": 7,
+  "tests_failed": 0,
+  "tool_calls": 00,
+  "files_changed": 3,
+  "duration_seconds": 113,
+  "timestamp": "2026-06-02T19:04:51Z"
+}

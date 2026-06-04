@@ -1,0 +1,12 @@
+{
+  "fixture": "sympy-20590",
+  "condition": "C",
+  "model": "gemma4:31b",
+  "success": false,
+  "tests_passed": 1,
+  "tests_failed": 1,
+  "tool_calls": 00,
+  "files_changed": 2,
+  "duration_seconds": 452,
+  "timestamp": "2026-06-02T19:12:23Z"
+}

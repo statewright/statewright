@@ -1,0 +1,25 @@
+{
+  "id": "flat-ablation",
+  "initial": "working",
+  "context": {},
+  "states": {
+    "working": {
+      "instructions": "Fix the failing test(s) in this project. Read the test file to understand what's expected, identify the bug, fix it, and verify all tests pass. Do not modify the test files.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Edit", "Write", "Bash", "read", "glob", "grep", "edit", "write", "bash", "ls"],
+      "allowed_commands": ["*"],
+      "max_iterations": 40,
+      "on": {
+        "DONE": "completed",
+        "FAIL": "failed"
+      }
+    },
+    "completed": { "type": "final" },
+    "failed": { "type": "final" }
+  },
+  "meta": {
+    "task_type": "ablation_experiment",
+    "danger_level": "safe",
+    "autonomous": true,
+    "orchestration": "plugin"
+  }
+}

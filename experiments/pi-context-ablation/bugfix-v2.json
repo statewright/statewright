@@ -1,0 +1,60 @@
+{
+  "id": "bugfix-v2",
+  "initial": "reconnaissance",
+  "context": {},
+  "states": {
+    "reconnaissance": {
+      "instructions": "Programmatic: run tests, read source files, identify failing tests. No LLM needed — the plugin handles this automatically.",
+      "allowed_tools": ["Read", "Bash", "Glob", "Grep", "read", "bash", "glob", "grep"],
+      "allowed_commands": ["*test*", "pytest", "npm test", "cargo test", "cat", "find", "ls"],
+      "max_iterations": 5,
+      "on": {
+        "HYPOTHESIS_FORMED": "planning",
+        "LOCALIZED": "planning",
+        "FAIL": "failed"
+      }
+    },
+    "planning": {
+      "instructions": "You have the test results and source files from reconnaissance. Analyze the failing test(s), identify the bug, and form a plan. Do NOT edit files yet. Read additional files if needed. When you know what to fix, call statewright_transition with event READY. Use the provided tool functions directly — do NOT emit raw XML tool tags.",
+      "allowed_tools": ["Read", "Glob", "Grep", "read", "glob", "grep", "statewright_transition", "statewright_get_state"],
+      "allowed_commands": [],
+      "max_iterations": 5,
+      "safe_next": "implementing",
+      "on": {
+        "READY": "implementing",
+        "FAIL": "failed"
+      }
+    },
+    "implementing": {
+      "instructions": "Fix ONLY the bug. Use edit or patch_file. Change the fewest lines possible. Do not modify test files. When done, transition DONE.",
+      "allowed_tools": ["Read", "Edit", "Write", "read", "edit", "write", "statewright_transition", "statewright_get_state"],
+      "allowed_commands": [],
+      "max_iterations": 6,
+      "safe_next": "testing",
+      "on": {
+        "DONE": "testing",
+        "FAIL": "failed"
+      }
+    },
+    "testing": {
+      "instructions": "Run the test suite to verify your fix. Use pytest (or the appropriate test runner). If tests pass, transition PASS. If tests fail, transition TESTS_FAIL to go back and fix.",
+      "allowed_tools": ["Read", "Bash", "read", "bash", "statewright_transition", "statewright_get_state"],
+      "allowed_commands": ["*test*", "pytest", "npm test", "cargo test"],
+      "max_iterations": 3,
+      "safe_next": "implementing",
+      "on": {
+        "PASS": "completed",
+        "TESTS_FAIL": "implementing",
+        "FAIL": "failed"
+      }
+    },
+    "completed": { "type": "final" },
+    "failed": { "type": "final" }
+  },
+  "meta": {
+    "task_type": "bugfix",
+    "danger_level": "safe",
+    "autonomous": true,
+    "orchestration": "plugin"
+  }
+}

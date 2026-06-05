@@ -334,6 +334,34 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                 "required": ["name", "definition"]
             }),
         },
+        ToolInfo {
+            name: "statewright_run_agent".into(),
+            description: Some(
+                "Run a state-machine-constrained agent to fix bugs or build features. Spawns the Rust agent executor and streams progress.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "What to fix or build"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Ollama model to use (default: gemma4:31b)"
+                    },
+                    "workflow": {
+                        "type": "string",
+                        "description": "State machine workflow name (default: bugfix-v2)"
+                    },
+                    "workdir": {
+                        "type": "string",
+                        "description": "Working directory (default: current directory)"
+                    }
+                },
+                "required": ["task"]
+            }),
+        },
     ]
 }
 

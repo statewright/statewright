@@ -1512,6 +1512,107 @@ impl Gateway {
                     }
                 }
             }
+            "statewright_run_agent" => {
+                let task = arguments.get("task").and_then(|t| t.as_str()).unwrap_or("Fix the failing tests");
+                let model = arguments.get("model").and_then(|m| m.as_str()).unwrap_or("gemma4:31b");
+                let agent_workdir = arguments.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
+
+                // Build config for the agent
+                let config = json!({
+                    "task": task,
+                    "workdir": agent_workdir,
+                    "model_routing": {
+                        "planning": { "model": model, "temperature": 0.3, "num_predict": 4096 },
+                        "implementing": { "model": model, "temperature": 0.2, "num_predict": 4096 },
+                    },
+                    "guardrails": { "max_steps": 20, "max_diff_lines": 5 }
+                });
+
+                // Write config to temp file
+                let config_path = format!("/tmp/sw-agent-config-{}.json", std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                if let Err(e) = std::fs::write(&config_path, config.to_string()) {
+                    return JsonRpcResponse::success(id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            format!("Failed to write agent config: {}", e)
+                        )).unwrap());
+                }
+
+                // Spawn sw-agent subprocess
+                let output = match tokio::process::Command::new("sw-agent")
+                    .args(["--json-events", "--use-hardcoded-machine", "--config", &config_path,
+                           "--workdir", agent_workdir])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .output()
+                    .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&config_path);
+                        return JsonRpcResponse::success(id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                format!("Failed to spawn sw-agent: {}. Is it in PATH?", e)
+                            )).unwrap());
+                    }
+                };
+
+                let _ = std::fs::remove_file(&config_path);
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                // Parse JSONL events from stdout into a summary
+                let mut summary_lines: Vec<String> = Vec::new();
+                for line in stdout.lines() {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
+                        match event.get("event").and_then(|e| e.as_str()) {
+                            Some("transition") => {
+                                let from = event.get("from").and_then(|f| f.as_str()).unwrap_or("?");
+                                let to = event.get("to").and_then(|t| t.as_str()).unwrap_or("?");
+                                summary_lines.push(format!("⚡ {} → {}", from, to));
+                            }
+                            Some("tool_call") => {
+                                let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                                let args = event.get("args_preview").and_then(|a| a.as_str()).unwrap_or("");
+                                summary_lines.push(format!("→ {} {}", name, args));
+                            }
+                            Some("auto_test") => {
+                                let passed = event.get("passed").and_then(|p| p.as_bool()).unwrap_or(false);
+                                let fc = event.get("fail_count").and_then(|f| f.as_u64()).unwrap_or(0);
+                                if passed {
+                                    summary_lines.push("✓ Tests passed".into());
+                                } else {
+                                    summary_lines.push(format!("✗ {} test(s) failing", fc));
+                                }
+                            }
+                            Some("completed") => {
+                                let steps = event.get("steps").and_then(|s| s.as_u64()).unwrap_or(0);
+                                let success = event.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                                if success {
+                                    summary_lines.push(format!("✓ Completed in {} steps", steps));
+                                } else {
+                                    summary_lines.push(format!("✗ Failed after {} steps", steps));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let result_text = if summary_lines.is_empty() {
+                    format!("Agent finished (exit code: {:?})\n\nstdout:\n{}\n\nstderr:\n{}",
+                        output.status.code(), &stdout[..stdout.len().min(2000)], &stderr[..stderr.len().min(500)])
+                } else {
+                    summary_lines.join("\n")
+                };
+
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::to_value(crate::protocol::ToolCallResult::text(result_text)).unwrap(),
+                )
+            }
+
             _ => JsonRpcResponse::error(id, -32601, format!("Unknown custom tool: {}", name)),
         }
     }

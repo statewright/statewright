@@ -145,6 +145,70 @@ struct Args {
     /// Output JSONL events to stdout instead of pretty TUI output (for MCP gateway integration)
     #[arg(long)]
     json_events: bool,
+
+    /// Run configuration JSON file (model routing, guardrails, workflow — for MCP gateway control)
+    #[arg(long)]
+    config: Option<String>,
+}
+
+/// Run configuration — written by the MCP gateway, read by the agent.
+/// Per-state model routing, guardrails, and workflow definition.
+#[derive(Deserialize, Debug, Default)]
+struct RunConfig {
+    #[serde(default)]
+    task: Option<String>,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    workflow: Option<String>,
+    #[serde(default)]
+    model_routing: HashMap<String, ModelConfig>,
+    #[serde(default)]
+    guardrails: GuardrailConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct ModelConfig {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    ollama_url: Option<String>,
+    #[serde(default = "default_num_ctx")]
+    num_ctx: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
+    #[serde(default = "default_num_predict")]
+    num_predict: u32,
+    #[serde(default)]
+    skip: bool,
+    #[serde(default)]
+    programmatic: bool,
+}
+
+fn default_num_ctx() -> u32 { 8192 }
+fn default_temperature() -> f32 { 0.3 }
+fn default_num_predict() -> u32 { 4096 }
+
+#[derive(Deserialize, Debug)]
+#[serde(default)]
+struct GuardrailConfig {
+    max_diff_lines: usize,
+    max_steps: u32,
+    enable_localizer: bool,
+    enable_minimizer: bool,
+    enable_auto_test: bool,
+}
+
+impl Default for GuardrailConfig {
+    fn default() -> Self {
+        Self {
+            max_diff_lines: 5,
+            max_steps: 20,
+            enable_localizer: true,
+            enable_minimizer: true,
+            enable_auto_test: true,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -341,6 +405,40 @@ async fn main() {
 
     let args = Args::parse();
 
+    // Load run config from file if provided (MCP gateway writes this)
+    let run_config: RunConfig = if let Some(config_path) = &args.config {
+        let config_str = std::fs::read_to_string(config_path)
+            .unwrap_or_else(|e| panic!("Failed to read config {}: {}", config_path, e));
+        serde_json::from_str(&config_str)
+            .unwrap_or_else(|e| panic!("Failed to parse config {}: {}", config_path, e))
+    } else {
+        RunConfig::default()
+    };
+
+    // Config overrides CLI args
+    let task = run_config.task.as_deref().unwrap_or(&args.task).to_string();
+    let workdir = run_config.workdir.as_deref().unwrap_or(&args.workdir).to_string();
+    let max_steps = if run_config.guardrails.max_steps > 0 { run_config.guardrails.max_steps } else { args.max_steps };
+
+    // Helper: get OllamaClient for a given state (per-state model routing)
+    let make_client_for_state = |state: &str| -> OllamaClient {
+        if let Some(mc) = run_config.model_routing.get(state) {
+            OllamaClient::new(OllamaConfig {
+                api_url: mc.ollama_url.clone().unwrap_or_else(|| args.ollama_url.clone()),
+                model: mc.model.clone().unwrap_or_else(|| args.model.clone()),
+                temperature: mc.temperature,
+                max_tokens: mc.num_predict,
+            })
+        } else {
+            OllamaClient::new(OllamaConfig {
+                api_url: args.ollama_url.clone(),
+                model: args.model.clone(),
+                temperature: 0.3,
+                max_tokens: 4096,
+            })
+        }
+    };
+
     // TDD chain mode — TDD with debug machine invocation
     if args.tdd_chain {
         let client = OllamaClient::new(OllamaConfig {
@@ -394,15 +492,15 @@ async fn main() {
 
     if !json_mode {
         println!("\n=== Statewright Agent ===\n");
-        println!("Task: {}", args.task);
-        println!("Working dir: {}", args.workdir);
+        println!("Task: {}", task);
+        println!("Working dir: {}", workdir);
         println!("Model: {}", args.model);
         println!();
     }
 
     // Snapshot and restore: save all files before the run, restore on exit
-    let workdir_for_restore = args.workdir.clone();
-    let originals = tools::snapshot_all(&args.workdir);
+    let workdir_for_restore = workdir.clone();
+    let originals = tools::snapshot_all(&workdir);
     let original_count = originals.len();
     emit!(TuiEvent::Setup { files_snapshotted: original_count }, format!("[Setup] Snapshotted {} file(s) for auto-restore\n", original_count));
 
@@ -467,11 +565,12 @@ async fn main() {
     println!("---\n");
 
     // Phase 2: Execute the state machine with conversation history
-    println!("[Phase 2] Executing agent within state machine constraints\n");
+    if !json_mode { println!("[Phase 2] Executing agent within state machine constraints\n"); }
 
+    // Default client (used when no per-state routing configured)
     let client = OllamaClient::new(OllamaConfig {
-        api_url: args.ollama_url,
-        model: args.model,
+        api_url: args.ollama_url.clone(),
+        model: args.model.clone(),
         temperature: 0.3,
         max_tokens: 4096,
     });
@@ -488,10 +587,17 @@ async fn main() {
         step += 1;
         steps_in_current_state += 1;
 
+        // Per-state model routing: use config-specific client if available
+        let client = if run_config.model_routing.contains_key(&current_state) {
+            make_client_for_state(&current_state)
+        } else {
+            client.clone()
+        };
+
         // Don't abort during testing/review — these are quick programmatic steps
         // that shouldn't count against the LLM's step budget
         let in_endgame = current_state == "testing" || current_state == "review" || current_state == "completed";
-        if step > args.max_steps && !in_endgame {
+        if step > max_steps && !in_endgame {
             println!("\n[ABORT] Max steps ({}) exceeded", args.max_steps);
             break;
         }

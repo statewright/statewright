@@ -22,6 +22,7 @@ impl Default for OllamaConfig {
 }
 
 /// Client for calling Ollama's OpenAI-compatible API.
+#[derive(Clone)]
 pub struct OllamaClient {
     config: OllamaConfig,
     http: reqwest::Client,

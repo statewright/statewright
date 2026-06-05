@@ -18,7 +18,7 @@ tasks:
     desc: "Reset buggy-calc fixture"
     cmds:
       - |
-        cat > crates/demo/fixtures/buggy-calc/calc.py << 'EOF'
+        cat > crates/cli/fixtures/buggy-calc/calc.py << 'EOF'
         """Simple calculator module."""
 
 
@@ -46,7 +46,7 @@ tasks:
                 raise ValueError("Total cannot be zero")
             return (value / total) * 100
         EOF
-      - rm -rf crates/demo/fixtures/buggy-calc/__pycache__
+      - rm -rf crates/cli/fixtures/buggy-calc/__pycache__
       - echo "buggy-calc fixture reset"
 
   release:
@@ -74,10 +74,10 @@ tasks:
       OLLAMA_URL: '{{default "http://localhost:11434/v1" .OLLAMA_URL}}'
       MODEL: '{{default "gemma4:31b" .MODEL}}'
       MODE: '{{default "raw" .MODE}}'
-      FIXTURE: '{{default "crates/demo/fixtures/buggy-calc" .FIXTURE}}'
+      FIXTURE: '{{default "crates/cli/fixtures/buggy-calc" .FIXTURE}}'
     cmds:
       - |
-        {{.CARGO}} run --bin sw-demo -- \
+        {{.CARGO}} run --bin sw-agent -- \
           --use-hardcoded-machine \
           --workdir "{{.FIXTURE}}" \
           --ollama-url "{{.OLLAMA_URL}}" \

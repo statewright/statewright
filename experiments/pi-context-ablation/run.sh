@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-FIXTURES_DIR="/Users/ben/dev/statewright/crates/demo/fixtures"
+FIXTURES_DIR="/Users/ben/dev/statewright/crates/cli/fixtures"
 RESULTS_DIR="/Users/ben/dev/statewright/experiments/pi-context-ablation/results"
 MODEL="ollama/gemma4:31b"
 TIMEOUT=${TIMEOUT:-1200}

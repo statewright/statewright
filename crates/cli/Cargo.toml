@@ -1,6 +1,6 @@
 [package]
-name = "statewright-demo"
-description = "Demo: LLM creates its own state machine guardrails to fix a bug"
+name = "statewright-cli"
+description = "State machine agent executor — direct-to-Ollama agent loop with guardrails"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,11 +11,11 @@ categories.workspace = true
 readme = "README.md"
 
 [lib]
-name = "statewright_demo"
+name = "statewright_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sw-demo"
+name = "sw-agent"
 path = "src/main.rs"
 
 [dependencies]

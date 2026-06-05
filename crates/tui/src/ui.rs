@@ -108,7 +108,7 @@ impl App {
             TuiEvent::ToolCall { name, args_preview } => {
                 self.last_tool = self.current_tool.take();
                 self.current_tool = Some(name.clone());
-                // args_preview might already include "name(...)" from sw-demo output — don't double-wrap
+                // args_preview might already include "name(...)" from sw-agent output — don't double-wrap
                 let display = if args_preview.starts_with(&format!("{}(", name)) {
                     truncate(&args_preview, 65)
                 } else {

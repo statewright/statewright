@@ -20,7 +20,7 @@ struct Args {
     task: String,
 
     /// Working directory with the buggy code
-    #[arg(short, long, default_value = "crates/demo/fixtures/buggy-calc")]
+    #[arg(short, long, default_value = "crates/cli/fixtures/buggy-calc")]
     workdir: String,
 
     /// Ollama API URL
@@ -62,14 +62,14 @@ enum AppEvent {
     EngineDone,
 }
 
-fn find_sw_demo() -> String {
+fn find_sw_agent() -> String {
     let self_exe = std::env::current_exe().unwrap_or_default();
     let self_dir = self_exe.parent().unwrap_or(std::path::Path::new("."));
-    let sw_demo = self_dir.join("sw-demo");
-    if sw_demo.exists() {
-        sw_demo.to_string_lossy().to_string()
+    let sw_agent = self_dir.join("sw-agent");
+    if sw_agent.exists() {
+        sw_agent.to_string_lossy().to_string()
     } else {
-        "sw-demo".to_string()
+        "sw-agent".to_string()
     }
 }
 
@@ -82,11 +82,11 @@ struct DemoChoice {
 /// Embedded fixture files for demo mode
 fn get_demo_fixtures() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("buggy-calc", "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py", "crates/demo/fixtures/buggy-calc"),
-        ("sympy-22914", include_str!("../../demo/fixtures/sympy-22914/ISSUE.md"), "crates/demo/fixtures/sympy-22914"),
-        ("requests-1963", include_str!("../../demo/fixtures/requests-1963/ISSUE.md"), "crates/demo/fixtures/requests-1963"),
-        ("pytest-5262", include_str!("../../demo/fixtures/pytest-5262/ISSUE.md"), "crates/demo/fixtures/pytest-5262"),
-        ("sympy-21847", include_str!("../../demo/fixtures/sympy-21847/ISSUE.md"), "crates/demo/fixtures/sympy-21847"),
+        ("buggy-calc", "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py", "crates/cli/fixtures/buggy-calc"),
+        ("sympy-22914", include_str!("../../cli/fixtures/sympy-22914/ISSUE.md"), "crates/cli/fixtures/sympy-22914"),
+        ("requests-1963", include_str!("../../cli/fixtures/requests-1963/ISSUE.md"), "crates/cli/fixtures/requests-1963"),
+        ("pytest-5262", include_str!("../../cli/fixtures/pytest-5262/ISSUE.md"), "crates/cli/fixtures/pytest-5262"),
+        ("sympy-21847", include_str!("../../cli/fixtures/sympy-21847/ISSUE.md"), "crates/cli/fixtures/sympy-21847"),
     ]
 }
 
@@ -168,7 +168,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Spawn sw-demo as subprocess
+    // Spawn sw-agent as subprocess
     let engine_tx = tx.clone();
     let task = args.task.clone();
     // Make workdir absolute so subprocess doesn't depend on CWD
@@ -184,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
     let control = args.control;
 
     tokio::spawn(async move {
-        let sw_demo_path = find_sw_demo();
+        let sw_demo_path = find_sw_agent();
         let mut cmd = tokio::process::Command::new(&sw_demo_path);
         if control {
             cmd.arg("--control");
@@ -207,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = engine_tx.send(AppEvent::EngineLine(format!("[ERROR] Failed to spawn sw-demo: {}", e)));
+                let _ = engine_tx.send(AppEvent::EngineLine(format!("[ERROR] Failed to spawn sw-agent: {}", e)));
                 let _ = engine_tx.send(AppEvent::EngineDone);
                 return;
             }
@@ -372,9 +372,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run in plain text mode (just exec sw-demo directly)
+/// Run in plain text mode (just exec sw-agent directly)
 async fn run_plain(args: &Args) -> anyhow::Result<()> {
-    let sw_demo_path = find_sw_demo();
+    let sw_demo_path = find_sw_agent();
     let mut cmd = std::process::Command::new(&sw_demo_path);
     if args.control {
         cmd.arg("--control");
@@ -446,7 +446,7 @@ fn parse_machine_block(lines: &[String]) -> Vec<StateInfo> {
     states
 }
 
-/// Parse a line from sw-demo stdout into a TuiEvent.
+/// Parse a line from sw-agent stdout into a TuiEvent.
 fn parse_engine_line(line: &str) -> TuiEvent {
     let trimmed = line.trim();
 

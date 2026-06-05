@@ -22,9 +22,9 @@ setup_fixture() {
 
 setup_sympy_fixture() {
   FIXTURE_DIR=$(mktemp -d /tmp/sw-tui-sympy-XXXXXX)
-  cp -r "$SCRIPT_DIR/../crates/demo/fixtures/sympy-21847/"* "$FIXTURE_DIR/" 2>/dev/null || \
-    cp -r "$(dirname "$SCRIPT_DIR")/crates/demo/fixtures/sympy-21847/"* "$FIXTURE_DIR/" 2>/dev/null || \
-    cp -r "/Users/$USER/dev/statewright/crates/demo/fixtures/sympy-21847/"* "$FIXTURE_DIR/"
+  cp -r "$SCRIPT_DIR/../crates/cli/fixtures/sympy-21847/"* "$FIXTURE_DIR/" 2>/dev/null || \
+    cp -r "$(dirname "$SCRIPT_DIR")/crates/cli/fixtures/sympy-21847/"* "$FIXTURE_DIR/" 2>/dev/null || \
+    cp -r "/Users/$USER/dev/statewright/crates/cli/fixtures/sympy-21847/"* "$FIXTURE_DIR/"
   rm -rf "$FIXTURE_DIR/__pycache__" "$FIXTURE_DIR/.pytest_cache" "$FIXTURE_DIR/.opencode"
   cd "$FIXTURE_DIR" && git init -q && git checkout -b main -q
   git add -A && git commit -q -m "initial: sympy-21847 itermonomials bug"

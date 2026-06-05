@@ -83,14 +83,14 @@ impl Drop for RestoreGuard {
 }
 
 #[derive(Parser)]
-#[command(name = "sw-demo", about = "Statewright demo — LLM self-guardrailing agent")]
+#[command(name = "sw-agent", about = "Statewright agent — state machine constrained LLM executor")]
 struct Args {
     /// Task description for the agent
     #[arg(short, long, default_value = "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py")]
     task: String,
 
     /// Working directory for the agent
-    #[arg(short, long, default_value = "crates/demo/fixtures/buggy-calc")]
+    #[arg(short, long, default_value = "crates/cli/fixtures/buggy-calc")]
     workdir: String,
 
     /// Ollama API URL

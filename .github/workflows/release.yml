@@ -32,7 +32,7 @@ jobs:
           sleep 30
           cargo publish -p statewright-agent --no-verify || true
           sleep 30
-          cargo publish -p statewright-demo --no-verify || true
+          cargo publish -p statewright-cli --no-verify || true
           cargo publish -p statewright-tui --no-verify || true
           sleep 30
           cargo publish -p statewright-mcp-gateway --no-verify || true

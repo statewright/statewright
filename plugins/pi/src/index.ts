@@ -87,6 +87,12 @@ let lastKnownModel: string | null = null
 let lastKnownProvider: string | null = null
 let pluginStepCount = 0
 
+// Experimental: text-only Ollama provider + Rust harness context model.
+// Bypasses Pi's native tool calling to match the Rust harness's direct-to-Ollama architecture.
+// OFF by default — Pi's native tool calling works for agentic mode. Enable for testing:
+//   STATEWRIGHT_EXPERIMENTAL=1 pi --model ollama/gemma4:31b ...
+const EXPERIMENTAL = process.env.STATEWRIGHT_EXPERIMENTAL === "1"
+
 // Centralized status bar formatter
 function formatStatusBar(s: StateCache | null, extra?: string): string {
   if (!s) return plSegment("statewright", "recon", "iter") + plSegment("inactive", "iter")
@@ -345,6 +351,7 @@ let dormant = false  // module-level: true after deactivate, suppresses all enfo
 let lastNudgeTime = 0
 let lastToolResult: { toolName: string; output: string } | null = null
 let reconResult: { toolName: string; output: string } | null = null  // preserved across tool calls, never overwritten
+let detectedTestCmd: string | null = null  // test runner detected during recon — reused for programmatic test validation
 
 function isPluginOrchestrated(): boolean {
   return stateCache?.meta?.orchestration === "plugin"
@@ -472,7 +479,7 @@ function formatContext(s: StateCache): string {
 // --- Fresh prompt builder (plugin orchestration mode) ---
 // Mirrors crates/agent/src/prompt_templates.rs:163-186
 // Each LLM call gets a clean prompt with no accumulated history.
-function buildFreshSystemPrompt(s: StateCache, localModelHint = false): string {
+function buildFreshSystemPrompt(s: StateCache): string {
   const toolList = s.allowedTools.length > 0
     ? s.allowedTools.map(normalizeToolName).join(", ")
     : "No tools available in this state."
@@ -481,6 +488,22 @@ function buildFreshSystemPrompt(s: StateCache, localModelHint = false): string {
     .join("\n")
   const stateInstructions = s.instructions ?? "Proceed with the task."
   const taskDesc = s.meta.task_description ?? s.instructions ?? "Complete the current task."
+
+  // Context section: only used in EXPERIMENTAL mode where context handler strips all history.
+  // In normal mode, Pi's conversation carries context and the system prompt stays lean.
+  const contextSection: string[] = []
+  if (EXPERIMENTAL) {
+    const contextParts: string[] = []
+    const isFirstPhase = /^(reconnaissance)$/i.test(s.state)
+    if (isFirstPhase && reconResult) {
+      contextParts.push(reconResult.output.slice(0, 6000))
+    } else if (lastToolResult) {
+      contextParts.push(`Last tool result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}`)
+    }
+    if (contextParts.length > 0) {
+      contextSection.push(``, `## Context`, contextParts.join("\n\n"))
+    }
+  }
 
   return [
     `You are executing a task under state machine constraints. You are in the "${s.state}" state.`,
@@ -493,37 +516,17 @@ function buildFreshSystemPrompt(s: StateCache, localModelHint = false): string {
     ``,
     `## Allowed Tools`,
     toolList,
+    ...contextSection,
     ``,
     `## Available Transitions`,
     transitionsList,
     ``,
     `## How to Proceed`,
-    `Use your allowed tools to make progress on the task.`,
-    `When ready to advance to the next phase, call statewright_transition(event="EVENT_NAME", data={"rationale": "why"}).`,
-    `Use ALL tools available to you, including any MCP tools (web_fetch, search, etc.).`,
-    `Do NOT skip states. Do NOT use sed/python scripts to edit files — use the edit tool.`,
-    ``,
-    // Local models need explicit tool signatures — large-context models use native calling
-    ...(localModelHint ? [
-      `## Tool Signatures (for JSON text output)`,
-      `- read: {"name": "read", "args": {"path": "file.py"}} or {"name": "read", "args": {"path": "file.py", "start_line": 15, "end_line": 150}} for large files`,
-      `- bash: {"name": "bash", "args": {"command": "pytest -q"}}`,
-      `- edit: {"name": "edit", "args": {"path": "file.py", "old": "exact old text", "new": "replacement text"}}`,
-      `- patch_file: {"name": "patch_file", "args": {"path": "file.py", "patches": [{"old": "if max(powers.values())", "new": "if sum(powers.values())"}]}}`,
-      `- grep: {"name": "grep", "args": {"pattern": "search", "path": "."}}`,
-      `- ls: {"name": "ls", "args": {"path": "."}}`,
-      `- statewright_transition: {"name": "statewright_transition", "args": {"event": "EVENT", "data": {"rationale": "why"}}}`,
-      ``,
-      ``,
-      `Respond with ONLY a JSON object, no other text.`,
-      `Your response MUST contain a "tool_calls" array with at least one tool call.`,
-      `A response with only "thought" and no "tool_calls" is INVALID.`,
-      ``,
-      `Format: {"tool_calls": [{"name": "TOOL_NAME", "args": {...}}]}`,
-      `With reasoning: {"thought": "brief analysis", "tool_calls": [{"name": "tool", "args": {...}}]}`,
-      ``,
-      `If you need information, call read. If you know the fix, call edit. To advance phases, call statewright_transition.`,
-    ] : []),
+    `1. Use your allowed tools to make progress`,
+    `2. When ready to advance, respond with a JSON object: {"transition": "EVENT_NAME"}`,
+    `3. If you encounter an unrecoverable error: {"transition": "FAIL", "error": "description"}`,
+    `4. Do NOT use tools not in your allowed list`,
+    `5. Do NOT skip states — follow the defined transitions`,
   ].join("\n")
 }
 
@@ -594,6 +597,63 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
   }
   if (harmonyCalls.length > 0) return harmonyCalls
 
+  // Arrow format: → TOOL_NAME {"key": "value"} or → TOOL_NAME {json}<tool_call|>
+  // Gemma4 emits this when native tools are available but it falls back to text.
+  // Args can contain nested braces, so use greedy match to closing brace + strip <tool_call|>.
+  const arrowRegex = /→\s*(\w+)\s*(\{[\s\S]*?\})(?:\s*<tool_call\|?>)?/g
+  const arrowCalls: ParsedToolCall[] = []
+  let arrowMatch
+  while ((arrowMatch = arrowRegex.exec(trimmed)) !== null) {
+    try {
+      const args = JSON.parse(arrowMatch[2])
+      arrowCalls.push({ name: arrowMatch[1], args })
+    } catch {
+      // Try extracting just the first valid JSON object
+      const raw = arrowMatch[2]
+      let depth = 0, end = -1
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i] === "{") depth++
+        else if (raw[i] === "}") { depth--; if (depth === 0) { end = i; break } }
+      }
+      if (end > 0) {
+        try {
+          const args = JSON.parse(raw.slice(0, end + 1))
+          arrowCalls.push({ name: arrowMatch[1], args })
+        } catch { /* truly invalid */ }
+      }
+    }
+  }
+  if (arrowCalls.length > 0) return arrowCalls
+
+  // Google <tool_code> format: gemma4 emits <tool_code>tool_name(args)</tool_code>
+  const toolCodeMatch = trimmed.match(/<tool_code>\s*([\s\S]*?)\s*<\/tool_code>/)
+  if (toolCodeMatch) {
+    const code = toolCodeMatch[1].trim()
+    // Parse function-call syntax: read("path") or edit("path", "old", "new")
+    const fnMatch = code.match(/^(\w+)\s*\(([\s\S]*)\)$/)
+    if (fnMatch) {
+      const fnName = fnMatch[1]
+      const argsStr = fnMatch[2].trim()
+      // Parse positional string args
+      const strArgs = [...argsStr.matchAll(/"([^"]*?)"/g)].map(m => m[1])
+      let args: Record<string, unknown> = {}
+      if (fnName === "read" || fnName === "read_file") {
+        args = { path: strArgs[0] ?? argsStr }
+      } else if (fnName === "edit" || fnName === "edit_line" || fnName === "edit_file") {
+        args = { path: strArgs[0], old: strArgs[1], new: strArgs[2] }
+      } else if (fnName === "bash" || fnName === "run_command") {
+        args = { command: strArgs[0] ?? argsStr }
+      } else if (fnName === "grep" || fnName === "search") {
+        args = { pattern: strArgs[0], path: strArgs[1] ?? "." }
+      } else if (fnName === "statewright_transition" || fnName === "transition") {
+        args = { event: strArgs[0] }
+      } else {
+        args = { path: strArgs[0] }
+      }
+      return [{ name: fnName, args }]
+    }
+  }
+
   // <channel|> format: Gemma4 emits <channel|> followed by JSON in a code block
   // Also handles <tool_call|> standalone tags and {"shell": "command"} objects
   const channelClean = trimmed
@@ -610,8 +670,9 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
       if (typeof obj.shell === "string") return [{ name: "bash", args: { command: obj.shell } }]
       // {"command": "..."} → bash
       if (typeof obj.command === "string") return [{ name: "bash", args: { command: obj.command } }]
-      // {"name": "tool", "args": {...}} → direct
-      if (typeof obj.name === "string") return [{ name: obj.name, args: obj.args ?? obj.parameters ?? {} }]
+      // {"name": "tool", "args": {...}} or {"tool": "name", "args": {...}} → direct
+      const toolName = obj.name ?? obj.tool ?? obj.function
+      if (typeof toolName === "string") return [{ name: toolName, args: obj.args ?? obj.arguments ?? obj.parameters ?? obj.input ?? {} }]
       // {"tool_calls": [...]}
       if (Array.isArray(obj.tool_calls)) {
         return obj.tool_calls.filter((tc: any) => typeof tc.name === "string")
@@ -647,8 +708,8 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
     // Format 1: {"tool_calls": [{"name": "...", "args": {...}}]}
     if (Array.isArray(parsed.tool_calls)) {
       return (parsed.tool_calls as Array<Record<string, unknown>>)
-        .filter((tc) => typeof tc.name === "string")
-        .map((tc) => ({ name: tc.name as string, args: (tc.args ?? tc.arguments ?? {}) as Record<string, unknown> }))
+        .filter((tc) => typeof (tc.name ?? tc.tool ?? tc.function) === "string")
+        .map((tc) => ({ name: (tc.name ?? tc.tool ?? tc.function) as string, args: (tc.args ?? tc.arguments ?? tc.parameters ?? tc.input ?? {}) as Record<string, unknown> }))
     }
     // Check other JSON formats below (transition, function, etc.)
   }
@@ -695,9 +756,10 @@ function extractToolCallsFromText(text: string): ParsedToolCall[] {
       .map((item) => ({ name: item.name as string, args: (item.parameters ?? item.arguments ?? item.args ?? {}) as Record<string, unknown> }))
   }
 
-  // Format 5: {"name": "tool_name", "parameters": {...}} (no type field)
-  if (typeof parsed.name === "string" && (parsed.parameters || parsed.arguments || parsed.args)) {
-    return [{ name: parsed.name as string, args: (parsed.parameters ?? parsed.arguments ?? parsed.args ?? {}) as Record<string, unknown> }]
+  // Format 5: {"name": "tool_name", "args": {...}} or {"tool": "name", "args": {...}}
+  const directName = parsed.name ?? parsed.tool ?? parsed.function
+  if (typeof directName === "string" && (parsed.parameters || parsed.arguments || parsed.args || parsed.input)) {
+    return [{ name: directName as string, args: (parsed.args ?? parsed.arguments ?? parsed.parameters ?? parsed.input ?? {}) as Record<string, unknown> }]
   }
 
   // Format 4: {"transition": "EVENT_NAME"} (state machine nav)
@@ -1030,140 +1092,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // Our message_end recovery handler (extractToolCallsFromText) parses the
   // JSON tool calls from the text — same architecture as the Rust harness.
   //
-  // Registered as "ollama-text" — use models.json to point models at it
-  // or switch programmatically via pi.setModel().
+  // Import the stream helper for text-only provider (used in applyModelRouting)
+  let createStream: (() => any) | null = null
   try {
-    const { createAssistantMessageEventStream } = require("@earendil-works/pi-ai") as { createAssistantMessageEventStream: () => any }
-    pi.registerProvider("ollama-text", {
-      name: "Ollama (text-only, no native tool calls)",
-      api: "openai-completions" as any,
-      streamSimple(model, context, options) {
-        const stream = createAssistantMessageEventStream()
-        const base = (model.baseUrl || "").replace(/\/v1\/?$/, "").replace(/\/+$/, "")
-        const url = `${base}/api/chat`
-        const apiKey = model.apiKey || "ollama"
-
-        const makeMessage = (text: string, stopReason: string, errorMsg?: string): any => ({
-          role: "assistant",
-          content: text ? [{ type: "text", text }] : [],
-          api: "openai-completions",
-          provider: "ollama-text",
-          model: model.id,
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          stopReason,
-          errorMessage: errorMsg,
-          timestamp: Date.now(),
-        })
-
-        ;(async () => {
-          try {
-            // Exact Rust harness architecture: system prompt + recon + last tool result. Nothing else.
-            const chatMessages: Array<{role: string; content: string}> = []
-            if (context.systemPrompt) chatMessages.push({ role: "system", content: context.systemPrompt })
-
-            // Recon context (persistent — never overwritten by subsequent tool calls)
-            if (reconResult) {
-              chatMessages.push({ role: "user", content: `${reconResult.toolName}:\n${reconResult.output.slice(0, 6000)}` })
-            }
-
-            // Last user message only (most recent tool result or initial prompt)
-            const allMsgs = context.messages ?? []
-            const lastMsg = [...allMsgs].reverse().find(m => m.role === "user")
-            if (lastMsg) {
-              const text = typeof lastMsg.content === "string" ? lastMsg.content
-                : Array.isArray(lastMsg.content) ? (lastMsg.content as any[]).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
-                : String(lastMsg.content ?? "")
-              if (text && text !== lastToolResult?.output?.slice(0, 100)) {
-                chatMessages.push({ role: "user", content: text })
-              }
-            }
-            if (chatMessages.length < 2) chatMessages.push({ role: "user", content: "Begin." })
-
-            const body = JSON.stringify({
-              model: model.id,
-              messages: chatMessages,
-              stream: true,
-              options: {
-                num_ctx: 16384,
-                temperature: 0.3,
-                num_predict: 4096,
-              },
-            })
-
-            const resp = await fetch(url, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-              body,
-              signal: options?.signal ?? AbortSignal.timeout(300000),  // 5min max per request
-            })
-
-            if (!resp.ok || !resp.body) {
-              stream.push({ type: "error", reason: "error", error: makeMessage("", "error", `Ollama ${resp.status}`) } as any)
-              return
-            }
-
-            const output: any = { role: "assistant", content: [{ type: "text", text: "" }] }
-            stream.push({ type: "start", partial: output })
-            stream.push({ type: "text_start", contentIndex: 0, partial: output })
-
-            const reader = resp.body.getReader()
-            const decoder = new TextDecoder()
-            let buffer = ""
-            let fullText = ""
-            let lastContentTime = Date.now()
-            const CONTENT_TIMEOUT = 90000  // 90s with no text content = stalled generation
-
-            while (true) {
-              const { done, value } = await reader.read()
-              if (done) break
-              // Check for stalled generation — stream alive but no content
-              if (Date.now() - lastContentTime > CONTENT_TIMEOUT) {
-                reader.cancel().catch(() => {})
-                throw new Error(`Ollama stalled: no text content for ${Math.round(CONTENT_TIMEOUT / 1000)}s (stream alive but empty)`)
-              }
-              buffer += decoder.decode(value, { stream: true })
-
-              const lines = buffer.split("\n")
-              buffer = lines.pop() || ""
-
-              for (const line of lines) {
-                const trimLine = line.trim()
-                if (!trimLine) continue
-                // Support both Ollama native NDJSON and OpenAI SSE formats
-                const jsonStr = trimLine.startsWith("data: ") ? trimLine.slice(6).trim() : trimLine
-                if (jsonStr === "[DONE]") continue
-                try {
-                  const chunk = JSON.parse(jsonStr)
-                  // Ollama native: { message: { content: "delta" }, done: false }
-                  // OpenAI compat: { choices: [{ delta: { content: "delta" } }] }
-                  const delta = chunk.message?.content || chunk.choices?.[0]?.delta?.content || ""
-                  if (chunk.done === true) continue
-                  if (delta) {
-                    fullText += delta
-                    lastContentTime = Date.now()  // reset stall timer on actual content
-                    output.content = [{ type: "text", text: fullText }]
-                    stream.push({ type: "text_delta", contentIndex: 0, delta, partial: output })
-                  }
-                } catch { /* skip unparseable */ }
-              }
-            }
-
-            const finalMsg = makeMessage(fullText, "stop")
-            stream.push({ type: "text_end", contentIndex: 0, content: fullText, partial: output })
-            stream.push({ type: "done", reason: "stop", message: finalMsg } as any)
-            stream.end()
-          } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err)
-            stream.push({ type: "error", reason: "error", error: makeMessage("", "error", errMsg) } as any)
-          }
-        })()
-
-        return stream
-      },
-    })
-    swLog(`provider] registered ollama-text (text-only Ollama provider)`)
+    const piAi = await import("@mariozechner/pi-ai")
+    createStream = piAi.createAssistantMessageEventStream
+    swLog(`provider] imported createAssistantMessageEventStream from @mariozechner/pi-ai`)
   } catch (err) {
-    swLog(`provider] could not register ollama-text: ${err instanceof Error ? err.message : String(err)}`)
+    swLog(`provider] could not import @mariozechner/pi-ai: ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // Show status bar immediately on startup + auto-load from env
@@ -1795,34 +1731,224 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       const currentModel = ctx.model as { provider?: string; id?: string; baseUrl?: string } | undefined
       swLog(`model] state=${state.state} want=${state.model} have=${currentModel?.provider}/${currentModel?.id} lastSwitched=${lastSwitchedModel}`)
 
-      // Plugin orchestration + Ollama model: auto-switch to text-only provider
-      // This forces all responses through our extractToolCallsFromText parser
-      // instead of Pi's native tool call interpretation (which breaks on small models)
-      if (isPluginOrchestrated() && currentModel?.provider?.startsWith("ollama") && currentModel.provider !== "ollama-text") {
-        const textModel = ctx.modelRegistry.find("ollama-text", currentModel.id)
-        if (!textModel) {
-          // Register the model under ollama-text dynamically
-          try {
-            pi.registerProvider("ollama-text", {
-              name: "Ollama (text-only)",
-              baseUrl: currentModel.baseUrl || `https://${currentModel.id.replace(":", "-")}.ollama.casa.enhasa.cloud/v1`,
-              apiKey: "ollama",
-              models: [{
-                id: currentModel.id,
-                name: `${currentModel.id} (text-only)`,
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-              }],
-            })
-            swLog(`model] registered ${currentModel.id} under ollama-text provider`)
-          } catch { /* already registered */ }
-        }
+      // Plugin orchestration + Ollama model: auto-switch to text-only provider.
+      // DISABLED: Using Pi's built-in Ollama provider instead. The text-only provider
+      // has issues with thinking tokens, stream lifecycle, and Pi's message delivery
+      // after recovery. The built-in provider handles all of these natively.
+      // Re-enable with STATEWRIGHT_TEXT_PROVIDER=1 for testing.
+      // Text-only provider: reads Ollama's `content` field (text), ignores `tool_calls`.
+      // This matches the Rust harness which parses JSON from text, not native tool calls.
+      // Ollama sends BOTH — Pi reads tool_calls (only gets read), Rust reads content (gets everything).
+      if (EXPERIMENTAL && isPluginOrchestrated() && createStream && currentModel?.provider?.startsWith("ollama") && currentModel.provider !== "ollama-text") {
+        const ollamaBaseUrl = (currentModel.baseUrl || `https://${currentModel.id.replace(":", "-")}.ollama.casa.enhasa.cloud/v1`).replace(/\/v1\/?$/, "").replace(/\/+$/, "")
+        try {
+          pi.registerProvider("ollama-text", {
+            name: "Ollama (text-only, no native tool calls)",
+            baseUrl: ollamaBaseUrl,
+            apiKey: "ollama",
+            api: "ollama-text-api" as any,
+            models: [{
+              id: currentModel.id,
+              name: `${currentModel.id} (text-only)`,
+              reasoning: false,
+              input: ["text"],
+              contextWindow: (currentModel as any).contextWindow ?? 32768,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            }],
+            streamSimple(model: any, context: any, options: any) {
+              const stream = createStream!()
+
+              const makeMessage = (text: string, stopReason: string, errorMsg?: string): any => ({
+                role: "assistant",
+                content: text ? [{ type: "text", text }] : [],
+                api: "openai-completions",
+                provider: "ollama-text",
+                model: model.id,
+                usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+                stopReason,
+                errorMessage: errorMsg,
+                timestamp: Date.now(),
+              })
+
+              ;(async () => {
+                try {
+                  // Exact Rust harness architecture: system prompt + recon + last tool result. Nothing else.
+                  const chatMessages: Array<{role: string; content: string}> = []
+                  if (context.systemPrompt) chatMessages.push({ role: "system", content: context.systemPrompt })
+
+                  // Recon context (persistent — never overwritten by subsequent tool calls)
+                  if (reconResult) {
+                    chatMessages.push({ role: "user", content: `${reconResult.toolName}:\n${reconResult.output.slice(0, 6000)}` })
+                  }
+
+                  // Last tool result from recovery handler (bypasses Pi's message system
+                  // which may not persist steer/followUp to context.messages)
+                  if (lastToolResult && lastToolResult !== reconResult) {
+                    chatMessages.push({ role: "user", content: `${lastToolResult.toolName} result:\n${lastToolResult.output.slice(0, 4000)}` })
+                  }
+
+                  // Fallback: if no tool results, include the original user prompt
+                  if (chatMessages.length < 2) {
+                    const allMsgs = context.messages ?? []
+                    const firstUser = allMsgs.find((m: any) => m.role === "user")
+                    if (firstUser) {
+                      const text = typeof firstUser.content === "string" ? firstUser.content
+                        : Array.isArray(firstUser.content) ? (firstUser.content as any[]).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+                        : String(firstUser.content ?? "")
+                      if (text) chatMessages.push({ role: "user", content: text })
+                    }
+                  }
+                  if (chatMessages.length < 2) chatMessages.push({ role: "user", content: "Begin." })
+
+                  const url = `${ollamaBaseUrl}/api/chat`
+                  const body = JSON.stringify({
+                    model: model.id,
+                    messages: chatMessages,
+                    stream: true,
+                    options: {
+                      num_ctx: 8192,  // match operator default — 16384 causes VRAM pressure on 24GB GPU
+                      temperature: 0.3,
+                      num_predict: 4096,
+                    },
+                  })
+
+                  const resp = await fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${model.apiKey || "ollama"}` },
+                    body,
+                    signal: options?.signal ?? AbortSignal.timeout(300000),
+                  })
+
+                  if (!resp.ok || !resp.body) {
+                    stream.push({ type: "error", reason: "error", error: makeMessage("", "error", `Ollama ${resp.status}`) } as any)
+                    stream.end()
+                    return
+                  }
+
+                  const output: any = { role: "assistant", content: [{ type: "text", text: "" }] }
+                  stream.push({ type: "start", partial: output })
+                  stream.push({ type: "text_start", contentIndex: 0, partial: output })
+
+                  const reader = resp.body.getReader()
+                  const decoder = new TextDecoder()
+                  let buffer = ""
+                  let fullText = ""
+                  let lastContentTime = Date.now()
+                  const CONTENT_TIMEOUT = 90000
+                  const MAX_OUTPUT_LENGTH = 16384  // hard cap: ~4K tokens
+                  let ollamaDoneReason = "stop"
+                  let streamCancelled = false
+
+                  // Repetition detection: track recent output in a sliding window
+                  const REPETITION_WINDOW = 50
+                  const REPETITION_THRESHOLD = 3
+                  const detectRepetition = (text: string): boolean => {
+                    if (text.length < REPETITION_WINDOW * REPETITION_THRESHOLD) return false
+                    // Check the last REPETITION_WINDOW chars against earlier occurrences
+                    const tail = text.slice(-REPETITION_WINDOW)
+                    let count = 0
+                    let searchFrom = 0
+                    while (true) {
+                      const idx = text.indexOf(tail, searchFrom)
+                      if (idx === -1 || idx >= text.length - REPETITION_WINDOW) break
+                      count++
+                      if (count >= REPETITION_THRESHOLD) return true
+                      searchFrom = idx + 1
+                    }
+                    return false
+                  }
+
+                  while (true) {
+                    // Stall detection: check BEFORE resetting the timer
+                    if (Date.now() - lastContentTime > CONTENT_TIMEOUT) {
+                      reader.cancel().catch(() => {})
+                      streamCancelled = true
+                      swLog(`ollama-text] stream cancelled: no data for ${Math.round(CONTENT_TIMEOUT / 1000)}s`)
+                      break
+                    }
+                    const { done, value } = await reader.read()
+                    if (done) break
+                    // Any data from the reader = connection alive. Reset stall timer.
+                    // This is critical: gemma4 emits thinking tokens (content: "", thinking: "...")
+                    // before content tokens. Without this, the thinking phase triggers the stall timeout.
+                    lastContentTime = Date.now()
+                    buffer += decoder.decode(value, { stream: true })
+
+                    const lines = buffer.split("\n")
+                    buffer = lines.pop() || ""
+
+                    for (const line of lines) {
+                      const trimLine = line.trim()
+                      if (!trimLine) continue
+                      const jsonStr = trimLine.startsWith("data: ") ? trimLine.slice(6).trim() : trimLine
+                      if (jsonStr === "[DONE]") continue
+                      try {
+                        const chunk = JSON.parse(jsonStr)
+                        // Read done_reason from the final chunk (Ollama sends done_reason: "length" when num_predict hit)
+                        if (chunk.done === true) {
+                          if (chunk.done_reason) ollamaDoneReason = chunk.done_reason
+                          continue
+                        }
+                        const delta = chunk.message?.content || chunk.choices?.[0]?.delta?.content || ""
+                        if (delta) {
+                          fullText += delta
+                          output.content = [{ type: "text", text: fullText }]
+                          stream.push({ type: "text_delta", contentIndex: 0, delta, partial: output })
+                        }
+                      } catch { /* skip unparseable */ }
+                    }
+
+                    // Hard output length cap
+                    if (fullText.length > MAX_OUTPUT_LENGTH) {
+                      reader.cancel().catch(() => {})
+                      streamCancelled = true
+                      ollamaDoneReason = "length"
+                      swLog(`ollama-text] stream cancelled: output exceeded ${MAX_OUTPUT_LENGTH} chars`)
+                      break
+                    }
+
+                    // Repetition loop detection
+                    if (detectRepetition(fullText)) {
+                      reader.cancel().catch(() => {})
+                      streamCancelled = true
+                      ollamaDoneReason = "repetition"
+                      // Trim the repeated tail — keep up to the start of the 2nd repetition
+                      const tail = fullText.slice(-REPETITION_WINDOW)
+                      const firstOccurrence = fullText.indexOf(tail)
+                      if (firstOccurrence >= 0 && firstOccurrence < fullText.length - REPETITION_WINDOW) {
+                        fullText = fullText.slice(0, firstOccurrence + REPETITION_WINDOW)
+                      }
+                      swLog(`ollama-text] stream cancelled: repetition loop detected`)
+                      break
+                    }
+                  }
+
+                  const stopReason = streamCancelled ? ollamaDoneReason : ollamaDoneReason
+                  const finalMsg = makeMessage(fullText, stopReason)
+                  stream.push({ type: "text_end", contentIndex: 0, content: fullText, partial: output })
+                  stream.push({ type: "done", reason: stopReason, message: finalMsg } as any)
+                  stream.end()
+                } catch (err) {
+                  const errMsg = err instanceof Error ? err.message : String(err)
+                  stream.push({ type: "error", reason: "error", error: makeMessage("", "error", errMsg) } as any)
+                  stream.end()
+                }
+              })()
+
+              return stream
+            },
+          })
+          swLog(`model] registered ${currentModel.id} under ollama-text provider with streamSimple`)
+        } catch { /* already registered — reuse existing */ }
         const resolved = ctx.modelRegistry.find("ollama-text", currentModel.id)
         if (resolved) {
           swLog(`model] auto-switching to ollama-text/${currentModel.id} for plugin orchestration`)
-          await pi.setModel(resolved as Parameters<typeof pi.setModel>[0])
+          const ok = await pi.setModel(resolved as Parameters<typeof pi.setModel>[0])
+          swLog(`model] setModel returned: ${ok}`)
+          if (ok) lastSwitchedModel = state.model ?? "ollama-text"  // prevent state.model block from undoing
           ctx.ui.notify(`[statewright] Text-only mode: ${currentModel.id}`, "info")
+        } else {
+          swLog(`model] WARN: ollama-text/${currentModel.id} not found after registration`)
         }
       }
       if (state.model && state.model !== lastSwitchedModel) {
@@ -1966,9 +2092,30 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         ctx.ui.notify("[statewright] ⚡ Programmatic reconnaissance — running tests, reading source files", "info")
 
         try {
-          // 1. Run tests
-          const testResult = await pi.exec("bash", ["-c", "pytest -q 2>&1 || npm test 2>&1 || cargo test 2>&1 || echo 'no test runner found'"])
-          const testOutput = execText(testResult)
+          // 1. Detect test runner and run tests
+          const TEST_RUNNERS = [
+            { cmd: "pytest -q", detect: "pytest" },
+            { cmd: "npm test", detect: "npm" },
+            { cmd: "cargo test", detect: "cargo" },
+            { cmd: "go test ./...", detect: "go" },
+            { cmd: "make test", detect: "make" },
+          ]
+          let testOutput = ""
+          for (const runner of TEST_RUNNERS) {
+            const r = await pi.exec("bash", ["-c", `${runner.cmd} 2>&1`])
+            const out = execText(r)
+            // Detect success by: non-empty output that isn't "command not found" / "no such file"
+            if (out && !/command not found|no such file|not found|No targets/i.test(out)) {
+              testOutput = out
+              detectedTestCmd = runner.cmd
+              swLog(`programmatic] detected test runner: ${runner.cmd}`)
+              break
+            }
+          }
+          if (!detectedTestCmd) {
+            testOutput = "no test runner found"
+            swLog(`programmatic] no test runner detected`)
+          }
           swLog(`programmatic] test output: ${testOutput.slice(0, 200)}`)
 
           // 2. List source files (separate test files from source files)
@@ -2153,7 +2300,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           if (stateCache) {
             ctx.ui.setStatus("!statewright", formatStatusBar(stateCache))
             ctx.ui.notify(`[statewright] ✓ ${state.state} → ${stateCache.state}`, "success")
-            return { systemPrompt: buildFreshSystemPrompt(stateCache, isSmallContext) }
+            return { systemPrompt: buildFreshSystemPrompt(stateCache) }
           }
         } catch (err) {
           swLog(`programmatic] reconnaissance failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -2161,47 +2308,39 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         }
       }
 
-      return { systemPrompt: buildFreshSystemPrompt(state, isSmallContext) }
+      return { systemPrompt: buildFreshSystemPrompt(state) }
     }
 
     return { systemPrompt: formatContext(state) }
   })
 
-  // --- Plugin orchestration: adaptive context window ---
-  // Small models (< 64k context): sliding window of 6 messages to prevent accumulation.
-  // Large models (>= 64k context): pass through all messages — they handle long context fine
-  //   and stripping breaks OpenAI's strict tool call_id pairing.
-  const PLUGIN_CONTEXT_WINDOW = 6
-  const LARGE_CONTEXT_THRESHOLD = 64000  // tokens — above this, skip windowing
+  // --- Plugin orchestration: Rust harness context model ---
+  // The Rust harness sends ZERO conversation history. Each step is a fresh prompt:
+  // [system, user("Proceed with the next action.")]. The system prompt (injected by
+  // before_agent_start) already contains state instructions and tool names.
+  // Recon results go in a single user message. No accumulated history.
+  const LARGE_CONTEXT_THRESHOLD = 64000
 
   pi.on("context", async (_event, _ctx) => {
+    swLog(`context] fired: dormant=${dormant} stateCache=${!!stateCache} pluginOrch=${isPluginOrchestrated()}`)
     if (dormant || !stateCache || !isPluginOrchestrated()) return
 
-    const messages = _event.messages as Array<Record<string, unknown>>
-
-    // Check context window size — large models don't need windowing
+    // Large context models: preserve full history (they handle it fine)
     const usage = (_ctx as unknown as { getContextUsage?: () => { contextWindow?: number } }).getContextUsage?.()
-    const contextWindow = usage?.contextWindow ?? 33000  // default to small if unknown
-    if (contextWindow >= LARGE_CONTEXT_THRESHOLD) {
-      // Large context: pass through, just prepend recon results if needed
-      if (lastToolResult && messages.length === 0) {
-        return {
-          messages: [
-            { role: "user", content: [{ type: "text", text: `Previous result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}\n\nProceed with the next action.` }] },
-          ] as unknown[],
-        }
-      }
-      return  // no modification — full context preserved
+    const contextWindow = usage?.contextWindow ?? 33000
+    swLog(`context] contextWindow=${contextWindow} threshold=${LARGE_CONTEXT_THRESHOLD} skip=${contextWindow >= LARGE_CONTEXT_THRESHOLD}`)
+    if (contextWindow >= LARGE_CONTEXT_THRESHOLD) return
+
+    if (EXPERIMENTAL) {
+      // Rust harness parity: strip ALL history, send only "Proceed" as user message.
+      // Recon/tool results go in the system prompt (buildFreshSystemPrompt's ## Context).
+      return { messages: [{ role: "user", content: [{ type: "text", text: "Proceed with the next action." }] }] }
     }
 
-    // Small context: sliding window
+    // Default: sliding window of last 6 messages to prevent context accumulation
+    const PLUGIN_CONTEXT_WINDOW = 6
+    const messages = _event.messages as Array<Record<string, unknown>>
     const windowed = messages.slice(-PLUGIN_CONTEXT_WINDOW)
-
-    if (lastToolResult) {
-      const reconMsg = { role: "user", content: [{ type: "text", text: `Previous result (${lastToolResult.toolName}):\n${lastToolResult.output.slice(0, 4000)}\n\nProceed with the next action.` }] }
-      return { messages: [reconMsg, ...windowed].slice(0, PLUGIN_CONTEXT_WINDOW + 1) as unknown[] }
-    }
-
     return { messages: windowed as unknown[] }
   })
 
@@ -2220,21 +2359,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       }
     }
 
-    // Plugin orchestration + small context: strip native tool calling.
-    // The system prompt already has JSON tool schemas (buildFreshSystemPrompt with localModelHint).
-    // Competing native tool calling confuses small models — they produce neither format cleanly.
-    // Text-based JSON tool calls are parsed by extractToolCallsFromText in message_end.
-    if (isPluginOrchestrated()) {
-      const ctxUsage = (ctx as unknown as { getContextUsage?: () => { contextWindow?: number } }).getContextUsage?.()
-      const contextWindow = ctxUsage?.contextWindow ?? 33000
-      if (contextWindow < LARGE_CONTEXT_THRESHOLD) {
-        if (payload.tools) {
-          swLog(`before_provider_request] stripping native tools, forcing JSON mode (${contextWindow} < ${LARGE_CONTEXT_THRESHOLD})`)
-          delete payload.tools
-          try { (ctx as any).ui?.notify?.("[statewright] JSON mode: native tools stripped", "info") } catch {}
-        }
-      }
-    }
+    // NOTE: Do NOT strip native tools. gemma4:31b insists on native tool_calls
+    // regardless of whether tools are in the request. Stripping just removes the
+    // schema, so the model calls read (which it knows) but not edit (which it doesn't).
+    // Keep tools so the model sees edit's schema and can call it natively.
 
     swLog(`before_provider_request] payload keys: ${Object.keys(payload).join(", ")}`)
     return payload
@@ -2250,6 +2378,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
     if (event.toolName.startsWith("statewright_")) return
     if (!stateCache) return
+
+    // NOTE: Native tool calls are ALLOWED. gemma4:31b refuses to produce JSON-in-text
+    // and insists on native tool_calls regardless of system prompt instructions.
+    // Let Pi handle them natively. The tool_call enforcement below gates by state.
 
     // Final state: block everything. Workflow is done, no more tool use.
     if (stateCache.isFinal) {
@@ -2580,8 +2712,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (msg.role !== "assistant") return
 
     // Auto-retry on connection errors (Ollama stall, timeout, etc.)
+    // Compensate: the followUp triggers before_agent_start which increments pluginStepCount,
+    // but connection errors aren't real iterations — undo the increment.
     if (isPluginOrchestrated() && !stateCache.isFinal && msg.stopReason === "error") {
-      swLog(`recovery] connection error detected — auto-retrying`)
+      swLog(`recovery] connection error detected — auto-retrying (not counted as iteration)`)
+      pluginStepCount = Math.max(0, pluginStepCount - 1)
       try {
         pi.sendUserMessage("Connection error occurred. Retry the last action.", { deliverAs: "followUp" })
       } catch { /* followUp may fail */ }
@@ -2597,16 +2732,22 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
     if (toolCallParts.length > 0 && !isPluginOrchestrated()) return
 
+    // Native tool calls handled by Pi — nothing to do here
+    if (toolCallParts.length > 0 && textParts.length === 0) return
+
     // Check all text parts for embedded tool calls
     let anyExtracted = false
     for (const part of textParts) {
       const extracted = extractToolCallsFromText(part.text as string)
       if (extracted.length === 0) {
         // Parse failed — model produced text without valid tool calls.
-        // Rust harness behavior: don't nudge/steer. Just send a fresh prompt
-        // with state instructions so the model gets a clean retry.
-        if (isPluginOrchestrated()) {
-          swLog(`recovery] parse failed — no retry message (let before_agent_start handle next turn)`)
+        // Send a minimal followUp to trigger the next turn. Without this,
+        // Pi stalls because nothing triggers before_agent_start.
+        if (isPluginOrchestrated() && !stateCache.isFinal) {
+          swLog(`recovery] parse failed — sending followUp to trigger next turn`)
+          try {
+            pi.sendUserMessage("Continue.", { deliverAs: "followUp" })
+          } catch { /* delivery may fail */ }
         }
         continue
       }
@@ -2637,14 +2778,18 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
           // Statewright tools → call gateway directly
           if (tc.name.startsWith("statewright_") || name.startsWith("statewright_")) {
+            swLog(`recovery] gwCall ${tc.name} args=${JSON.stringify(args).slice(0, 200)}`)
             const gwResult = await gwCall(tc.name, args)
+            swLog(`recovery] gwCall result: ${JSON.stringify(gwResult).slice(0, 200)}`)
             result = gwResult ? JSON.stringify(gwResult, null, 2) : "Gateway not reachable"
             await refreshState()
+            pluginStepCount = 0  // reset on state change
+            swLog(`recovery] after refreshState: state=${stateCache?.state}`)
             checkStateAfterTransition()
           }
           // Transition tool — Rust harness uses {"name": "transition", "args": {"event": "PLAN_READY"}}
           // Map to statewright_transition gateway call.
-          else if (name === "transition" || tc.name === "navigate" || tc.name === "state_transition") {
+          else if (name === "transition" || name === "statewright_transition" || tc.name === "statewright_transition" || tc.name === "navigate" || tc.name === "state_transition") {
             const event = (args.event ?? args.transition ?? args.name) as string
             // Try to extract thought from the full message text as rationale
             let rationale = (args.rationale ?? args.reason) as string | undefined
@@ -2734,6 +2879,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
                 }
               }
               await refreshState()
+              pluginStepCount = 0  // reset on state change — counter is per-state, not cumulative
               checkStateAfterTransition()
               if (stateCache?.isFinal) break  // stop processing more tool calls
             } else {
@@ -2797,10 +2943,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           // Edit tool — normalize parameter variants from local models
           // Local models emit {file, old, new}, {path, old_text, new_text}, {edits: [{file, oldText, newText}]}, etc.
           // Pi expects: edit(path, edits: [{oldText, newText}])
-          else if (name === "edit" || tc.name === "edit_file" || tc.name === "apply_patch" || tc.name === "patch_file") {
+          else if (name === "edit" || name === "edit_line" || tc.name === "edit_file" || tc.name === "edit_line" || tc.name === "apply_patch" || tc.name === "patch_file") {
             const filePath = (args.path ?? args.file ?? args.file_path ?? args.filename) as string | undefined
-            const oldText = (args.old ?? args.old_text ?? args.oldText ?? args.original) as string | undefined
-            const newText = (args.new ?? args.new_text ?? args.newText ?? args.replacement) as string | undefined
+            const oldText = (args.old ?? args.old_text ?? args.oldText ?? args.original ?? args.find) as string | undefined
+            const newText = (args.new ?? args.new_text ?? args.newText ?? args.replacement ?? args.replace) as string | undefined
             const editsArr = args.edits as Array<Record<string, unknown>> | undefined
 
             let editPath = filePath
@@ -2927,6 +3073,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         }
       }
 
+      // Persist tool results so the text-only provider can inject them.
+      // steer/followUp may not persist to context.messages, so the provider
+      // reads lastToolResult directly as a module-level variable.
+      if (results.length > 0) {
+        const lastToolName = extracted[extracted.length - 1]?.name ?? "tool"
+        lastToolResult = { toolName: lastToolName, output: results.join("\n\n").slice(0, 8000) }
+      }
+
       // Recovery executed tools — reset inactivity timer (model IS making progress)
       disarmInactivityTimer()
       armInactivityTimer()
@@ -2935,19 +3089,40 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       pluginStepCount++
       const maxIter = stateCache?.maxIterations ?? 10
       if (pluginStepCount > maxIter && stateCache && !stateCache.isFinal) {
-        const safeTarget = stateCache.transitions.find(t => t.target !== "failed")?.target
-        if (safeTarget) {
-          swLog(`recovery] max iterations (${pluginStepCount}/${maxIter}) — safe_next to ${safeTarget}`)
-          const gwResult = await gwCall("statewright_transition", {
-            event: stateCache.transitions.find(t => t.target === safeTarget)?.event ?? "DONE",
-            data: { rationale: `Max iterations exceeded (${pluginStepCount}/${maxIter}) — safe_next` },
-          })
+        // Testing state: run tests programmatically before allowing safe_next.
+        // If tests pass → PASS → completed. If tests fail → TESTS_FAIL → implementing.
+        // This prevents false positives from safe_next to completed without validation.
+        if (/^testing$/i.test(stateCache.state) && detectedTestCmd) {
+          swLog(`recovery] testing safe_next gate — running ${detectedTestCmd}`)
+          const testR = execText(await pi.exec("bash", ["-c", `${detectedTestCmd} 2>&1`]))
+          const testsPassed = !testR.includes("failed") && !testR.includes("FAILED") && (testR.includes("passed") || testR.includes("ok") || testR.includes("test result: ok"))
+          const event = testsPassed ? "PASS" : "TESTS_FAIL"
+          const target = stateCache.transitions.find(t => t.event === event)?.target
+          swLog(`recovery] programmatic test result: ${event} → ${target ?? "?"} (${testR.slice(0, 100)})`)
+          const gwResult = await gwCall("statewright_transition", { event, data: { rationale: `Programmatic test validation: ${event}` } })
           if (gwResult) {
             await refreshState()
             pluginStepCount = 0
             if (stateCache) {
               _ctx.ui.setStatus("!statewright", formatStatusBar(stateCache))
-              _ctx.ui.notify(`[statewright] safe_next → ${stateCache.state}`, "warn")
+              _ctx.ui.notify(`[statewright] tests ${testsPassed ? "PASS" : "FAIL"} → ${stateCache.state}`, testsPassed ? "success" : "warn")
+            }
+          }
+        } else {
+          const safeTarget = stateCache.transitions.find(t => t.target !== "failed")?.target
+          if (safeTarget) {
+            swLog(`recovery] max iterations (${pluginStepCount}/${maxIter}) — safe_next to ${safeTarget}`)
+            const gwResult = await gwCall("statewright_transition", {
+              event: stateCache.transitions.find(t => t.target === safeTarget)?.event ?? "DONE",
+              data: { rationale: `Max iterations exceeded (${pluginStepCount}/${maxIter}) — safe_next` },
+            })
+            if (gwResult) {
+              await refreshState()
+              pluginStepCount = 0
+              if (stateCache) {
+                _ctx.ui.setStatus("!statewright", formatStatusBar(stateCache))
+                _ctx.ui.notify(`[statewright] safe_next → ${stateCache.state}`, "warn")
+              }
             }
           }
         }
@@ -2973,10 +3148,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         } else if (state === "testing") {
           guidance = "Check test results. Call statewright_transition(event=\"TESTS_PASS\") or statewright_transition(event=\"TESTS_FAIL\")."
         }
-        pi.sendUserMessage(
-          results.join("\n\n") + `\n\n${guidance}`,
-          { deliverAs: "steer" },
-        )
+        // Defer delivery to avoid "agent still processing" errors when
+        // safe_next transitions happen inside message_end.
+        const msg = results.join("\n\n") + `\n\n${guidance}`
+        setTimeout(() => {
+          try { pi.sendUserMessage(msg, { deliverAs: "followUp" }) } catch {
+            try { pi.sendUserMessage(msg, { deliverAs: "steer" }) } catch { /* both failed */ }
+          }
+        }, 0)
       }
 
       // Plugin mode: reformat the raw JSON output for display after recovery processed it.

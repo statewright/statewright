@@ -169,7 +169,7 @@ impl App {
                 self.push_log("BLOCK", &format!("{} not available in {} state", tool, state), BORDER_DANGER,
                     LogStyle::Boxed { border_color: BORDER_DANGER });
             }
-            TuiEvent::Transition { from, to } => {
+            TuiEvent::Transition { from, to, .. } => {
                 self.current_state = to.clone();
                 self.push_log("STATE", &format!("{} -> {}", from, to), Color::Rgb(180, 80, 255),
                     LogStyle::Boxed { border_color: Color::Rgb(180, 80, 255) });

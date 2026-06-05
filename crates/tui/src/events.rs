@@ -48,6 +48,8 @@ pub enum TuiEvent {
     Transition {
         from: String,
         to: String,
+        trigger: Option<String>,
+        rationale: Option<String>,
     },
 
     /// Auto-test ran

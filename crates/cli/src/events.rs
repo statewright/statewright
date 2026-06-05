@@ -51,6 +51,10 @@ pub enum TuiEvent {
     Transition {
         from: String,
         to: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        trigger: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rationale: Option<String>,
     },
 
     /// Auto-test ran

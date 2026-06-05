@@ -402,6 +402,7 @@ pub fn is_custom_tool(name: &str) -> bool {
             | "statewright_get_status"
             | "statewright_create_workflow"
             | "statewright_force_state"
+            | "statewright_run_agent"
     )
 }
 

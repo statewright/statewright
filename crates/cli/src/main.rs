@@ -149,6 +149,16 @@ struct Args {
     /// Run configuration JSON file (model routing, guardrails, workflow — for MCP gateway control)
     #[arg(long)]
     config: Option<String>,
+
+    /// Execute a single state then exit. The TUI orchestrates, sw-agent executes one state at a time.
+    /// Context (recon results, last tool output) is passed via --context-file.
+    #[arg(long)]
+    state: Option<String>,
+
+    /// Context file (JSON) — passed to the agent for single-state execution.
+    /// Contains recon results, previous tool outputs, etc.
+    #[arg(long)]
+    context_file: Option<String>,
 }
 
 /// Run configuration — written by the MCP gateway, read by the agent.
@@ -466,6 +476,141 @@ async fn main() {
         return;
     }
 
+    // --- Single-state execution mode ---
+    // The TUI orchestrates the workflow. sw-agent executes ONE state and exits.
+    // e.g.: sw-agent --state implementing --workdir /path --task "Fix the bug" --json-events
+    if let Some(target_state) = &args.state {
+        let json_mode = args.json_events;
+        let client = make_client_for_state(target_state);
+
+        // Load context from file if provided
+        let context_json: serde_json::Value = args.context_file.as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(json!({}));
+
+        // Use hardcoded machine to get state definition
+        let definition = hardcoded_bug_fix_machine();
+        let state_def = match definition.states.get(target_state.as_str()) {
+            Some(s) => s,
+            None => {
+                eprintln!("State '{}' not found in workflow", target_state);
+                std::process::exit(1);
+            }
+        };
+
+        let allowed_tools = state_def.allowed_tools.as_ref().cloned().unwrap_or_default();
+        let instructions = state_def.instructions.as_deref().unwrap_or("Proceed.");
+        let transitions: Vec<(String, String)> = state_def.on.iter()
+            .map(|(event, t)| (event.clone(), t.target().to_string()))
+            .collect();
+
+        let mut conversation: Vec<ChatMessage> = Vec::new();
+
+        // Inject context as initial user message
+        if context_json != json!({}) {
+            conversation.push(ChatMessage {
+                role: "user".into(),
+                content: format!("Context from previous states:\n{}", serde_json::to_string_pretty(&context_json).unwrap_or_default()),
+            });
+        }
+
+        let mut step = 0u32;
+        let max_iter = state_def.max_iterations.unwrap_or(10);
+
+        loop {
+            step += 1;
+            if step > max_iter {
+                if json_mode {
+                    events::emit_json(&TuiEvent::Completed { steps: step - 1, success: false });
+                }
+                eprintln!("Max iterations ({}) exceeded in state '{}'", max_iter, target_state);
+                break;
+            }
+
+            let system_prompt = build_system_prompt(
+                &task, target_state, instructions, &allowed_tools,
+                &transitions, &workdir, false, Some(max_iter - step),
+            );
+            let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
+            // Single-state mode: fresh prompt each step (Rust harness parity)
+            messages.push(ChatMessage { role: "user".into(), content: "Proceed with the next action.".into() });
+
+            let raw_response = match client.chat(messages).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("LLM error: {}", e);
+                    continue;
+                }
+            };
+
+            // Parse response
+            let resp: LlmResponse = match serde_json::from_str(&raw_response) {
+                Ok(r) => r,
+                Err(_) => {
+                    // Try embedded JSON
+                    let start = raw_response.find('{');
+                    let end = raw_response.rfind('}');
+                    match (start, end) {
+                        (Some(s), Some(e)) if e > s => {
+                            serde_json::from_str(&raw_response[s..=e]).unwrap_or(LlmResponse {
+                                transition: None, error: None, tool_calls: None, reasoning: None,
+                            })
+                        }
+                        _ => LlmResponse { transition: None, error: None, tool_calls: None, reasoning: None },
+                    }
+                }
+            };
+
+            // Handle transition — exit single-state mode
+            if let Some(event) = &resp.transition {
+                let target = transitions.iter().find(|(e, _)| e == event).map(|(_, t)| t.as_str()).unwrap_or("?");
+                if json_mode {
+                    events::emit_json(&TuiEvent::Transition {
+                        from: target_state.clone(), to: target.to_string(),
+                        trigger: Some(event.clone()), rationale: resp.error.clone(),
+                    });
+                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                } else {
+                    println!("[TRANSITION] {} -> {} (event: {})", target_state, target, event);
+                }
+                break;
+            }
+
+            // Handle tool calls
+            if let Some(calls) = resp.tool_calls {
+                for tc in &calls {
+                    if json_mode {
+                        events::emit_json(&TuiEvent::ToolCall {
+                            name: tc.name.clone(),
+                            args_preview: serde_json::to_string(&tc.args).unwrap_or_default(),
+                        });
+                    }
+
+                    let result = tools::execute_tool(&tc.name, &tc.args, &workdir);
+
+                    if json_mode {
+                        events::emit_json(&TuiEvent::ToolResult {
+                            name: tc.name.clone(),
+                            result_preview: result.chars().take(500).collect(),
+                        });
+                    } else {
+                        println!("  [TOOL] {}({}) -> {}", tc.name,
+                            serde_json::to_string(&tc.args).unwrap_or_default().chars().take(60).collect::<String>(),
+                            result.chars().take(200).collect::<String>());
+                    }
+
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: format!("=== {} result ===\n{}", tc.name, result),
+                    });
+                }
+            }
+        }
+
+        return;
+    }
+
     // Tee stdout to log file if requested
     let _tee = if args.log {
         let timestamp = std::time::SystemTime::now()
@@ -726,7 +871,7 @@ async fn main() {
                 let from = current_state.clone();
                 current_state = "planning".into();
                 steps_in_current_state = 0;
-                emit!(TuiEvent::Transition { from: from, to: "planning".into() }, "  [TRANSITION] localizing -> planning");
+                emit!(TuiEvent::Transition { from: from, to: "planning".into(), trigger: Some("LOCALIZED".into()), rationale: Some("Programmatic localization complete".into()) }, "  [TRANSITION] localizing -> planning");
                 continue;
             }
 
@@ -760,7 +905,7 @@ async fn main() {
                         role: "user".into(),
                         content: format!("Tests ran automatically and ALL PASSED:\n{}\n\nProceeding to review.", test_result),
                     });
-                    emit!(TuiEvent::Transition { from: "testing".into(), to: "review".into() }, "  [TRANSITION] testing -> review");
+                    emit!(TuiEvent::Transition { from: "testing".into(), to: "review".into(), trigger: Some("TESTS_PASS".into()), rationale: Some("All tests passed".into()) }, "  [TRANSITION] testing -> review");
                     current_state = "review".into();
                     steps_in_current_state = 0;
                     continue;
@@ -1106,7 +1251,7 @@ async fn main() {
                         println!("\n  [APPROVAL GATE] {}", msg);
                         // In production, this is where the system parks and waits for human input.
                         // For the demo, transition to the approval state and let the LLM handle it.
-                        emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone() },
+                        emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone(), trigger: transition_event.clone(), rationale: None },
                             format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
                         current_state = result.new_state;
                         context = result.new_context;
@@ -1177,7 +1322,7 @@ async fn main() {
                         }
                     }
 
-                    emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone() },
+                    emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone(), trigger: transition_event.clone(), rationale: None },
                         format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
                     current_state = result.new_state;
                     context = result.new_context;

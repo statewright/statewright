@@ -468,7 +468,7 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     // [Step N] HARD LIMIT — forcing X -> Y
     if trimmed.contains("HARD LIMIT") {
         if let Some((from, to)) = trimmed.split("forcing ").nth(1).and_then(|s| s.split_once(" -> ")) {
-            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string() };
+            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string(), trigger: None, rationale: None };
         }
     }
 
@@ -519,7 +519,7 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     // [TRANSITION] old -> new
     if let Some(rest) = strip_tag(trimmed, "[TRANSITION]") {
         if let Some((from, to)) = rest.split_once(" -> ") {
-            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string() };
+            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string(), trigger: None, rationale: None };
         }
     }
 
@@ -583,7 +583,7 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     if trimmed.contains("[HUMAN]") {
         // "[HUMAN] APPROVED -> completed" — treat as a transition
         if let Some(target) = trimmed.split("-> ").nth(1) {
-            return TuiEvent::Transition { from: "review".to_string(), to: target.trim().to_string() };
+            return TuiEvent::Transition { from: "review".to_string(), to: target.trim().to_string(), trigger: None, rationale: None };
         }
         return TuiEvent::NavAction { action: trimmed.to_string() };
     }

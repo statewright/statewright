@@ -11,6 +11,7 @@ use statewright_agent::prompt_templates::ChatMessage;
 use statewright_agent::tool_enforcer;
 use statewright_agent::validator::validate_agent_machine;
 use statewright_engine::MachineDefinition;
+use statewright_cli::events::{self, TuiEvent, StateInfo};
 
 /// Tee stdout to a log file using a background thread.
 /// All println! output automatically goes to both stdout and the file.
@@ -140,6 +141,10 @@ struct Args {
     /// Log all output to /tmp/statewright-<timestamp>.log
     #[arg(long)]
     log: bool,
+
+    /// Output JSONL events to stdout instead of pretty TUI output (for MCP gateway integration)
+    #[arg(long)]
+    json_events: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -376,17 +381,30 @@ async fn main() {
         None
     };
 
-    println!("\n=== Statewright Demo: LLM Self-Guardrailing Agent ===\n");
-    println!("Task: {}", args.task);
-    println!("Working dir: {}", args.workdir);
-    println!("Model: {}", args.model);
-    println!();
+    let json_mode = args.json_events;
+    // emit: send a TuiEvent as JSONL if --json-events, otherwise pretty-print
+    macro_rules! emit {
+        ($event:expr) => {
+            if json_mode { events::emit_json(&$event); }
+        };
+        ($event:expr, $pretty:expr) => {
+            if json_mode { events::emit_json(&$event); } else { println!("{}", $pretty); }
+        };
+    }
+
+    if !json_mode {
+        println!("\n=== Statewright Agent ===\n");
+        println!("Task: {}", args.task);
+        println!("Working dir: {}", args.workdir);
+        println!("Model: {}", args.model);
+        println!();
+    }
 
     // Snapshot and restore: save all files before the run, restore on exit
     let workdir_for_restore = args.workdir.clone();
     let originals = tools::snapshot_all(&args.workdir);
     let original_count = originals.len();
-    println!("[Setup] Snapshotted {} file(s) for auto-restore\n", original_count);
+    emit!(TuiEvent::Setup { files_snapshotted: original_count }, format!("[Setup] Snapshotted {} file(s) for auto-restore\n", original_count));
 
     // Restore originals on exit (panic or normal)
     let _restore_guard = RestoreGuard {
@@ -502,9 +520,9 @@ async fn main() {
                         println!("    {} — {} line(s) changed", file, lines_changed);
                     }
                 }
-                println!("\n=== COMPLETED in {} steps ===", step - 1);
+                emit!(TuiEvent::Completed { steps: step - 1, success: true }, format!("\n=== COMPLETED in {} steps ===", step - 1));
             } else {
-                println!("\n=== FAILED ({}) after {} steps ===", current_state, step - 1);
+                emit!(TuiEvent::Completed { steps: step - 1, success: false }, format!("\n=== FAILED ({}) after {} steps ===", current_state, step - 1));
             }
             break;
         }
@@ -599,9 +617,10 @@ async fn main() {
                 });
 
                 // Transition to planning
+                let from = current_state.clone();
                 current_state = "planning".into();
                 steps_in_current_state = 0;
-                println!("  [TRANSITION] localizing -> planning");
+                emit!(TuiEvent::Transition { from: from, to: "planning".into() }, "  [TRANSITION] localizing -> planning");
                 continue;
             }
 
@@ -624,23 +643,24 @@ async fn main() {
                     .to_string();
                 println!("  {}", test_summary);
                 if passed {
-                    println!("  [AUTO-TEST] ALL PASSED");
+                    emit!(TuiEvent::AutoTest { passed: true, fail_count: 0 }, "  [AUTO-TEST] ALL PASSED");
                     // Show what changed
                     let changed = tools::all_diff_stats(&args.workdir);
                     for (file, lines_changed, total) in &changed {
-                        println!("  Changes: {} ({}/{} lines modified)", file, lines_changed, total);
+                        emit!(TuiEvent::DiffStats { file: file.clone(), changed: *lines_changed, total: *total },
+                            format!("  Changes: {} ({}/{} lines modified)", file, lines_changed, total));
                     }
                     conversation.push(ChatMessage {
                         role: "user".into(),
                         content: format!("Tests ran automatically and ALL PASSED:\n{}\n\nProceeding to review.", test_result),
                     });
-                    // Transition to review — let the LLM handle the review state
-                    println!("  [TRANSITION] testing -> review");
+                    emit!(TuiEvent::Transition { from: "testing".into(), to: "review".into() }, "  [TRANSITION] testing -> review");
                     current_state = "review".into();
                     steps_in_current_state = 0;
                     continue;
                 } else {
-                    println!("  [AUTO-TEST] {} failing — returning to implementing", fail_count);
+                    emit!(TuiEvent::AutoTest { passed: false, fail_count: fail_count.parse().unwrap_or(1) },
+                        format!("  [AUTO-TEST] {} failing — returning to implementing", fail_count));
                     conversation.push(ChatMessage {
                         role: "user".into(),
                         content: format!("Tests ran automatically and FAILED:\n{}\n\nYou are back in implementing. Fix the remaining issues.", test_result),
@@ -919,7 +939,18 @@ async fn main() {
                 continue;
             }
 
+            emit!(TuiEvent::ToolCall {
+                name: tool_name.clone(),
+                args_preview: truncate_json(tool_args, 200),
+            });
+
             let result = tools::execute_tool(tool_name, tool_args, &args.workdir);
+
+            emit!(TuiEvent::ToolResult {
+                name: tool_name.clone(),
+                result_preview: truncate(&result, 500),
+            });
+
             // Escape newlines for edit/patch results so TUI can parse diffs on one line
             // Don't escape read_file results — they're huge and only shown truncated
             let is_edit = tool_name.contains("edit") || tool_name.contains("patch") || tool_name == "diff";
@@ -928,8 +959,10 @@ async fn main() {
             } else {
                 result.replace('\n', " ")
             };
-            println!("  [TOOL] {}({}) -> {}", tool_name,
-                truncate_json(tool_args, 60), truncate(&display_result, 300));
+            if !json_mode {
+                println!("  [TOOL] {}({}) -> {}", tool_name,
+                    truncate_json(tool_args, 60), truncate(&display_result, 300));
+            }
             tool_output.push_str(&format!("=== {} result ===\n{}\n", tool_name, result));
         }
 
@@ -967,7 +1000,8 @@ async fn main() {
                         println!("\n  [APPROVAL GATE] {}", msg);
                         // In production, this is where the system parks and waits for human input.
                         // For the demo, transition to the approval state and let the LLM handle it.
-                        println!("  [TRANSITION] {} -> {}", current_state, result.new_state);
+                        emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone() },
+                            format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
                         current_state = result.new_state;
                         context = result.new_context;
                         steps_in_current_state = 0;
@@ -1037,7 +1071,8 @@ async fn main() {
                         }
                     }
 
-                    println!("  [TRANSITION] {} -> {}", current_state, result.new_state);
+                    emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone() },
+                        format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
                     current_state = result.new_state;
                     context = result.new_context;
                     steps_in_current_state = 0;

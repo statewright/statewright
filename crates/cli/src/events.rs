@@ -1,5 +1,8 @@
-/// Events emitted by the engine loop for TUI rendering.
-#[derive(Debug, Clone)]
+use serde::Serialize;
+
+/// Events emitted by the engine loop for TUI rendering and JSON streaming.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum TuiEvent {
     /// Setup phase
     Setup { files_snapshotted: usize },
@@ -98,7 +101,14 @@ pub enum TuiEvent {
     Aborted { max_steps: u32 },
 }
 
-#[derive(Debug, Clone)]
+/// Emit a TuiEvent as a single JSONL line to stdout.
+pub fn emit_json(event: &TuiEvent) {
+    if let Ok(json) = serde_json::to_string(event) {
+        println!("{}", json);
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StateInfo {
     pub name: String,
     pub tools: Vec<String>,

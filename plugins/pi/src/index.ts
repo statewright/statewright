@@ -2139,14 +2139,26 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
               keywords.push(m[1])
             }
           }
-          // Extract function names from test files
+          // Extract function names AND called methods from test files
           for (const tf of testFiles) {
             try {
               const content = execText(await pi.exec("cat", [tf]))
+              // Test function names
               const fnMatches = content.matchAll(/def\s+(test_\w+)|it\s*\(\s*["']([^"']+)/g)
               for (const m of fnMatches) {
                 const name = (m[1] || m[2] || "").replace(/^test_/, "")
                 if (name.length > 3) keywords.push(name)
+              }
+              // Called methods/functions in test bodies — follow the call chain
+              // Matches: obj.method(), function_call(), Class.method()
+              const callMatches = content.matchAll(/(?:^|\s)(\w+)\.(\w+)\s*\(|(?:^|\s)(\w+)\s*\(/gm)
+              for (const m of callMatches) {
+                const method = m[2] || m[3] || ""
+                const obj = m[1] || ""
+                // Skip common noise: self, assert, print, len, range, etc.
+                if (/^(self|assert|print|len|range|str|int|list|dict|set|type|super|isinstance|hasattr|getattr|setattr|expect|describe|it|before|after|require|import|console|Math|JSON|Object|Array)$/i.test(method || obj)) continue
+                if (method && method.length > 2) keywords.push(method)
+                if (obj && obj.length > 2 && !/^(self|cls|this)$/.test(obj)) keywords.push(obj)
               }
             } catch { /* skip */ }
           }
@@ -3004,7 +3016,35 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
                     continue
                   }
 
-                  // 3. Partial match hints (help model correct)
+                  // 3. Multi-line whitespace-normalized match
+                  // Split old text into lines, normalize each, find the block in the file
+                  const oldLines = edit.oldText.split("\n").map(l => l.trim()).filter(Boolean)
+                  if (oldLines.length > 1) {
+                    for (let i = 0; i <= lines.length - oldLines.length; i++) {
+                      let allMatch = true
+                      for (let j = 0; j < oldLines.length; j++) {
+                        if (lines[i + j].trim() !== oldLines[j]) { allMatch = false; break }
+                      }
+                      if (allMatch) {
+                        // Found the block — preserve indentation from the first matched line
+                        const indent = lines[i].match(/^(\s*)/)?.[1] ?? ""
+                        const newLines = edit.newText.split("\n").map(l => {
+                          const trimmed = l.trim()
+                          return trimmed ? `${indent}${trimmed}` : ""
+                        })
+                        lines.splice(i, oldLines.length, ...newLines)
+                        content = lines.join("\n")
+                        applied++
+                        diffLines.push(`${ANSI.diffDel}- L${i + 1}-${i + oldLines.length}: (${oldLines.length} lines)${ANSI.eol}${ANSI.reset}`)
+                        for (const ol of oldLines) diffLines.push(`${ANSI.diffDel}-   ${ol}${ANSI.eol}${ANSI.reset}`)
+                        for (const nl of newLines) diffLines.push(`${ANSI.diffAdd}+   ${nl.trim()}${ANSI.eol}${ANSI.reset}`)
+                        break
+                      }
+                    }
+                    if (applied > 0) continue
+                  }
+
+                  // 4. Partial match hints (help model correct)
                   const partials = lines
                     .map((l, i) => ({ i, l }))
                     .filter(({ l }) => l.includes(oldTrimmed) || oldTrimmed.includes(l.trim()))

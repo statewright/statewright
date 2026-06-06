@@ -246,6 +246,67 @@ struct ToolCallRequest {
 /// For a ~26 line file, 5 lines is generous for a single bug fix.
 const MAX_DIFF_LINES: usize = 5;
 
+/// Find the extent of a function/class body around a grep hit.
+/// If the hit is on or near a `def`/`class` line, walk indentation to find the full body.
+/// Otherwise fall back to +/-15 line window.
+fn find_function_body(lines: &[&str], hit_line: usize) -> (usize, usize) {
+    let idx = hit_line.saturating_sub(1); // 0-indexed
+    if idx >= lines.len() {
+        return (hit_line.saturating_sub(10), hit_line + 15);
+    }
+
+    // Search nearby lines (hit ± 3) for a def/class statement
+    let search_start = idx.saturating_sub(3);
+    let search_end = (idx + 4).min(lines.len());
+    let mut def_idx = None;
+
+    for i in search_start..search_end {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("def ") || trimmed.starts_with("class ")
+            || trimmed.starts_with("async def ")
+        {
+            def_idx = Some(i);
+            break;
+        }
+    }
+
+    let def_idx = match def_idx {
+        Some(d) => d,
+        None => {
+            // No function/class nearby — use fixed window
+            return (hit_line.saturating_sub(10), hit_line + 15);
+        }
+    };
+
+    // Walk forward from def to find end of body by indentation
+    let def_indent = lines[def_idx].len() - lines[def_idx].trim_start().len();
+    let mut body_end = def_idx + 1;
+
+    for i in (def_idx + 1)..lines.len() {
+        let l = lines[i];
+        let trimmed = l.trim();
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            body_end = i + 1;
+            continue;
+        }
+        let indent = l.len() - trimmed.len();
+        if indent <= def_indent {
+            // Back to same or less indentation — function ended
+            body_end = i;
+            break;
+        }
+        body_end = i + 1;
+    }
+
+    // Cap at 200 lines to avoid dumping entire classes
+    let max_body = 200;
+    let end = body_end.min(def_idx + max_body);
+
+    // 1-indexed for read_file
+    (def_idx.saturating_sub(1) + 1, end)
+}
+
 fn hardcoded_bug_fix_machine() -> MachineDefinition {
     serde_json::from_value(json!({
         "id": "fix-bug",
@@ -918,6 +979,14 @@ async fn main() {
                     .collect();
 
                 for src_file in &source_files {
+                    let file_content = std::fs::read_to_string(
+                        std::path::Path::new(&args.workdir).join(src_file)
+                    ).unwrap_or_default();
+                    let file_lines: Vec<&str> = file_content.lines().collect();
+
+                    // Track function bodies we've already extracted (avoid duplicates)
+                    let mut extracted_ranges: Vec<(usize, usize)> = Vec::new();
+
                     for pattern in &grep_patterns {
                         let grep_result = tools::execute_tool(
                             "grep",
@@ -925,25 +994,91 @@ async fn main() {
                             &args.workdir,
                         );
                         if grep_result != "no matches found" {
-                            // Extract line numbers from grep output and read context
                             for line in grep_result.lines().take(5) {
                                 if let Some(line_num_str) = line.split(':').nth(1) {
                                     if let Ok(line_num) = line_num_str.trim().parse::<usize>() {
+                                        // Skip if this line is already within an extracted range
+                                        if extracted_ranges.iter().any(|(s, e)| line_num >= *s && line_num <= *e) {
+                                            continue;
+                                        }
+
                                         // Store for context cap suggestions
                                         localized_regions.entry(src_file.to_string())
                                             .or_default()
                                             .push((line_num, pattern.to_string()));
-                                        let start = line_num.saturating_sub(10);
-                                        let end = line_num + 15;
+
+                                        // Level 1: Find the function body containing this hit
+                                        let (func_start, func_end) = find_function_body(&file_lines, line_num);
+                                        extracted_ranges.push((func_start, func_end));
+
+                                        // Level 2: Within the function body, find the hotspot
+                                        // Grep the function body for test-failure keywords to narrow focus
+                                        let func_body: Vec<(usize, &str)> = file_lines[func_start.saturating_sub(1)..func_end.min(file_lines.len())]
+                                            .iter().enumerate()
+                                            .map(|(i, l)| (func_start + i, *l))
+                                            .collect();
+
+                                        // Score each line by keyword overlap with test output
+                                        // Skip docstrings, comments, and example lines
+                                        let test_keywords: Vec<&str> = test_summary.split_whitespace()
+                                            .filter(|w| w.len() > 3)
+                                            .collect();
+                                        let mut hotspot_line = line_num;
+                                        let mut best_score = 0usize;
+                                        let mut in_docstring = false;
+                                        for (ln, content) in &func_body {
+                                            let trimmed = content.trim();
+                                            // Track triple-quote docstrings
+                                            let triple_count = trimmed.matches("\"\"\"").count()
+                                                + trimmed.matches("'''").count();
+                                            if triple_count == 1 { in_docstring = !in_docstring; }
+                                            // Skip docstrings, comments, and example lines
+                                            if in_docstring || trimmed.starts_with('#')
+                                                || trimmed.starts_with(">>>") || trimmed.starts_with("...") {
+                                                continue;
+                                            }
+                                            let score = test_keywords.iter()
+                                                .filter(|kw| content.to_lowercase().contains(&kw.to_lowercase()))
+                                                .count();
+                                            if score > best_score {
+                                                best_score = score;
+                                                hotspot_line = *ln;
+                                            }
+                                        }
+
+                                        // Present a focused window:
+                                        // - Small function (<60 lines): show all
+                                        // - Large function + hotspot found: 40 lines centered on hotspot
+                                        // - Large function + no hotspot: show full body (capped at 150 lines)
+                                        let func_len = func_end - func_start;
+                                        let (show_start, show_end) = if func_len <= 60 {
+                                            (func_start, func_end)
+                                        } else if best_score > 0 {
+                                            let center = hotspot_line;
+                                            let half = 20;
+                                            let s = center.saturating_sub(half).max(func_start);
+                                            let e = (s + 40).min(func_end);
+                                            (s, e)
+                                        } else {
+                                            // No hotspot — show full function body, the bug could be anywhere
+                                            (func_start, func_end.min(func_start + 150))
+                                        };
+
                                         let context = tools::execute_tool(
                                             "read_file",
-                                            &json!({"path": src_file, "start_line": start, "end_line": end}),
+                                            &json!({"path": src_file, "start_line": show_start, "end_line": show_end}),
                                             &args.workdir,
                                         );
                                         if !localized_code.contains(&context) {
+                                            let label = if func_len > 60 && best_score > 0 {
+                                                format!("{} lines {}-{} (hotspot at L{}, function {}-{})",
+                                                    src_file, show_start, show_end, hotspot_line, func_start, func_end)
+                                            } else {
+                                                format!("{} lines {}-{} (grep: '{}')",
+                                                    src_file, show_start, show_end, pattern)
+                                            };
                                             localized_code.push_str(&format!(
-                                                "\n=== {} around line {} (grep: '{}') ===\n{}\n",
-                                                src_file, line_num, pattern, context
+                                                "\n=== {} ===\n{}\n", label, context
                                             ));
                                         }
                                     }

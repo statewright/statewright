@@ -5,6 +5,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Renamed `crates/demo` → `crates/cli`, binary `sw-demo` → `sw-agent`
+
+### Added
+- **[cli]** `--json-events` flag for JSONL event streaming (MCP gateway integration)
+- **[cli]** `--config` flag for gateway-controlled model routing and guardrails
+- **[cli]** `--state` flag for per-state execution (hybrid TUI/agent architecture)
+- **[cli]** `--context-file` for passing context to single-state runs
+- **[cli]** `TuiEvent` enum with Serialize + `emit_json()` for structured events
+- **[cli]** `RunConfig` struct with per-state model routing and guardrail config
+- **[cli]** Transition events include `trigger` and `rationale` fields
+- **[gateway]** `statewright_run_agent` MCP tool — spawns sw-agent subprocess
+- **[gateway]** `statewright_run_agent` added to `is_custom_tool` routing
+- **[agent]** `OllamaClient` derives `Clone` for per-state client creation
+- **[pi]** Bug fixes: statewright_transition match, pluginStepCount reset, test gate
+- **[pi]** Parser improvements: edit_line alias, `<tool_code>` format, arrow format, tool/function aliases
+- **[pi]** Experimental text-only Ollama provider (gated behind `STATEWRIGHT_EXPERIMENTAL=1`)
+
 ## [1.1.0] — 2026-06-01
 
 Plugin orchestration mode for local models that can't reliably navigate state machines on their own. The plugin drives transitions instead of relying on the model. Plus: self-hosted stack, Pi plugin rewrite, fork/join parallel execution, and per-state model routing.

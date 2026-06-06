@@ -123,9 +123,10 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         while let Some(state_name) = queue.pop_front() {
             if let Some(state_def) = definition.states.get(state_name) {
                 for transition in state_def.on.values() {
-                    let target = transition.target();
-                    if target != "$return" && definition.states.contains_key(target) && visited.insert(target) {
-                        queue.push_back(target);
+                    for target in transition.all_targets() {
+                        if target != "$return" && definition.states.contains_key(target) && visited.insert(target) {
+                            queue.push_back(target);
+                        }
                     }
                 }
             }

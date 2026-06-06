@@ -144,6 +144,22 @@ impl TransitionDef {
         }
     }
 
+    /// All possible target states (for reachability analysis).
+    /// Unlike target() which returns only the first, this returns every branch.
+    pub fn all_targets(&self) -> Vec<&str> {
+        match self {
+            TransitionDef::Simple(t) => vec![t],
+            TransitionDef::Full { target, .. } => vec![target],
+            TransitionDef::Guarded(branches) => branches.iter().map(|b| b.target.as_str()).collect(),
+            TransitionDef::Fork { fork } => vec![&fork.on_complete],
+            TransitionDef::Invoke { on_complete, on_fail, .. } => {
+                let mut v = vec![on_complete.as_str()];
+                if let Some(f) = on_fail { v.push(f.as_str()); }
+                v
+            }
+        }
+    }
+
     pub fn guard_names(&self) -> Vec<&str> {
         match self {
             TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Fork { .. } | TransitionDef::Guarded(_) => vec![],

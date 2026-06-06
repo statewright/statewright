@@ -330,6 +330,7 @@ fn build_system_prompt(
     is_checkpoint: bool,
     iterations_remaining: Option<u32>,
     native_hint: bool,
+    localization: &str,
 ) -> String {
     let tools_list = allowed_tools.join(", ");
     let nav_section = statewright_agent::ollama_client::nav_tools_prompt_section(
@@ -375,11 +376,20 @@ Respond with ONLY a JSON object."#,
     } else if native_hint {
         // Native tool calling: clean prompt without JSON format noise
         let state_guidance = match current_state {
-            "planning" => "Read the code and test failures to understand the bug. Use grep and read_file with start_line/end_line for large files. When you understand the bug, transition to implementing.",
-            "implementing" => "You MUST edit the code to fix the bug. Call edit_line or edit_block now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.",
-            "testing" => "Run the tests. If all pass, transition TESTS_PASS. If any fail, transition TESTS_FAIL.",
-            "review" => "Call diff to review your changes. If correct and minimal, transition APPROVED. Otherwise transition REJECTED.",
-            _ => instructions,
+            "planning" => "Read the code and test failures to understand the bug. Use grep and read_file with start_line/end_line for large files. When you understand the bug, transition to implementing.".to_string(),
+            "implementing" => {
+                let mut s = "You MUST edit the code to fix the bug. Call edit_line or edit_block now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.".to_string();
+                if !localization.is_empty() {
+                    s.push_str("\n\nFrom bug localization:\n");
+                    // Truncate to avoid blowing context — just the key sections
+                    let loc_lines: Vec<&str> = localization.lines().take(40).collect();
+                    s.push_str(&loc_lines.join("\n"));
+                }
+                s
+            },
+            "testing" => "Run the tests. If all pass, transition TESTS_PASS. If any fail, transition TESTS_FAIL.".to_string(),
+            "review" => "Call diff to review your changes. If correct and minimal, transition APPROVED. Otherwise transition REJECTED.".to_string(),
+            _ => instructions.to_string(),
         };
         format!(
 r#"You fix bugs in code. You are in the "{current_state}" state.
@@ -555,7 +565,7 @@ async fn main() {
 
             let system_prompt = build_system_prompt(
                 &task, target_state, instructions, &allowed_tools,
-                &transitions, &workdir, false, Some(max_iter - step), false,
+                &transitions, &workdir, false, Some(max_iter - step), false, "",
             );
             let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
             // Single-state mode: fresh prompt each step (Rust harness parity)
@@ -781,6 +791,9 @@ async fn main() {
     // Key: filename, Value: vec of (line_num, pattern) from grep hits
     let mut localized_regions: HashMap<String, Vec<(usize, String)>> = HashMap::new();
 
+    // Localization summary — re-injected into implementing prompt for re-grounding
+    let mut localization_summary = String::new();
+
     loop {
         step += 1;
         steps_in_current_state += 1;
@@ -915,12 +928,18 @@ async fn main() {
                 let excerpt_lines = localized_code.lines().count();
                 println!("  [LOCALIZE] Extracted {} lines of relevant code from {} file(s)", excerpt_lines, source_files.len());
 
+                // Save localization for re-grounding in implementing state
+                localization_summary = format!(
+                    "## Test Failures\n{}\n\n## Relevant Code\n{}",
+                    test_summary, localized_code
+                );
+
                 // Feed everything into conversation for the planning state
                 conversation.push(ChatMessage {
                     role: "user".into(),
                     content: format!(
-                        "Bug localization results:\n\n## Test Failures\n{}\n\n## Relevant Code Sections\n{}\n\nAnalyze these code sections to find the bug described in the task.",
-                        test_summary, localized_code
+                        "Bug localization results:\n\n{}\n\nAnalyze these code sections to find the bug described in the task.",
+                        localization_summary
                     ),
                 });
 
@@ -1044,6 +1063,7 @@ async fn main() {
             is_checkpoint,
             iters_remaining,
             use_native,
+            &localization_summary,
         );
 
         let mut messages = vec![ChatMessage {
@@ -1086,7 +1106,7 @@ async fn main() {
                     let system = build_system_prompt(
                         &args.task, &current_state, instructions,
                         &allowed_tools, &transitions, &args.workdir, is_checkpoint,
-                        iters_remaining, false,
+                        iters_remaining, false, &localization_summary,
                     );
                     let mut msgs = vec![ChatMessage { role: "system".into(), content: system }];
                     let hs = conversation.len().saturating_sub(history_window);
@@ -1339,12 +1359,50 @@ async fn main() {
             // Track file modifications to invalidate read cache
             let is_edit = tool_name.contains("edit") || tool_name.contains("patch")
                 || tool_name == "write_file" || tool_name == "apply_patch";
-            if is_edit && !result.contains("error") && !result.contains("not found") {
+            let edit_succeeded = is_edit && !result.contains("error") && !result.contains("not found");
+            if edit_succeeded {
                 // Mark the file as modified so future reads aren't cached
                 if let Some(path) = tool_args.get("path").and_then(|p| p.as_str()) {
                     modified_files.insert(path.to_string());
                     // Invalidate any cached reads for this file
                     read_cache.retain(|k, _| !k.contains(path));
+                }
+            }
+
+            // Post-edit auto-test: if an edit landed in implementing, run tests immediately.
+            // Pass → short-circuit to completed. Fail + oversized → restore and restrict.
+            if edit_succeeded && current_state == "implementing" {
+                let test_result = tools::execute_tool("run_test", &serde_json::json!({}), &args.workdir);
+                let all_pass = test_result.contains("passed") && !test_result.contains("FAILED")
+                    && !test_result.contains("failed") && !test_result.contains("error");
+                let changed = tools::all_diff_stats(&args.workdir);
+                if all_pass {
+                    let diff_summary: Vec<String> = changed.iter()
+                        .map(|(f, c, t)| format!("{} ({}/{} lines)", f, c, t))
+                        .collect();
+                    println!("  [AUTO-TEST] PASS — short-circuiting to completed");
+                    println!("  Changes: {}", diff_summary.join(", "));
+                    emit!(TuiEvent::Transition { from: "implementing".into(), to: "completed".into(),
+                        trigger: Some("AUTO_COMPLETE".into()),
+                        rationale: Some("Edit + tests pass".into()) },
+                        "  [TRANSITION] implementing -> completed (auto)");
+                    current_state = "completed".into();
+                    break;
+                } else {
+                    // Tests failed — if edit was oversized, restore and constrain
+                    let oversized = changed.iter().any(|(_, c, _)| *c > MAX_DIFF_LINES);
+                    if oversized {
+                        println!("  [AUTO-TEST] FAIL + oversized edit — restoring snapshot");
+                        tools::restore_snapshot(&args.workdir);
+                        modified_files.clear();
+                        read_cache.clear();
+                        tool_output.push_str("Tests FAILED and your edit changed too many lines. Snapshot restored. Use edit_line for small, targeted changes. You can make multiple small edits — each one is tested automatically.\n");
+                    } else {
+                        // Small edit, tests failed — keep the edit, let model iterate
+                        println!("  [AUTO-TEST] FAIL — edit kept, model can refine");
+                        tool_output.push_str(&format!("Tests FAILED after your edit. Fix the remaining issue.\n{}\n",
+                            test_result.lines().filter(|l| l.contains("FAILED") || l.contains("Error") || l.contains("assert")).take(5).collect::<Vec<_>>().join("\n")));
+                    }
                 }
             }
 

@@ -425,7 +425,7 @@ Available tools: {tools_list}
 - run_test: args: {{}}
 - grep: args: {{"pattern": "search term"}} or {{"pattern": "search term", "file": "filename"}}
 - diff: args: {{"path": "filename"}} (shows changes vs original)
-- edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content, no line number needed)
+- edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
 - patch_file: args: {{"path": "filename", "patches": [{{"old": "old line", "new": "new line"}}]}}
 
 {nav_section}"#,
@@ -868,19 +868,47 @@ async fn main() {
                     .join("\n");
                 println!("  [LOCALIZE] Test failures:\n{}", test_summary.lines().take(5).collect::<Vec<_>>().join("\n"));
 
-                // Extract keywords from the task to grep for
+                // Extract keywords from the task AND test output to grep for
                 let task_lower = args.task.to_lowercase();
-                let mut grep_patterns: Vec<&str> = Vec::new();
-                // Look for function names mentioned in the task
-                for word in ["itermonomials", "min_degree", "max_degree", "max(", "sum(", "divide", "multiply"] {
-                    if task_lower.contains(&word.to_lowercase()) {
-                        grep_patterns.push(word);
+                let mut grep_patterns: Vec<String> = Vec::new();
+
+                // Extract identifiers from the task: words with underscores or camelCase
+                for word in args.task.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if clean.contains('_') && clean.len() > 3 {
+                        grep_patterns.push(clean.to_string());
                     }
                 }
-                // Also grep for terms from the issue description
-                if task_lower.contains("maximum") { grep_patterns.push("max("); }
-                if task_lower.contains("sum") { grep_patterns.push("sum("); }
-                if grep_patterns.is_empty() { grep_patterns.push("def "); }
+
+                // Extract function/class names from test failures (e.g. "test_foo" → grep for "foo")
+                for line in test_summary.lines() {
+                    for word in line.split_whitespace() {
+                        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        if clean.starts_with("test_") {
+                            let without_test = &clean[5..];
+                            if without_test.len() > 3 {
+                                grep_patterns.push(without_test.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Extract assertion targets from test output
+                for line in test_output.lines() {
+                    if line.contains("assert") {
+                        for word in line.split_whitespace() {
+                            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
+                            if clean.contains('_') && clean.len() > 3 && !clean.starts_with("assert") {
+                                grep_patterns.push(clean.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Deduplicate and fallback
+                grep_patterns.sort();
+                grep_patterns.dedup();
+                if grep_patterns.is_empty() { grep_patterns.push("def ".to_string()); }
 
                 let mut localized_code = String::new();
 

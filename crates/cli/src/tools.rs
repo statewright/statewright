@@ -313,15 +313,40 @@ fn edit_line(args: &Value, workdir: &str) -> String {
         Some(p) => p,
         None => return "error: missing 'path' argument".into(),
     };
-    let old = match args.get("old").and_then(|o| o.as_str()) {
-        Some(o) => o,
-        None => return "error: missing 'old' argument (current line content to find)".into(),
-    };
+    let old = args.get("old").and_then(|o| o.as_str());
     let new_content = match args.get("new").and_then(|n| n.as_str()) {
         Some(n) => n,
         None => return "error: missing 'new' argument (replacement content)".into(),
     };
     let hint_line = args.get("line").and_then(|l| l.as_u64()).map(|l| l as usize);
+
+    // Insert mode: no 'old' but 'line' provided → insert after that line
+    if old.is_none() {
+        if let Some(after) = hint_line {
+            let full_path = Path::new(workdir).join(path);
+            let content = match std::fs::read_to_string(&full_path) {
+                Ok(c) => c,
+                Err(e) => return format!("error reading '{}': {}", path, e),
+            };
+            let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+            let idx = after.min(lines.len());
+            // Detect indent from the target line
+            let indent: String = if idx > 0 {
+                lines[idx - 1].chars().take_while(|c| c.is_whitespace()).collect()
+            } else {
+                String::new()
+            };
+            let new_trimmed = new_content.trim_start();
+            lines.insert(idx, format!("{}{}", indent, new_trimmed));
+            let new_file = lines.join("\n") + "\n";
+            return match std::fs::write(&full_path, &new_file) {
+                Ok(()) => format!("Inserted after L{}: '{}'", after, new_content.trim()),
+                Err(e) => format!("error writing '{}': {}", path, e),
+            };
+        }
+        return "error: missing 'old' argument. Provide 'old' (content to find) or 'line' (insert after line N) with 'new'.".into();
+    }
+    let old = old.unwrap();
 
     let full_path = Path::new(workdir).join(path);
     let content = match std::fs::read_to_string(&full_path) {

@@ -329,6 +329,7 @@ fn build_system_prompt(
     workdir: &str,
     is_checkpoint: bool,
     iterations_remaining: Option<u32>,
+    native_hint: bool,
 ) -> String {
     let tools_list = allowed_tools.join(", ");
     let nav_section = statewright_agent::ollama_client::nav_tools_prompt_section(
@@ -369,6 +370,30 @@ TASK: {task}
 Respond with ONLY a JSON object."#,
             current_state = current_state,
             task = task,
+            nav_section = nav_section,
+        )
+    } else if native_hint {
+        // Native tool calling: clean prompt without JSON format noise
+        let state_guidance = match current_state {
+            "planning" => "Read the code and test failures to understand the bug. Use grep and read_file with start_line/end_line for large files. When you understand the bug, transition to implementing.",
+            "implementing" => "You MUST edit the code to fix the bug. Call edit_line or edit_block now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.",
+            "testing" => "Run the tests. If all pass, transition TESTS_PASS. If any fail, transition TESTS_FAIL.",
+            "review" => "Call diff to review your changes. If correct and minimal, transition APPROVED. Otherwise transition REJECTED.",
+            _ => instructions,
+        };
+        format!(
+r#"You fix bugs in code. You are in the "{current_state}" state.
+
+TASK: {task}
+WORKING DIRECTORY: {workdir}
+
+{state_guidance}
+
+{nav_section}"#,
+            task = task,
+            current_state = current_state,
+            workdir = workdir,
+            state_guidance = state_guidance,
             nav_section = nav_section,
         )
     } else {
@@ -530,7 +555,7 @@ async fn main() {
 
             let system_prompt = build_system_prompt(
                 &task, target_state, instructions, &allowed_tools,
-                &transitions, &workdir, false, Some(max_iter - step),
+                &transitions, &workdir, false, Some(max_iter - step), false,
             );
             let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
             // Single-state mode: fresh prompt each step (Rust harness parity)
@@ -728,6 +753,34 @@ async fn main() {
     // Conversation history — the model sees its own previous turns
     let mut conversation: Vec<ChatMessage> = Vec::new();
 
+    // Read dedup: track file reads to avoid re-injecting full content
+    // Key: (tool_name, canonical_args), Value: (step_number, result)
+    let mut read_cache: HashMap<String, (u32, String)> = HashMap::new();
+    // Track which files have been modified (edits invalidate cache)
+    let mut modified_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Scale conversation window by model size — small models drown in context
+    let history_window: usize = if args.model_size < 10.0 {
+        3
+    } else if args.model_size < 20.0 {
+        5
+    } else {
+        10
+    };
+
+    // Max lines for unranged file reads — prevents context clobber on small models
+    let max_full_read_lines: usize = if args.model_size < 10.0 {
+        80
+    } else if args.model_size < 20.0 {
+        200
+    } else {
+        600
+    };
+
+    // Localized regions from programmatic recon — used by context cap to suggest ranges
+    // Key: filename, Value: vec of (line_num, pattern) from grep hits
+    let mut localized_regions: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+
     loop {
         step += 1;
         steps_in_current_state += 1;
@@ -835,6 +888,10 @@ async fn main() {
                             for line in grep_result.lines().take(5) {
                                 if let Some(line_num_str) = line.split(':').nth(1) {
                                     if let Ok(line_num) = line_num_str.trim().parse::<usize>() {
+                                        // Store for context cap suggestions
+                                        localized_regions.entry(src_file.to_string())
+                                            .or_default()
+                                            .push((line_num, pattern.to_string()));
                                         let start = line_num.saturating_sub(10);
                                         let end = line_num + 15;
                                         let context = tools::execute_tool(
@@ -969,6 +1026,13 @@ async fn main() {
         let iters_remaining = state_def.max_iterations
             .map(|max| max.saturating_sub(steps_in_current_state));
 
+        // Determine tool calling mode early (needed for prompt construction)
+        let use_native = match args.tool_mode.as_str() {
+            "native" => true,
+            "raw" => false,
+            _ => !is_checkpoint, // "auto": native for tool steps, raw for checkpoints
+        };
+
         // Build messages: system prompt + conversation history + user nudge
         let system = build_system_prompt(
             &args.task,
@@ -979,6 +1043,7 @@ async fn main() {
             &args.workdir,
             is_checkpoint,
             iters_remaining,
+            use_native,
         );
 
         let mut messages = vec![ChatMessage {
@@ -986,8 +1051,8 @@ async fn main() {
             content: system,
         }];
 
-        // Add conversation history (last 10 turns to stay within context)
-        let history_start = conversation.len().saturating_sub(10);
+        // Add conversation history (window scaled by model size)
+        let history_start = conversation.len().saturating_sub(history_window);
         messages.extend(conversation[history_start..].iter().cloned());
 
         // User message
@@ -1001,13 +1066,6 @@ async fn main() {
                 "What is your next action?".into()
             },
         });
-
-        // Call LLM — dual mode: native tool calling or raw JSON
-        let use_native = match args.tool_mode.as_str() {
-            "native" => true,
-            "raw" => false,
-            _ => !is_checkpoint, // "auto": native for tool steps, raw for checkpoints
-        };
 
         let mut tool_calls_to_process: Vec<(String, serde_json::Value)> = Vec::new();
         let mut transition_event: Option<String> = None;
@@ -1028,10 +1086,10 @@ async fn main() {
                     let system = build_system_prompt(
                         &args.task, &current_state, instructions,
                         &allowed_tools, &transitions, &args.workdir, is_checkpoint,
-                        iters_remaining,
+                        iters_remaining, false,
                     );
                     let mut msgs = vec![ChatMessage { role: "system".into(), content: system }];
-                    let hs = conversation.len().saturating_sub(10);
+                    let hs = conversation.len().saturating_sub(history_window);
                     msgs.extend(conversation[hs..].iter().cloned());
                     msgs.push(ChatMessage { role: "user".into(), content: "What is your next action?".into() });
 
@@ -1195,7 +1253,100 @@ async fn main() {
                 args_preview: truncate_json(tool_args, 200),
             });
 
-            let result = tools::execute_tool(tool_name, tool_args, &args.workdir);
+            // Read dedup: if this is an unranged read_file for a file we already read
+            // and haven't modified since, return a cached summary instead of full content
+            let is_read = tool_name == "read_file";
+            let is_ranged_read = is_read && (tool_args.get("start_line").is_some() || tool_args.get("line_start").is_some());
+            let cache_key = format!("{}:{}", tool_name, serde_json::to_string(tool_args).unwrap_or_default());
+            let read_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+
+            let result = if is_read && !is_ranged_read && !modified_files.contains(&read_path) {
+                if let Some((prev_step, prev_result)) = read_cache.get(&cache_key) {
+                    let line_count = prev_result.lines().count();
+                    let summary = format!(
+                        "(cached — already read in step {}, {} lines, unchanged)\n\
+                         Use start_line/end_line to re-read specific sections, or make your edit based on the content you already have.",
+                        prev_step, line_count
+                    );
+                    if !json_mode {
+                        println!("  [DEDUP] {}({}) -> cached from step {}", tool_name,
+                            truncate_json(tool_args, 60), prev_step);
+                    }
+                    summary
+                } else {
+                    // Pre-check file size before reading — block if too large
+                    let full_path = std::path::Path::new(&args.workdir).join(&read_path);
+                    let line_count = std::fs::read_to_string(&full_path)
+                        .map(|c| c.lines().count())
+                        .unwrap_or(0);
+
+                    if line_count > max_full_read_lines {
+                        // BLOCK: file too large for full read. Suggest ranges from localization.
+                        if !json_mode {
+                            println!("  [CONTEXT CAP] BLOCKED: {} is {} lines (max {} for this model) — use ranged read",
+                                read_path, line_count, max_full_read_lines);
+                        }
+                        let mut suggestion = format!(
+                            "BLOCKED: '{}' is {} lines — too large for full read (max {} lines for this model).\n",
+                            read_path, line_count, max_full_read_lines
+                        );
+                        // Add specific range suggestions from localization data
+                        if let Some(regions) = localized_regions.get(&read_path) {
+                            suggestion.push_str("Relevant sections from bug localization:\n");
+                            for (line_num, pattern) in regions {
+                                let start = line_num.saturating_sub(5);
+                                let end = line_num + 10;
+                                suggestion.push_str(&format!(
+                                    "  - '{}' at line {} → use read_file with start_line={}, end_line={}\n",
+                                    pattern, line_num, start, end
+                                ));
+                            }
+                            suggestion.push_str("Use one of these ranges, or use grep to find other sections.");
+                        } else {
+                            suggestion.push_str("Use grep to find the section you need, then read_file with start_line/end_line.");
+                        }
+                        suggestion
+                    } else {
+                        let r = tools::execute_tool(tool_name, tool_args, &args.workdir);
+                        read_cache.insert(cache_key.clone(), (step, r.clone()));
+                        r
+                    }
+                }
+            } else if is_read && !is_ranged_read {
+                // Even for modified files, block full reads of large files
+                let full_path = std::path::Path::new(&args.workdir).join(&read_path);
+                let line_count = std::fs::read_to_string(&full_path)
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                if line_count > max_full_read_lines {
+                    if !json_mode {
+                        println!("  [CONTEXT CAP] BLOCKED: {} is {} lines (max {}) — use ranged read",
+                            read_path, line_count, max_full_read_lines);
+                    }
+                    format!(
+                        "BLOCKED: '{}' is {} lines — too large. Use read_file with start_line/end_line, or grep to find sections.",
+                        read_path, line_count
+                    )
+                } else {
+                    let r = tools::execute_tool(tool_name, tool_args, &args.workdir);
+                    read_cache.insert(cache_key.clone(), (step, r.clone()));
+                    r
+                }
+            } else {
+                tools::execute_tool(tool_name, tool_args, &args.workdir)
+            };
+
+            // Track file modifications to invalidate read cache
+            let is_edit = tool_name.contains("edit") || tool_name.contains("patch")
+                || tool_name == "write_file" || tool_name == "apply_patch";
+            if is_edit && !result.contains("error") && !result.contains("not found") {
+                // Mark the file as modified so future reads aren't cached
+                if let Some(path) = tool_args.get("path").and_then(|p| p.as_str()) {
+                    modified_files.insert(path.to_string());
+                    // Invalidate any cached reads for this file
+                    read_cache.retain(|k, _| !k.contains(path));
+                }
+            }
 
             emit!(TuiEvent::ToolResult {
                 name: tool_name.clone(),
@@ -1204,7 +1355,6 @@ async fn main() {
 
             // Escape newlines for edit/patch results so TUI can parse diffs on one line
             // Don't escape read_file results — they're huge and only shown truncated
-            let is_edit = tool_name.contains("edit") || tool_name.contains("patch") || tool_name == "diff";
             let display_result = if is_edit {
                 result.replace('\n', "\\n")
             } else {
@@ -1327,6 +1477,9 @@ async fn main() {
                     current_state = result.new_state;
                     context = result.new_context;
                     steps_in_current_state = 0;
+                    // Reset per-state caches
+                    read_cache.clear();
+                    modified_files.clear();
                 }
                 Err(e) => {
                     let msg = format!("Invalid transition: {}", e);

@@ -330,8 +330,9 @@ fn edit_line(args: &Value, workdir: &str) -> String {
     };
 
     let lines: Vec<&str> = content.lines().collect();
-    // Strip whitespace, trailing newlines, and escaped newlines
-    let old_trimmed = old.trim().trim_end_matches("\\n").trim_end_matches("\\r").trim();
+    // Unescape JSON artifacts, strip whitespace and trailing newlines
+    let old_unescaped = old.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\");
+    let old_trimmed = old_unescaped.trim().lines().next().unwrap_or("").trim();
 
     // Find all matching lines
     let matches: Vec<usize> = lines.iter().enumerate()
@@ -439,8 +440,15 @@ fn edit_block(args: &Value, workdir: &str) -> String {
         Err(e) => return format!("error reading '{}': {}", path, e),
     };
 
+    // Unescape JSON artifacts from native tool calling (models send \" for ")
+    let old_unescaped = old
+        .replace("\\\"", "\"")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\\\", "\\");
+
     // Normalize the old block for matching: trim each line, collapse whitespace
-    let old_lines: Vec<&str> = old.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let old_lines: Vec<&str> = old_unescaped.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     if old_lines.is_empty() {
         return "error: 'old' block is empty".into();
     }
@@ -448,6 +456,7 @@ fn edit_block(args: &Value, workdir: &str) -> String {
     let file_lines: Vec<&str> = content.lines().collect();
 
     // Sliding window search: find where old_lines match in file_lines (by trimmed content)
+    // First try exact trim match, then fuzzy (substring) match
     let mut match_start = None;
     for i in 0..file_lines.len() {
         if file_lines.len() - i < old_lines.len() {
@@ -463,6 +472,32 @@ fn edit_block(args: &Value, workdir: &str) -> String {
         if matches {
             match_start = Some(i);
             break;
+        }
+    }
+
+    // Fuzzy fallback: if exact match failed, try matching first+last lines
+    // and check that the block length is close
+    if match_start.is_none() && old_lines.len() >= 2 {
+        let first = old_lines[0];
+        let last = old_lines[old_lines.len() - 1];
+        for i in 0..file_lines.len() {
+            if file_lines.len() - i < old_lines.len() { break; }
+            if file_lines[i].trim() == first {
+                // Check if last line matches within a reasonable window
+                let search_end = (i + old_lines.len() + 5).min(file_lines.len());
+                for end in i + 1..search_end {
+                    if file_lines[end].trim() == last {
+                        let span = end - i + 1;
+                        // Accept if span is within 3 lines of expected
+                        if span.abs_diff(old_lines.len()) <= 3 {
+                            match_start = Some(i);
+                            // Adjust old_lines length to match actual span
+                            break;
+                        }
+                    }
+                }
+                if match_start.is_some() { break; }
+            }
         }
     }
 
@@ -697,7 +732,8 @@ fn patch_file(args: &Value, workdir: &str) -> String {
             }
         };
 
-        let old_trimmed = old.trim();
+        let old_unescaped = old.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\");
+        let old_trimmed = old_unescaped.trim();
         let found = lines.iter().position(|l| l.trim() == old_trimmed);
 
         match found {

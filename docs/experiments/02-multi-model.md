@@ -219,7 +219,7 @@ Both constrain model behavior. The state machine approach is:
 - **Enforceable** — tool blocking and diff checking are deterministic, not advisory
 - **Composable** — states can be added/removed/reordered without rewriting prompts
 - **Model-agnostic** — the same machine works across model sizes with capability adapters (safe_next)
-- **Testable** — 91 unit tests validate the constraint logic independent of any model
+- **Testable** — unit tests validate the constraint logic independent of any model
 
 The insight: **we're not replacing prompt engineering, we're formalizing it into a machine-readable, enforceable, composable structure.**
 
@@ -399,9 +399,9 @@ Each model size has a different bottleneck, and the state machine framework can 
 
 ## Appendix: Key Code Artifacts
 
-- Engine crate: `crates/engine/src/` — 35 tests (guards, transitions, validation, safe_next)
-- Agent crate: `crates/agent/src/` — 41 tests (validator, tool enforcer, generator, executor)
-- Operator crate: `crates/operator/src/` — 15 tests (CRDs, persistence, NATS, reconciler)
-- Demo: `crates/demo/src/main.rs` — dual-mode execution loop with all guardrails
-- Fixture: `crates/demo/fixtures/buggy-calc/` — auto-restoring test target
+- Engine crate: `crates/engine/src/` — 86 tests (guards, transitions, validation, safe_next, model routing)
+- Agent crate: `crates/agent/src/` — 59 tests (validator, tool enforcer, generator, executor)
+- MCP Gateway crate: `crates/mcp-gateway/src/` — tests (gateway, custom tools, sessions)
+- CLI: `crates/cli/src/main.rs` — dual-mode execution loop with all guardrails
+- Fixture: `crates/cli/fixtures/buggy-calc/` — auto-restoring test target
 - Previous experiment: `.claude/artifacts/001-self-guardrailing-experiment.md`

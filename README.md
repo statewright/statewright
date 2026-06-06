@@ -84,9 +84,42 @@ The structural win on larger models is breaking read-loop death spirals and keep
 
 ## How it works
 
-The core is a Rust engine that evaluates state machine definitions: states, transitions, guards, tool restrictions. It's deterministic. No LLM in the loop.
+### Architecture
 
-On top of that sits a plugin layer that integrates with your coding agent via MCP. When you activate a workflow, hooks enforce tool restrictions per state. The model sees 5 tools instead of 30. It gets clear instructions for the current phase and transitions when conditions are met.
+Three layers, each independently useful:
+
+1. **Engine** (`crates/engine`) — Pure Rust state machine evaluator. States, transitions, guards, tool restrictions. Deterministic. No LLM in the loop. No runtime dependencies.
+
+2. **Agent binary** (`crates/cli`, binary: `sw-agent`) — Direct-to-Ollama agent executor. Loads a workflow, runs the LLM in a constrained loop, enforces tool access, and streams structured JSONL events. Supports per-state model routing via `--config`, and single-state execution via `--state` (the TUI or MCP gateway orchestrates, `sw-agent` executes one state at a time and exits).
+
+3. **Plugin layer** (`crates/mcp-gateway` + `plugins/`) — MCP gateway that integrates with coding agents (Claude Code, Codex, Pi, etc.). When you activate a workflow, hooks enforce tool restrictions per state. The model sees 5 tools instead of 30. It gets clear instructions for the current phase and transitions when conditions are met. The `statewright_run_agent` MCP tool spawns the Rust binary for states that benefit from direct Ollama execution.
+
+The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface that spawns `sw-agent` as a subprocess and renders its JSONL event stream in real time. It handles keyboard input, demo mode, and fixture selection.
+
+### Per-state model routing
+
+States can specify which model to use via the `model` field. A `default_model` in `meta` applies to states without an explicit override. Clients that support programmatic model switching (Pi, the Rust harness) enforce this; others treat it as advisory.
+
+```json
+{
+  "meta": { "default_model": "claude-sonnet-4-20250514" },
+  "states": {
+    "diagnose": {
+      "model": "claude-haiku-4-5-20251001",
+      "allowed_tools": ["Read", "Bash"]
+    },
+    "propose_fix": {
+      "model": "anthropic/claude-opus-4-6",
+      "allowed_tools": ["Read"]
+    },
+    "execute": {
+      "allowed_tools": ["Read", "Edit", "Bash"]
+    }
+  }
+}
+```
+
+In this example, `diagnose` uses Haiku (fast, cheap reconnaissance), `propose_fix` escalates to Opus (high-stakes reasoning), and `execute` inherits the `default_model` (Sonnet). The `sw-agent` binary also accepts a `--config` file with a `model_routing` block for per-state Ollama URL, temperature, and context window overrides.
 
 ### Guardrails
 
@@ -102,6 +135,9 @@ On top of that sits a plugin layer that integrates with your coding agent via MC
 | Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
 | Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |
 | Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
+| Per-state model routing | Route cheap states to small models, expensive states to frontier models. `model` per state, `default_model` in `meta`. |
+| Thinking level control | Per-state `thinking_level` field (`high`, `medium`, `low`, `off`) for clients that support reasoning effort tuning. |
+| Tool escalation detection | Validator warns when a state jumps 2+ privilege levels without an approval gate |
 
 Full guardrail reference in [the docs](https://docs.statewright.ai/tools/reference).
 
@@ -111,9 +147,14 @@ Full guardrail reference in [the docs](https://docs.statewright.ai/tools/referen
 {
   "id": "bugfix",
   "initial": "planning",
+  "meta": {
+    "default_model": "claude-sonnet-4-20250514"
+  },
   "states": {
     "planning": {
       "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "claude-haiku-4-5-20251001",
+      "thinking_level": "low",
       "max_iterations": 8,
       "on": { "READY": "implementing" }
     },
@@ -155,6 +196,23 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 | [Cursor](plugins/cursor/) | MCP + rules | Advisory |
 
 *\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
+
+### MCP tools
+
+The gateway exposes these tools to the connected agent:
+
+| Tool | Purpose |
+|------|---------|
+| `statewright_load_workflow` | Activate a named workflow, optionally resuming a paused run |
+| `statewright_get_state` | Current state, allowed tools, transitions, iteration count, model, thinking level |
+| `statewright_transition` | Emit an event to advance the state machine |
+| `statewright_list_workflows` | List available workflows and which is active |
+| `statewright_create_workflow` | Create a new workflow from a JSON definition |
+| `statewright_pause` | Pause the current run; resume later with `load_workflow(resume=true)` |
+| `statewright_deactivate` | Turn off enforcement; all tools pass through |
+| `statewright_get_status` | Gateway health: active workflow, state, available workflows |
+| `statewright_run_agent` | Spawn the Rust agent executor (`sw-agent`) for direct-to-Ollama bug fixing |
+| `statewright_force_state` | Jump to any state bypassing guards (debug mode only, gated on `meta.debug`) |
 
 ## Pricing
 

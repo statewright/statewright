@@ -125,7 +125,7 @@ During this experiment, a bug was found and fixed in the programmatic minimizer.
 
 ## Infrastructure Changes
 
-1. **`--control` flag** — Added to sw-demo for flat single-state runs without guardrails.
+1. **`--control` flag** — Added to sw-agent for flat single-state runs without guardrails.
 2. **LCS diff** — `similar` crate replaces positional diff in minimizer. Now correctly reports 2 lines changed when 2 lines are inserted.
 3. **`control_flat_machine()`** — Single "solving" state with all tools, no programmatic states.
 4. **Checkpoint edit forcing** — When implementing state hits max_iterations, the checkpoint prompt now demands an edit before transition. Edit tools are listed in the checkpoint prompt. Prevents empty transitions that waste the testing/retry cycle.

@@ -443,10 +443,18 @@ Respond with ONLY a JSON object."#,
         let state_guidance = match current_state {
             "planning" => "Read the code and test failures to understand the bug. Use grep and read_file with start_line/end_line for large files. When you understand the bug, transition to implementing.".to_string(),
             "implementing" => {
-                let mut s = "You MUST edit the code to fix the bug. Call edit_line or edit_block now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.".to_string();
+                let mut s = "You MUST edit the code to fix the bug. Call edit_line, edit_block, or insert_between now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.".to_string();
+                // Surface assertion hints first (most actionable)
+                if localization.contains("## Assertion Hints") {
+                    if let Some(hints_start) = localization.find("## Assertion Hints") {
+                        let hints = &localization[hints_start..];
+                        let hints_lines: Vec<&str> = hints.lines().take(5).collect();
+                        s.push_str("\n\n");
+                        s.push_str(&hints_lines.join("\n"));
+                    }
+                }
                 if !localization.is_empty() {
                     s.push_str("\n\nFrom bug localization:\n");
-                    // Truncate to avoid blowing context — just the key sections
                     let loc_lines: Vec<&str> = localization.lines().take(40).collect();
                     s.push_str(&loc_lines.join("\n"));
                 }
@@ -1112,9 +1120,47 @@ async fn main() {
                 println!("  [LOCALIZE] Extracted {} lines of relevant code from {} file(s)", excerpt_lines, source_files.len());
 
                 // Save localization for re-grounding in implementing state
+                // Extract assertion hints: if test says assert "X" in Y, X is what the code needs
+                let mut assertion_hints = Vec::new();
+                for line in test_output.lines() {
+                    let trimmed = line.trim();
+                    // Match: assert "some code" in variable
+                    if trimmed.contains("assert") && trimmed.contains("\" in ") {
+                        // Extract the quoted string
+                        if let Some(start) = trimmed.find('"') {
+                            if let Some(end) = trimmed[start+1..].find('"') {
+                                let hint = &trimmed[start+1..start+1+end];
+                                if hint.len() > 3 && !hint.contains("assert") {
+                                    assertion_hints.push(hint.to_string());
+                                }
+                            }
+                        }
+                    }
+                    // Match: AssertionError: message containing "code"
+                    if trimmed.starts_with("AssertionError:") || trimmed.starts_with("AssertionError:") {
+                        for word in trimmed.split('"') {
+                            let w = word.trim();
+                            if w.contains('=') || w.contains('(') || w.contains('.') {
+                                if w.len() > 3 {
+                                    assertion_hints.push(w.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                assertion_hints.sort();
+                assertion_hints.dedup();
+
+                let hint_section = if !assertion_hints.is_empty() {
+                    format!("\n\n## Assertion Hints\nThe test expects this code to exist in the source:\n{}\nUse insert_between or edit_line to add the missing code.",
+                        assertion_hints.iter().map(|h| format!("  - `{}`", h)).collect::<Vec<_>>().join("\n"))
+                } else {
+                    String::new()
+                };
+
                 localization_summary = format!(
-                    "## Test Failures\n{}\n\n## Relevant Code\n{}",
-                    test_summary, localized_code
+                    "## Test Failures\n{}\n\n## Relevant Code\n{}{}",
+                    test_summary, localized_code, hint_section
                 );
 
                 // Feed everything into conversation for the planning state

@@ -1053,7 +1053,7 @@ async fn main() {
                                         let func_len = func_end - func_start;
                                         let (show_start, show_end) = if func_len <= 60 {
                                             (func_start, func_end)
-                                        } else if best_score > 0 {
+                                        } else if best_score >= 3 {
                                             let center = hotspot_line;
                                             let half = 20;
                                             let s = center.saturating_sub(half).max(func_start);

@@ -26,7 +26,7 @@ Prior experiments established: gemma4:e2b (7.2GB) scores 0/5, gpt-oss:20b (13.8G
 **gemma4:e2b (7.2GB):** Valid JSON structure starts but can't maintain nested braces through complex tool arguments. Every edit attempt is a parse failure. The model understands the fix (truncated output shows correct old/new content) but can't serialize it.
 
 ### Tier 2: Valid calls, wrong targets (5-8GB)
-**llama3.1:8b (4.9GB):** Produces valid JSON reliably. But hallucinates paths from training data (`/Users/benjamin/Code/sympy/sympy/printing.py`) that don't match any file even after basename resolution. Edits the reproduce script instead of the source file. The model can't distinguish "files I know from training" from "files in this directory."
+**llama3.1:8b (4.9GB):** Produces valid JSON reliably. But hallucinates paths from training data (e.g. full repo paths like `sympy/sympy/printing.py`) that don't match any file even after basename resolution. Edits the reproduce script instead of the source file. The model can't distinguish "files I know from training" from "files in this directory."
 
 ### Tier 3: Valid calls, right targets, wrong content (7-8GB)
 **mistral-nemo (7.1GB), gemma3:12b (8GB):** Both produce valid tool calls and (with path resolver) navigate to the correct files. Both read the files successfully. But when constructing edit arguments, they hallucinate content — inventing dict entries that don't exist, using wrong variable names, or producing edits that are semantically wrong. The model reads 640 lines, but by the time it generates the edit, it's lost the exact content.

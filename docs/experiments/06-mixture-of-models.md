@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-06 through 2026-06-07
 **System:** Statewright sw-agent harness with model registry + escalation ladder
-**Hardware:** RTX 3060 12GB (deepred), RTX 3090 24GB (anduril, cortana), cross-pool load balanced
+**Hardware:** 12GB and 24GB GPUs (multi-node Kubernetes cluster, cross-pool load balanced)
 **Ollama:** v0.30.6, NVIDIA drivers 580.159.03
 
 ## Abstract
@@ -52,6 +52,17 @@ The harness resolves the active model's profile at each step, auto-configuring p
 | **VRAM** | | 7.6GB | 8.1GB | 9.0GB | **4.9GB** |
 
 **Key finding: qwen3:8b matches qwen2.5-coder:14b at half the VRAM.** Native thinking mode + Qwen3 architecture compensates for parameter count.
+
+### Same-Family Scaling Does Not Help
+
+| Model | VRAM | Solve Rate |
+|-------|------|-----------|
+| qwen3:8b | 4.9GB | **3/5** |
+| qwen3:14b | 9.3GB | 2/5 |
+
+qwen3:14b scores WORSE than qwen3:8b despite nearly double the parameters. The 14b model's extended thinking burns more tokens per step, exceeds the step budget on pytest-5262, and produces more verbose edits that trigger the minimizer. Same-architecture scaling is counterproductive when guardrails already maximize the smaller model's effective capability.
+
+**MoM design principle: the escalation ladder must be heterogeneous.** Cross-architecture escalation (qwen3:8b → devstral:24b) gains +1 fixture. Same-family escalation (qwen3:8b → qwen3:14b) loses 1.
 
 ### Control Baseline (no state machine, no guardrails)
 
@@ -149,13 +160,11 @@ The harness resolves the active model's profile at each step, auto-configuring p
 ### Bench Configuration
 - Pod 0 (24GB): gemma4:12b + qwen2.5-coder:14b + qwen3:8b (21.5GB, numParallel=3)
 - Pod 1 (24GB): devstral-small-2:24b (~15GB, numParallel=3)
-- 12GB pool: gemma4:12b + gemma4:e2b (deepred, 2x RTX 3060)
+- 12GB pool: gemma4:12b + gemma4:e2b (2x 12GB GPUs)
 - Load balanced via shared Service selectors across pools
 
 ### Driver Upgrades
-- deepred: 535 → 580 (CUDA 12.2 → 13.0) for Ollama v0.30.6 compatibility
-- anduril: 535 → 550+ for same
-- cortana: 535 → 580 for same
+- All GPU nodes: NVIDIA driver 535 → 580 (CUDA 12.2 → 13.0) for Ollama v0.30.6 compatibility
 
 ## The Commodity Thesis
 
@@ -163,9 +172,9 @@ The harness resolves the active model's profile at each step, auto-configuring p
 
 | Tier | Hardware | Cost (used) | VRAM | Solve Rate |
 |------|----------|-------------|------|-----------|
-| Entry | GTX 1070/1080 | $50-80 | 8GB | 3/5 (60%) with qwen3:8b |
-| Mid | RTX 3060 | $150-200 | 12GB | 3/5 + escalation headroom |
-| High | RTX 3090 | $400-500 | 24GB | Escalation target (devstral/qwen3:14b) |
+| Entry | Used 8GB GPU | $50-80 | 8GB | 3/5 (60%) with qwen3:8b |
+| Mid | Used 12GB GPU | $150-200 | 12GB | 3/5 + escalation headroom |
+| High | Used 24GB GPU | $400-500 | 24GB | Escalation target (devstral) |
 | Frontier | API call | $0.01-0.10/call | N/A | Remaining 20% fallback |
 
 ### The MoM Value Proposition

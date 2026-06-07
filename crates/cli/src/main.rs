@@ -1227,11 +1227,20 @@ async fn main() {
         let iters_remaining = state_def.max_iterations
             .map(|max| max.saturating_sub(steps_in_current_state));
 
-        // Determine tool calling mode early (needed for prompt construction)
+        // Determine tool calling mode — use escalation model's profile when escalated
+        let active_profile = if escalated_model {
+            registry.resolve(&escalation_model)
+        } else {
+            profile.clone()
+        };
         let use_native = match args.tool_mode.as_str() {
             "native" => true,
             "raw" => false,
-            _ => !is_checkpoint, // "auto": native for tool steps, raw for checkpoints
+            _ => match active_profile.tool_mode {
+                model_registry::ToolMode::Native => true,
+                model_registry::ToolMode::Raw => false,
+                model_registry::ToolMode::Auto => !is_checkpoint,
+            },
         };
 
         // Build messages: system prompt + conversation history + user nudge
@@ -1649,6 +1658,17 @@ async fn main() {
             let event = raw_event.split_whitespace().next().unwrap_or(raw_event).trim();
 
             if event == "FAIL" {
+                // Intercept FAIL: escalate instead of giving up if escalation is available
+                if !escalated_model {
+                    edit_fail_count = 4; // Force Level 2
+                    escalated_model = true;
+                    reasoning_mode = false;
+                    println!("  [FAIL → ESCALATE] Model gave up — switching to {}", escalation_model);
+                    conversation.clear();
+                    tools::restore_snapshot(&args.workdir);
+                    modified_files.clear();
+                    continue;
+                }
                 let err = transition_error.unwrap_or_else(|| "agent reported failure".into());
                 println!("  [FAIL] {}", err);
                 current_state = "failed".into();

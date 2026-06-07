@@ -50,7 +50,7 @@
     },
     "gpt-oss": {
       "family_defaults": {
-        "tool_mode": "raw",
+        "tool_mode": "native",
         "reasoning": true,
         "response_field": "reasoning",
         "max_diff_lines": 15,

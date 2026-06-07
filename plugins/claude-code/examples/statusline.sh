@@ -14,7 +14,6 @@
 # Requires: curl, jq
 # Uses: STATEWRIGHT_API_KEY (env or ~/.statewright/api_key)
 #       STATEWRIGHT_GATEWAY_URL (default: https://mcp.statewright.ai)
-#       COLUMNS (set by Claude Code for terminal width)
 
 # Read stdin (Claude Code sends context JSON)
 INPUT=$(timeout 0.1 cat 2>/dev/null || echo "")
@@ -31,25 +30,21 @@ BG_ORANGE='\033[48;5;208m'
 BG_GREEN='\033[48;5;82m'
 BG_RED='\033[48;5;196m'
 
-# Powerline glyphs — fall back to ASCII if font not available
-# Set STATEWRIGHT_POWERLINE=0 to force ASCII
+# Powerline glyphs — set STATEWRIGHT_POWERLINE=0 to force ASCII
 if [[ "${STATEWRIGHT_POWERLINE:-1}" != "0" ]]; then
-    ARROW_RIGHT=""
-    ARROW_LEFT=$(printf '\xee\x82\xb2')
+    SEP=""
 else
-    ARROW_RIGHT=">"
-    ARROW_LEFT="<"
+    SEP=">"
 fi
 
-# --- Statewright segment ---
+# --- Statewright segment (left-aligned, fits inline with existing powerline) ---
 SW_SEGMENT=""
-SW_VISIBLE=""
 
 if [[ -n "$STATEWRIGHT_API_KEY" ]] || [[ -f "$HOME/.statewright/api_key" ]]; then
     SW_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null)}"
     SW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 
-    SW_STATE=$(timeout 1 curl -s -X POST "${SW_URL}/mcp" \
+    SW_STATE=$(timeout 1 curl -s -X POST "${SW_URL}/" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${SW_KEY}" \
         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"statewright_get_state","arguments":{}}}' 2>/dev/null \
@@ -68,45 +63,60 @@ if [[ -n "$STATEWRIGHT_API_KEY" ]] || [[ -f "$HOME/.statewright/api_key" ]]; the
         if [[ -n "$SW_NAME" ]] && [[ "$SW_FINAL" != "true" ]]; then
             # Active workflow — color by state type
             if echo "$SW_NAME" | grep -qi "implement\|edit"; then
-                SW_BG="${BG_PURPLE}"; SW_FG_ARR="\033[38;5;141m"
+                SW_BG="${BG_PURPLE}"; SW_FG="${FG_BLACK}"
             elif echo "$SW_NAME" | grep -qi "test\|verif"; then
-                SW_BG="${BG_ORANGE}"; SW_FG_ARR="\033[38;5;208m"
+                SW_BG="${BG_ORANGE}"; SW_FG="${FG_BLACK}"
             elif echo "$SW_NAME" | grep -qi "plan"; then
-                SW_BG="${BG_CYAN}"; SW_FG_ARR="\033[38;5;51m"
+                SW_BG="${BG_CYAN}"; SW_FG="${FG_BLACK}"
             elif echo "$SW_NAME" | grep -qi "completed"; then
-                SW_BG="${BG_GREEN}"; SW_FG_ARR="\033[38;5;82m"
+                SW_BG="${BG_GREEN}"; SW_FG="${FG_BLACK}"
             elif echo "$SW_NAME" | grep -qi "fail"; then
-                SW_BG="${BG_RED}"; SW_FG_ARR="\033[38;5;196m"
+                SW_BG="${BG_RED}"; SW_FG="${FG_BLACK}"
             else
-                SW_BG="${BG_BLUE}"; SW_FG_ARR="\033[38;5;33m"
+                SW_BG="${BG_BLUE}"; SW_FG="${FG_BLACK}"
             fi
 
-            # State pill + brand pill
-            SW_SEGMENT="${SW_FG_ARR}${ARROW_LEFT}${SW_BG}${FG_BLACK} ${SW_NAME} ${SW_ITER}/${SW_MAX} ${FG_SW}${ARROW_LEFT}${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${ARROW_RIGHT}${RESET}"
-            SW_VISIBLE=" ${SW_NAME} ${SW_ITER}/${SW_MAX}  ⚙ statewright "
+            # Left-aligned: [state iter/max] > [⚙ statewright] >
+            SW_SEGMENT="${SW_BG}${SW_FG} ${SW_NAME} ${SW_ITER}/${SW_MAX} ${RESET}${FG_SW}${BG_SW}${SEP}${RESET}${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${SEP}${RESET}"
         else
             # No active workflow — brand pill only
-            SW_SEGMENT="${FG_SW}${ARROW_LEFT}${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${ARROW_RIGHT}${RESET}"
-            SW_VISIBLE=" ⚙ statewright "
+            SW_SEGMENT="${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${SEP}${RESET}"
         fi
     else
         # Gateway reachable, no state
-        SW_SEGMENT="${FG_SW}${ARROW_LEFT}${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${ARROW_RIGHT}${RESET}"
-        SW_VISIBLE=" ⚙ statewright "
+        SW_SEGMENT="${BG_SW}${FG_WHITE} ⚙ statewright ${RESET}${FG_SW}${SEP}${RESET}"
     fi
 fi
 
 # --- Output ---
-# If you have your own left-side statusline, append SW_SEGMENT with padding:
-#
-#   LEFT="your existing segments"
-#   LEFT_VISIBLE="your segments without ANSI"
-#   COLS=${COLUMNS:-120}
-#   PAD=$((COLS - ${#LEFT_VISIBLE} - ${#SW_VISIBLE} - 2))
-#   [[ "$PAD" -lt 1 ]] && PAD=1
-#   printf "${LEFT}$(printf '%*s' "$PAD" '')${SW_SEGMENT}\n"
-#
-# Standalone mode (just the statewright segment):
+# Standalone mode — just print the statewright segment.
+# To integrate with an existing powerline, append this segment at the end.
 if [[ -n "$SW_SEGMENT" ]]; then
     printf "${SW_SEGMENT}\n"
 fi
+
+# --- Example: minimal full powerline with statewright appended ---
+# Uncomment below for a complete left-aligned statusline.
+# Integrates directory, git branch, and statewright into one powerline.
+#
+# BG_DIR='\033[48;5;75m'
+# FG_DIR='\033[38;5;75m'
+# BG_GIT='\033[48;5;82m'
+# FG_GIT='\033[38;5;82m'
+#
+# DIR=$(pwd | sed "s|^$HOME|~|" | rev | cut -d/ -f1-2 | rev)
+# BRANCH=$(git branch --show-current 2>/dev/null)
+#
+# LEFT="${BG_DIR}${FG_BLACK} ${DIR} ${RESET}${FG_DIR}"
+# if [[ -n "$BRANCH" ]]; then
+#     LEFT="${LEFT}${BG_GIT}${SEP}${FG_BLACK} ${BRANCH} ${RESET}${FG_GIT}"
+# fi
+# if [[ -n "$SW_SEGMENT" ]]; then
+#     # Statewright as the last segment — flows naturally after git
+#     FG_PREV="${FG_GIT:-$FG_DIR}"
+#     LEFT="${LEFT}${SW_BG:-$BG_SW}${SEP}${SW_SEGMENT}"
+# else
+#     LEFT="${LEFT}${SEP}${RESET}"
+# fi
+#
+# printf "${LEFT}\n"

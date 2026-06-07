@@ -73,6 +73,18 @@
         "70b": { "history_window": 10, "max_full_read_lines": 600, "max_diff_lines": 15 }
       }
     },
+    "devstral-small-2": {
+      "family_defaults": {
+        "tool_mode": "raw",
+        "reasoning": false,
+        "max_diff_lines": 15,
+        "history_window": 10,
+        "max_full_read_lines": 400
+      },
+      "sizes": {
+        "24b": { "max_full_read_lines": 600 }
+      }
+    },
     "qwen3": {
       "family_defaults": {
         "tool_mode": "native",

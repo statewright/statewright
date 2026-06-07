@@ -90,6 +90,7 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "edit_block" => edit_block(args, workdir),
         "patch_file" => patch_file(args, workdir),
         "apply_patch" => apply_patch(args, workdir),
+        "insert_between" => insert_between(args, workdir),
         _ => format!("unknown tool: {}", name),
     }
 }
@@ -843,6 +844,62 @@ pub fn all_diff_stats(workdir: &str) -> Vec<(String, usize, usize)> {
         })
         .filter(|(_, changed, _)| *changed > 0)
         .collect()
+}
+
+/// Insert a line between two anchor strings in a file.
+/// Finds `after` and `before` in the file and inserts `new` between them.
+fn insert_between(args: &Value, workdir: &str) -> String {
+    let path = match args.get("path").and_then(|p| p.as_str()) {
+        Some(p) => p,
+        None => return "error: missing 'path' argument".into(),
+    };
+    let after_anchor = match args.get("after").and_then(|a| a.as_str()) {
+        Some(a) => a.trim(),
+        None => return "error: missing 'after' argument (line content to insert after)".into(),
+    };
+    let new_content = match args.get("new").and_then(|n| n.as_str()) {
+        Some(n) => n,
+        None => return "error: missing 'new' argument (content to insert)".into(),
+    };
+    let before_anchor = args.get("before").and_then(|b| b.as_str()).map(|s| s.trim());
+
+    let full_path = Path::new(workdir).join(path);
+    let content = match std::fs::read_to_string(&full_path) {
+        Ok(c) => c,
+        Err(e) => return format!("error reading '{}': {}", path, e),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Find the 'after' anchor line
+    let after_idx = lines.iter().position(|l| l.trim().contains(after_anchor));
+    let after_idx = match after_idx {
+        Some(i) => i,
+        None => return format!("error: '{}' not found in {}", after_anchor, path),
+    };
+
+    // If 'before' anchor given, verify it exists after the 'after' anchor
+    if let Some(before) = before_anchor {
+        let before_found = lines[after_idx..].iter().any(|l| l.trim().contains(before));
+        if !before_found {
+            return format!("error: '{}' not found after '{}'", before, after_anchor);
+        }
+    }
+
+    // Detect indentation from the after line
+    let indent: String = lines[after_idx].chars().take_while(|c| c.is_whitespace()).collect();
+
+    // Insert after the anchor line
+    let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    let new_trimmed = new_content.trim();
+    new_lines.insert(after_idx + 1, format!("{}{}", indent, new_trimmed));
+
+    let new_file = new_lines.join("\n") + "\n";
+    match std::fs::write(&full_path, &new_file) {
+        Ok(()) => format!("Inserted '{}' after L{} ('{}') in {}",
+            new_trimmed, after_idx + 1, after_anchor, path),
+        Err(e) => format!("error writing '{}': {}", path, e),
+    }
 }
 
 /// Restore all snapshotted files to their original content.

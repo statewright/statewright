@@ -324,7 +324,7 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
                 "on": { "PLAN_READY": "implementing", "DONE": "implementing", "FAIL": "failed" }
             },
             "implementing": {
-                "allowed_tools": ["read_file", "list_directory", "grep", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file"],
+                "allowed_tools": ["read_file", "list_directory", "grep", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
                 "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible.",
                 "max_iterations": 6,
                 "safe_next": "testing",
@@ -365,7 +365,7 @@ fn control_flat_machine() -> MachineDefinition {
         "meta": { "task_type": "bug_fix", "danger_level": "safe" },
         "states": {
             "solving": {
-                "allowed_tools": ["read_file", "list_directory", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "diff"],
+                "allowed_tools": ["read_file", "list_directory", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between", "diff"],
                 "instructions": "Fix the bug described in the task. You have all tools available. Read the code, find the bug, fix it, and run the tests to verify.",
                 "max_iterations": 20,
                 "on": { "DONE": "completed", "FAIL": "failed" }
@@ -492,6 +492,7 @@ Available tools: {tools_list}
 - diff: args: {{"path": "filename"}} (shows changes vs original)
 - edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
 - patch_file: args: {{"path": "filename", "patches": [{{"old": "old line", "new": "new line"}}]}}
+- insert_between: args: {{"path": "filename", "after": "line to insert after", "new": "new code"}} optionally {{"before": "line before which to insert"}}
 
 {nav_section}"#,
             task = task,

@@ -504,6 +504,153 @@ case "$ENDPOINT" in
     exit 0
     ;;
 
+  permission-request)
+    # --- Spec 27: Permission Auto-Responder ---
+    # Four-tier decision stack for autonomous permission resolution.
+    # Only fires when a tool IS about to be used but the runtime's native
+    # permission system would normally prompt the human.
+
+    # No active workflow: pass through to human
+    if [ ! -f "$ACTIVE_FILE" ]; then
+      exit 0
+    fi
+
+    # No cached state: pass through
+    if [ ! -f "$CACHE_FILE" ]; then
+      exit 0
+    fi
+
+    STATE_JSON=$(cat "$CACHE_FILE")
+
+    # Check meta.autonomous — if false/unset, pass through to human
+    AUTONOMOUS=$(echo "$STATE_JSON" | jq -r '.meta.autonomous // false' 2>/dev/null || true)
+    if [ "$AUTONOMOUS" != "true" ]; then
+      exit 0
+    fi
+
+    # Check danger_level — dangerous = all pass through to human
+    DANGER=$(echo "$STATE_JSON" | jq -r '.meta.danger_level // "safe"' 2>/dev/null || true)
+    if [ "$DANGER" = "dangerous" ]; then
+      exit 0
+    fi
+
+    TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
+    TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_input // {}' 2>/dev/null || true)
+
+    # --- Check if tool is in allowed_tools ---
+    ALLOWED=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | .[]' 2>/dev/null || true)
+
+    if [ -z "$ALLOWED" ]; then
+      exit 0  # No allowed_tools = no enforcement
+    fi
+
+    if ! echo "$ALLOWED" | grep -qx "$TOOL_NAME"; then
+      # Tool NOT in allowed_tools — deny
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'
+      exit 0
+    fi
+
+    # Tool IS in allowed_tools. Now evaluate the command (Bash-specific).
+    if [ "$TOOL_NAME" = "Bash" ]; then
+      COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null || true)
+
+      if [ -z "$COMMAND" ]; then
+        # No command = allow (shouldn't happen but fail-open for non-Bash)
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+        exit 0
+      fi
+
+      # --- Tier 2: Regex fast-deny (destructive patterns) ---
+      # These are ALWAYS denied regardless of allowed_commands
+      DENY=false
+
+      # Destructive file operations
+      if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
+        DENY=true
+      fi
+      # Destructive in pipeline/chain
+      if echo "$COMMAND" | grep -qE '(&&|;|\|)\s*(rm|rmdir|shred|truncate|unlink)\s'; then
+        DENY=true
+      fi
+      # Privilege escalation
+      if echo "$COMMAND" | grep -qE '^\s*sudo\s'; then
+        DENY=true
+      fi
+      # Dangerous permissions
+      if echo "$COMMAND" | grep -qE 'chmod\s+(777|666|a\+w)'; then
+        DENY=true
+      fi
+      # Remote code execution
+      if echo "$COMMAND" | grep -qE 'curl\s.*\|\s*bash|wget\s.*\|\s*bash|curl\s.*\|\s*sh|wget\s.*\|\s*sh'; then
+        DENY=true
+      fi
+      # Force push to main/master
+      if echo "$COMMAND" | grep -qE 'git\s+push\s+--force.*\s+(main|master)'; then
+        DENY=true
+      fi
+      # Fork bombs and disk wipes
+      if echo "$COMMAND" | grep -qE ':\(\)\{|/dev/zero.*of=/dev/|/dev/random.*of=/dev/|mkfs\.' ; then
+        DENY=true
+      fi
+      # dd to block devices
+      if echo "$COMMAND" | grep -qE 'dd\s.*of=/dev/[a-z]'; then
+        DENY=true
+      fi
+
+      if [ "$DENY" = true ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'
+        exit 0
+      fi
+
+      # --- Tier 1: Check allowed_commands + safe patterns ---
+      ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
+
+      if [ -n "$ALLOWED_CMDS" ]; then
+        # Has explicit allowed_commands — check if command matches
+        CMD_OK=false
+        while IFS= read -r pattern; do
+          # shellcheck disable=SC2254 — intentional glob expansion
+          case "$COMMAND" in $pattern) CMD_OK=true; break ;; esac
+        done <<< "$ALLOWED_CMDS"
+
+        if [ "$CMD_OK" = true ]; then
+          # Command matches allowed_commands — Tier 1 allow
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+          exit 0
+        else
+          # Command not in allowed_commands — deny (moderate or safe, doesn't matter)
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'
+          exit 0
+        fi
+      else
+        # No explicit allowed_commands — use safe read-only heuristics
+        # Safe patterns: ls, cat, head, tail, wc, file, find (no -exec), grep, tree, pwd, echo, date, env, which, type
+        if echo "$COMMAND" | grep -qE '^\s*(ls|cat|head|tail|wc|file|tree|pwd|echo|date|env|which|type|stat|du|df|uname|whoami|id|hostname)\s'; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+          exit 0
+        fi
+        # Git read-only
+        if echo "$COMMAND" | grep -qE '^\s*git\s+(status|log|diff|show|branch|tag|remote|stash list|rev-parse|describe)'; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+          exit 0
+        fi
+        # Build/test commands (common patterns)
+        if echo "$COMMAND" | grep -qE '^\s*(cargo|npm|yarn|pnpm|bun|pytest|python -m pytest|go test|make|task)\s'; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+          exit 0
+        fi
+        # If we get here with no allowed_commands and no safe pattern match,
+        # pass through to human (no auto-decision)
+        exit 0
+      fi
+    fi
+
+    # Non-Bash tool that IS in allowed_tools — auto-allow
+    # (Read, Edit, Write, Grep, Glob, etc.)
+    jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+    exit 0
+    ;;
+
   *)
     exit 0
     ;;

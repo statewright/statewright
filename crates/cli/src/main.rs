@@ -7,6 +7,7 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::process::Command;
 use statewright_agent::ollama_client::{OllamaClient, OllamaConfig};
 use statewright_agent::prompt_templates::ChatMessage;
 use statewright_agent::tool_enforcer;
@@ -138,6 +139,11 @@ struct Args {
     /// Control mode: single state, all tools, no guardrails (no localizer, no minimizer, no auto-test)
     #[arg(long)]
     control: bool,
+
+    /// Blind mode: no run_test tool, no auto-test feedback. Agent works from issue text only.
+    /// For SWE-bench evaluation where test patches are not available to the agent.
+    #[arg(long)]
+    blind: bool,
 
     /// Log all output to /tmp/statewright-<timestamp>.log
     #[arg(long)]
@@ -324,8 +330,8 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
                 "on": { "PLAN_READY": "implementing", "DONE": "implementing", "FAIL": "failed" }
             },
             "implementing": {
-                "allowed_tools": ["read_file", "list_directory", "grep", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
-                "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible.",
+                "allowed_tools": ["read_file", "list_directory", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
+                "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible. Use run_test with a path to verify your fix.",
                 "max_iterations": 6,
                 "safe_next": "testing",
                 "on": { "DONE": "testing", "FAIL": "failed" }
@@ -495,7 +501,7 @@ Available tools: {tools_list}
 - read_file: args: {{"path": "filename"}} or {{"path": "filename", "start_line": 120, "end_line": 150}} for large files
 - write_file: args: {{"path": "filename", "content": "full file content"}}
 - list_directory: args: {{"path": "."}}
-- run_test: args: {{}}
+- run_test: args: {{}} or {{"path": "tests/"}} to scope to a directory
 - grep: args: {{"pattern": "search term"}} or {{"pattern": "search term", "file": "filename"}}
 - diff: args: {{"path": "filename"}} (shows changes vs original)
 - edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
@@ -945,13 +951,35 @@ async fn main() {
                 let files = tools::execute_tool("list_directory", &json!({"path": "."}), &args.workdir);
                 println!("  [LOCALIZE] Files: {}", files.replace('\n', ", "));
 
-                let test_output = tools::execute_tool("run_test", &json!({}), &args.workdir);
-                let test_summary: String = test_output.lines()
-                    .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
-                    .take(10)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                println!("  [LOCALIZE] Test failures:\n{}", test_summary.lines().take(5).collect::<Vec<_>>().join("\n"));
+                // Count tests before running — skip if the suite is too large
+                let test_count_output = Command::new("python3")
+                    .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
+                    .current_dir(&args.workdir)
+                    .output();
+                let test_count = test_count_output.ok()
+                    .and_then(|o| String::from_utf8_lossy(&o.stdout)
+                        .lines().last()
+                        .and_then(|l| l.split_whitespace().next())
+                        .and_then(|n| n.parse::<usize>().ok()))
+                    .unwrap_or(0);
+
+                let (test_output, test_summary) = if test_count > 100 {
+                    println!("  [LOCALIZE] {} tests detected — skipping full suite", test_count);
+                    let skip_msg = format!(
+                        "{} tests in this repo — too many to run all at once. Use run_test with a scoped path, e.g. run_test({{\"path\": \"sympy/core/tests/\"}}) to test a specific module.",
+                        test_count
+                    );
+                    (skip_msg.clone(), skip_msg)
+                } else {
+                    let output = tools::execute_tool("run_test", &json!({}), &args.workdir);
+                    let summary: String = output.lines()
+                        .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
+                        .take(10)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!("  [LOCALIZE] Test failures:\n{}", summary.lines().take(5).collect::<Vec<_>>().join("\n"));
+                    (output, summary)
+                };
 
                 // Extract keywords from the task AND test output to grep for
                 let task_lower = args.task.to_lowercase();
@@ -1611,7 +1639,23 @@ async fn main() {
             // Post-edit auto-test: if an edit landed in implementing, run tests immediately.
             // Pass → short-circuit to completed. Fail + oversized → restore and restrict.
             if edit_succeeded && current_state == "implementing" {
-                let test_result = tools::execute_tool("run_test", &serde_json::json!({}), &args.workdir);
+                // Scope auto-test to the edited file's test directory
+                let test_scope = if let Some(edited_path) = tool_args.get("path").and_then(|p| p.as_str()) {
+                    // Heuristic: look for a tests/ dir near the edited file
+                    let dir = std::path::Path::new(edited_path).parent().unwrap_or(std::path::Path::new("."));
+                    let test_dir = dir.join("tests");
+                    let full_test_dir = std::path::Path::new(&args.workdir).join(&test_dir);
+                    if full_test_dir.is_dir() {
+                        json!({"path": test_dir.to_string_lossy()})
+                    } else if dir.join("test").is_dir() || std::path::Path::new(&args.workdir).join(dir).join("test").is_dir() {
+                        json!({"path": dir.join("test").to_string_lossy()})
+                    } else {
+                        json!({})
+                    }
+                } else {
+                    json!({})
+                };
+                let test_result = tools::execute_tool("run_test", &test_scope, &args.workdir);
                 let all_pass = test_result.contains("passed") && !test_result.contains("FAILED")
                     && !test_result.contains("failed") && !test_result.contains("error");
                 let changed = tools::all_diff_stats(&args.workdir);

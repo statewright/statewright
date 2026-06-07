@@ -83,7 +83,7 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "read_file" => read_file(args, workdir),
         "write_file" => write_file(args, workdir),
         "list_directory" => list_directory(args, workdir),
-        "run_test" => run_test(workdir),
+        "run_test" => run_test_with_args(args, workdir),
         "grep" => grep(args, workdir),
         "diff" => diff(args, workdir),
         "edit_line" => edit_line(args, workdir),
@@ -211,9 +211,19 @@ fn list_directory(args: &Value, workdir: &str) -> String {
     }
 }
 
-fn run_test(workdir: &str) -> String {
+fn run_test_with_args(args: &Value, workdir: &str) -> String {
+    // Optional path to scope tests (e.g. "sympy/core/tests/")
+    let test_path = args.get("path").and_then(|p| p.as_str());
+
+    let mut cmd_args = vec!["-m", "pytest", "-xvs", "--tb=short", "--no-header", "-q"];
+    let path_string;
+    if let Some(p) = test_path {
+        path_string = p.to_string();
+        cmd_args.push(&path_string);
+    }
+
     let output = Command::new("python3")
-        .args(["-m", "pytest", "-v", "--tb=short"])
+        .args(&cmd_args)
         .current_dir(workdir)
         .output();
 

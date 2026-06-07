@@ -81,12 +81,31 @@ The harness resolves the active model's profile at each step, auto-configuring p
 | deepseek-r1:8b | 8B | 5.2GB | 0/5 | Pure hallucination, no tool calls |
 | gemma4:e2b | 2B | 7.2GB | 0/5 | Navigates states but can't edit |
 
-### Escalation Ladder (in progress)
+### Escalation Ladder
 
-| Fixture | qwen3:8b alone | + escalation to gpt-oss:20b | + escalation to devstral-small-2:24b |
-|---------|---------------|---------------------------|--------------------------------------|
-| sympy-21847 | FAILED | Edits attempted, wrong fix | **PENDING** |
-| requests-1963 | FAILED | Empty responses (format issue) | **PENDING** |
+| Fixture | qwen3:8b (5GB) | devstral-small-2:24b (15GB) | MoM Result |
+|---------|---------------|---------------------------|------------|
+| sympy-22914 | **SOLVED 3** | **SOLVED 13** | Tier 1 |
+| sympy-20590 | **SOLVED 5** | **SOLVED 8** | Tier 1 |
+| sympy-21847 | FAILED | **SOLVED 7** | Tier 2 |
+| pytest-5262 | **SOLVED 8** | **SOLVED 12** | Tier 1 |
+| requests-1963 | FAILED | FAILED | Frontier API |
+
+**4/5 with two-tier MoM ladder.** requests-1963 (redirect chain variable lifecycle) remains unsolved at every local model tier tested.
+
+### Control Baselines (no state machine)
+
+| Fixture | qwen3:8b control | qwen3:8b guardrailed | devstral:24b control | devstral:24b guardrailed |
+|---------|-----------------|---------------------|---------------------|------------------------|
+| sympy-22914 | FAILED | **SOLVED 3** | **SOLVED 13** | — |
+| sympy-20590 | FAILED | **SOLVED 5** | **SOLVED 8** | — |
+| sympy-21847 | FAILED | FAILED | **SOLVED 11** | **SOLVED 7** |
+| pytest-5262 | **SOLVED 15** | **SOLVED 8** | **SOLVED 12** | — |
+| requests-1963 | FAILED | FAILED | FAILED | FAILED |
+| **Total** | **1/5** | **3/5** | **4/5** | **4/5** |
+
+**qwen3:8b: guardrails provide +2 fixtures (1/5 → 3/5).**
+**devstral:24b: guardrails provide faster solves (11 → 7 steps on sympy-21847) but same solve rate.**
 
 ## Guardrail Inventory
 
@@ -105,6 +124,7 @@ The harness resolves the active model's profile at each step, auto-configuring p
 ### Automated Feedback
 9. **Post-edit auto-test** — run tests after every edit, short-circuit to completed on pass
 10. **Auto-reject + restore** — failed tests + oversized diff → restore snapshot + constrain
+11. **Assertion hint extraction** — parses test failures for string literals in assertions, surfaces as edit directives
 
 ### Localization
 11. **Function-body extraction** — grep hit on `def` → extract full function by indentation walking
@@ -112,10 +132,11 @@ The harness resolves the active model's profile at each step, auto-configuring p
 13. **Dynamic grep patterns** — extract identifiers from task description + test output
 
 ### Escalation
-14. **Reasoning mode toggle** — "Think step by step" prompt after 2 failures
-15. **Multi-model escalation** — switch to larger model after 4 failures, profile-aware tool mode
-16. **FAIL interception** — model trying to give up triggers escalation instead
-17. **Model registry** — JSON profiles with hierarchical resolution, auto-configures harness per model
+15. **Reasoning mode toggle** — "Think step by step" prompt after 2 failures
+16. **Multi-model escalation** — switch to larger model after 4 failures, profile-aware tool mode
+17. **FAIL interception** — model trying to give up triggers escalation instead
+18. **Model registry** — JSON profiles with hierarchical resolution, auto-configures harness per model
+19. **Insert-between tool** — insert code between two anchor strings, eliminates line-number positioning
 
 ## Infrastructure
 
@@ -172,9 +193,9 @@ Effective cost: ~$0.005 per task (100x reduction) at comparable solve rates.
 
 ## Next Steps
 
-- devstral-small-2:24b results on sympy-21847 and requests-1963 (PENDING)
-- qwen3:14b results (pulling)
-- Scale to SWE-bench lite subset (50-100 tasks) for statistical significance
+- qwen3:14b matrix (pulled, not tested — 9GB, fits on 12GB card, could be mid-tier sweet spot)
+- SWE-bench Verified subset: devstral-small-2 scores 68% (340/500). Run the 160 failures with guardrails — if +20 flip, that's 72% matching full Devstral 2
 - Build bench farm automation with fork/join workflow
 - Port guardrails to MCP gateway for all clients (Pi, Claude Code, opencode)
 - Formalize MoM as a workflow template in the statewright marketplace
+- Model registry as a community resource — new model drops → bench matrix → JSON entry

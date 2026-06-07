@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "defaults": {
+    "tool_mode": "auto",
+    "reasoning": false,
+    "response_field": "content",
+    "history_window": 10,
+    "max_full_read_lines": 600,
+    "max_diff_lines": 10,
+    "unescape_tool_args": false,
+    "single_quote_json": false,
+    "num_ctx": 8192
+  },
+  "models": {
+    "gemma4": {
+      "family_defaults": {
+        "tool_mode": "native",
+        "unescape_tool_args": true,
+        "max_diff_lines": 5
+      },
+      "sizes": {
+        "e2b": { "history_window": 3, "max_full_read_lines": 80 },
+        "12b": { "history_window": 3, "max_full_read_lines": 80 },
+        "27b": { "history_window": 5, "max_full_read_lines": 200 },
+        "31b": { "history_window": 10, "max_full_read_lines": 600 }
+      }
+    },
+    "gemma3": {
+      "family_defaults": {
+        "tool_mode": "raw",
+        "max_diff_lines": 5
+      },
+      "sizes": {
+        "latest": { "history_window": 3, "max_full_read_lines": 80 },
+        "12b": { "history_window": 3, "max_full_read_lines": 80 },
+        "27b": { "history_window": 5, "max_full_read_lines": 200 }
+      }
+    },
+    "qwen2.5-coder": {
+      "family_defaults": {
+        "tool_mode": "raw",
+        "single_quote_json": true,
+        "max_diff_lines": 15
+      },
+      "sizes": {
+        "7b": { "history_window": 3, "max_full_read_lines": 80 },
+        "14b": { "history_window": 5, "max_full_read_lines": 200 },
+        "32b": { "history_window": 10, "max_full_read_lines": 600 }
+      }
+    },
+    "gpt-oss": {
+      "family_defaults": {
+        "tool_mode": "raw",
+        "reasoning": true,
+        "response_field": "reasoning",
+        "max_diff_lines": 15,
+        "num_ctx": 16384
+      },
+      "sizes": {
+        "20b": { "history_window": 10, "max_full_read_lines": 600 }
+      }
+    },
+    "deepseek-r1": {
+      "family_defaults": {
+        "tool_mode": "raw",
+        "reasoning": true,
+        "response_field": "reasoning"
+      },
+      "sizes": {
+        "8b": { "history_window": 3, "max_full_read_lines": 80, "max_diff_lines": 3 },
+        "14b": { "history_window": 5, "max_full_read_lines": 200 },
+        "32b": { "history_window": 10, "max_full_read_lines": 600 },
+        "70b": { "history_window": 10, "max_full_read_lines": 600, "max_diff_lines": 15 }
+      }
+    },
+    "qwen3": {
+      "family_defaults": {
+        "tool_mode": "native",
+        "reasoning": true,
+        "response_field": "content"
+      },
+      "sizes": {
+        "8b": { "history_window": 5, "max_full_read_lines": 200 },
+        "32b": { "history_window": 10, "max_full_read_lines": 600 }
+      }
+    }
+  }
+}

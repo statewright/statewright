@@ -1,3 +1,4 @@
+mod model_registry;
 mod tdd;
 mod tdd_chain;
 mod tools;
@@ -242,9 +243,6 @@ struct ToolCallRequest {
     args: serde_json::Value,
 }
 
-/// Max lines a diff can touch before the change is rejected and restored.
-/// For a ~26 line file, 5 lines is generous for a single bug fix.
-const MAX_DIFF_LINES: usize = 5;
 
 /// Find the extent of a function/class body around a grep hit.
 /// If the hit is on or near a `def`/`class` line, walk indentation to find the full body.
@@ -517,6 +515,10 @@ async fn main() {
         .init();
 
     let args = Args::parse();
+
+    // Resolve model profile from registry
+    let registry = model_registry::ModelRegistry::builtin();
+    let profile = registry.resolve(&args.model);
 
     // Load run config from file if provided (MCP gateway writes this)
     let run_config: RunConfig = if let Some(config_path) = &args.config {
@@ -855,23 +857,9 @@ async fn main() {
     // Track which files have been modified (edits invalidate cache)
     let mut modified_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Scale conversation window by model size — small models drown in context
-    let history_window: usize = if args.model_size < 10.0 {
-        3
-    } else if args.model_size < 20.0 {
-        5
-    } else {
-        10
-    };
-
-    // Max lines for unranged file reads — prevents context clobber on small models
-    let max_full_read_lines: usize = if args.model_size < 10.0 {
-        80
-    } else if args.model_size < 20.0 {
-        200
-    } else {
-        600
-    };
+    // Model profile drives these — no more hardcoded size thresholds
+    let history_window = profile.history_window;
+    let max_full_read_lines = profile.max_full_read_lines;
 
     // Localized regions from programmatic recon — used by context cap to suggest ranges
     // Key: filename, Value: vec of (line_num, pattern) from grep hits
@@ -1585,7 +1573,7 @@ async fn main() {
                     break;
                 } else {
                     // Tests failed — if edit was oversized, restore and constrain
-                    let oversized = changed.iter().any(|(_, c, _)| *c > MAX_DIFF_LINES);
+                    let oversized = changed.iter().any(|(_, c, _)| *c > profile.max_diff_lines);
                     if oversized {
                         println!("  [AUTO-TEST] FAIL + oversized edit — restoring snapshot");
                         tools::restore_snapshot(&args.workdir);
@@ -1719,9 +1707,9 @@ async fn main() {
                         for (file, changed, total) in &changed_files {
                             println!("  [DIFF] {} — {}/{} lines changed", file, changed, total);
 
-                            if *changed > MAX_DIFF_LINES && *total > 0 {
+                            if *changed > profile.max_diff_lines && *total > 0 {
                                 println!("  [MINIMIZER] REJECTED — {} changed {} lines (max {}). Restoring and retrying.",
-                                    file, changed, MAX_DIFF_LINES);
+                                    file, changed, profile.max_diff_lines);
                                 tools::restore_snapshot(&args.workdir);
                                 rejected = true;
 
@@ -1738,7 +1726,7 @@ async fn main() {
                                         The file has been restored to the original. You changed:\n{}\n\n\
                                         Try again. Change ONLY the line(s) with the bug. Do NOT rename variables, \
                                         remove comments, or rewrite working functions.",
-                                        changed, MAX_DIFF_LINES, diff_detail
+                                        changed, profile.max_diff_lines, diff_detail
                                     ),
                                 });
                                 break;

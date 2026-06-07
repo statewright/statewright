@@ -392,8 +392,14 @@ fn build_system_prompt(
     iterations_remaining: Option<u32>,
     native_hint: bool,
     localization: &str,
+    reasoning: bool,
 ) -> String {
     let tools_list = allowed_tools.join(", ");
+    let reasoning_directive = if reasoning {
+        "Think step by step about what the bug is and why, then provide your action as a JSON object."
+    } else {
+        "Respond with ONLY a JSON object, no other text."
+    };
     let nav_section = statewright_agent::ollama_client::nav_tools_prompt_section(
         transitions, current_state, allowed_tools, iterations_remaining,
     );
@@ -469,7 +475,7 @@ WORKING DIRECTORY: {workdir}
         )
     } else {
         format!(
-r#"You fix bugs step by step. Respond with ONLY a JSON object, no other text.
+r#"You fix bugs step by step. {reasoning_directive}
 
 TASK: {task}
 STATE: {current_state}
@@ -496,6 +502,7 @@ Available tools: {tools_list}
             workdir = workdir,
             tools_list = tools_list,
             nav_section = nav_section,
+            reasoning_directive = reasoning_directive,
         )
     }
 }
@@ -626,7 +633,7 @@ async fn main() {
 
             let system_prompt = build_system_prompt(
                 &task, target_state, instructions, &allowed_tools,
-                &transitions, &workdir, false, Some(max_iter - step), false, "",
+                &transitions, &workdir, false, Some(max_iter - step), false, "", false,
             );
             let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
             // Single-state mode: fresh prompt each step (Rust harness parity)
@@ -809,9 +816,21 @@ async fn main() {
     if !json_mode { println!("[Phase 2] Executing agent within state machine constraints\n"); }
 
     // Default client (used when no per-state routing configured)
-    let client = OllamaClient::new(OllamaConfig {
+    // Escalation model (env override or default to gpt-oss:20b)
+    let escalation_url = std::env::var("SW_ESCALATION_URL")
+        .unwrap_or_else(|_| "https://gpt-oss-20b.ollama.casa.enhasa.cloud/v1".into());
+    let escalation_model = std::env::var("SW_ESCALATION_MODEL")
+        .unwrap_or_else(|_| "gpt-oss:20b".into());
+
+    let base_client = OllamaClient::new(OllamaConfig {
         api_url: args.ollama_url.clone(),
         model: args.model.clone(),
+        temperature: 0.3,
+        max_tokens: 4096,
+    });
+    let escalation_client = OllamaClient::new(OllamaConfig {
+        api_url: escalation_url.clone(),
+        model: escalation_model.clone(),
         temperature: 0.3,
         max_tokens: 4096,
     });
@@ -823,6 +842,12 @@ async fn main() {
 
     // Conversation history — the model sees its own previous turns
     let mut conversation: Vec<ChatMessage> = Vec::new();
+
+    // Escalation ladder: track failed edit attempts in implementing
+    // Level 0: fast (no reasoning) → Level 1: reasoning → Level 2: bigger model → Level 3: bigger + reasoning
+    let mut edit_fail_count = 0u32;
+    let mut reasoning_mode = false;
+    let mut escalated_model = false;
 
     // Read dedup: track file reads to avoid re-injecting full content
     // Key: (tool_name, canonical_args), Value: (step_number, result)
@@ -859,11 +884,13 @@ async fn main() {
         step += 1;
         steps_in_current_state += 1;
 
-        // Per-state model routing: use config-specific client if available
+        // Per-state model routing or escalation-driven model selection
         let client = if run_config.model_routing.contains_key(&current_state) {
             make_client_for_state(&current_state)
+        } else if escalated_model {
+            escalation_client.clone()
         } else {
-            client.clone()
+            base_client.clone()
         };
 
         // Don't abort during testing/review — these are quick programmatic steps
@@ -1231,6 +1258,7 @@ async fn main() {
             iters_remaining,
             use_native,
             &localization_summary,
+            reasoning_mode,
         );
 
         let mut messages = vec![ChatMessage {
@@ -1273,7 +1301,7 @@ async fn main() {
                     let system = build_system_prompt(
                         &args.task, &current_state, instructions,
                         &allowed_tools, &transitions, &args.workdir, is_checkpoint,
-                        iters_remaining, false, &localization_summary,
+                        iters_remaining, false, &localization_summary, reasoning_mode,
                     );
                     let mut msgs = vec![ChatMessage { role: "system".into(), content: system }];
                     let hs = conversation.len().saturating_sub(history_window);
@@ -1570,6 +1598,8 @@ async fn main() {
                         tool_output.push_str(&format!("Tests FAILED after your edit. Fix the remaining issue.\n{}\n",
                             test_result.lines().filter(|l| l.contains("FAILED") || l.contains("Error") || l.contains("assert")).take(5).collect::<Vec<_>>().join("\n")));
                     }
+                    // Count failed edit for unified escalation (checked after tool loop)
+                    edit_fail_count += 1;
                 }
             }
 
@@ -1597,6 +1627,32 @@ async fn main() {
                 role: "user".into(),
                 content: format!("Tool results:\n{}", tool_output),
             });
+        }
+
+        // Escalation: also count non-edit implementing steps as stalls
+        if current_state == "implementing" {
+            let any_edit_this_step = tool_calls_to_process.iter()
+                .any(|(name, _)| name.contains("edit") || name.contains("patch") || name == "write_file");
+            if !any_edit_this_step {
+                edit_fail_count += 1;
+            }
+            // Unified escalation check (fires from both auto-test failures and stalls)
+            if edit_fail_count >= 2 && !reasoning_mode && !escalated_model {
+                reasoning_mode = true;
+                println!("  [ESCALATE] Level 1: reasoning mode (fail_count={})", edit_fail_count);
+                conversation.clear();
+            } else if edit_fail_count >= 4 && !escalated_model {
+                escalated_model = true;
+                reasoning_mode = false;
+                println!("  [ESCALATE] Level 2: switching to {} (fail_count={})", escalation_model, edit_fail_count);
+                conversation.clear();
+                tools::restore_snapshot(&args.workdir);
+                modified_files.clear();
+            } else if edit_fail_count >= 6 && escalated_model && !reasoning_mode {
+                reasoning_mode = true;
+                println!("  [ESCALATE] Level 3: {} + reasoning (fail_count={})", escalation_model, edit_fail_count);
+                conversation.clear();
+            }
         }
 
         // Handle transition

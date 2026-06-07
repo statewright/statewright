@@ -1300,6 +1300,45 @@ impl Gateway {
                     .unwrap(),
                 )
             }
+            "statewright_get_model_traits" => {
+                static REGISTRY_JSON: &str = include_str!("../../cli/model_registry.json");
+                let model_tag = arguments.get("model").and_then(|m| m.as_str());
+
+                let result = if let Some(tag) = model_tag {
+                    // Resolve traits for a specific model
+                    let registry: serde_json::Value = serde_json::from_str(REGISTRY_JSON)
+                        .unwrap_or(json!({"error": "invalid registry"}));
+                    let (family, size) = tag.split_once(':').unwrap_or((tag, ""));
+                    let mut traits = registry.get("defaults").cloned().unwrap_or(json!({}));
+                    if let Some(entry) = registry.get("models").and_then(|m| m.get(family)) {
+                        if let Some(fd) = entry.get("family_defaults") {
+                            if let (Some(base), Some(overlay)) = (traits.as_object_mut(), fd.as_object()) {
+                                for (k, v) in overlay { base.insert(k.clone(), v.clone()); }
+                            }
+                        }
+                        if !size.is_empty() {
+                            if let Some(sv) = entry.get("sizes").and_then(|s| s.get(size)) {
+                                if let (Some(base), Some(overlay)) = (traits.as_object_mut(), sv.as_object()) {
+                                    for (k, v) in overlay { base.insert(k.clone(), v.clone()); }
+                                }
+                            }
+                        }
+                    }
+                    json!({ "model": tag, "traits": traits })
+                } else {
+                    // Return full registry
+                    serde_json::from_str::<serde_json::Value>(REGISTRY_JSON)
+                        .unwrap_or(json!({"error": "invalid registry"}))
+                };
+
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::to_value(crate::protocol::ToolCallResult::text(
+                        serde_json::to_string_pretty(&result).unwrap(),
+                    ))
+                    .unwrap(),
+                )
+            }
             "statewright_deactivate" => {
                 // Record run end before deactivating
                 if let Some(session) = self.session_manager.get(&self.session_id) {

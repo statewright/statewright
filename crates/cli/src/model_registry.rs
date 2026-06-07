@@ -4,20 +4,20 @@ use std::collections::HashMap;
 #[derive(Deserialize, Debug, Clone)]
 pub struct ModelRegistry {
     pub version: u32,
-    pub defaults: ModelProfile,
+    pub defaults: ModelTraits,
     pub models: HashMap<String, ModelEntry>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ModelEntry {
     #[serde(default)]
-    pub family_defaults: ModelProfile,
+    pub family_defaults: ModelTraits,
     #[serde(default)]
-    pub sizes: HashMap<String, ModelProfile>,
+    pub sizes: HashMap<String, ModelTraits>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
-pub struct ModelProfile {
+pub struct ModelTraits {
     pub tool_mode: Option<ToolMode>,
     pub reasoning: Option<bool>,
     pub response_field: Option<ResponseField>,
@@ -46,7 +46,7 @@ pub enum ResponseField {
 
 /// Fully resolved profile — no Options.
 #[derive(Debug, Clone)]
-pub struct ResolvedProfile {
+pub struct ResolvedTraits {
     pub tool_mode: ToolMode,
     pub reasoning: bool,
     pub response_field: ResponseField,
@@ -71,19 +71,19 @@ impl ModelRegistry {
             .unwrap_or_else(Self::builtin)
     }
 
-    pub fn resolve(&self, model_tag: &str) -> ResolvedProfile {
+    pub fn resolve(&self, model_tag: &str) -> ResolvedTraits {
         let (family, size) = parse_model_tag(model_tag);
 
         let mut merged = self.defaults.clone();
 
         if let Some(entry) = self.models.get(family) {
-            merge_profile(&mut merged, &entry.family_defaults);
+            merge_traits(&mut merged, &entry.family_defaults);
             if let Some(size_profile) = size.and_then(|s| entry.sizes.get(s)) {
-                merge_profile(&mut merged, size_profile);
+                merge_traits(&mut merged, size_profile);
             }
         }
 
-        ResolvedProfile {
+        ResolvedTraits {
             tool_mode: merged.tool_mode.unwrap_or(ToolMode::Auto),
             reasoning: merged.reasoning.unwrap_or(false),
             response_field: merged.response_field.unwrap_or(ResponseField::Content),
@@ -104,7 +104,7 @@ fn parse_model_tag(tag: &str) -> (&str, Option<&str>) {
     }
 }
 
-fn merge_profile(base: &mut ModelProfile, from: &ModelProfile) {
+fn merge_traits(base: &mut ModelTraits, from: &ModelTraits) {
     macro_rules! merge {
         ($f:ident) => { if from.$f.is_some() { base.$f = from.$f.clone(); } };
     }

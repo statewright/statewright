@@ -362,6 +362,21 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                 "required": ["task"]
             }),
         },
+        ToolInfo {
+            name: "statewright_get_model_traits".into(),
+            description: Some(
+                "Get model behavioral traits from the registry. Returns tool_mode, reasoning support, context limits, and other characteristics the agent should use to configure itself for the given model.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Model tag (e.g., qwen3:8b, devstral-small-2:24b). If omitted, returns the full registry."
+                    }
+                }
+            }),
+        },
     ]
 }
 

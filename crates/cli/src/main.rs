@@ -1011,32 +1011,32 @@ async fn main() {
                                         let (func_start, func_end) = find_function_body(&file_lines, line_num);
                                         extracted_ranges.push((func_start, func_end));
 
-                                        // Level 2: Within the function body, find the hotspot
-                                        // Grep the function body for test-failure keywords to narrow focus
-                                        let func_body: Vec<(usize, &str)> = file_lines[func_start.saturating_sub(1)..func_end.min(file_lines.len())]
-                                            .iter().enumerate()
-                                            .map(|(i, l)| (func_start + i, *l))
-                                            .collect();
+                                        // Strip docstrings from function body for cleaner context
+                                        let mut stripped_body: Vec<(usize, &str)> = Vec::new();
+                                        let mut in_docstring = false;
+                                        for i in func_start.saturating_sub(1)..func_end.min(file_lines.len()) {
+                                            let trimmed = file_lines[i].trim();
+                                            let triple_count = trimmed.matches("\"\"\"").count()
+                                                + trimmed.matches("'''").count();
+                                            if triple_count >= 2 {
+                                                // Single-line docstring — skip it
+                                                continue;
+                                            }
+                                            if triple_count == 1 {
+                                                in_docstring = !in_docstring;
+                                                continue;
+                                            }
+                                            if in_docstring { continue; }
+                                            stripped_body.push((i + 1, file_lines[i])); // 1-indexed
+                                        }
 
-                                        // Score each line by keyword overlap with test output
-                                        // Skip docstrings, comments, and example lines
+                                        // Level 2: Within the stripped body, find the hotspot
                                         let test_keywords: Vec<&str> = test_summary.split_whitespace()
                                             .filter(|w| w.len() > 3)
                                             .collect();
                                         let mut hotspot_line = line_num;
                                         let mut best_score = 0usize;
-                                        let mut in_docstring = false;
-                                        for (ln, content) in &func_body {
-                                            let trimmed = content.trim();
-                                            // Track triple-quote docstrings
-                                            let triple_count = trimmed.matches("\"\"\"").count()
-                                                + trimmed.matches("'''").count();
-                                            if triple_count == 1 { in_docstring = !in_docstring; }
-                                            // Skip docstrings, comments, and example lines
-                                            if in_docstring || trimmed.starts_with('#')
-                                                || trimmed.starts_with(">>>") || trimmed.starts_with("...") {
-                                                continue;
-                                            }
+                                        for (ln, content) in &stripped_body {
                                             let score = test_keywords.iter()
                                                 .filter(|kw| content.to_lowercase().contains(&kw.to_lowercase()))
                                                 .count();
@@ -1064,21 +1064,25 @@ async fn main() {
                                             (func_start, func_end.min(func_start + 150))
                                         };
 
-                                        let context = tools::execute_tool(
-                                            "read_file",
-                                            &json!({"path": src_file, "start_line": show_start, "end_line": show_end}),
-                                            &args.workdir,
-                                        );
+                                        // Present stripped body (implementation only, docstrings removed)
+                                        let context_lines: Vec<String> = stripped_body.iter()
+                                            .filter(|(ln, _)| *ln >= show_start && *ln <= show_end)
+                                            .map(|(ln, content)| format!("{:>4}: {}", ln, content))
+                                            .collect();
+                                        let context = if context_lines.is_empty() {
+                                            tools::execute_tool(
+                                                "read_file",
+                                                &json!({"path": src_file, "start_line": show_start, "end_line": show_end}),
+                                                &args.workdir,
+                                            )
+                                        } else {
+                                            format!("({} lines, docstrings stripped)\n{}",
+                                                context_lines.len(), context_lines.join("\n"))
+                                        };
                                         if !localized_code.contains(&context) {
-                                            let label = if func_len > 60 && best_score > 0 {
-                                                format!("{} lines {}-{} (hotspot at L{}, function {}-{})",
-                                                    src_file, show_start, show_end, hotspot_line, func_start, func_end)
-                                            } else {
-                                                format!("{} lines {}-{} (grep: '{}')",
-                                                    src_file, show_start, show_end, pattern)
-                                            };
                                             localized_code.push_str(&format!(
-                                                "\n=== {} ===\n{}\n", label, context
+                                                "\n=== {} function at L{} ===\n{}\n",
+                                                src_file, func_start, context
                                             ));
                                         }
                                     }

@@ -330,7 +330,7 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
                 "on": { "PLAN_READY": "implementing", "DONE": "implementing", "FAIL": "failed" }
             },
             "implementing": {
-                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "inspect_class", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
                 "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible. Use run_test with a path to verify your fix.",
                 "max_iterations": 6,
                 "safe_next": "testing",
@@ -371,7 +371,7 @@ fn control_flat_machine() -> MachineDefinition {
         "meta": { "task_type": "bug_fix", "danger_level": "safe" },
         "states": {
             "solving": {
-                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between", "diff"],
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "inspect_class", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between", "diff"],
                 "instructions": "Fix the bug described in the task. You have all tools available. Read the code, find the bug, fix it, and run the tests to verify.",
                 "max_iterations": 20,
                 "on": { "DONE": "completed", "FAIL": "failed" }
@@ -503,6 +503,7 @@ Available tools: {tools_list}
 - list_directory: args: {{"path": "."}}
 - run_test: args: {{}} or {{"path": "tests/"}} to scope to a directory
 - find_files: args: {{"pattern": "*.py"}} to search for files by name pattern recursively
+- inspect_class: args: {{"class": "ClassName"}} or {{"class": "ClassName", "attribute": "__slots__"}} to show class hierarchy and check if attribute is defined
 - grep: args: {{"pattern": "search term"}} or {{"pattern": "search term", "file": "filename"}}
 - diff: args: {{"path": "filename"}} (shows changes vs original)
 - edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
@@ -866,6 +867,7 @@ async fn main() {
     let mut edit_fail_count = 0u32;
     let mut reasoning_mode = false;
     let mut escalated_model = false;
+    let mut persistent_hint: Option<String> = None;
 
     // Read dedup: track file reads to avoid re-injecting full content
     // Key: (tool_name, canonical_args), Value: (step_number, result)
@@ -1127,20 +1129,22 @@ async fn main() {
                     }
                 }
 
-                // Step 6: Python-specific class hierarchy tracing (LIP_Python)
-                if dominant_lang == "py" {
-                    // Extract class names mentioned in task
-                    let class_names: Vec<String> = args.task.split_whitespace()
-                        .filter_map(|w| {
-                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
-                            if clean.len() > 2 && clean.chars().next().map_or(false, |c| c.is_uppercase())
-                                && !stopwords.contains(&clean) {
-                                Some(clean.to_string())
-                            } else { None }
-                        }).collect();
+                // Step 6: Language-specific enrichment
+                let mut enrichment_context = String::new();
 
+                // Extract class names from task
+                let class_names: Vec<String> = args.task.split_whitespace()
+                    .filter_map(|w| {
+                        let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
+                        if clean.len() > 2 && clean.chars().next().map_or(false, |c| c.is_uppercase())
+                            && !stopwords.contains(&clean) {
+                            Some(clean.to_string())
+                        } else { None }
+                    }).collect();
+
+                if dominant_lang == "py" && !class_names.is_empty() {
+                    // Static analysis: grep-based MRO tracing
                     for class_name in &class_names {
-                        // Trace inheritance chain (up to 4 hops)
                         let mut queue = vec![class_name.clone()];
                         let mut visited = std::collections::HashSet::new();
                         for _ in 0..4 {
@@ -1151,14 +1155,25 @@ async fn main() {
                                 let grep_result = tools::execute_tool(
                                     "grep", &json!({"pattern": format!("class {}(", cls)}), &args.workdir,
                                 );
-                                if grep_result == "no matches found" { continue; }
+                                if grep_result == "no matches found" {
+                                    // Also try without parens (base classes with no parents)
+                                    let grep2 = tools::execute_tool(
+                                        "grep", &json!({"pattern": format!("class {}:", cls)}), &args.workdir,
+                                    );
+                                    if grep2 != "no matches found" {
+                                        for line in grep2.lines().take(2) {
+                                            if let Some(file) = line.split(':').next() {
+                                                *file_scores.entry(file.to_string()).or_default() += 3;
+                                            }
+                                        }
+                                    }
+                                    continue;
+                                }
                                 for line in grep_result.lines().take(3) {
                                     let parts: Vec<&str> = line.splitn(3, ':').collect();
                                     if parts.len() < 3 { continue; }
                                     let file = parts[0];
-                                    // Bonus score for files in the inheritance chain
                                     *file_scores.entry(file.to_string()).or_default() += 3;
-                                    // Extract parent classes
                                     let def = parts[2];
                                     if let Some(ps) = def.find('(') {
                                         if let Some(pe) = def.find(')') {
@@ -1174,6 +1189,68 @@ async fn main() {
                             }
                             if next.is_empty() { break; }
                             queue = next;
+                        }
+                    }
+
+                    // Dynamic analysis: Python runtime introspection
+                    // Import the class, walk MRO, report which ancestors are missing key attributes
+                    for class_name in &class_names {
+                        // Try to find the import path from grep hits
+                        let grep_result = tools::execute_tool(
+                            "grep", &json!({"pattern": format!("class {}(", class_name)}), &args.workdir,
+                        );
+                        if grep_result == "no matches found" { continue; }
+                        let first_file = grep_result.lines().next()
+                            .and_then(|l| l.split(':').next())
+                            .unwrap_or("");
+                        if first_file.is_empty() { continue; }
+
+                        // Convert file path to importable module
+                        let module_path = first_file
+                            .trim_start_matches("./")
+                            .trim_end_matches(".py")
+                            .replace('/', ".");
+
+                        let introspect_script = [
+                            "import sys, os, inspect",
+                            "sys.path.insert(0, '.')",
+                            "try:",
+                            &format!("    parts = '{}' .rsplit('.', 1)", module_path),
+                            "    mod = __import__(parts[0], fromlist=[parts[1]] if len(parts) > 1 else [])",
+                            &format!("    cls = getattr(mod, '{}') if len(parts) > 1 else mod", class_name),
+                            "    if len(parts) > 1: cls = getattr(mod, parts[1])",
+                            &format!("    print('## Class Hierarchy for {}')", class_name),
+                            "    for c in cls.__mro__:",
+                            "        has_slots = '__slots__' in c.__dict__",
+                            "        try: src = os.path.relpath(inspect.getfile(c))",
+                            "        except: src = 'builtin'",
+                            "        marker = '' if has_slots else ' <-- MISSING __slots__'",
+                            "        if src != 'builtin': print(f'  {c.__name__} @ {src}{marker}')",
+                            "except Exception as e: print(f'Introspection failed: {e}')",
+                        ].join("\n");
+
+                        let intro_output = Command::new("python3")
+                            .args(["-c", &introspect_script])
+                            .current_dir(&args.workdir)
+                            .output();
+
+                        if let Ok(out) = intro_output {
+                            let stdout = String::from_utf8_lossy(&out.stdout);
+                            if !stdout.is_empty() && !stdout.contains("failed") {
+                                println!("  [LOCALIZE] Runtime introspection:\n{}", stdout.trim());
+                                enrichment_context.push_str(&stdout);
+                                // Boost files mentioned in introspection with MISSING markers
+                                for line in stdout.lines() {
+                                    if line.contains("MISSING") || line.contains("<--") {
+                                        if let Some(at_pos) = line.find(" @ ") {
+                                            let file = line[at_pos+3..].split(|c: char| c == ' ' || c == '\n' || c == '<').next().unwrap_or("").trim();
+                                            if !file.is_empty() {
+                                                *file_scores.entry(file.to_string()).or_default() += 10;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1360,9 +1437,14 @@ async fn main() {
                     String::new()
                 };
 
+                let enrichment_section = if !enrichment_context.is_empty() {
+                    format!("\n{}\n", enrichment_context.trim())
+                } else {
+                    String::new()
+                };
                 localization_summary = format!(
-                    "{}\n## Test Failures\n{}\n\n## Relevant Code\n{}{}",
-                    file_ranking_section, test_summary, localized_code, hint_section
+                    "{}{}\n## Test Failures\n{}\n\n## Relevant Code\n{}{}",
+                    file_ranking_section, enrichment_section, test_summary, localized_code, hint_section
                 );
 
                 // Feed everything into conversation for the planning state
@@ -1523,6 +1605,8 @@ async fn main() {
                 "You've reached the iteration limit. Make your best edit NOW based on what you've read, then call transition with DONE. Do not skip the edit.".into()
             } else if is_checkpoint {
                 "You've reached the iteration limit. Make your decision now.".into()
+            } else if let Some(hint) = &persistent_hint {
+                format!("What is your next action?\n\nNote: {}", hint)
             } else {
                 "What is your next action?".into()
             },
@@ -1811,6 +1895,15 @@ async fn main() {
             }
 
             // Post-edit auto-test: if an edit landed in implementing, run tests immediately.
+            // Count failed edit ATTEMPTS (tool returned error) for corrective hints
+            let edit_tool_failed = is_edit && !edit_succeeded && current_state == "implementing";
+            if edit_tool_failed {
+                edit_fail_count += 1;
+                if edit_fail_count >= 2 && persistent_hint.is_none() {
+                    persistent_hint = Some("Multiple edit attempts failed. The fix might be in a different file. Try: inspect_class to check inheritance hierarchies, grep to search the codebase, or find_files to locate related files.".into());
+                }
+            }
+
             // Pass → short-circuit to completed. Fail + oversized → restore and restrict.
             if edit_succeeded && current_state == "implementing" {
                 // Scope auto-test to the edited file's test directory
@@ -1857,8 +1950,14 @@ async fn main() {
                     } else {
                         // Small edit, tests failed — keep the edit, let model iterate
                         println!("  [AUTO-TEST] FAIL — edit kept, model can refine");
-                        tool_output.push_str(&format!("Tests FAILED after your edit. Fix the remaining issue.\n{}\n",
-                            test_result.lines().filter(|l| l.contains("FAILED") || l.contains("Error") || l.contains("assert")).take(5).collect::<Vec<_>>().join("\n")));
+                        let fail_detail = test_result.lines()
+                            .filter(|l| l.contains("FAILED") || l.contains("Error") || l.contains("assert"))
+                            .take(5).collect::<Vec<_>>().join("\n");
+                        let hint = if edit_fail_count >= 2 {
+                            "\n\nYou've made multiple failed attempts. The fix might be in a different file. Try: inspect_class to check inheritance hierarchies, grep to search the codebase, or find_files to locate related files."
+                        } else { "" };
+                        tool_output.push_str(&format!("Tests FAILED after your edit. Fix the remaining issue.\n{}{}\n",
+                            fail_detail, hint));
                     }
                     // Count failed edit for unified escalation (checked after tool loop)
                     edit_fail_count += 1;

@@ -92,6 +92,7 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "apply_patch" => apply_patch(args, workdir),
         "insert_between" => insert_between(args, workdir),
         "find_files" => find_files(args, workdir),
+        "inspect_class" => inspect_class(args, workdir),
         _ => format!("unknown tool: {}", name),
     }
 }
@@ -910,6 +911,103 @@ fn insert_between(args: &Value, workdir: &str) -> String {
         Ok(()) => format!("Inserted '{}' after L{} ('{}') in {}",
             new_trimmed, after_idx + 1, after_anchor, path),
         Err(e) => format!("error writing '{}': {}", path, e),
+    }
+}
+
+/// Inspect a class: show its inheritance tree, file locations, and key attributes.
+/// Language-aware: Python uses AST, others fall back to grep.
+fn inspect_class(args: &Value, workdir: &str) -> String {
+    let class_name = match args.get("class").or(args.get("name")).and_then(|c| c.as_str()) {
+        Some(c) => c,
+        None => return "error: missing 'class' argument (class name to inspect)".into(),
+    };
+    let check_attr = args.get("attribute").and_then(|a| a.as_str()).unwrap_or("");
+
+    // Detect language from nearby files
+    let has_py = Path::new(workdir).join("setup.py").exists()
+        || Path::new(workdir).join("pyproject.toml").exists()
+        || std::fs::read_dir(workdir).ok().map_or(false, |e|
+            e.filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().ends_with(".py")));
+
+    if has_py {
+        // Python: AST-based class hierarchy walk
+        let attr_check = if !check_attr.is_empty() {
+            format!(
+                "        has_attr = any(isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '{}' for t in s.targets) for s in node.body)",
+                check_attr
+            )
+        } else {
+            "        has_attr = True".to_string()
+        };
+        let attr_label = if !check_attr.is_empty() {
+            format!("f' — {}: {{\"yes\" if has_attr else \"MISSING\"}}'", check_attr)
+        } else {
+            "''".to_string()
+        };
+
+        let script = format!(
+            r#"import ast, os, sys
+target = '{class_name}'
+checked = set()
+queue = [(target, None)]
+results = []
+while queue:
+    name, from_file = queue.pop(0)
+    if name in checked: continue
+    checked.add(name)
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d not in ('__pycache__', '.git', 'node_modules')]
+        for f in files:
+            if not f.endswith('.py'): continue
+            path = os.path.join(root, f)
+            try:
+                with open(path) as fh: tree = ast.parse(fh.read())
+            except: continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and node.name == name:
+{attr_check}
+                    label = {attr_label}
+                    results.append(f'  {{name}} @ {{os.path.relpath(path)}}:{{node.lineno}}{{label}}')
+                    for base in node.bases:
+                        bname = base.attr if hasattr(base, 'attr') else base.id if hasattr(base, 'id') else None
+                        if bname and bname not in ('object', 'type'):
+                            queue.append((bname, path))
+if results:
+    print('Class hierarchy for ' + target + ':')
+    for r in results: print(r)
+else:
+    print('Class ' + target + ' not found')
+"#,
+            class_name = class_name,
+            attr_check = attr_check,
+            attr_label = attr_label,
+        );
+
+        match Command::new("python3").args(["-c", &script]).current_dir(workdir).output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stdout.is_empty() { stdout.to_string() }
+                else if !stderr.is_empty() { format!("error: {}", stderr) }
+                else { format!("Class {} not found", class_name) }
+            }
+            Err(e) => format!("error: {}", e),
+        }
+    } else {
+        // Non-Python: grep-based fallback
+        let grep_result = Command::new("grep")
+            .args(["-rn", &format!("class {}|struct {}|impl {}|type {}|interface {}",
+                class_name, class_name, class_name, class_name, class_name), "."])
+            .current_dir(workdir)
+            .output();
+        match grep_result {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if stdout.is_empty() { format!("Class {} not found", class_name) }
+                else { format!("Definitions of {}:\n{}", class_name, stdout) }
+            }
+            Err(e) => format!("error: {}", e),
+        }
     }
 }
 

@@ -323,14 +323,14 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
                 "on": { "LOCALIZED": "planning", "FAIL": "failed" }
             },
             "planning": {
-                "allowed_tools": ["read_file", "list_directory", "run_test", "grep"],
+                "allowed_tools": ["read_file", "list_directory", "find_files", "run_test", "grep"],
                 "instructions": "Review the localized code sections and test failures provided. Identify the exact bug. Use grep or read_file with start_line/end_line if you need more context. Do NOT modify files yet.",
                 "max_iterations": 5,
                 "safe_next": "implementing",
                 "on": { "PLAN_READY": "implementing", "DONE": "implementing", "FAIL": "failed" }
             },
             "implementing": {
-                "allowed_tools": ["read_file", "list_directory", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
                 "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible. Use run_test with a path to verify your fix.",
                 "max_iterations": 6,
                 "safe_next": "testing",
@@ -371,7 +371,7 @@ fn control_flat_machine() -> MachineDefinition {
         "meta": { "task_type": "bug_fix", "danger_level": "safe" },
         "states": {
             "solving": {
-                "allowed_tools": ["read_file", "list_directory", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between", "diff"],
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between", "diff"],
                 "instructions": "Fix the bug described in the task. You have all tools available. Read the code, find the bug, fix it, and run the tests to verify.",
                 "max_iterations": 20,
                 "on": { "DONE": "completed", "FAIL": "failed" }
@@ -502,6 +502,7 @@ Available tools: {tools_list}
 - write_file: args: {{"path": "filename", "content": "full file content"}}
 - list_directory: args: {{"path": "."}}
 - run_test: args: {{}} or {{"path": "tests/"}} to scope to a directory
+- find_files: args: {{"pattern": "*.py"}} to search for files by name pattern recursively
 - grep: args: {{"pattern": "search term"}} or {{"pattern": "search term", "file": "filename"}}
 - diff: args: {{"path": "filename"}} (shows changes vs original)
 - edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
@@ -948,25 +949,87 @@ async fn main() {
                 // 5. Feed focused excerpts into conversation for the planning state
                 println!("[Step {}] State: localizing — programmatic bug localization", step);
 
-                let files = tools::execute_tool("list_directory", &json!({"path": "."}), &args.workdir);
-                println!("  [LOCALIZE] Files: {}", files.replace('\n', ", "));
+                // === LIP: Language-Agnostic Localization ===
 
-                // Count tests before running — skip if the suite is too large
-                let test_count_output = Command::new("python3")
-                    .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
-                    .current_dir(&args.workdir)
-                    .output();
-                let test_count = test_count_output.ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout)
-                        .lines().last()
-                        .and_then(|l| l.split_whitespace().next())
-                        .and_then(|n| n.parse::<usize>().ok()))
-                    .unwrap_or(0);
+                // Step 1: Discover all source files via git ls-files (or fallback)
+                let all_files: Vec<String> = {
+                    let git_output = Command::new("git")
+                        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+                        .current_dir(&args.workdir)
+                        .output();
+                    match git_output {
+                        Ok(out) if out.status.success() => {
+                            String::from_utf8_lossy(&out.stdout)
+                                .lines().map(|s| s.to_string()).collect()
+                        }
+                        _ => {
+                            // Fallback: list_directory top-level
+                            tools::execute_tool("list_directory", &json!({"path": "."}), &args.workdir)
+                                .lines().map(|s| s.to_string()).collect()
+                        }
+                    }
+                };
+                println!("  [LOCALIZE] {} files in repo", all_files.len());
+
+                // Step 2: Detect language + filter source vs test files
+                let source_extensions = ["py","rs","js","ts","jsx","tsx","go","java","c","cpp","h","hpp","rb","php","kt","swift","cs"];
+                let test_indicators = ["test_","tests/","test/","_test.","_test_",".test.",".spec.","__test__","spec/"];
+
+                let source_files: Vec<&str> = all_files.iter()
+                    .filter(|f| {
+                        let ext = f.rsplit('.').next().unwrap_or("");
+                        source_extensions.contains(&ext)
+                            && !test_indicators.iter().any(|t| f.to_lowercase().contains(t))
+                            && !f.contains("__pycache__") && !f.contains("node_modules")
+                            && !f.contains("/doc/") && !f.contains("/docs/")
+                            && !f.contains("/examples/") && !f.contains("/vendor/")
+                    })
+                    .map(|s| s.as_str())
+                    .collect();
+
+                // Detect dominant language
+                let mut ext_counts: HashMap<String, usize> = HashMap::new();
+                for f in &source_files {
+                    if let Some(ext) = f.rsplit('.').next() {
+                        *ext_counts.entry(ext.to_string()).or_default() += 1;
+                    }
+                }
+                let dominant_lang = ext_counts.into_iter()
+                    .max_by_key(|(_, c)| *c)
+                    .map(|(e, _)| e)
+                    .unwrap_or_else(|| "py".into());
+                println!("  [LOCALIZE] {} source files, language: {}", source_files.len(), dominant_lang);
+
+                // Step 3: Test runner — detect and run if suite is small
+                let (test_cmd, test_args) = match dominant_lang.as_str() {
+                    "rs" => ("cargo", vec!["test", "--", "--nocapture"]),
+                    "go" => ("go", vec!["test", "-v", "./..."]),
+                    "js" | "ts" | "jsx" | "tsx" => {
+                        if std::path::Path::new(&args.workdir).join("package.json").exists() {
+                            ("npm", vec!["test", "--"])
+                        } else { ("echo", vec!["no test runner"]) }
+                    }
+                    _ => ("python3", vec!["-m", "pytest", "-xvs", "--tb=short", "--no-header", "-q"]),
+                };
+
+                // Count tests before running (pytest-specific for now, skip for others)
+                let test_count = if dominant_lang == "py" {
+                    Command::new("python3")
+                        .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
+                        .current_dir(&args.workdir).output().ok()
+                        .and_then(|o| String::from_utf8_lossy(&o.stdout)
+                            .lines().last()
+                            .and_then(|l| l.split_whitespace().next())
+                            .and_then(|n| n.parse::<usize>().ok()))
+                        .unwrap_or(0)
+                } else if source_files.len() > 200 {
+                    999 // Assume large repo = many tests
+                } else { 0 };
 
                 let (test_output, test_summary) = if test_count > 100 {
                     println!("  [LOCALIZE] {} tests detected — skipping full suite", test_count);
                     let skip_msg = format!(
-                        "{} tests in this repo — too many to run all at once. Use run_test with a scoped path, e.g. run_test({{\"path\": \"sympy/core/tests/\"}}) to test a specific module.",
+                        "{} tests — too many for full run. Use run_test with a scoped path.",
                         test_count
                     );
                     (skip_msg.clone(), skip_msg)
@@ -974,18 +1037,15 @@ async fn main() {
                     let output = tools::execute_tool("run_test", &json!({}), &args.workdir);
                     let summary: String = output.lines()
                         .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
-                        .take(10)
-                        .collect::<Vec<_>>()
-                        .join("\n");
+                        .take(10).collect::<Vec<_>>().join("\n");
                     println!("  [LOCALIZE] Test failures:\n{}", summary.lines().take(5).collect::<Vec<_>>().join("\n"));
                     (output, summary)
                 };
 
-                // Extract keywords from the task AND test output to grep for
-                let task_lower = args.task.to_lowercase();
+                // Step 4: Extract grep patterns from task + test output
                 let mut grep_patterns: Vec<String> = Vec::new();
 
-                // Extract identifiers from the task: words with underscores or camelCase
+                // Identifiers with underscores
                 for word in args.task.split_whitespace() {
                     let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                     if clean.contains('_') && clean.len() > 3 {
@@ -993,20 +1053,40 @@ async fn main() {
                     }
                 }
 
-                // Extract function/class names from test failures (e.g. "test_foo" → grep for "foo")
+                // Class names (capitalized words) → "class ClassName"
+                let stopwords = ["The","This","When","Since","In","It","But","And","For","If","We","Is","Are","Was","Has","Have","Not","No","Can","Do","Does","Did","Will","Would","Should","Could","May","Might","Must","From","To","With","At","By","On","Of","A","An","Description","Bug","Fix","Error","Issue","Version","File","Method","Function","Note","See","Also"];
+                for word in args.task.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
+                    if clean.len() > 2
+                        && clean.chars().next().map_or(false, |c| c.is_uppercase())
+                        && !stopwords.contains(&clean)
+                    {
+                        grep_patterns.push(format!("class {}", clean));
+                    }
+                }
+
+                // Dunder methods (__dict__, __slots__, etc.)
+                for word in args.task.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if clean.starts_with("__") && clean.ends_with("__") && clean.len() > 4 {
+                        grep_patterns.push(clean.to_string());
+                        // Complementary pattern
+                        if clean == "__dict__" { grep_patterns.push("__slots__".to_string()); }
+                        if clean == "__slots__" { grep_patterns.push("__dict__".to_string()); }
+                    }
+                }
+
+                // Test function names
                 for line in test_summary.lines() {
                     for word in line.split_whitespace() {
                         let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                        if clean.starts_with("test_") {
-                            let without_test = &clean[5..];
-                            if without_test.len() > 3 {
-                                grep_patterns.push(without_test.to_string());
-                            }
+                        if clean.starts_with("test_") && clean.len() > 8 {
+                            grep_patterns.push(clean[5..].to_string());
                         }
                     }
                 }
 
-                // Extract assertion targets from test output
+                // Assertion targets from test output
                 for line in test_output.lines() {
                     if line.contains("assert") {
                         for word in line.split_whitespace() {
@@ -1018,19 +1098,102 @@ async fn main() {
                     }
                 }
 
-                // Deduplicate and fallback
                 grep_patterns.sort();
                 grep_patterns.dedup();
-                if grep_patterns.is_empty() { grep_patterns.push("def ".to_string()); }
+                let fallback_pattern = match dominant_lang.as_str() {
+                    "rs" => "fn ", "go" => "func ", "js"|"ts" => "function ",
+                    "rb" => "def ", _ => "def ",
+                };
+                if grep_patterns.is_empty() { grep_patterns.push(fallback_pattern.to_string()); }
+                println!("  [LOCALIZE] Patterns: {:?}", &grep_patterns[..grep_patterns.len().min(5)]);
 
+                // Step 5: Recursive grep + file ranking by keyword density
+                let mut file_scores: HashMap<String, usize> = HashMap::new();
+                for pattern in &grep_patterns {
+                    // Recursive grep across entire repo (no file arg = -rn on .)
+                    let grep_result = tools::execute_tool(
+                        "grep", &json!({"pattern": pattern}), &args.workdir,
+                    );
+                    if grep_result != "no matches found" {
+                        for line in grep_result.lines().take(50) {
+                            if let Some(file_path) = line.split(':').next() {
+                                // Only count source files, not tests
+                                let fp = file_path.to_string();
+                                if source_files.iter().any(|&s| s == fp || fp.ends_with(s)) {
+                                    *file_scores.entry(fp).or_default() += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Step 6: Python-specific class hierarchy tracing (LIP_Python)
+                if dominant_lang == "py" {
+                    // Extract class names mentioned in task
+                    let class_names: Vec<String> = args.task.split_whitespace()
+                        .filter_map(|w| {
+                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
+                            if clean.len() > 2 && clean.chars().next().map_or(false, |c| c.is_uppercase())
+                                && !stopwords.contains(&clean) {
+                                Some(clean.to_string())
+                            } else { None }
+                        }).collect();
+
+                    for class_name in &class_names {
+                        // Trace inheritance chain (up to 4 hops)
+                        let mut queue = vec![class_name.clone()];
+                        let mut visited = std::collections::HashSet::new();
+                        for _ in 0..4 {
+                            let mut next = Vec::new();
+                            for cls in &queue {
+                                if visited.contains(cls) { continue; }
+                                visited.insert(cls.clone());
+                                let grep_result = tools::execute_tool(
+                                    "grep", &json!({"pattern": format!("class {}(", cls)}), &args.workdir,
+                                );
+                                if grep_result == "no matches found" { continue; }
+                                for line in grep_result.lines().take(3) {
+                                    let parts: Vec<&str> = line.splitn(3, ':').collect();
+                                    if parts.len() < 3 { continue; }
+                                    let file = parts[0];
+                                    // Bonus score for files in the inheritance chain
+                                    *file_scores.entry(file.to_string()).or_default() += 3;
+                                    // Extract parent classes
+                                    let def = parts[2];
+                                    if let Some(ps) = def.find('(') {
+                                        if let Some(pe) = def.find(')') {
+                                            for parent in def[ps+1..pe].split(',') {
+                                                let p = parent.trim();
+                                                if !p.is_empty() && p != "object" && p != "type" {
+                                                    next.push(p.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if next.is_empty() { break; }
+                            queue = next;
+                        }
+                    }
+                }
+
+                // Rank files by score, take top 5
+                let mut ranked_files: Vec<(String, usize)> = file_scores.into_iter().collect();
+                ranked_files.sort_by(|a, b| b.1.cmp(&a.1));
+                let top_files: Vec<&str> = ranked_files.iter().take(5).map(|(f, _)| f.as_str()).collect();
+
+                if !ranked_files.is_empty() {
+                    println!("  [LOCALIZE] Top files:");
+                    for (f, score) in ranked_files.iter().take(5) {
+                        println!("    {} (score: {})", f, score);
+                    }
+                }
+
+                // Step 7: Extract code from top-ranked files
                 let mut localized_code = String::new();
 
-                // Find source files (not test files)
-                let source_files: Vec<&str> = files.lines()
-                    .filter(|f| f.ends_with(".py") && !f.starts_with("test_") && !f.contains("__"))
-                    .collect();
-
-                for src_file in &source_files {
+                for src_file in &top_files {
                     let file_content = std::fs::read_to_string(
                         std::path::Path::new(&args.workdir).join(src_file)
                     ).unwrap_or_default();

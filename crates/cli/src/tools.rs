@@ -91,6 +91,7 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "patch_file" => patch_file(args, workdir),
         "apply_patch" => apply_patch(args, workdir),
         "insert_between" => insert_between(args, workdir),
+        "find_files" => find_files(args, workdir),
         _ => format!("unknown tool: {}", name),
     }
 }
@@ -909,6 +910,29 @@ fn insert_between(args: &Value, workdir: &str) -> String {
         Ok(()) => format!("Inserted '{}' after L{} ('{}') in {}",
             new_trimmed, after_idx + 1, after_anchor, path),
         Err(e) => format!("error writing '{}': {}", path, e),
+    }
+}
+
+/// Search for files by name pattern (recursive).
+fn find_files(args: &Value, workdir: &str) -> String {
+    let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap_or("*.py");
+    let output = Command::new("find")
+        .args([".", "-name", pattern, "-not", "-path", "*/.git/*",
+               "-not", "-path", "*/node_modules/*", "-not", "-path", "*/__pycache__/*",
+               "-not", "-path", "*/target/*"])
+        .current_dir(workdir)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.is_empty() { "no files found".into() }
+            else {
+                let mut files: Vec<&str> = stdout.lines().collect();
+                files.sort();
+                files.join("\n")
+            }
+        }
+        Err(e) => format!("error: {}", e),
     }
 }
 

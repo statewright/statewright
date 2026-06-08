@@ -391,6 +391,38 @@ async function refreshState(): Promise<StateCache | null> {
   return stateCache
 }
 
+/// Auto-delegate to sw-agent when the current state has direct_execution: true.
+/// Returns a status string if delegation happened, null otherwise.
+async function maybeDelegateDirectExecution(): Promise<string | null> {
+  if (!stateCache?.directExecution || stateCache.isFinal) return null
+
+  const tier = (stateCache.context.current_tier as number) ?? 0
+  const ladder = stateCache.modelLadder
+  const tierEntry = ladder?.[tier] as { model?: string; url?: string } | undefined
+  const agentModel = tierEntry?.model ?? stateCache.model ?? "devstral-small-2:24b"
+  const agentUrl = tierEntry?.url
+
+  swLog(`direct_execution] state=${stateCache.state} tier=${tier} model=${agentModel} url=${agentUrl}`)
+
+  const agentArgs: Record<string, unknown> = {
+    state: stateCache.state,
+    model: agentModel,
+  }
+  if (agentUrl && !agentUrl.startsWith("codex") && !agentUrl.startsWith("anthropic")) {
+    agentArgs.ollama_url = agentUrl
+  }
+
+  const agentResult = await gwCall("statewright_run_agent", agentArgs)
+  if (agentResult) {
+    swLog(`direct_execution] agent returned: ${JSON.stringify(agentResult).slice(0, 200)}`)
+    await refreshState()
+    return `\n[sw-agent] Executed state '${stateCache?.state ?? "?"}' via direct execution (${agentModel}):\n${JSON.stringify(agentResult, null, 2)}`
+  } else {
+    swLog(`direct_execution] statewright_run_agent failed or not available`)
+    return null
+  }
+}
+
 // --- Transition descriptions ---
 // Infer intent from graph structure, not hardcoded event names.
 // Final target = terminal. Target already visited = retry. Otherwise = advance.
@@ -1127,6 +1159,9 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             setAutonomousPermissions(true)
           }
           armInactivityTimer()
+
+          // Auto-delegate if initial state is direct_execution
+          await maybeDelegateDirectExecution()
         }
       } else {
         swLog(`auto-load] STATEWRIGHT_WORKFLOW=${autoWorkflow} failed: ${(result as Record<string, unknown>)?._error || "no result"}`)
@@ -1213,36 +1248,13 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       await refreshState()
 
       // Auto-delegate to sw-agent when entering a direct_execution state
-      if (stateCache?.directExecution && !stateCache.isFinal) {
-        const tier = (stateCache.context.current_tier as number) ?? 0
-        const ladder = stateCache.modelLadder
-        const tierEntry = ladder?.[tier]
-        const agentModel = tierEntry?.model ?? stateCache.model ?? "devstral-small-2:24b"
-        const agentUrl = tierEntry?.url
-
-        swLog(`direct_execution] state=${stateCache.state} tier=${tier} model=${agentModel} url=${agentUrl}`)
-
-        const agentArgs: Record<string, unknown> = {
-          state: stateCache.state,
-          model: agentModel,
-        }
-        if (agentUrl && !agentUrl.startsWith("codex") && !agentUrl.startsWith("anthropic")) {
-          agentArgs.ollama_url = agentUrl
-        }
-
-        const agentResult = await gwCall("statewright_run_agent", agentArgs)
-        if (agentResult) {
-          swLog(`direct_execution] agent returned: ${JSON.stringify(agentResult).slice(0, 200)}`)
-          // Refresh state again — agent may have transitioned
-          await refreshState()
-          return {
-            content: [
-              { type: "text", text: JSON.stringify(result, null, 2) },
-              { type: "text", text: `\n[sw-agent] Executed state '${stateCache?.state ?? "?"}' via direct execution (${agentModel}):\n${JSON.stringify(agentResult, null, 2)}` },
-            ],
-          }
-        } else {
-          swLog(`direct_execution] statewright_run_agent failed or not available`)
+      const delegationResult = await maybeDelegateDirectExecution()
+      if (delegationResult) {
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+            { type: "text", text: delegationResult },
+          ],
         }
       }
 
@@ -1291,6 +1303,17 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         swLog(`load] autonomous mode ENABLED — YOLO + idle timer active`)
         setAutonomousPermissions(true)
         armInactivityTimer()
+      }
+
+      // Auto-delegate if initial state is direct_execution
+      const delegationResult = await maybeDelegateDirectExecution()
+      if (delegationResult) {
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(result, null, 2) },
+            { type: "text", text: delegationResult },
+          ],
+        }
       }
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }

@@ -1192,61 +1192,36 @@ async fn main() {
                         }
                     }
 
-                    // Dynamic analysis: Python runtime introspection
-                    // Import the class, walk MRO, report which ancestors are missing key attributes
+                    // Dynamic analysis: AST-based class hierarchy introspection
+                    // Extract dunder attributes mentioned in the task for checking
+                    // Extract dunder attributes from task for hierarchy checking
+                    // Special case: __dict__ → check __slots__ (absence of __slots__ causes __dict__)
+                    let check_attrs: Vec<&str> = grep_patterns.iter()
+                        .filter(|p| p.starts_with("__") && p.ends_with("__"))
+                        .map(|s| if s.as_str() == "__dict__" { "__slots__" } else { s.as_str() })
+                        .collect();
+
                     for class_name in &class_names {
-                        // Try to find the import path from grep hits
-                        let grep_result = tools::execute_tool(
-                            "grep", &json!({"pattern": format!("class {}(", class_name)}), &args.workdir,
+                        // Use inspect_class tool (AST-based, no import needed)
+                        let check_attr = check_attrs.first().copied().unwrap_or("");
+                        let result = tools::execute_tool(
+                            "inspect_class",
+                            &json!({"class": class_name, "attribute": check_attr}),
+                            &args.workdir,
                         );
-                        if grep_result == "no matches found" { continue; }
-                        let first_file = grep_result.lines().next()
-                            .and_then(|l| l.split(':').next())
-                            .unwrap_or("");
-                        if first_file.is_empty() { continue; }
 
-                        // Convert file path to importable module
-                        let module_path = first_file
-                            .trim_start_matches("./")
-                            .trim_end_matches(".py")
-                            .replace('/', ".");
-
-                        let introspect_script = [
-                            "import sys, os, inspect",
-                            "sys.path.insert(0, '.')",
-                            "try:",
-                            &format!("    parts = '{}' .rsplit('.', 1)", module_path),
-                            "    mod = __import__(parts[0], fromlist=[parts[1]] if len(parts) > 1 else [])",
-                            &format!("    cls = getattr(mod, '{}') if len(parts) > 1 else mod", class_name),
-                            "    if len(parts) > 1: cls = getattr(mod, parts[1])",
-                            &format!("    print('## Class Hierarchy for {}')", class_name),
-                            "    for c in cls.__mro__:",
-                            "        has_slots = '__slots__' in c.__dict__",
-                            "        try: src = os.path.relpath(inspect.getfile(c))",
-                            "        except: src = 'builtin'",
-                            "        marker = '' if has_slots else ' <-- MISSING __slots__'",
-                            "        if src != 'builtin': print(f'  {c.__name__} @ {src}{marker}')",
-                            "except Exception as e: print(f'Introspection failed: {e}')",
-                        ].join("\n");
-
-                        let intro_output = Command::new("python3")
-                            .args(["-c", &introspect_script])
-                            .current_dir(&args.workdir)
-                            .output();
-
-                        if let Ok(out) = intro_output {
-                            let stdout = String::from_utf8_lossy(&out.stdout);
-                            if !stdout.is_empty() && !stdout.contains("failed") {
-                                println!("  [LOCALIZE] Runtime introspection:\n{}", stdout.trim());
-                                enrichment_context.push_str(&stdout);
-                                // Boost files mentioned in introspection with MISSING markers
-                                for line in stdout.lines() {
-                                    if line.contains("MISSING") || line.contains("<--") {
-                                        if let Some(at_pos) = line.find(" @ ") {
-                                            let file = line[at_pos+3..].split(|c: char| c == ' ' || c == '\n' || c == '<').next().unwrap_or("").trim();
-                                            if !file.is_empty() {
-                                                *file_scores.entry(file.to_string()).or_default() += 10;
-                                            }
+                        if !result.contains("not found") && !result.contains("error") {
+                            println!("  [LOCALIZE] Class introspection:\n{}", result.trim());
+                            enrichment_context.push_str(&result);
+                            enrichment_context.push('\n');
+                            // Boost files with MISSING markers
+                            for line in result.lines() {
+                                if line.contains("MISSING") {
+                                    if let Some(at_pos) = line.find(" @ ") {
+                                        let file_part = &line[at_pos+3..];
+                                        let file = file_part.split(':').next().unwrap_or("").trim();
+                                        if !file.is_empty() {
+                                            *file_scores.entry(file.to_string()).or_default() += 10;
                                         }
                                     }
                                 }

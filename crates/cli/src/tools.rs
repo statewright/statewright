@@ -933,11 +933,11 @@ fn inspect_class(args: &Value, workdir: &str) -> String {
         // Python: AST-based class hierarchy walk
         let attr_check = if !check_attr.is_empty() {
             format!(
-                "        has_attr = any(isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '{}' for t in s.targets) for s in node.body)",
+                "                has_attr = any(isinstance(s, ast.Assign) and any(isinstance(t, ast.Name) and t.id == '{}' for t in s.targets) for s in node.body)",
                 check_attr
             )
         } else {
-            "        has_attr = True".to_string()
+            "                has_attr = True".to_string()
         };
         let attr_label = if !check_attr.is_empty() {
             format!("f' — {}: {{\"yes\" if has_attr else \"MISSING\"}}'", check_attr)
@@ -945,33 +945,39 @@ fn inspect_class(args: &Value, workdir: &str) -> String {
             "''".to_string()
         };
 
+        // Grep-first then AST-parse: much faster on large repos
         let script = format!(
-            r#"import ast, os, sys
+            r#"import ast, os, subprocess
 target = '{class_name}'
 checked = set()
-queue = [(target, None)]
+queue = [target]
 results = []
 while queue:
-    name, from_file = queue.pop(0)
+    name = queue.pop(0)
     if name in checked: continue
     checked.add(name)
-    for root, dirs, files in os.walk('.'):
-        dirs[:] = [d for d in dirs if d not in ('__pycache__', '.git', 'node_modules')]
-        for f in files:
-            if not f.endswith('.py'): continue
-            path = os.path.join(root, f)
-            try:
-                with open(path) as fh: tree = ast.parse(fh.read())
-            except: continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef) and node.name == name:
+    grep = subprocess.run(['grep', '-rn', f'class {{name}}(', '.'], capture_output=True, text=True)
+    if not grep.stdout:
+        grep = subprocess.run(['grep', '-rn', f'class {{name}}:', '.'], capture_output=True, text=True)
+    if not grep.stdout: continue
+    for line in grep.stdout.strip().split('\n')[:2]:
+        parts = line.split(':', 2)
+        if len(parts) < 3: continue
+        path = parts[0]
+        if '__pycache__' in path or '/test' in path: continue
+        try:
+            with open(path) as f: tree = ast.parse(f.read())
+        except: continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == name:
 {attr_check}
-                    label = {attr_label}
-                    results.append(f'  {{name}} @ {{os.path.relpath(path)}}:{{node.lineno}}{{label}}')
-                    for base in node.bases:
-                        bname = base.attr if hasattr(base, 'attr') else base.id if hasattr(base, 'id') else None
-                        if bname and bname not in ('object', 'type'):
-                            queue.append((bname, path))
+                label = {attr_label}
+                results.append(f'  {{name}} @ {{os.path.relpath(path)}}:{{node.lineno}}{{label}}')
+                for base in node.bases:
+                    bname = base.attr if hasattr(base, 'attr') else base.id if hasattr(base, 'id') else None
+                    if bname and bname not in ('object', 'type'): queue.append(bname)
+                break
+        break
 if results:
     print('Class hierarchy for ' + target + ':')
     for r in results: print(r)

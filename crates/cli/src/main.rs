@@ -1190,6 +1190,17 @@ async fn main() {
                     }
                 }
 
+                // Build file ranking section for the model's context
+                let file_ranking_section = if ranked_files.len() > 1 {
+                    let mut s = String::from("## Most Relevant Files (ranked by keyword density — start with #1)\n");
+                    for (i, (f, score)) in ranked_files.iter().take(5).enumerate() {
+                        s.push_str(&format!("{}. `{}` (score: {})\n", i + 1, f, score));
+                    }
+                    s
+                } else {
+                    String::new()
+                };
+
                 // Step 7: Extract code from top-ranked files
                 let mut localized_code = String::new();
 
@@ -1350,8 +1361,8 @@ async fn main() {
                 };
 
                 localization_summary = format!(
-                    "## Test Failures\n{}\n\n## Relevant Code\n{}{}",
-                    test_summary, localized_code, hint_section
+                    "{}\n## Test Failures\n{}\n\n## Relevant Code\n{}{}",
+                    file_ranking_section, test_summary, localized_code, hint_section
                 );
 
                 // Feed everything into conversation for the planning state

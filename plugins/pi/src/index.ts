@@ -344,6 +344,8 @@ interface StateCache {
   thinkingLevel: string | null
   runId: string | null
   meta: WorkflowMeta
+  directExecution: boolean
+  modelLadder: Array<{ model: string; url: string }> | null
 }
 
 let stateCache: StateCache | null = null
@@ -383,6 +385,8 @@ async function refreshState(): Promise<StateCache | null> {
     meta: (raw.meta as WorkflowMeta) ?? {},
     allowedCommands: raw.allowed_commands ?? [],
     disallowedTools: raw.disallowed_tools ?? [],
+    directExecution: raw.direct_execution ?? false,
+    modelLadder: raw.model_ladder ?? null,
   }
   return stateCache
 }
@@ -1207,6 +1211,40 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
       // Refresh state after transition
       await refreshState()
+
+      // Auto-delegate to sw-agent when entering a direct_execution state
+      if (stateCache?.directExecution && !stateCache.isFinal) {
+        const tier = (stateCache.context.current_tier as number) ?? 0
+        const ladder = stateCache.modelLadder
+        const tierEntry = ladder?.[tier]
+        const agentModel = tierEntry?.model ?? stateCache.model ?? "devstral-small-2:24b"
+        const agentUrl = tierEntry?.url
+
+        swLog(`direct_execution] state=${stateCache.state} tier=${tier} model=${agentModel} url=${agentUrl}`)
+
+        const agentArgs: Record<string, unknown> = {
+          state: stateCache.state,
+          model: agentModel,
+        }
+        if (agentUrl && !agentUrl.startsWith("codex") && !agentUrl.startsWith("anthropic")) {
+          agentArgs.ollama_url = agentUrl
+        }
+
+        const agentResult = await gwCall("statewright_run_agent", agentArgs)
+        if (agentResult) {
+          swLog(`direct_execution] agent returned: ${JSON.stringify(agentResult).slice(0, 200)}`)
+          // Refresh state again — agent may have transitioned
+          await refreshState()
+          return {
+            content: [
+              { type: "text", text: JSON.stringify(result, null, 2) },
+              { type: "text", text: `\n[sw-agent] Executed state '${stateCache?.state ?? "?"}' via direct execution (${agentModel}):\n${JSON.stringify(agentResult, null, 2)}` },
+            ],
+          }
+        } else {
+          swLog(`direct_execution] statewright_run_agent failed or not available`)
+        }
+      }
 
       return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
     },
@@ -2071,6 +2109,19 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       stateCache = null
       dormant = true
       ctx.ui.setStatus("!statewright", formatStatusBar(null))
+      return
+    }
+
+    // If the model lands in a direct_execution state (agent delegation failed or didn't transition),
+    // tell it to just call statewright_run_agent or transition FAIL — don't let it try the work itself
+    if (state.directExecution) {
+      const tier = (state.context.current_tier as number) ?? 0
+      const ladder = state.modelLadder
+      const tierModel = ladder?.[tier]?.model ?? state.model ?? "unknown"
+      const msg = `DIRECT EXECUTION STATE: This state is handled by sw-agent (${tierModel}), not by you. ` +
+        `Call statewright_run_agent to delegate, or statewright_transition(event="FAIL", data={"rationale": "agent delegation failed"}) to escalate.`
+      ctx.ui?.notify?.(`[statewright] Direct execution: delegating to ${tierModel}`, "info")
+      pi.sendUserMessage(msg, { deliverAs: "steer" })
       return
     }
 

@@ -141,9 +141,12 @@ struct Args {
     control: bool,
 
     /// Blind mode: no run_test tool, no auto-test feedback. Agent works from issue text only.
-    /// For SWE-bench evaluation where test patches are not available to the agent.
     #[arg(long)]
     blind: bool,
+
+    /// Skip restoring files after completion (for capturing diffs in evaluation).
+    #[arg(long)]
+    no_restore: bool,
 
     /// Log all output to /tmp/statewright-<timestamp>.log
     #[arg(long)]
@@ -771,10 +774,14 @@ async fn main() {
     let original_count = originals.len();
     emit!(TuiEvent::Setup { files_snapshotted: original_count }, format!("[Setup] Snapshotted {} file(s) for auto-restore\n", original_count));
 
-    // Restore originals on exit (panic or normal)
-    let _restore_guard = RestoreGuard {
-        workdir: workdir_for_restore,
-        originals,
+    // Restore originals on exit (panic or normal) — unless --no-restore
+    let _restore_guard = if args.no_restore {
+        None
+    } else {
+        Some(RestoreGuard {
+            workdir: workdir_for_restore,
+            originals,
+        })
     };
 
     // Phase 1: Get or generate the state machine

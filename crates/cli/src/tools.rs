@@ -107,7 +107,12 @@ fn read_file(args: &Value, workdir: &str) -> String {
 
     let canonical = match full_path.canonicalize() {
         Ok(p) => p,
-        Err(e) => return format!("error reading '{}': {}", path, e),
+        Err(e) => {
+            if !full_path.exists() {
+                return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+            }
+            return format!("error reading '{}': {}", path, e);
+        }
     };
     let workdir_canonical = match Path::new(workdir).canonicalize() {
         Ok(p) => p,
@@ -172,8 +177,15 @@ fn write_file(args: &Value, workdir: &str) -> String {
 
     let full_path = Path::new(workdir).join(path);
 
-    if let Ok(workdir_canonical) = Path::new(workdir).canonicalize() {
-        if let Some(parent) = full_path.parent() {
+    // Create parent directories if needed (for new files in new dirs)
+    if let Some(parent) = full_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return format!("error creating directory for '{}': {}", path, e);
+            }
+        }
+        // Path traversal check
+        if let Ok(workdir_canonical) = Path::new(workdir).canonicalize() {
             if let Ok(parent_canonical) = parent.canonicalize() {
                 if !parent_canonical.starts_with(&workdir_canonical) {
                     return "error: path traversal detected".into();
@@ -339,7 +351,12 @@ fn edit_line(args: &Value, workdir: &str) -> String {
             let full_path = Path::new(workdir).join(path);
             let content = match std::fs::read_to_string(&full_path) {
                 Ok(c) => c,
-                Err(e) => return format!("error reading '{}': {}", path, e),
+                Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
             };
             let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
             let idx = after.min(lines.len());
@@ -364,7 +381,12 @@ fn edit_line(args: &Value, workdir: &str) -> String {
     let full_path = Path::new(workdir).join(path);
     let content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
-        Err(e) => return format!("error reading '{}': {}", path, e),
+        Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
     };
 
     let lines: Vec<&str> = content.lines().collect();
@@ -451,7 +473,12 @@ fn edit_block(args: &Value, workdir: &str) -> String {
                 let full_path = Path::new(workdir).join(path);
                 let content = match std::fs::read_to_string(&full_path) {
                     Ok(c) => c,
-                    Err(e) => return format!("error reading '{}': {}", path, e),
+                    Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
                 };
                 let lines: Vec<&str> = content.lines().collect();
                 let s = (start as usize).saturating_sub(1).min(lines.len());
@@ -475,7 +502,12 @@ fn edit_block(args: &Value, workdir: &str) -> String {
     let full_path = Path::new(workdir).join(path);
     let content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
-        Err(e) => return format!("error reading '{}': {}", path, e),
+        Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
     };
 
     // Unescape JSON artifacts from native tool calling (models send \" for ")
@@ -746,7 +778,12 @@ fn patch_file(args: &Value, workdir: &str) -> String {
     let full_path = Path::new(workdir).join(path);
     let content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
-        Err(e) => return format!("error reading '{}': {}", path, e),
+        Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
     };
 
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
@@ -878,7 +915,12 @@ fn insert_between(args: &Value, workdir: &str) -> String {
     let full_path = Path::new(workdir).join(path);
     let content = match std::fs::read_to_string(&full_path) {
         Ok(c) => c,
-        Err(e) => return format!("error reading '{}': {}", path, e),
+        Err(e) => {
+                    if !std::path::Path::new(workdir).join(path).exists() {
+                        return format!("File '{}' does not exist. To create a new file, use write_file.", path);
+                    }
+                    return format!("error reading '{}': {}", path, e);
+                },
     };
 
     let lines: Vec<&str> = content.lines().collect();

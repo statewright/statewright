@@ -171,7 +171,7 @@ struct RunConfig {
     #[serde(default)]
     workdir: Option<String>,
     #[serde(default)]
-    workflow: Option<String>,
+    workflow: Option<MachineDefinition>,
     #[serde(default)]
     model_routing: HashMap<String, ModelConfig>,
     #[serde(default)]
@@ -603,8 +603,8 @@ async fn main() {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(json!({}));
 
-        // Use hardcoded machine to get state definition
-        let definition = hardcoded_bug_fix_machine();
+        // Use workflow from config if provided, otherwise fall back to hardcoded machine
+        let definition = run_config.workflow.unwrap_or_else(hardcoded_bug_fix_machine);
         let state_def = match definition.states.get(target_state.as_str()) {
             Some(s) => s,
             None => {
@@ -676,19 +676,48 @@ async fn main() {
                 }
             };
 
-            // Handle transition — exit single-state mode
+            // Handle transition — validate event against state's transition map
             if let Some(event) = &resp.transition {
-                let target = transitions.iter().find(|(e, _)| e == event).map(|(_, t)| t.as_str()).unwrap_or("?");
-                if json_mode {
-                    events::emit_json(&TuiEvent::Transition {
-                        from: target_state.clone(), to: target.to_string(),
-                        trigger: Some(event.clone()), rationale: resp.error.clone(),
-                    });
-                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                let rationale = resp.error.clone().or_else(|| resp.reasoning.clone());
+
+                // Check if this is a valid event for this state
+                if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                    if json_mode {
+                        events::emit_json(&TuiEvent::Transition {
+                            from: target_state.clone(), to: target_name.clone(),
+                            trigger: Some(event.clone()), rationale: rationale.clone(),
+                        });
+                        events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                    } else {
+                        println!("[TRANSITION] {} -> {} (event: {})", target_state, target_name, event);
+                        if let Some(r) = &rationale {
+                            println!("  rationale: {}", r);
+                        }
+                    }
+                    break;
                 } else {
-                    println!("[TRANSITION] {} -> {} (event: {})", target_state, target, event);
+                    // Invalid event — tell the model to pick a valid one
+                    let valid_events: Vec<String> = transitions.iter()
+                        .map(|(e, t)| format!("{} → {}", e, t))
+                        .collect();
+                    let rejection = format!(
+                        "Invalid transition event '{}'. Valid transitions from '{}' are:\n  {}\nAnalyze your results and call transition with the CORRECT event name and a rationale explaining why.",
+                        event, target_state, valid_events.join("\n  ")
+                    );
+                    if json_mode {
+                        events::emit_json(&TuiEvent::GuardBlocked {
+                            tool: format!("transition({})", event),
+                            state: target_state.to_string(),
+                        });
+                    } else {
+                        eprintln!("  [REJECTED] {}", rejection);
+                    }
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: rejection,
+                    });
+                    // Don't break — let the model retry with a valid event
                 }
-                break;
             }
 
             // Handle tool calls

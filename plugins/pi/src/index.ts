@@ -394,91 +394,49 @@ async function refreshState(): Promise<StateCache | null> {
 /// Auto-delegate to sw-agent when the current state has direct_execution: true.
 /// Spawns sw-agent as a LOCAL subprocess (not via gateway — gateway is remote, code is local).
 /// Returns a status string if delegation happened, null otherwise.
-async function maybeDelegateDirectExecution(): Promise<string | null> {
-  swLog(`direct_execution] check: directExecution=${stateCache?.directExecution} isFinal=${stateCache?.isFinal} state=${stateCache?.state}`)
-  if (!stateCache?.directExecution || stateCache.isFinal) return null
+// Tool name translation: workflow uses portable names (Read, Edit, Bash),
+// sw-agent has its own (read_file, edit_line, run_test).
+const AGENT_TOOL_EXPAND: Record<string, string[]> = {
+  read: ["read_file", "list_directory"],
+  edit: ["edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
+  write: ["write_file"],
+  grep: ["grep"],
+  bash: ["run_test", "list_directory", "diff"],
+  find: ["list_directory"],
+}
 
-  const tier = (stateCache.context.current_tier as number) ?? 0
-  const ladder = stateCache.modelLadder
-  const tierEntry = ladder?.[tier] as { model?: string; url?: string } | undefined
-  const agentModel = tierEntry?.model ?? stateCache.model ?? "devstral-small-2:24b"
-  const agentUrl = tierEntry?.url ?? "https://devstral-small-2-24b.ollama.casa.enhasa.cloud/v1"
-
-  swLog(`direct_execution] spawning sw-agent locally: state=${stateCache.state} tier=${tier} model=${agentModel} url=${agentUrl}`)
-
-  const workdir = process.cwd()
-  const task = stateCache.instructions ?? "Fix the bug"
-
-  // Translate workflow tool names (Claude Code / Pi canonical) → sw-agent tool names
-  const AGENT_TOOL_EXPAND: Record<string, string[]> = {
-    read: ["read_file", "list_directory"],
-    edit: ["edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
-    write: ["write_file"],
-    grep: ["grep"],
-    bash: ["run_test", "list_directory", "diff"],
-    find: ["list_directory"],
-  }
-
-  function expandToolNames(tools: string[]): string[] {
-    const expanded = new Set<string>()
-    for (const t of tools) {
-      const normalized = normalizeToolName(t)
-      const agentTools = AGENT_TOOL_EXPAND[normalized]
-      if (agentTools) {
-        for (const at of agentTools) expanded.add(at)
-      } else {
-        expanded.add(t)
-      }
-    }
-    return [...expanded]
-  }
-
-  // Build config with workflow definition for sw-agent --state --config
-  const configPath = join(tmpdir(), `sw-agent-${Date.now()}.json`)
-  const workflowForAgent: Record<string, unknown> = {
-    id: "direct-exec",
-    initial: stateCache.state,
-    states: {} as Record<string, unknown>,
-    guards: {},
-  }
-
-  // Build the state with translated tool names
-  const agentState: Record<string, unknown> = {
-    allowed_tools: expandToolNames(stateCache.allowedTools),
-    instructions: stateCache.instructions,
-    max_iterations: stateCache.maxIterations,
-    max_edit_lines: 15,
-    on: Object.fromEntries(stateCache.transitions.map(t => [t.event, t.target])),
-  }
-  if (stateCache.allowedCommands.length > 0) {
-    agentState.allowed_commands = stateCache.allowedCommands
-  }
-
-  // Add terminal states for transition targets
-  const states = workflowForAgent.states as Record<string, unknown>
-  states[stateCache.state] = agentState
-  for (const t of stateCache.transitions) {
-    if (!states[t.target]) {
-      states[t.target] = { type: "final" }
+function expandToolNames(tools: string[]): string[] {
+  const expanded = new Set<string>()
+  for (const t of tools) {
+    const normalized = normalizeToolName(t)
+    const agentTools = AGENT_TOOL_EXPAND[normalized]
+    if (agentTools) {
+      for (const at of agentTools) expanded.add(at)
+    } else {
+      expanded.add(t)
     }
   }
+  return [...expanded]
+}
 
-  const config = { task, workdir, workflow: workflowForAgent }
-  writeFileSync(configPath, JSON.stringify(config, null, 2))
-  swLog(`direct_execution] config: ${configPath}`)
-
+/// Run a single sw-agent attempt for the current state.
+/// Returns the transition event from JSONL, or null on failure.
+function runAgentAttempt(
+  state: string, model: string, url: string,
+  workdir: string, task: string, configPath: string,
+): Promise<{ event: string; events: number } | null> {
   const args = [
-    "--state", stateCache.state,
+    "--state", state,
     "--config", configPath,
     "--workdir", workdir,
     "--task", task,
-    "--model", agentModel,
-    "--ollama-url", agentUrl,
+    "--model", model,
+    "--ollama-url", url,
     "--json-events",
   ]
-  swLog(`direct_execution] args: ${args.join(" ")}`)
+  swLog(`direct_execution] attempt: state=${state} model=${model}`)
 
-  return new Promise<string | null>((resolve) => {
+  return new Promise((resolve) => {
     const agent = spawn("sw-agent", args, {
       cwd: workdir,
       stdio: ["ignore", "pipe", "pipe"],
@@ -486,95 +444,141 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
     })
 
     let stdout = ""
-    let stderr = ""
-    const events: string[] = []
+    const eventList: string[] = []
 
     agent.stdout.on("data", (data: Buffer) => {
       const chunk = data.toString()
       stdout += chunk
-      // Parse JSONL events as they arrive
       for (const line of chunk.split("\n")) {
         if (!line.trim()) continue
         try {
           const evt = JSON.parse(line)
-          events.push(evt.event ?? "unknown")
+          eventList.push(evt.event ?? "unknown")
           swLog(`direct_execution] event: ${evt.event}${evt.success !== undefined ? ` success=${evt.success}` : ""}`)
         } catch { /* not JSON */ }
       }
     })
 
-    agent.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString()
-    })
+    agent.stderr.on("data", () => {})
 
-    agent.on("close", async (code) => {
-      swLog(`direct_execution] sw-agent exited code=${code} events=${events.length}`)
+    agent.on("close", (code) => {
+      swLog(`direct_execution] sw-agent exited code=${code} events=${eventList.length}`)
 
-      // Parse JSONL to find the transition event the model emitted
+      // Parse JSONL: find the last transition trigger and completion status
       const lines = stdout.trim().split("\n").filter(l => l.trim())
       let transitionEvent: string | null = null
       let success = false
       for (const line of lines) {
         try {
           const evt = JSON.parse(line)
-          if (evt.event === "transition" && evt.trigger) {
-            transitionEvent = evt.trigger
-          }
-          if (evt.event === "completed") {
-            success = evt.success ?? false
-          }
+          if (evt.event === "transition" && evt.trigger) transitionEvent = evt.trigger
+          if (evt.event === "completed") success = evt.success ?? false
         } catch { /* skip */ }
       }
 
-      // Use the model's transition event if available, otherwise DONE/FAIL
-      const event = transitionEvent ?? (success || code === 0 ? "DONE" : "FAIL")
-      swLog(`direct_execution] transitioning: ${event} (from sw-agent ${agentModel})`)
-      await gwCall("statewright_transition", { event, data: { rationale: `sw-agent (${agentModel}) exit=${code}` } })
-
-      await refreshState()
-
-      // Clean up config file
-      try { unlinkSync(configPath) } catch {}
-
-      // If next state is also direct_execution, continue the loop
-      if (stateCache?.directExecution && !stateCache.isFinal) {
-        swLog(`direct_execution] next state ${stateCache.state} is also direct_execution — continuing loop`)
-        const nextResult = await maybeDelegateDirectExecution()
-        resolve(nextResult ?? `\n[sw-agent] ${agentModel} → ${event} (${events.length} events)`)
-      } else if (stateCache && !stateCache.isFinal && stateCache.state === "escalating") {
-        // Programmatic escalation — no LLM needed
-        const tier = ((stateCache.context.current_tier as number) ?? 0) + 1
-        const ladder = stateCache.modelLadder ?? []
-        if (tier < ladder.length) {
-          swLog(`direct_execution] escalating: tier ${tier - 1} → ${tier}`)
-          await gwCall("statewright_transition", {
-            event: "RETRY",
-            data: { rationale: `Escalating from tier ${tier - 1} to ${tier}`, current_tier: tier },
-          })
-          await refreshState()
-          const retryResult = await maybeDelegateDirectExecution()
-          resolve(retryResult ?? `\n[sw-agent] escalated to tier ${tier}`)
-        } else {
-          swLog(`direct_execution] all tiers exhausted`)
-          await gwCall("statewright_transition", {
-            event: "EXHAUSTED",
-            data: { rationale: `All ${ladder.length} tiers exhausted` },
-          })
-          await refreshState()
-          resolve(`\n[sw-agent] all tiers exhausted — failed`)
-        }
+      const event = transitionEvent ?? (success ? "DONE" : null)
+      if (event) {
+        resolve({ event, events: eventList.length })
       } else {
-        resolve(`\n[sw-agent] ${agentModel} → ${event} (${events.length} events)`)
+        resolve(null)
       }
     })
 
-    agent.on("error", async (err) => {
-      swLog(`direct_execution] sw-agent spawn error: ${err.message}`)
-      await gwCall("statewright_transition", { event: "FAIL", data: { rationale: `sw-agent spawn failed: ${err.message}` } })
-      await refreshState()
+    agent.on("error", (err) => {
+      swLog(`direct_execution] spawn error: ${err.message}`)
       resolve(null)
     })
   })
+}
+
+/// Programmatic orchestration loop for direct_execution states.
+/// Walks the model ladder per state. Continues across states until
+/// a non-direct_execution state or final state is reached.
+async function maybeDelegateDirectExecution(): Promise<string | null> {
+  const log: string[] = []
+
+  while (stateCache?.directExecution && !stateCache.isFinal) {
+    const state = stateCache.state
+    const ladder = (stateCache.modelLadder ?? []) as Array<{ model: string; url: string }>
+    const maxRetries = (stateCache.maxIterations ?? ladder.length) > 0 ? ladder.length : 1
+    const workdir = process.cwd()
+    const task = stateCache.instructions ?? "Fix the bug"
+
+    swLog(`direct_execution] state=${state} ladder=${ladder.length} maxRetries=${maxRetries}`)
+
+    // Build config file with workflow definition for sw-agent
+    const configPath = join(tmpdir(), `sw-agent-${Date.now()}.json`)
+    const agentState: Record<string, unknown> = {
+      allowed_tools: expandToolNames(stateCache.allowedTools),
+      instructions: stateCache.instructions,
+      max_iterations: stateCache.maxIterations,
+      max_edit_lines: 15,
+      on: Object.fromEntries(stateCache.transitions.map(t => [t.event, t.target])),
+    }
+    if (stateCache.allowedCommands.length > 0) {
+      agentState.allowed_commands = stateCache.allowedCommands
+    }
+    const wfStates: Record<string, unknown> = { [state]: agentState }
+    for (const t of stateCache.transitions) {
+      if (!wfStates[t.target]) wfStates[t.target] = { type: "final" }
+    }
+    const config = {
+      task, workdir,
+      workflow: { id: "direct-exec", initial: state, states: wfStates, guards: {} },
+    }
+    writeFileSync(configPath, JSON.stringify(config, null, 2))
+
+    // Walk the ladder: each attempt uses the next model, clamped to last
+    let succeeded = false
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const tier = Math.min(attempt, ladder.length - 1)
+      const model = ladder[tier]?.model ?? stateCache.model ?? "devstral-small-2:24b"
+      const url = ladder[tier]?.url ?? "https://devstral-small-2-24b.ollama.casa.enhasa.cloud/v1"
+
+      swLog(`direct_execution] ${state} attempt ${attempt + 1}/${maxRetries} → ${model} (tier ${tier})`)
+
+      const result = await runAgentAttempt(state, model, url, workdir, task, configPath)
+
+      if (result) {
+        // Forward transition — valid event from the model
+        // Check it's not FAIL (FAIL = model gave up, try next tier)
+        if (result.event !== "FAIL") {
+          swLog(`direct_execution] ${state} → ${result.event} via ${model} (${result.events} events)`)
+          await gwCall("statewright_transition", {
+            event: result.event,
+            data: { rationale: `sw-agent (${model}) completed: ${result.event}` },
+          })
+          await refreshState()
+          log.push(`${state}: ${model} → ${result.event}`)
+          succeeded = true
+          break
+        }
+        swLog(`direct_execution] ${state} attempt ${attempt + 1} FAIL via ${model}, escalating`)
+        log.push(`${state}: ${model} → FAIL (escalating)`)
+      } else {
+        swLog(`direct_execution] ${state} attempt ${attempt + 1} no valid transition via ${model}, escalating`)
+        log.push(`${state}: ${model} → no transition (escalating)`)
+      }
+    }
+
+    // Clean up config
+    try { unlinkSync(configPath) } catch {}
+
+    if (!succeeded) {
+      // All tiers exhausted for this state
+      swLog(`direct_execution] ${state}: all ${maxRetries} attempts exhausted → FAIL`)
+      await gwCall("statewright_transition", {
+        event: "FAIL",
+        data: { rationale: `All ${maxRetries} model tiers exhausted for state '${state}'` },
+      })
+      await refreshState()
+      log.push(`${state}: EXHAUSTED → FAIL`)
+      break
+    }
+  }
+
+  if (log.length === 0) return null
+  return `\n[sw-agent] ${log.join(" | ")}`
 }
 
 // --- Transition descriptions ---

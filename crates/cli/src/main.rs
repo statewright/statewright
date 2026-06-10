@@ -631,14 +631,69 @@ async fn main() {
 
         let mut step = 0u32;
         let max_iter = state_def.max_iterations.unwrap_or(10);
+        let mut classified = false;
 
         loop {
             step += 1;
             if step > max_iter {
+                // Tier 1 classifier: re-prompt the model to pick a valid transition
+                if !classified {
+                    classified = true;
+                    let valid_list = transitions.iter()
+                        .map(|(e, t)| format!("  {} → {}", e, t))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let history_summary = conversation.iter()
+                        .filter(|m| m.role == "user")
+                        .rev()
+                        .take(5)
+                        .map(|m| m.content.chars().take(300).collect::<String>())
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+
+                    let classify_prompt = format!(
+                        "You have been working in the '{}' state. Budget exhausted.\n\
+                         Recent results:\n{}\n\n\
+                         Valid transitions:\n{}\n\n\
+                         Based on the results above, which transition event is correct?\n\
+                         Reply with ONLY the event name, nothing else.",
+                        target_state, history_summary, valid_list
+                    );
+
+                    eprintln!("[CLASSIFY] Asking model to pick a valid transition for '{}'", target_state);
+                    let classify_response = client.chat(vec![
+                        ChatMessage { role: "system".into(), content: "Reply with ONLY the transition event name. No explanation.".into() },
+                        ChatMessage { role: "user".into(), content: classify_prompt },
+                    ]).await;
+
+                    if let Ok(raw) = classify_response {
+                        // Extract event name: model may respond "TESTS_FAIL" or "TESTS_FAIL → retry" or "TESTS_FAIL."
+                        let cleaned = raw.trim().trim_matches('"').trim();
+                        let event = cleaned.split_whitespace().next()
+                            .unwrap_or(cleaned)
+                            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                            eprintln!("[CLASSIFY] Model chose: {} → {}", event, target_name);
+                            if json_mode {
+                                events::emit_json(&TuiEvent::Transition {
+                                    from: target_state.clone(), to: target_name.clone(),
+                                    trigger: Some(event.to_string()),
+                                    rationale: Some("Classified by model after max_iterations".to_string()),
+                                });
+                                events::emit_json(&TuiEvent::Completed { steps: step - 1, success: true });
+                            }
+                            break;
+                        } else {
+                            eprintln!("[CLASSIFY] Model response '{}' not a valid event", event);
+                        }
+                    }
+                }
+
+                // Classification failed — exit with failure
                 if json_mode {
                     events::emit_json(&TuiEvent::Completed { steps: step - 1, success: false });
                 }
-                eprintln!("Max iterations ({}) exceeded in state '{}'", max_iter, target_state);
+                eprintln!("Max iterations ({}) exceeded in state '{}', classification failed", max_iter, target_state);
                 break;
             }
 

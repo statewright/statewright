@@ -643,21 +643,20 @@ async fn main() {
                         .map(|(e, t)| format!("  {} → {}", e, t))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let history_summary = conversation.iter()
+                    // Use only the LAST tool result — not stale history from prior cycles
+                    let last_result = conversation.iter()
                         .filter(|m| m.role == "user")
-                        .rev()
-                        .take(5)
-                        .map(|m| m.content.chars().take(300).collect::<String>())
-                        .collect::<Vec<_>>()
-                        .join("\n---\n");
+                        .last()
+                        .map(|m| m.content.chars().take(500).collect::<String>())
+                        .unwrap_or_else(|| "No tool results.".to_string());
 
                     let classify_prompt = format!(
-                        "You have been working in the '{}' state. Budget exhausted.\n\
-                         Recent results:\n{}\n\n\
+                        "State: '{}'. Instructions: {}\n\
+                         Last tool result:\n{}\n\n\
                          Valid transitions:\n{}\n\n\
-                         Based on the results above, which transition event is correct?\n\
+                         Based on the result above, which transition event is correct?\n\
                          Reply with ONLY the event name, nothing else.",
-                        target_state, history_summary, valid_list
+                        target_state, instructions, last_result, valid_list
                     );
 
                     eprintln!("[CLASSIFY] Asking model to pick a valid transition for '{}'", target_state);

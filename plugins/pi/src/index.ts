@@ -494,17 +494,29 @@ function runAgentAttempt(
 /// Programmatic orchestration loop for direct_execution states.
 /// Walks the model ladder per state. Continues across states until
 /// a non-direct_execution state or final state is reached.
+/// Backward transitions (TESTS_FAIL → implementing) count as soft failures
+/// and escalate the model tier for the entire cycle.
 async function maybeDelegateDirectExecution(): Promise<string | null> {
   const log: string[] = []
+  const visitedStates = new Set<string>()
+  let cycleTier = 0  // escalation tier for the whole pipeline cycle
 
   while (stateCache?.directExecution && !stateCache.isFinal) {
     const state = stateCache.state
     const ladder = (stateCache.modelLadder ?? []) as Array<{ model: string; url: string }>
-    const maxRetries = (stateCache.maxIterations ?? ladder.length) > 0 ? ladder.length : 1
+    const maxRetries = ladder.length || 1
     const workdir = process.cwd()
     const task = stateCache.instructions ?? "Fix the bug"
 
-    swLog(`direct_execution] state=${state} ladder=${ladder.length} maxRetries=${maxRetries}`)
+    // Track visited states to detect backward transitions
+    visitedStates.add(state)
+
+    // Use the cycle tier (clamped to this state's ladder)
+    const tier = Math.min(cycleTier, ladder.length - 1)
+    const model = ladder[tier]?.model ?? stateCache.model ?? "devstral-small-2:24b"
+    const url = ladder[tier]?.url ?? "https://devstral-small-2-24b.ollama.casa.enhasa.cloud/v1"
+
+    swLog(`direct_execution] state=${state} cycleTier=${cycleTier} model=${model}`)
 
     // Build config file with workflow definition for sw-agent
     const configPath = join(tmpdir(), `sw-agent-${Date.now()}.json`)
@@ -528,52 +540,55 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
     }
     writeFileSync(configPath, JSON.stringify(config, null, 2))
 
-    // Walk the ladder: each attempt uses the next model, clamped to last
-    let succeeded = false
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      const tier = Math.min(attempt, ladder.length - 1)
-      const model = ladder[tier]?.model ?? stateCache.model ?? "devstral-small-2:24b"
-      const url = ladder[tier]?.url ?? "https://devstral-small-2-24b.ollama.casa.enhasa.cloud/v1"
+    const result = await runAgentAttempt(state, model, url, workdir, task, configPath)
 
-      swLog(`direct_execution] ${state} attempt ${attempt + 1}/${maxRetries} → ${model} (tier ${tier})`)
-
-      const result = await runAgentAttempt(state, model, url, workdir, task, configPath)
-
-      if (result) {
-        // Forward transition — valid event from the model
-        // Check it's not FAIL (FAIL = model gave up, try next tier)
-        if (result.event !== "FAIL") {
-          swLog(`direct_execution] ${state} → ${result.event} via ${model} (${result.events} events)`)
-          await gwCall("statewright_transition", {
-            event: result.event,
-            data: { rationale: `sw-agent (${model}) completed: ${result.event}` },
-          })
-          await refreshState()
-          log.push(`${state}: ${model} → ${result.event}`)
-          succeeded = true
-          break
-        }
-        swLog(`direct_execution] ${state} attempt ${attempt + 1} FAIL via ${model}, escalating`)
-        log.push(`${state}: ${model} → FAIL (escalating)`)
-      } else {
-        swLog(`direct_execution] ${state} attempt ${attempt + 1} no valid transition via ${model}, escalating`)
-        log.push(`${state}: ${model} → no transition (escalating)`)
-      }
-    }
-
-    // Clean up config
     try { unlinkSync(configPath) } catch {}
 
-    if (!succeeded) {
-      // All tiers exhausted for this state
-      swLog(`direct_execution] ${state}: all ${maxRetries} attempts exhausted → FAIL`)
+    if (result && result.event !== "FAIL") {
+      // Valid transition — apply it
+      swLog(`direct_execution] ${state} → ${result.event} via ${model} (${result.events} events)`)
       await gwCall("statewright_transition", {
-        event: "FAIL",
-        data: { rationale: `All ${maxRetries} model tiers exhausted for state '${state}'` },
+        event: result.event,
+        data: { rationale: `sw-agent (${model}) completed: ${result.event}` },
       })
       await refreshState()
-      log.push(`${state}: EXHAUSTED → FAIL`)
-      break
+      log.push(`${state}: ${model} → ${result.event}`)
+
+      // Check if this is a backward transition (target we already visited)
+      if (stateCache && visitedStates.has(stateCache.state) && !stateCache.isFinal) {
+        // Soft failure: cycle looped back. Escalate the tier.
+        cycleTier++
+        const maxTier = Math.max(...(stateCache.modelLadder ?? ladder).map(() => 1), ladder.length)
+        if (cycleTier >= maxTier) {
+          swLog(`direct_execution] cycle exhausted all ${maxTier} tiers after backward transition`)
+          await gwCall("statewright_transition", {
+            event: "FAIL",
+            data: { rationale: `Cycle exhausted: ${cycleTier} backward transitions, all model tiers used` },
+          })
+          await refreshState()
+          log.push(`cycle: EXHAUSTED after ${cycleTier} retries`)
+          break
+        }
+        swLog(`direct_execution] backward transition to ${stateCache.state} — escalating cycleTier to ${cycleTier}`)
+        log.push(`cycle: backward → tier ${cycleTier}`)
+        visitedStates.clear()
+        visitedStates.add(stateCache.state)
+      }
+    } else {
+      // FAIL or no valid transition — escalate within this state
+      cycleTier++
+      if (cycleTier >= maxRetries) {
+        swLog(`direct_execution] ${state}: all ${maxRetries} tiers exhausted → FAIL`)
+        await gwCall("statewright_transition", {
+          event: "FAIL",
+          data: { rationale: `All ${maxRetries} model tiers exhausted for state '${state}'` },
+        })
+        await refreshState()
+        log.push(`${state}: EXHAUSTED → FAIL`)
+        break
+      }
+      swLog(`direct_execution] ${state} failed via ${model}, escalating to tier ${cycleTier}`)
+      log.push(`${state}: ${model} → FAIL (tier ${cycleTier})`)
     }
   }
 

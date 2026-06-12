@@ -47,6 +47,10 @@ struct ChatRequest {
 #[derive(Serialize, Clone)]
 struct OllamaOptions {
     num_ctx: u32,
+    /// Max output tokens. Ollama maps this to num_predict internally.
+    /// Override max_tokens for models that need long output (greenfield file writes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
 }
 
 /// OpenAI-compatible tool definition for native function calling.
@@ -174,7 +178,7 @@ impl OllamaClient {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             tools: None,
-            options: Some(OllamaOptions { num_ctx: 16384 }),
+            options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
         };
 
         let response = self
@@ -233,7 +237,7 @@ impl OllamaClient {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             tools: Some(tools),
-            options: Some(OllamaOptions { num_ctx: 16384 }),
+            options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
         };
 
         let response = self

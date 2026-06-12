@@ -124,6 +124,10 @@ struct Args {
     #[arg(long)]
     tdd: bool,
 
+    /// Use TDD greenfield state machine (understanding→tests→red→implement→green→done)
+    #[arg(long)]
+    tdd_greenfield: bool,
+
     /// Run TDD with debug machine chaining (--tdd-chain)
     #[arg(long)]
     tdd_chain: bool,
@@ -367,6 +371,64 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
     .unwrap()
 }
 
+fn tdd_greenfield_machine() -> MachineDefinition {
+    serde_json::from_value(json!({
+        "id": "tdd-greenfield",
+        "initial": "understanding",
+        "meta": { "task_type": "feature", "danger_level": "moderate", "estimated_steps": 50 },
+        "states": {
+            "understanding": {
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "inspect_class"],
+                "instructions": "Read the task instruction carefully. Explore the existing codebase to understand its structure, patterns, and conventions. Identify where new code should go and what interfaces to follow. Do NOT write any code yet.",
+                "max_iterations": 5,
+                "safe_next": "test_writing",
+                "on": { "UNDERSTOOD": "test_writing", "DONE": "test_writing", "FAIL": "failed" }
+            },
+            "test_writing": {
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "create_file", "write_file", "edit_line", "edit_block"],
+                "instructions": "Write tests FIRST that encode the expected behavior from the task description. Write them in the project's test directory following existing test patterns. These tests should FAIL because no implementation exists yet. Each test should verify one specific requirement from the task. Use create_file to create new files — you'll be prompted to output the content directly.",
+                "max_iterations": 8,
+                "safe_next": "red_check",
+                "on": { "TESTS_WRITTEN": "red_check", "DONE": "red_check", "FAIL": "failed" }
+            },
+            "red_check": {
+                "allowed_tools": ["run_test"],
+                "instructions": "Run the tests you wrote. They should FAIL because no implementation exists. If they pass, your tests are wrong — go back and write real tests. If they fail with import/syntax errors in test code, fix the tests. If they fail as expected (assertion errors), proceed to implementing.",
+                "max_iterations": 3,
+                "on": {
+                    "TESTS_RED": "implementing",
+                    "TESTS_PASS": "test_writing",
+                    "DONE": "implementing",
+                    "FAIL": "failed"
+                }
+            },
+            "implementing": {
+                "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "inspect_class", "create_file", "write_file", "edit_line", "edit_block", "patch_file", "apply_patch", "insert_between"],
+                "instructions": "Write the implementation to make your tests pass. Follow the codebase's existing patterns and conventions. ALWAYS use create_file (not write_file) for new files — it lets you output the code directly without JSON limitations. For editing existing files, use edit_line or edit_block. Run tests frequently with run_test to check progress.",
+                "max_iterations": 20,
+                "safe_next": "green_check",
+                "on": { "DONE": "green_check", "TESTS_PASS": "green_check", "FAIL": "failed" }
+            },
+            "green_check": {
+                "allowed_tools": ["run_test", "read_file", "diff"],
+                "instructions": "Run ALL tests (your new tests AND existing tests). If all pass, transition APPROVED. If your tests fail, go back to implementing. If existing tests broke, fix the regression.",
+                "max_iterations": 3,
+                "on": {
+                    "APPROVED": "completed",
+                    "DONE": "completed",
+                    "TESTS_FAIL": "implementing",
+                    "TESTS_PASS": "completed",
+                    "FAIL": "failed"
+                }
+            },
+            "completed": { "type": "final" },
+            "failed": { "type": "final" }
+        },
+        "guards": {}
+    }))
+    .unwrap()
+}
+
 fn control_flat_machine() -> MachineDefinition {
     serde_json::from_value(json!({
         "id": "control-flat",
@@ -502,7 +564,8 @@ To call a tool:
 
 Available tools: {tools_list}
 - read_file: args: {{"path": "filename"}} or {{"path": "filename", "start_line": 120, "end_line": 150}} for large files
-- write_file: args: {{"path": "filename", "content": "full file content"}}
+- write_file: args: {{"path": "filename", "content": "full file content"}} (for small files only)
+- create_file: args: {{"path": "filename"}} — creates a new file. You will be prompted to output the raw content directly. Use this for large files.
 - list_directory: args: {{"path": "."}}
 - run_test: args: {{}} or {{"path": "tests/"}} to scope to a directory
 - find_files: args: {{"pattern": "*.py"}} to search for files by name pattern recursively
@@ -538,7 +601,13 @@ async fn main() {
 
     // Resolve model profile from registry
     let registry = model_registry::ModelRegistry::builtin();
-    let profile = registry.resolve(&args.model);
+    let mut profile = registry.resolve(&args.model);
+
+    // Greenfield mode: disable the diff size limiter.
+    // Bugfix = surgical edits (5 lines), greenfield = whole file writes.
+    if args.tdd_greenfield {
+        profile.max_diff_lines = 500;
+    }
 
     // Load run config from file if provided (MCP gateway writes this)
     let run_config: RunConfig = if let Some(config_path) = &args.config {
@@ -788,6 +857,9 @@ async fn main() {
     let definition = if args.control {
         println!("[Phase 1] CONTROL MODE — flat machine, no guardrails");
         control_flat_machine()
+    } else if args.tdd_greenfield {
+        println!("[Phase 1] TDD GREENFIELD — understanding→tests→red→implement→green→done");
+        tdd_greenfield_machine()
     } else if args.use_hardcoded_machine {
         println!("[Phase 1] Using hardcoded bug-fix state machine");
         hardcoded_bug_fix_machine()
@@ -848,17 +920,21 @@ async fn main() {
     let escalation_model = std::env::var("SW_ESCALATION_MODEL")
         .unwrap_or_else(|_| "gpt-oss:20b".into());
 
+    // Greenfield needs higher output token limit for file writes.
+    // A 200-line file with JSON escaping needs ~6500 tokens.
+    let output_tokens = if args.tdd_greenfield { 16384 } else { 4096 };
+
     let base_client = OllamaClient::new(OllamaConfig {
         api_url: args.ollama_url.clone(),
         model: args.model.clone(),
         temperature: 0.3,
-        max_tokens: 4096,
+        max_tokens: output_tokens,
     });
     let escalation_client = OllamaClient::new(OllamaConfig {
         api_url: escalation_url.clone(),
         model: escalation_model.clone(),
         temperature: 0.3,
-        max_tokens: 4096,
+        max_tokens: output_tokens,
     });
 
     let mut current_state = definition.initial.clone();
@@ -1697,6 +1773,31 @@ async fn main() {
 
             println!("  [LLM] {}", truncate(&raw_response, 300));
 
+            // Raw file block extraction — models can write files without JSON wrapping.
+            // Check BEFORE JSON parse so we don't lose content to parse failures.
+            let file_blocks = tools::extract_file_blocks(&raw_response, &args.workdir);
+            if !file_blocks.is_empty() {
+                for (path, bytes) in &file_blocks {
+                    println!("  [FILE BLOCK] wrote {} bytes to {}", bytes, path);
+                    modified_files.insert(path.clone());
+                }
+                // Still try to parse remaining JSON for transitions
+                let has_transition = raw_response.contains("\"transition\"")
+                    || raw_response.contains("\"event\"");
+                if has_transition {
+                    if let Some(resp) = parse_response(&raw_response) {
+                        transition_event = resp.transition;
+                    }
+                }
+                conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                let paths: Vec<&str> = file_blocks.iter().map(|(p, _)| p.as_str()).collect();
+                conversation.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!("Files written: {}. Run tests with run_test to check, or continue writing more files.", paths.join(", ")),
+                });
+                // Don't fall through to JSON parse — file blocks were the action
+            } else {
+
             match parse_response(&raw_response) {
                 Some(resp) => {
                     if let Some(calls) = resp.tool_calls {
@@ -1708,14 +1809,87 @@ async fn main() {
                 }
                 None => {
                     println!("  [PARSE FAIL] {}", truncate(&raw_response, 200));
-                    conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                    conversation.push(ChatMessage {
-                        role: "user".into(),
-                        content: "That was not valid JSON. Respond with ONLY a JSON object.".into(),
-                    });
+
+                    // Auto-fallback: if this was a write_file that truncated,
+                    // extract the path and redo as two-phase create_file.
+                    let is_write_file_attempt = raw_response.contains("write_file")
+                        && raw_response.contains("\"content\"");
+                    if is_write_file_attempt && args.tdd_greenfield {
+                        // Extract path from the malformed JSON
+                        if let Some(path) = extract_path_from_malformed(&raw_response) {
+                            println!("  [FALLBACK] write_file parse-failed → retrying as create_file for {}", path);
+                            let full_path = std::path::Path::new(&args.workdir).join(&path);
+                            if let Some(parent) = full_path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            // Phase 2: get raw content
+                            let recent: Vec<ChatMessage> = conversation.iter()
+                                .rev().take(4).rev().cloned().collect();
+                            let mut content_messages = vec![
+                                ChatMessage { role: "system".into(), content: format!(
+                                    "You are writing the file {}. Output the COMPLETE file content — every function, every class, every import. \
+                                     Do NOT abbreviate. Output ONLY raw code. No markdown, no fences, no JSON. Start with line 1.",
+                                    path
+                                )},
+                            ];
+                            content_messages.extend(recent);
+                            content_messages.push(ChatMessage { role: "user".into(), content: format!(
+                                "Output the COMPLETE content for `{}` now. This is your ONE chance — output ALL the code.\n\nTASK: {}",
+                                path, task
+                            )});
+                            match client.chat(content_messages).await {
+                                Ok(raw_content) => {
+                                    let content = tools::strip_code_fences(&raw_content);
+                                    if std::fs::write(&full_path, &content).is_ok() {
+                                        let bytes = content.len();
+                                        println!("  [FALLBACK] Wrote {} bytes to {}", bytes, path);
+                                        modified_files.insert(path.clone());
+                                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                                        conversation.push(ChatMessage {
+                                            role: "user".into(),
+                                            content: format!("Created {} ({} bytes). Run tests or continue.", path, bytes),
+                                        });
+                                    } else {
+                                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                                        conversation.push(ChatMessage {
+                                            role: "user".into(),
+                                            content: format!("Failed to write {}. Try create_file instead of write_file.", path),
+                                        });
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("  [FALLBACK] LLM error: {}", e);
+                                    conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                                    conversation.push(ChatMessage {
+                                        role: "user".into(),
+                                        content: "Your write_file was too large. Use create_file instead.".into(),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Standard recovery for non-greenfield or non-write_file failures
+                    let recovered = recover_truncated_write(&raw_response, &args.workdir);
+                    if let Some(ref path) = recovered {
+                        println!("  [PARSE RECOVER] Extracted partial write_file to {}", path);
+                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                        conversation.push(ChatMessage {
+                            role: "user".into(),
+                            content: format!("Your response was truncated but I saved what I could to {}. The file is incomplete. Use edit_block to append the remaining functions one at a time. Do NOT rewrite the whole file.", path),
+                        });
+                    } else {
+                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                        conversation.push(ChatMessage {
+                            role: "user".into(),
+                            content: "That was not valid JSON. Use create_file for new files (it lets you output code directly without JSON).".into(),
+                        });
+                    }
                     continue;
                 }
             }
+            } // close else (no file blocks)
         }
 
         // Process tool calls (unified for both modes)
@@ -1863,9 +2037,62 @@ async fn main() {
                 tools::execute_tool(tool_name, tool_args, &args.workdir)
             };
 
+            // Two-phase file write: intercept CREATE_FILE_READY sentinel.
+            // Make a second LLM call for raw file content (no JSON escaping).
+            if result.starts_with("CREATE_FILE_READY:") {
+                let file_path = result.trim_start_matches("CREATE_FILE_READY:").to_string();
+                println!("  [CREATE FILE] Phase 2: requesting raw content for {}", file_path);
+
+                // Build content prompt with task context for the model to work with
+                let content_prompt = format!(
+                    "Output the COMPLETE content for `{path}` now.\n\
+                     This is your ONE chance to write this file — output ALL the code.\n\
+                     Output ONLY the file content — no explanations, no code fences, no JSON.\n\
+                     Start immediately with line 1 of the file.\n\n\
+                     TASK: {task}",
+                    path = file_path,
+                    task = task,
+                );
+                // Include recent conversation for context (last 4 messages)
+                let recent: Vec<ChatMessage> = conversation.iter()
+                    .rev().take(4).rev().cloned().collect();
+                let mut content_messages = vec![
+                    ChatMessage { role: "system".into(), content: format!(
+                        "You are writing the file {}. Output the COMPLETE file content — every function, every class, every import. \
+                         Do NOT abbreviate, do NOT use comments like '# ... rest of implementation'. \
+                         Output ONLY raw code. No markdown, no fences, no JSON. Start with line 1.",
+                        file_path
+                    )},
+                ];
+                content_messages.extend(recent);
+                content_messages.push(ChatMessage { role: "user".into(), content: content_prompt });
+
+                match client.chat(content_messages).await {
+                    Ok(raw_content) => {
+                        let content = tools::strip_code_fences(&raw_content);
+                        let full_path = std::path::Path::new(&args.workdir).join(&file_path);
+                        match std::fs::write(&full_path, &content) {
+                            Ok(()) => {
+                                let bytes = content.len();
+                                println!("  [CREATE FILE] Wrote {} bytes to {}", bytes, file_path);
+                                modified_files.insert(file_path.clone());
+                                tool_output.push_str(&format!("Created {} ({} bytes)\n", file_path, bytes));
+                            }
+                            Err(e) => {
+                                tool_output.push_str(&format!("error writing {}: {}\n", file_path, e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tool_output.push_str(&format!("error getting file content: {}\n", e));
+                    }
+                }
+                continue; // Skip auto-test — the file is new, tests will fail until more code is written
+            }
+
             // Track file modifications to invalidate read cache
             let is_edit = tool_name.contains("edit") || tool_name.contains("patch")
-                || tool_name == "write_file" || tool_name == "apply_patch";
+                || tool_name == "write_file" || tool_name == "apply_patch" || tool_name == "create_file";
             let edit_succeeded = is_edit && !result.contains("error") && !result.contains("not found");
             if edit_succeeded {
                 // Mark the file as modified so future reads aren't cached
@@ -1905,8 +2132,19 @@ async fn main() {
                     json!({})
                 };
                 let test_result = tools::execute_tool("run_test", &test_scope, &args.workdir);
-                let all_pass = test_result.contains("passed") && !test_result.contains("FAILED")
-                    && !test_result.contains("failed") && !test_result.contains("error");
+                // Multi-language pass detection:
+                // Python: "X passed" / "FAILED" / "failed"
+                // Go: "PASS" / "FAIL" at line start
+                // JS/TS: "Tests  X passed" or "✓" / "FAIL" or "✗"
+                // Rust: "test result: ok" / "test result: FAILED"
+                let all_pass = {
+                    let r = &test_result;
+                    let no_fail = !r.contains("FAILED") && !r.contains("FAIL ")
+                        && !r.contains("failed") && !r.contains("error:");
+                    let has_pass = r.contains("passed") || r.contains("PASS")
+                        || r.contains("test result: ok") || r.contains("Tests  ");
+                    no_fail && has_pass
+                };
                 let changed = tools::all_diff_stats(&args.workdir);
                 if all_pass {
                     let diff_summary: Vec<String> = changed.iter()
@@ -2325,6 +2563,78 @@ fn parse_response(raw: &str) -> Option<LlmResponse> {
         }
     }
 
+    None
+}
+
+/// Try to extract a write_file call from a truncated/malformed JSON response.
+/// Returns the path written if recovery succeeded.
+fn recover_truncated_write(raw: &str, workdir: &str) -> Option<String> {
+    // Look for write_file pattern: "name": "write_file" ... "path": "..." ... "content": "..."
+    if !raw.contains("write_file") { return None; }
+
+    // Extract path
+    let path_marker = r#""path":"#;
+    let path_start = raw.find(path_marker)?;
+    let after_path = &raw[path_start + path_marker.len()..];
+    let after_path = after_path.trim_start();
+    if !after_path.starts_with('"') { return None; }
+    let path_end = after_path[1..].find('"')?;
+    let path = &after_path[1..1+path_end];
+
+    // Extract content (may be truncated)
+    let content_marker = r#""content":"#;
+    let content_start = raw.find(content_marker)?;
+    let after_content = &raw[content_start + content_marker.len()..];
+    let after_content = after_content.trim_start();
+    if !after_content.starts_with('"') { return None; }
+
+    // Find the content string — it may be truncated (no closing quote)
+    let content_body = &after_content[1..];
+    let content = if let Some(end) = find_unescaped_quote(content_body) {
+        &content_body[..end]
+    } else {
+        // Truncated — take everything up to the last complete line
+        let last_newline = content_body.rfind("\\n").unwrap_or(content_body.len());
+        &content_body[..last_newline]
+    };
+
+    // Unescape the JSON string
+    let unescaped = content.replace("\\n", "\n").replace("\\t", "\t")
+        .replace("\\\"", "\"").replace("\\\\", "\\");
+
+    if unescaped.len() < 20 { return None; } // Too small to be useful
+
+    let full_path = std::path::Path::new(workdir).join(path);
+    if let Some(parent) = full_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&full_path, &unescaped).ok()?;
+    println!("  [PARSE RECOVER] Wrote {} bytes (possibly truncated) to {}", unescaped.len(), path);
+    Some(path.to_string())
+}
+
+/// Extract file path from a malformed write_file JSON response.
+fn extract_path_from_malformed(raw: &str) -> Option<String> {
+    // Look for "path": "..." pattern
+    let marker = r#""path":"#;
+    let start = raw.find(marker)?;
+    let after = &raw[start + marker.len()..].trim_start();
+    if !after.starts_with('"') { return None; }
+    let end = after[1..].find('"')?;
+    let path = &after[1..1+end];
+    if path.is_empty() || path.contains("..") { return None; }
+    // Strip leading ./ if present
+    Some(path.trim_start_matches("./").to_string())
+}
+
+fn find_unescaped_quote(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' { i += 2; continue; }
+        if bytes[i] == b'"' { return Some(i); }
+        i += 1;
+    }
     None
 }
 

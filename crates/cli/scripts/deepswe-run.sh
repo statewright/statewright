@@ -10,10 +10,15 @@
 
 set -euo pipefail
 
-TASK_DIR="${1:?Usage: deepswe-run.sh <task_dir> [model_url] [model_name] [max_steps]}"
+TASK_DIR="${1:?Usage: deepswe-run.sh <task_dir> [model_url] [model_name] [max_steps] [workflow]}"
 MODEL_URL="${2:-https://qwen2-5-coder-14b.ollama.casa.enhasa.cloud/v1}"
 MODEL_NAME="${3:-qwen3:8b}"
-MAX_STEPS="${4:-25}"
+MAX_STEPS="${4:-50}"
+WORKFLOW="${5:-bugfix}"  # bugfix or tdd-greenfield
+
+# Escalation defaults to devstral-small-2:24b — override via env
+ESCALATION_URL="${SW_ESCALATION_URL:-$MODEL_URL}"
+ESCALATION_MODEL="${SW_ESCALATION_MODEL:-devstral-small-2:24b}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HARNESS="$SCRIPT_DIR/../../../target/release/sw-agent"
@@ -36,6 +41,7 @@ echo "Language: $LANGUAGE"
 echo "Repo: $REPO_URL"
 echo "Commit: ${BASE_COMMIT:0:12}"
 echo "Model: $MODEL_NAME"
+echo "Escalation: $ESCALATION_MODEL"
 echo ""
 
 # Step 1: Clone repo at base commit
@@ -51,18 +57,25 @@ TASK_TEXT=$(cat "$INSTRUCTION")
 echo "[2/4] Instruction loaded ($(wc -l < "$INSTRUCTION") lines)"
 
 # Step 3: Run sw-agent
-echo "[3/4] Running sw-agent..."
-SW_ESCALATION_URL="$MODEL_URL" SW_ESCALATION_MODEL="$MODEL_NAME" \
+echo "[3/4] Running sw-agent (workflow: $WORKFLOW)..."
+
+# Select machine flag based on workflow
+MACHINE_FLAG="--use-hardcoded-machine"
+if [ "$WORKFLOW" = "tdd-greenfield" ]; then
+  MACHINE_FLAG="--tdd-greenfield"
+fi
+
+SW_ESCALATION_URL="$ESCALATION_URL" SW_ESCALATION_MODEL="$ESCALATION_MODEL" \
 "$HARNESS" \
   --workdir "$WORKDIR/repo" \
   --task "$TASK_TEXT" \
   --ollama-url "$MODEL_URL" \
   --model "$MODEL_NAME" \
   --max-steps "$MAX_STEPS" \
-  --use-hardcoded-machine \
+  $MACHINE_FLAG \
   --no-restore \
   --log 2>&1 | tee "$RESULTS_DIR/harness.log" | \
-  grep -E "COMPLETED|ABORT|FAILED|LOCALIZE|AUTO-TEST|ESCALATE" | head -10
+  grep -E "COMPLETED|ABORT|FAILED|LOCALIZE|AUTO-TEST|ESCALATE|TDD|RED|GREEN" | head -10
 
 # Step 4: Capture diff
 echo ""
@@ -85,6 +98,8 @@ cat > "$RESULTS_DIR/meta.json" << EOF
 {
   "task": "$TASK_NAME",
   "model": "$MODEL_NAME",
+  "escalation_model": "$ESCALATION_MODEL",
+  "workflow": "$WORKFLOW",
   "language": "$LANGUAGE",
   "max_steps": $MAX_STEPS,
   "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",

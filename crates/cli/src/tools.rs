@@ -93,6 +93,7 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "insert_between" => insert_between(args, workdir),
         "find_files" => find_files(args, workdir),
         "inspect_class" => inspect_class(args, workdir),
+        "create_file" => create_file(args, workdir),
         _ => format!("unknown tool: {}", name),
     }
 }
@@ -200,6 +201,59 @@ fn write_file(args: &Value, workdir: &str) -> String {
     }
 }
 
+/// Phase 1 of two-phase file write. Validates path, creates parent dirs,
+/// returns a sentinel that the harness intercepts to trigger the content phase.
+/// The harness prompts the model for raw file content in a separate LLM call.
+fn create_file(args: &Value, workdir: &str) -> String {
+    let path = match args.get("path").and_then(|p| p.as_str()) {
+        Some(p) => p,
+        None => return "error: missing 'path' argument".into(),
+    };
+
+    if path.contains("..") || path.starts_with('/') {
+        return "error: path traversal detected".into();
+    }
+
+    let full_path = Path::new(workdir).join(path);
+    if let Some(parent) = full_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return format!("error creating directory for '{}': {}", path, e);
+        }
+    }
+
+    // Return sentinel — the harness detects this and triggers content phase
+    format!("CREATE_FILE_READY:{}", path)
+}
+
+/// Strip markdown code fences from model output.
+/// Models sometimes wrap raw content in ```python ... ``` even when told not to.
+pub fn strip_code_fences(content: &str) -> String {
+    let trimmed = content.trim();
+
+    // Check for opening fence (``` or ```lang)
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+
+    // Find end of first line (the opening fence line)
+    let first_newline = match trimmed.find('\n') {
+        Some(i) => i,
+        None => return trimmed.to_string(),
+    };
+
+    let body = &trimmed[first_newline + 1..];
+
+    // Strip closing fence
+    if let Some(close_pos) = body.rfind("\n```") {
+        body[..close_pos].to_string()
+    } else if body.ends_with("```") {
+        body[..body.len() - 3].trim_end().to_string()
+    } else {
+        // No closing fence — take everything after opening fence
+        body.to_string()
+    }
+}
+
 fn list_directory(args: &Value, workdir: &str) -> String {
     let subdir = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
     let full_path = Path::new(workdir).join(subdir);
@@ -226,28 +280,98 @@ fn list_directory(args: &Value, workdir: &str) -> String {
 }
 
 fn run_test_with_args(args: &Value, workdir: &str) -> String {
-    // Optional path to scope tests (e.g. "sympy/core/tests/")
     let test_path = args.get("path").and_then(|p| p.as_str());
+    let test_file = args.get("test_file").and_then(|p| p.as_str());
+    let extra_args: Vec<String> = args.get("args")
+        .and_then(|a| a.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
 
-    let mut cmd_args = vec!["-m", "pytest", "-xvs", "--tb=short", "--no-header", "-q"];
-    let path_string;
-    if let Some(p) = test_path {
-        path_string = p.to_string();
-        cmd_args.push(&path_string);
+    let lang = detect_language(workdir);
+
+    let (cmd, mut cmd_args) = match lang {
+        "go" => {
+            let mut a = vec!["test".to_string(), "-v".to_string(), "-count=1".to_string()];
+            if let Some(p) = test_path {
+                a.push(format!("./{}/...", p));
+            } else if let Some(f) = test_file {
+                a.push(format!("./{}", std::path::Path::new(f).parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| ".".into())));
+            } else {
+                a.push("./...".to_string());
+            }
+            a.extend(extra_args);
+            ("go".to_string(), a)
+        }
+        "rust" => {
+            let mut a = vec!["test".to_string()];
+            if let Some(p) = test_path {
+                a.push("--".to_string());
+                a.push(p.to_string());
+            }
+            a.extend(extra_args);
+            ("cargo".to_string(), a)
+        }
+        "typescript" | "javascript" => {
+            let (runner, mut runner_args) = detect_js_test_runner(workdir);
+            if let Some(p) = test_path {
+                runner_args.push(p.to_string());
+            } else if let Some(f) = test_file {
+                runner_args.push(f.to_string());
+            }
+            runner_args.extend(extra_args);
+            (runner, runner_args)
+        }
+        _ => {
+            // Default: Python / pytest
+            let mut a: Vec<String> = vec!["-m".into(), "pytest".into(), "-xvs".into(),
+                "--tb=short".into(), "--no-header".into(), "-q".into()];
+            if let Some(p) = test_path {
+                a.push(p.to_string());
+            } else if let Some(f) = test_file {
+                a.push(f.to_string());
+            }
+            a.extend(extra_args);
+            ("python3".to_string(), a)
+        }
+    };
+
+    // Install deps if needed (JS/TS only, first run)
+    if matches!(lang, "typescript" | "javascript") {
+        let p = Path::new(workdir);
+        if !p.join("node_modules").exists() && p.join("package.json").exists() {
+            let pkg_mgr = if p.join("pnpm-lock.yaml").exists() && command_exists("pnpm") { "pnpm" }
+                else if p.join("yarn.lock").exists() && command_exists("yarn") { "yarn" }
+                else { "npm" };
+            let _ = Command::new(pkg_mgr)
+                .arg("install")
+                .current_dir(workdir)
+                .output();
+        }
     }
 
-    let output = Command::new("python3")
+    let output = Command::new(&cmd)
         .args(&cmd_args)
         .current_dir(workdir)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
         .output();
 
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            format!("{}\n{}", stdout, stderr)
+            let combined = format!("{}\n{}", stdout, stderr);
+            // Truncate to prevent context blowup on huge test output
+            if combined.len() > 8000 {
+                let truncated = &combined[..4000];
+                let tail = &combined[combined.len()-3000..];
+                format!("{}...\n[truncated {} bytes]\n...{}", truncated, combined.len() - 7000, tail)
+            } else {
+                combined
+            }
         }
-        Err(e) => format!("error running tests: {}", e),
+        Err(e) => format!("error running tests ({}): {} — cmd: {} {:?}", lang, e, cmd, cmd_args),
     }
 }
 
@@ -885,14 +1009,38 @@ pub fn all_diff_stats(workdir: &str) -> Vec<(String, usize, usize)> {
     let files: Vec<String> = snaps.keys().cloned().collect();
     drop(snaps);
 
-    files
+    let mut results: Vec<(String, usize, usize)> = files
         .into_iter()
         .map(|f| {
             let (changed, total) = diff_stats(&f, workdir);
             (f, changed, total)
         })
         .filter(|(_, changed, _)| *changed > 0)
-        .collect()
+        .collect();
+
+    // Also detect new untracked files (created by write_file, not in snapshot)
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workdir)
+        .output()
+    {
+        let status = String::from_utf8_lossy(&output.stdout);
+        for line in status.lines() {
+            if line.starts_with("?? ") {
+                let path = line[3..].trim_end_matches('/');
+                if !results.iter().any(|(f, _, _)| f == path) {
+                    // Count lines in new file as "changed"
+                    let full = std::path::Path::new(workdir).join(path);
+                    let lines = std::fs::read_to_string(&full)
+                        .map(|c| c.lines().count())
+                        .unwrap_or(1);
+                    results.push((path.to_string(), lines, lines));
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// Insert a line between two anchor strings in a file.
@@ -1082,6 +1230,83 @@ fn find_files(args: &Value, workdir: &str) -> String {
     }
 }
 
+/// Extract raw file blocks from model output and write them to disk.
+/// Models can output `<write_file path="relative/path.py">content</write_file>`
+/// as an alternative to the JSON write_file tool call. This avoids JSON escaping
+/// overhead that causes self-truncation on large files.
+///
+/// Returns a vec of (path, bytes_written) for each block extracted.
+pub fn extract_file_blocks(response: &str, workdir: &str) -> Vec<(String, usize)> {
+    let mut results = Vec::new();
+    let mut search_from = 0;
+
+    while let Some(tag_start) = response[search_from..].find("<write_file path=\"") {
+        let abs_start = search_from + tag_start;
+        let after_tag = abs_start + "<write_file path=\"".len();
+
+        // Extract path (find closing quote)
+        let path_end = match response[after_tag..].find('"') {
+            Some(i) => after_tag + i,
+            None => break,
+        };
+        let path = &response[after_tag..path_end];
+
+        // Find the closing `>` of the opening tag
+        let content_start = match response[path_end..].find('>') {
+            Some(i) => path_end + i + 1,
+            None => break,
+        };
+
+        // Find closing tag
+        let close_tag = "</write_file>";
+        let content_end = match response[content_start..].find(close_tag) {
+            Some(i) => content_start + i,
+            None => {
+                // No closing tag — take everything remaining (truncated output)
+                response.len()
+            }
+        };
+
+        let mut content = &response[content_start..content_end];
+        // Strip single leading newline (artifact of tag being on its own line)
+        if content.starts_with('\n') {
+            content = &content[1..];
+        }
+        // Strip single trailing newline before close tag
+        let content = content.trim_end_matches('\n');
+
+        if content.is_empty() || path.is_empty() {
+            search_from = content_end + close_tag.len();
+            continue;
+        }
+
+        // Security: prevent path traversal
+        if path.contains("..") || path.starts_with('/') {
+            search_from = content_end + close_tag.len();
+            continue;
+        }
+
+        let full_path = Path::new(workdir).join(path);
+        // Create parent directories
+        if let Some(parent) = full_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let bytes = content.len();
+        if std::fs::write(&full_path, content).is_ok() {
+            results.push((path.to_string(), bytes));
+        }
+
+        search_from = if content_end + close_tag.len() <= response.len() {
+            content_end + close_tag.len()
+        } else {
+            response.len()
+        };
+    }
+
+    results
+}
+
 /// Restore all snapshotted files to their original content.
 pub fn restore_snapshot(workdir: &str) {
     let snaps = SNAPSHOTS.lock().unwrap();
@@ -1090,5 +1315,340 @@ pub fn restore_snapshot(workdir: &str) {
         if let Err(e) = std::fs::write(&path, content) {
             eprintln!("  [RESTORE] Failed to restore {}: {}", name, e);
         }
+    }
+}
+
+/// Detect project language from manifest files and file extensions.
+/// Returns "python", "go", "typescript", "javascript", "rust", or "unknown".
+pub fn detect_language(workdir: &str) -> &'static str {
+    let p = Path::new(workdir);
+    // Manifest-based detection (most reliable)
+    if p.join("Cargo.toml").exists() { return "rust"; }
+    if p.join("go.mod").exists() { return "go"; }
+    if p.join("tsconfig.json").exists() { return "typescript"; }
+    if p.join("pyproject.toml").exists() || p.join("setup.py").exists() || p.join("setup.cfg").exists() {
+        return "python";
+    }
+    if p.join("package.json").exists() {
+        // Disambiguate JS vs TS: check for tsconfig or .ts files
+        if p.join("tsconfig.json").exists() { return "typescript"; }
+        return "javascript";
+    }
+    // Fallback: scan top-level files for dominant extension
+    if let Ok(entries) = std::fs::read_dir(workdir) {
+        let mut py = 0u32;
+        let mut go = 0u32;
+        let mut ts = 0u32;
+        let mut js = 0u32;
+        let mut rs = 0u32;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".py") { py += 1; }
+            else if name.ends_with(".go") { go += 1; }
+            else if name.ends_with(".ts") || name.ends_with(".tsx") { ts += 1; }
+            else if name.ends_with(".js") || name.ends_with(".jsx") { js += 1; }
+            else if name.ends_with(".rs") { rs += 1; }
+        }
+        let max = py.max(go).max(ts).max(js).max(rs);
+        if max > 0 {
+            if py == max { return "python"; }
+            if go == max { return "go"; }
+            if ts == max { return "typescript"; }
+            if js == max { return "javascript"; }
+            if rs == max { return "rust"; }
+        }
+    }
+    "unknown"
+}
+
+/// Check if a command exists on PATH.
+fn command_exists(cmd: &str) -> bool {
+    Command::new("which").arg(cmd).output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Pick the package manager runner, preferring the lockfile match but falling back to npx.
+fn pick_js_runner(workdir: &str) -> String {
+    let p = Path::new(workdir);
+    if p.join("pnpm-lock.yaml").exists() && command_exists("pnpm") { "pnpm".into() }
+    else if p.join("yarn.lock").exists() && command_exists("yarn") { "yarn".into() }
+    else if command_exists("npx") { "npx".into() }
+    else { "npm".into() }
+}
+
+/// Detect the test runner command for a TypeScript/JavaScript project.
+/// Checks package.json scripts and lockfiles.
+fn detect_js_test_runner(workdir: &str) -> (String, Vec<String>) {
+    let p = Path::new(workdir);
+    if let Ok(pkg) = std::fs::read_to_string(p.join("package.json")) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&pkg) {
+            let scripts = parsed.get("scripts");
+            let has_test = scripts.and_then(|s| s.get("test")).and_then(|t| t.as_str()).unwrap_or("");
+            // Check for vitest config file (higher priority than package.json script)
+            if p.join("vitest.config.ts").exists() || p.join("vitest.config.js").exists()
+                || p.join("vitest.config.mts").exists() || has_test.contains("vitest") {
+                let runner = pick_js_runner(workdir);
+                return (runner, vec!["vitest".into(), "run".into()]);
+            }
+            if has_test.contains("jest") {
+                let runner = pick_js_runner(workdir);
+                return (runner, vec!["jest".into(), "--verbose".into()]);
+            }
+            if has_test.contains("mocha") {
+                return ("npx".into(), vec!["mocha".into()]);
+            }
+            // Generic: run the test script
+            if !has_test.is_empty() && has_test != "echo \"Error: no test specified\" && exit 1" {
+                let runner = pick_js_runner(workdir);
+                return (runner, vec!["test".into()]);
+            }
+        }
+    }
+    // Fallback
+    ("npx".into(), vec!["vitest".into(), "run".into()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tmp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("failed to create temp dir")
+    }
+
+    #[test]
+    fn detect_language_python_pyproject() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("pyproject.toml"), "[project]\nname = \"test\"").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "python");
+    }
+
+    #[test]
+    fn detect_language_python_setup_py() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("setup.py"), "from setuptools import setup").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "python");
+    }
+
+    #[test]
+    fn detect_language_go() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("go.mod"), "module github.com/test/test").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "go");
+    }
+
+    #[test]
+    fn detect_language_rust() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "rust");
+    }
+
+    #[test]
+    fn detect_language_typescript() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "typescript");
+    }
+
+    #[test]
+    fn detect_language_javascript() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "javascript");
+    }
+
+    #[test]
+    fn detect_language_fallback_extension() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("main.go"), "package main").unwrap();
+        fs::write(dir.path().join("util.go"), "package main").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "go");
+    }
+
+    #[test]
+    fn detect_language_unknown() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("README.md"), "# Hello").unwrap();
+        assert_eq!(detect_language(dir.path().to_str().unwrap()), "unknown");
+    }
+
+    #[test]
+    fn detect_js_vitest_config() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("package.json"), r#"{"scripts":{"test":"vitest"}}"#).unwrap();
+        fs::write(dir.path().join("vitest.config.ts"), "").unwrap();
+        fs::write(dir.path().join("pnpm-lock.yaml"), "").unwrap();
+        let (cmd, args) = detect_js_test_runner(dir.path().to_str().unwrap());
+        // Falls back to npx if pnpm not installed
+        assert!(cmd == "pnpm" || cmd == "npx", "expected pnpm or npx, got {}", cmd);
+        assert_eq!(args, vec!["vitest", "run"]);
+    }
+
+    #[test]
+    fn detect_js_jest() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("package.json"), r#"{"scripts":{"test":"jest --coverage"}}"#).unwrap();
+        let (cmd, args) = detect_js_test_runner(dir.path().to_str().unwrap());
+        assert!(cmd == "npx" || cmd == "npm", "expected npx or npm, got {}", cmd);
+        assert_eq!(args, vec!["jest", "--verbose"]);
+    }
+
+    #[test]
+    fn detect_js_yarn() {
+        let dir = tmp_dir();
+        fs::write(dir.path().join("package.json"), r#"{"scripts":{"test":"vitest run"}}"#).unwrap();
+        fs::write(dir.path().join("yarn.lock"), "").unwrap();
+        let (cmd, args) = detect_js_test_runner(dir.path().to_str().unwrap());
+        // Falls back to npx if yarn not installed
+        assert!(cmd == "yarn" || cmd == "npx", "expected yarn or npx, got {}", cmd);
+        assert_eq!(args, vec!["vitest", "run"]);
+    }
+
+    // --- create_file tests ---
+
+    #[test]
+    fn create_file_returns_sentinel() {
+        let dir = tmp_dir();
+        let result = create_file(&serde_json::json!({"path": "src/new.py"}), dir.path().to_str().unwrap());
+        assert!(result.starts_with("CREATE_FILE_READY:"));
+        assert!(result.contains("src/new.py"));
+    }
+
+    #[test]
+    fn create_file_makes_parent_dirs() {
+        let dir = tmp_dir();
+        create_file(&serde_json::json!({"path": "a/b/c/deep.py"}), dir.path().to_str().unwrap());
+        assert!(dir.path().join("a/b/c").is_dir());
+    }
+
+    #[test]
+    fn create_file_blocks_traversal() {
+        let dir = tmp_dir();
+        let result = create_file(&serde_json::json!({"path": "../escape.py"}), dir.path().to_str().unwrap());
+        assert!(result.contains("traversal"));
+    }
+
+    #[test]
+    fn create_file_blocks_absolute_path() {
+        let dir = tmp_dir();
+        let result = create_file(&serde_json::json!({"path": "/etc/passwd"}), dir.path().to_str().unwrap());
+        assert!(result.contains("traversal"));
+    }
+
+    // --- strip_code_fences tests ---
+
+    #[test]
+    fn strip_fences_python() {
+        let input = "```python\ndef hello():\n    pass\n```";
+        assert_eq!(strip_code_fences(input), "def hello():\n    pass");
+    }
+
+    #[test]
+    fn strip_fences_bare() {
+        let input = "```\nsome code\n```";
+        assert_eq!(strip_code_fences(input), "some code");
+    }
+
+    #[test]
+    fn strip_fences_no_fences() {
+        let input = "def hello():\n    pass";
+        assert_eq!(strip_code_fences(input), "def hello():\n    pass");
+    }
+
+    #[test]
+    fn strip_fences_preserves_inner_backticks() {
+        let input = "```go\nfmt.Println(`hello`)\n```";
+        assert_eq!(strip_code_fences(input), "fmt.Println(`hello`)");
+    }
+
+    // --- Raw file block extraction tests ---
+
+    #[test]
+    fn extract_file_blocks_single() {
+        let dir = tmp_dir();
+        let response = r#"I'll write the implementation now.
+
+<write_file path="src/blend.py">
+class BlendRange:
+    def __init__(self):
+        self.black = (0, 255)
+        self.white = (0, 255)
+</write_file>
+
+Now I'll run the tests."#;
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "src/blend.py");
+        let content = fs::read_to_string(dir.path().join("src/blend.py")).unwrap();
+        assert!(content.contains("class BlendRange:"));
+        assert!(content.contains("self.black = (0, 255)"));
+    }
+
+    #[test]
+    fn extract_file_blocks_multiple() {
+        let dir = tmp_dir();
+        let response = r#"<write_file path="a.py">
+def hello():
+    pass
+</write_file>
+
+<write_file path="b.py">
+def world():
+    pass
+</write_file>"#;
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 2);
+        assert!(dir.path().join("a.py").exists());
+        assert!(dir.path().join("b.py").exists());
+    }
+
+    #[test]
+    fn extract_file_blocks_none() {
+        let dir = tmp_dir();
+        let response = r#"{"tool_calls": [{"name": "read_file", "args": {"path": "main.py"}}]}"#;
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn extract_file_blocks_creates_dirs() {
+        let dir = tmp_dir();
+        let response = r#"<write_file path="deep/nested/dir/module.py">
+x = 1
+</write_file>"#;
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 1);
+        assert!(dir.path().join("deep/nested/dir/module.py").exists());
+    }
+
+    #[test]
+    fn extract_file_blocks_preserves_indentation() {
+        let dir = tmp_dir();
+        let response = r#"<write_file path="indented.py">
+class Foo:
+    def bar(self):
+        if True:
+            return 42
+</write_file>"#;
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 1);
+        let content = fs::read_to_string(dir.path().join("indented.py")).unwrap();
+        assert!(content.contains("    def bar(self):"));
+        assert!(content.contains("            return 42"));
+    }
+
+    #[test]
+    fn extract_file_blocks_strips_leading_blank_line() {
+        let dir = tmp_dir();
+        // The opening tag is followed by a newline, content shouldn't start with blank line
+        let response = "<write_file path=\"clean.py\">\ndef f():\n    pass\n</write_file>";
+        let results = extract_file_blocks(response, dir.path().to_str().unwrap());
+        assert_eq!(results.len(), 1);
+        let content = fs::read_to_string(dir.path().join("clean.py")).unwrap();
+        assert!(content.starts_with("def f():"), "content was: {:?}", content);
     }
 }

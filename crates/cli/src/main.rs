@@ -702,7 +702,8 @@ async fn main() {
                 &transitions, &workdir, false, Some(max_iter - step), false, "", false,
             );
             let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
-            // Single-state mode: fresh prompt each step (Rust harness parity)
+            // Include accumulated conversation (tool calls + results from prior steps)
+            messages.extend(conversation.iter().cloned());
             messages.push(ChatMessage { role: "user".into(), content: "Proceed with the next action.".into() });
 
             let raw_response = match client.chat(messages).await {
@@ -777,7 +778,33 @@ async fn main() {
 
             // Handle tool calls
             if let Some(calls) = resp.tool_calls {
+                let mut should_break = false;
                 for tc in &calls {
+                    // Intercept transition tool calls (model calls transition as a tool, not via resp.transition)
+                    if tc.name == "transition" || tc.name == "statewright_transition" {
+                        let event = tc.args.get("event").and_then(|v| v.as_str()).unwrap_or("DONE");
+                        let rationale = tc.args.get("rationale").or_else(|| tc.args.get("reason")).and_then(|v| v.as_str());
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                            if json_mode {
+                                events::emit_json(&TuiEvent::Transition {
+                                    from: target_state.clone(), to: target_name.clone(),
+                                    trigger: Some(event.to_string()),
+                                    rationale: rationale.map(|s| s.to_string()),
+                                });
+                                events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                            }
+                            should_break = true;
+                            break;
+                        } else {
+                            let valid = transitions.iter().map(|(e, t)| format!("{} → {}", e, t)).collect::<Vec<_>>().join(", ");
+                            conversation.push(ChatMessage {
+                                role: "user".into(),
+                                content: format!("Invalid event '{}'. Valid: {}. Pick the correct one.", event, valid),
+                            });
+                            continue;
+                        }
+                    }
+
                     if json_mode {
                         events::emit_json(&TuiEvent::ToolCall {
                             name: tc.name.clone(),
@@ -803,6 +830,7 @@ async fn main() {
                         content: format!("=== {} result ===\n{}", tc.name, result),
                     });
                 }
+                if should_break { break; }
             }
         }
 

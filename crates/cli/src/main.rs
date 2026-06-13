@@ -622,7 +622,11 @@ async fn main() {
     // Config overrides CLI args
     let task = run_config.task.as_deref().unwrap_or(&args.task).to_string();
     let workdir = run_config.workdir.as_deref().unwrap_or(&args.workdir).to_string();
-    let max_steps = if run_config.guardrails.max_steps > 0 { run_config.guardrails.max_steps } else { args.max_steps };
+    let max_steps = if run_config.guardrails.max_steps > 0 && args.config.is_some() {
+        run_config.guardrails.max_steps
+    } else {
+        args.max_steps
+    };
 
     // Helper: get OllamaClient for a given state (per-state model routing)
     let make_client_for_state = |state: &str| -> OllamaClient {
@@ -970,8 +974,6 @@ async fn main() {
     let mut localization_summary = String::new();
 
     loop {
-        step += 1;
-        steps_in_current_state += 1;
 
         // Per-state model routing or escalation-driven model selection
         let client = if run_config.model_routing.contains_key(&current_state) {
@@ -982,9 +984,11 @@ async fn main() {
             base_client.clone()
         };
 
-        // Don't abort during testing/review — these are quick programmatic steps
+        // Don't abort during testing/review/green_check — these are quick programmatic steps
         // that shouldn't count against the LLM's step budget
-        let in_endgame = current_state == "testing" || current_state == "review" || current_state == "completed";
+        let in_endgame = current_state == "testing" || current_state == "review"
+            || current_state == "completed" || current_state == "green_check"
+            || current_state == "red_check";
         if step > max_steps && !in_endgame {
             println!("\n[ABORT] Max steps ({}) exceeded", args.max_steps);
             break;
@@ -1598,6 +1602,11 @@ async fn main() {
                 continue;
             }
         }
+
+        // Only count actual LLM steps against the global budget.
+        // Programmatic steps (auto-test, edit gate, checkpoints) don't consume budget.
+        step += 1;
+        steps_in_current_state += 1;
 
         if is_checkpoint {
             let hard_max = state_def.max_iterations.unwrap() * 3;

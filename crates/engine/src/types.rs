@@ -82,6 +82,12 @@ pub struct StateDef {
     /// Clients that support programmatic effort control enforce this; others treat it as advisory.
     #[serde(default)]
     pub thinking_level: Option<String>,
+    /// When true, the orchestrating TUI delegates this state to sw-agent via direct execution.
+    #[serde(default)]
+    pub direct_execution: Option<bool>,
+    /// Model escalation ladder for direct_execution states.
+    #[serde(default)]
+    pub model_ladder: Option<Vec<serde_json::Value>>,
 }
 
 /// A transition triggered by an event.

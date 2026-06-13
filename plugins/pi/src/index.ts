@@ -437,7 +437,8 @@ function runAgentAttempt(
   swLog(`direct_execution] attempt: state=${state} model=${model}`)
 
   return new Promise((resolve) => {
-    const agent = spawn("sw-agent", args, {
+    const swAgentBin = process.env.SW_AGENT_PATH ?? "sw-agent"
+    const agent = spawn(swAgentBin, args, {
       cwd: workdir,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
@@ -504,7 +505,8 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
   while (stateCache?.directExecution && !stateCache.isFinal) {
     const state = stateCache.state
     const ladder = (stateCache.modelLadder ?? []) as Array<{ model: string; url: string }>
-    const maxRetries = ladder.length || 1
+    const maxRetries = Math.max(ladder.length, 1)
+    swLog(`direct_execution] ladder=${JSON.stringify(ladder.map(l => l.model))} maxRetries=${maxRetries}`)
     const workdir = process.cwd()
     const task = stateCache.instructions ?? "Fix the bug"
 
@@ -558,7 +560,7 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
       if (stateCache && visitedStates.has(stateCache.state) && !stateCache.isFinal) {
         // Soft failure: cycle looped back. Escalate the tier.
         cycleTier++
-        const maxTier = Math.max(...(stateCache.modelLadder ?? ladder).map(() => 1), ladder.length)
+        const maxTier = ladder.length
         if (cycleTier >= maxTier) {
           swLog(`direct_execution] cycle exhausted all ${maxTier} tiers after backward transition`)
           await gwCall("statewright_transition", {

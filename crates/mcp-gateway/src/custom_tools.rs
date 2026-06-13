@@ -122,6 +122,8 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
     let blocked_env = state_def.and_then(|s| s.blocked_env.as_ref()).cloned();
     let env_overrides = state_def.and_then(|s| s.env_overrides.as_ref()).cloned();
     let thinking_level = state_def.and_then(|s| s.thinking_level.as_ref()).cloned();
+    let direct_execution = state_def.and_then(|s| s.direct_execution).unwrap_or(false);
+    let model_ladder = state_def.and_then(|s| s.model_ladder.as_ref()).cloned();
 
     // Include guard definitions for transitions that use them
     let guard_info: serde_json::Value = state_def
@@ -169,6 +171,8 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "meta": session.definition.meta,
         "allowed_commands": allowed_commands,
         "disallowed_tools": disallowed_tools,
+        "direct_execution": direct_execution,
+        "model_ladder": model_ladder,
     });
 
     // Include interrupt definitions for client-side detection (built-in tools)

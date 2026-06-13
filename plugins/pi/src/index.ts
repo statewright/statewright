@@ -500,7 +500,9 @@ function runAgentAttempt(
 async function maybeDelegateDirectExecution(): Promise<string | null> {
   const log: string[] = []
   const visitedStates = new Set<string>()
-  let cycleTier = 0  // escalation tier for the whole pipeline cycle
+  // cycleTier persists across calls via module scope — reset only on workflow load
+  if (typeof (globalThis as any).__swCycleTier !== "number") (globalThis as any).__swCycleTier = 0
+  let cycleTier: number = (globalThis as any).__swCycleTier
 
   while (stateCache?.directExecution && !stateCache.isFinal) {
     const state = stateCache.state
@@ -557,6 +559,7 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
       log.push(`${state}: ${model} → ${result.event}`)
 
       // Check if this is a backward transition (target we already visited)
+      swLog(`direct_execution] backward check: newState=${stateCache?.state} visited=[${[...visitedStates]}] isFinal=${stateCache?.isFinal}`)
       if (stateCache && visitedStates.has(stateCache.state) && !stateCache.isFinal) {
         // Soft failure: cycle looped back. Escalate the tier.
         cycleTier++
@@ -593,6 +596,9 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
       log.push(`${state}: ${model} → FAIL (tier ${cycleTier})`)
     }
   }
+
+  // Persist cycleTier for next invocation
+  ;(globalThis as any).__swCycleTier = cycleTier
 
   if (log.length === 0) return null
   return `\n[sw-agent] ${log.join(" | ")}`
@@ -1471,6 +1477,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       pluginStepCount = 0
       currentRunId = (result as { run_id?: string }).run_id ?? null
       logSequence = 0
+      ;(globalThis as any).__swCycleTier = 0
       await refreshState()
 
       // If gateway didn't create a run (self-hosted, no metering), create via PB REST

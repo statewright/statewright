@@ -1467,6 +1467,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             { type: "text", text: JSON.stringify(result, null, 2) },
             { type: "text", text: delegationResult },
           ],
+          terminate: stateCache?.isFinal || !stateCache,
         }
       }
 
@@ -1526,6 +1527,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
             { type: "text", text: JSON.stringify(result, null, 2) },
             { type: "text", text: delegationResult },
           ],
+          terminate: stateCache?.isFinal || !stateCache,
         }
       }
 

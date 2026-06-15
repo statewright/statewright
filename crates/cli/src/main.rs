@@ -629,6 +629,75 @@ async fn main() {
             });
         }
 
+        // Programmatic localization: run tests, extract failures, read relevant code.
+        // Injects focused context so the model doesn't have to navigate large files.
+        {
+            let test_output = tools::execute_tool("run_test", &json!({}), &workdir);
+            let test_summary: String = test_output.lines()
+                .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let files = tools::execute_tool("list_directory", &json!({"path": "."}), &workdir);
+
+            // Grep for keywords from test failures
+            let mut grep_results = String::new();
+            let source_files: Vec<&str> = files.lines()
+                .filter(|f| (f.ends_with(".py") || f.ends_with(".rs") || f.ends_with(".js") || f.ends_with(".ts"))
+                    && !f.starts_with("test_") && !f.contains("__pycache__"))
+                .collect();
+
+            for line in test_summary.lines() {
+                for word in line.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if clean.len() > 3 && (clean.contains('_') || clean.starts_with("test_")) {
+                        let pattern = if clean.starts_with("test_") { &clean[5..] } else { clean };
+                        for src in &source_files {
+                            let result = tools::execute_tool("grep", &json!({"pattern": pattern, "file": src}), &workdir);
+                            if result != "no matches found" {
+                                grep_results.push_str(&format!("grep '{}' in {}:\n{}\n", pattern, src, result.lines().take(5).collect::<Vec<_>>().join("\n")));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Read source files (first 200 lines or around grep hits)
+            let mut source_excerpts = String::new();
+            for src in &source_files {
+                let content = tools::execute_tool("read_file", &json!({"path": src}), &workdir);
+                let line_count = content.lines().count();
+                if line_count <= 200 {
+                    source_excerpts.push_str(&format!("=== {} ({} lines) ===\n{}\n", src, line_count, content));
+                } else {
+                    source_excerpts.push_str(&format!("=== {} ({} lines, showing first 50) ===\n{}\n", src, line_count,
+                        content.lines().take(50).collect::<Vec<_>>().join("\n")));
+                }
+            }
+
+            let localization = format!(
+                "## Test Results\n{}\n\n## Files\n{}\n\n## Grep Hits\n{}\n\n## Source\n{}\n",
+                test_summary, files.lines().take(20).collect::<Vec<_>>().join(", "),
+                grep_results, source_excerpts
+            );
+
+            if json_mode {
+                events::emit_json(&TuiEvent::Localized {
+                    files: source_files.iter().map(|s| s.to_string()).collect(),
+                    test_failures: test_summary.clone(),
+                    excerpt_lines: localization.lines().count(),
+                });
+            }
+            eprintln!("[LOCALIZE] {} source files, {} test lines, {} grep lines",
+                source_files.len(), test_summary.lines().count(), grep_results.lines().count());
+
+            conversation.push(ChatMessage {
+                role: "user".into(),
+                content: format!("Bug localization results:\n{}", localization),
+            });
+        }
+
         let mut step = 0u32;
         let max_iter = state_def.max_iterations.unwrap_or(10);
         let mut classified = false;
@@ -828,6 +897,38 @@ async fn main() {
                         role: "user".into(),
                         content: format!("=== {} result ===\n{}", tc.name, result),
                     });
+
+                    // Auto-test: after any edit tool, run tests. If pass, auto-transition DONE/TESTS_PASS.
+                    // TODO: Expose as a per-state workflow flag (e.g. "auto_test": true) so non-Rust TUIs
+                    // implementing direct_execution can replicate this behavior. Currently implicit in
+                    // sw-agent's --state path only.
+                    let is_edit = matches!(tc.name.as_str(), "edit_line" | "edit_block" | "patch_file" | "apply_patch" | "write_file");
+                    if is_edit && !result.starts_with("error") {
+                        let test_output = tools::execute_tool("run_test", &serde_json::json!({}), &workdir);
+                        let tests_pass = test_output.contains("passed") && !test_output.contains("failed") && !test_output.contains("FAILED");
+                        if json_mode {
+                            events::emit_json(&TuiEvent::AutoTest { passed: tests_pass, fail_count: 0 });
+                        }
+                        if tests_pass {
+                            // Find the best forward transition (DONE, TESTS_PASS, or first non-FAIL)
+                            let auto_event = transitions.iter()
+                                .find(|(e, _)| e == "DONE" || e == "TESTS_PASS")
+                                .or_else(|| transitions.iter().find(|(e, _)| e != "FAIL"))
+                                .map(|(e, _)| e.clone());
+                            if let Some(event) = auto_event {
+                                let target = transitions.iter().find(|(e, _)| *e == event).map(|(_, t)| t.clone()).unwrap_or("?".into());
+                                if json_mode {
+                                    events::emit_json(&TuiEvent::Transition {
+                                        from: target_state.clone(), to: target,
+                                        trigger: Some(event), rationale: Some("Auto-test pass after edit".into()),
+                                    });
+                                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                                }
+                                should_break = true;
+                                break;
+                            }
+                        }
+                    }
                 }
                 if should_break { break; }
             }

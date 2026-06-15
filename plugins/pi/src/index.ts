@@ -420,11 +420,12 @@ function expandToolNames(tools: string[]): string[] {
 }
 
 /// Run a single sw-agent attempt for the current state.
-/// Returns the transition event from JSONL, or null on failure.
+/// Returns the transition event + stdout JSONL, or null on failure.
 function runAgentAttempt(
   state: string, model: string, url: string,
   workdir: string, task: string, configPath: string,
-): Promise<{ event: string; events: number } | null> {
+  contextFile?: string,
+): Promise<{ event: string; events: number; stdout: string } | null> {
   const args = [
     "--state", state,
     "--config", configPath,
@@ -434,6 +435,9 @@ function runAgentAttempt(
     "--ollama-url", url,
     "--json-events",
   ]
+  if (contextFile) {
+    args.push("--context-file", contextFile)
+  }
   swLog(`direct_execution] attempt: state=${state} model=${model}`)
 
   return new Promise((resolve) => {
@@ -479,7 +483,7 @@ function runAgentAttempt(
 
       const event = transitionEvent ?? (success ? "DONE" : null)
       if (event) {
-        resolve({ event, events: eventList.length })
+        resolve({ event, events: eventList.length, stdout })
       } else {
         resolve(null)
       }
@@ -503,6 +507,11 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
   // cycleTier persists across calls via module scope — reset only on workflow load
   if (typeof (globalThis as any).__swCycleTier !== "number") (globalThis as any).__swCycleTier = 0
   let cycleTier: number = (globalThis as any).__swCycleTier
+
+  // Context file: carries tool results from one state to the next
+  // so implementing knows what reconnaissance found
+  const contextPath = join(tmpdir(), `sw-context-${Date.now()}.json`)
+  let contextData: Record<string, unknown> = {}
 
   while (stateCache?.directExecution && !stateCache.isFinal) {
     const state = stateCache.state
@@ -544,11 +553,26 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
     }
     writeFileSync(configPath, JSON.stringify(config, null, 2))
 
-    const result = await runAgentAttempt(state, model, url, workdir, task, configPath)
+    // Write accumulated context for this state (reconnaissance findings carry to implementing)
+    if (Object.keys(contextData).length > 0) {
+      writeFileSync(contextPath, JSON.stringify(contextData, null, 2))
+    }
+    const ctxArg = Object.keys(contextData).length > 0 ? contextPath : undefined
+    const result = await runAgentAttempt(state, model, url, workdir, task, configPath, ctxArg)
 
     try { unlinkSync(configPath) } catch {}
 
     if (result && result.event !== "FAIL") {
+      // Extract tool results from JSONL to carry as context to the next state
+      for (const line of result.stdout.split("\n")) {
+        try {
+          const evt = JSON.parse(line)
+          if (evt.event === "tool_result" && evt.result_preview) {
+            contextData[`${state}_${evt.name ?? "tool"}`] = evt.result_preview
+          }
+        } catch { /* skip */ }
+      }
+
       // Valid transition — apply it
       swLog(`direct_execution] ${state} → ${result.event} via ${model} (${result.events} events)`)
       await gwCall("statewright_transition", {
@@ -599,6 +623,7 @@ async function maybeDelegateDirectExecution(): Promise<string | null> {
 
   // Persist cycleTier for next invocation
   ;(globalThis as any).__swCycleTier = cycleTier
+  try { unlinkSync(contextPath) } catch {}
 
   if (log.length === 0) return null
   return `\n[sw-agent] ${log.join(" | ")}`
@@ -2326,13 +2351,8 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     // If the model lands in a direct_execution state (agent delegation failed or didn't transition),
     // tell it to just call statewright_run_agent or transition FAIL — don't let it try the work itself
     if (state.directExecution) {
-      const tier = (state.context.current_tier as number) ?? 0
-      const ladder = state.modelLadder
-      const tierModel = ladder?.[tier]?.model ?? state.model ?? "unknown"
-      const msg = `DIRECT EXECUTION STATE: This state is handled by sw-agent (${tierModel}), not by you. ` +
-        `Call statewright_run_agent to delegate, or statewright_transition(event="FAIL", data={"rationale": "agent delegation failed"}) to escalate.`
-      ctx.ui?.notify?.(`[statewright] Direct execution: delegating to ${tierModel}`, "info")
-      pi.sendUserMessage(msg, { deliverAs: "steer" })
+      // Suppress the model entirely — sw-agent handles this state via the delegation loop.
+      // Don't steer (model will act on the steer). Just silently return.
       return
     }
 
@@ -2650,8 +2670,13 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     if (!event.toolName) {
       return { block: true, reason: "Tool call has no name. Use a specific tool." }
     }
-    if (event.toolName.startsWith("statewright_")) return
     if (!stateCache) return
+    // During direct_execution, block ALL tools including statewright transitions.
+    // sw-agent handles this state — the model must not interfere.
+    if (stateCache.directExecution && !stateCache.isFinal) {
+      return { block: true, reason: "This state is handled by sw-agent via direct execution. Wait for it to complete." }
+    }
+    if (event.toolName.startsWith("statewright_")) return
 
     // NOTE: Native tool calls are ALLOWED. gemma4:31b refuses to produce JSON-in-text
     // and insists on native tool_calls regardless of system prompt instructions.

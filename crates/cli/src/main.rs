@@ -184,7 +184,7 @@ struct RunConfig {
     #[serde(default)]
     workdir: Option<String>,
     #[serde(default)]
-    workflow: Option<String>,
+    workflow: Option<MachineDefinition>,
     #[serde(default)]
     model_routing: HashMap<String, ModelConfig>,
     #[serde(default)]
@@ -687,8 +687,8 @@ async fn main() {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(json!({}));
 
-        // Use hardcoded machine to get state definition
-        let definition = hardcoded_bug_fix_machine();
+        // Use workflow from config if provided, otherwise fall back to hardcoded machine
+        let definition = run_config.workflow.unwrap_or_else(hardcoded_bug_fix_machine);
         let state_def = match definition.states.get(target_state.as_str()) {
             Some(s) => s,
             None => {
@@ -713,16 +713,139 @@ async fn main() {
             });
         }
 
+        // Programmatic localization: run tests, extract failures, read relevant code.
+        // Injects focused context so the model doesn't have to navigate large files.
+        {
+            let test_output = tools::execute_tool("run_test", &json!({}), &workdir);
+            let test_summary: String = test_output.lines()
+                .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
+                .take(10)
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let files = tools::execute_tool("list_directory", &json!({"path": "."}), &workdir);
+
+            // Grep for keywords from test failures
+            let mut grep_results = String::new();
+            let source_files: Vec<&str> = files.lines()
+                .filter(|f| (f.ends_with(".py") || f.ends_with(".rs") || f.ends_with(".js") || f.ends_with(".ts"))
+                    && !f.starts_with("test_") && !f.contains("__pycache__"))
+                .collect();
+
+            for line in test_summary.lines() {
+                for word in line.split_whitespace() {
+                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                    if clean.len() > 3 && (clean.contains('_') || clean.starts_with("test_")) {
+                        let pattern = if clean.starts_with("test_") { &clean[5..] } else { clean };
+                        for src in &source_files {
+                            let result = tools::execute_tool("grep", &json!({"pattern": pattern, "file": src}), &workdir);
+                            if result != "no matches found" {
+                                grep_results.push_str(&format!("grep '{}' in {}:\n{}\n", pattern, src, result.lines().take(5).collect::<Vec<_>>().join("\n")));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Read source files (first 200 lines or around grep hits)
+            let mut source_excerpts = String::new();
+            for src in &source_files {
+                let content = tools::execute_tool("read_file", &json!({"path": src}), &workdir);
+                let line_count = content.lines().count();
+                if line_count <= 200 {
+                    source_excerpts.push_str(&format!("=== {} ({} lines) ===\n{}\n", src, line_count, content));
+                } else {
+                    source_excerpts.push_str(&format!("=== {} ({} lines, showing first 50) ===\n{}\n", src, line_count,
+                        content.lines().take(50).collect::<Vec<_>>().join("\n")));
+                }
+            }
+
+            let localization = format!(
+                "## Test Results\n{}\n\n## Files\n{}\n\n## Grep Hits\n{}\n\n## Source\n{}\n",
+                test_summary, files.lines().take(20).collect::<Vec<_>>().join(", "),
+                grep_results, source_excerpts
+            );
+
+            if json_mode {
+                events::emit_json(&TuiEvent::Localized {
+                    files: source_files.iter().map(|s| s.to_string()).collect(),
+                    test_failures: test_summary.clone(),
+                    excerpt_lines: localization.lines().count(),
+                });
+            }
+            eprintln!("[LOCALIZE] {} source files, {} test lines, {} grep lines",
+                source_files.len(), test_summary.lines().count(), grep_results.lines().count());
+
+            conversation.push(ChatMessage {
+                role: "user".into(),
+                content: format!("Bug localization results:\n{}", localization),
+            });
+        }
+
         let mut step = 0u32;
         let max_iter = state_def.max_iterations.unwrap_or(10);
+        let mut classified = false;
 
         loop {
             step += 1;
             if step > max_iter {
+                // Tier 1 classifier: re-prompt the model to pick a valid transition
+                if !classified {
+                    classified = true;
+                    let valid_list = transitions.iter()
+                        .map(|(e, t)| format!("  {} → {}", e, t))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    // Use only the LAST tool result — not stale history from prior cycles
+                    let last_result = conversation.iter()
+                        .filter(|m| m.role == "user")
+                        .last()
+                        .map(|m| m.content.chars().take(500).collect::<String>())
+                        .unwrap_or_else(|| "No tool results.".to_string());
+
+                    let classify_prompt = format!(
+                        "State: '{}'. Instructions: {}\n\
+                         Last tool result:\n{}\n\n\
+                         Valid transitions:\n{}\n\n\
+                         Based on the result above, which transition event is correct?\n\
+                         Reply with ONLY the event name, nothing else.",
+                        target_state, instructions, last_result, valid_list
+                    );
+
+                    eprintln!("[CLASSIFY] Asking model to pick a valid transition for '{}'", target_state);
+                    let classify_response = client.chat(vec![
+                        ChatMessage { role: "system".into(), content: "Reply with ONLY the transition event name. No explanation.".into() },
+                        ChatMessage { role: "user".into(), content: classify_prompt },
+                    ]).await;
+
+                    if let Ok(raw) = classify_response {
+                        // Extract event name: model may respond "TESTS_FAIL" or "TESTS_FAIL → retry" or "TESTS_FAIL."
+                        let cleaned = raw.trim().trim_matches('"').trim();
+                        let event = cleaned.split_whitespace().next()
+                            .unwrap_or(cleaned)
+                            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                            eprintln!("[CLASSIFY] Model chose: {} → {}", event, target_name);
+                            if json_mode {
+                                events::emit_json(&TuiEvent::Transition {
+                                    from: target_state.clone(), to: target_name.clone(),
+                                    trigger: Some(event.to_string()),
+                                    rationale: Some("Classified by model after max_iterations".to_string()),
+                                });
+                                events::emit_json(&TuiEvent::Completed { steps: step - 1, success: true });
+                            }
+                            break;
+                        } else {
+                            eprintln!("[CLASSIFY] Model response '{}' not a valid event", event);
+                        }
+                    }
+                }
+
+                // Classification failed — exit with failure
                 if json_mode {
                     events::emit_json(&TuiEvent::Completed { steps: step - 1, success: false });
                 }
-                eprintln!("Max iterations ({}) exceeded in state '{}'", max_iter, target_state);
+                eprintln!("Max iterations ({}) exceeded in state '{}', classification failed", max_iter, target_state);
                 break;
             }
 
@@ -731,7 +854,8 @@ async fn main() {
                 &transitions, &workdir, false, Some(max_iter - step), false, "", false,
             );
             let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
-            // Single-state mode: fresh prompt each step (Rust harness parity)
+            // Include accumulated conversation (tool calls + results from prior steps)
+            messages.extend(conversation.iter().cloned());
             messages.push(ChatMessage { role: "user".into(), content: "Proceed with the next action.".into() });
 
             let raw_response = match client.chat(messages).await {
@@ -760,24 +884,79 @@ async fn main() {
                 }
             };
 
-            // Handle transition — exit single-state mode
+            // Handle transition — validate event against state's transition map
             if let Some(event) = &resp.transition {
-                let target = transitions.iter().find(|(e, _)| e == event).map(|(_, t)| t.as_str()).unwrap_or("?");
-                if json_mode {
-                    events::emit_json(&TuiEvent::Transition {
-                        from: target_state.clone(), to: target.to_string(),
-                        trigger: Some(event.clone()), rationale: resp.error.clone(),
-                    });
-                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                let rationale = resp.error.clone().or_else(|| resp.reasoning.clone());
+
+                // Check if this is a valid event for this state
+                if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                    if json_mode {
+                        events::emit_json(&TuiEvent::Transition {
+                            from: target_state.clone(), to: target_name.clone(),
+                            trigger: Some(event.clone()), rationale: rationale.clone(),
+                        });
+                        events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                    } else {
+                        println!("[TRANSITION] {} -> {} (event: {})", target_state, target_name, event);
+                        if let Some(r) = &rationale {
+                            println!("  rationale: {}", r);
+                        }
+                    }
+                    break;
                 } else {
-                    println!("[TRANSITION] {} -> {} (event: {})", target_state, target, event);
+                    // Invalid event — tell the model to pick a valid one
+                    let valid_events: Vec<String> = transitions.iter()
+                        .map(|(e, t)| format!("{} → {}", e, t))
+                        .collect();
+                    let rejection = format!(
+                        "Invalid transition event '{}'. Valid transitions from '{}' are:\n  {}\nAnalyze your results and call transition with the CORRECT event name and a rationale explaining why.",
+                        event, target_state, valid_events.join("\n  ")
+                    );
+                    if json_mode {
+                        events::emit_json(&TuiEvent::GuardBlocked {
+                            tool: format!("transition({})", event),
+                            state: target_state.to_string(),
+                        });
+                    } else {
+                        eprintln!("  [REJECTED] {}", rejection);
+                    }
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: rejection,
+                    });
+                    // Don't break — let the model retry with a valid event
                 }
-                break;
             }
 
             // Handle tool calls
             if let Some(calls) = resp.tool_calls {
+                let mut should_break = false;
                 for tc in &calls {
+                    // Intercept transition tool calls (model calls transition as a tool, not via resp.transition)
+                    if tc.name == "transition" || tc.name == "statewright_transition" {
+                        let event = tc.args.get("event").and_then(|v| v.as_str()).unwrap_or("DONE");
+                        let rationale = tc.args.get("rationale").or_else(|| tc.args.get("reason")).and_then(|v| v.as_str());
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                            if json_mode {
+                                events::emit_json(&TuiEvent::Transition {
+                                    from: target_state.clone(), to: target_name.clone(),
+                                    trigger: Some(event.to_string()),
+                                    rationale: rationale.map(|s| s.to_string()),
+                                });
+                                events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                            }
+                            should_break = true;
+                            break;
+                        } else {
+                            let valid = transitions.iter().map(|(e, t)| format!("{} → {}", e, t)).collect::<Vec<_>>().join(", ");
+                            conversation.push(ChatMessage {
+                                role: "user".into(),
+                                content: format!("Invalid event '{}'. Valid: {}. Pick the correct one.", event, valid),
+                            });
+                            continue;
+                        }
+                    }
+
                     if json_mode {
                         events::emit_json(&TuiEvent::ToolCall {
                             name: tc.name.clone(),
@@ -802,7 +981,40 @@ async fn main() {
                         role: "user".into(),
                         content: format!("=== {} result ===\n{}", tc.name, result),
                     });
+
+                    // Auto-test: after any edit tool, run tests. If pass, auto-transition DONE/TESTS_PASS.
+                    // TODO: Expose as a per-state workflow flag (e.g. "auto_test": true) so non-Rust TUIs
+                    // implementing direct_execution can replicate this behavior. Currently implicit in
+                    // sw-agent's --state path only.
+                    let is_edit = matches!(tc.name.as_str(), "edit_line" | "edit_block" | "patch_file" | "apply_patch" | "write_file");
+                    if is_edit && !result.starts_with("error") {
+                        let test_output = tools::execute_tool("run_test", &serde_json::json!({}), &workdir);
+                        let tests_pass = test_output.contains("passed") && !test_output.contains("failed") && !test_output.contains("FAILED");
+                        if json_mode {
+                            events::emit_json(&TuiEvent::AutoTest { passed: tests_pass, fail_count: 0 });
+                        }
+                        if tests_pass {
+                            // Find the best forward transition (DONE, TESTS_PASS, or first non-FAIL)
+                            let auto_event = transitions.iter()
+                                .find(|(e, _)| e == "DONE" || e == "TESTS_PASS")
+                                .or_else(|| transitions.iter().find(|(e, _)| e != "FAIL"))
+                                .map(|(e, _)| e.clone());
+                            if let Some(event) = auto_event {
+                                let target = transitions.iter().find(|(e, _)| *e == event).map(|(_, t)| t.clone()).unwrap_or("?".into());
+                                if json_mode {
+                                    events::emit_json(&TuiEvent::Transition {
+                                        from: target_state.clone(), to: target,
+                                        trigger: Some(event), rationale: Some("Auto-test pass after edit".into()),
+                                    });
+                                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                                }
+                                should_break = true;
+                                break;
+                            }
+                        }
+                    }
                 }
+                if should_break { break; }
             }
         }
 

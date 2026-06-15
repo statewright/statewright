@@ -550,12 +550,20 @@ fn edit_line(args: &Value, workdir: &str) -> String {
             .min_by_key(|&&idx| (idx as isize - hint as isize).unsigned_abs())
             .unwrap()
     } else {
-        return format!(
-            "error: '{}' found on {} lines ({}) — provide 'line' to disambiguate",
-            old_trimmed,
-            matches.len(),
-            matches.iter().map(|i| format!("L{}", i + 1)).collect::<Vec<_>>().join(", ")
-        );
+        // Multiple matches, no line hint — edit ALL occurrences
+        let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let new_trimmed = new_content.trim_start();
+        let mut changed = Vec::new();
+        for &idx in &matches {
+            let indent: String = lines[idx].chars().take_while(|c| c.is_whitespace()).collect();
+            new_lines[idx] = format!("{}{}", indent, new_trimmed);
+            changed.push(format!("L{}", idx + 1));
+        }
+        let new_file = new_lines.join("\n") + "\n";
+        return match std::fs::write(&full_path, &new_file) {
+            Ok(()) => format!("{} changed ({}): '{}' -> '{}'", changed.len(), changed.join(", "), old_trimmed, new_content.trim()),
+            Err(e) => format!("error writing '{}': {}", path, e),
+        };
     };
 
     let mut new_lines: Vec<String> = lines.iter().map(|l| l.to_string()).collect();

@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh permission-request",
+            "timeout": 2000
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "*",

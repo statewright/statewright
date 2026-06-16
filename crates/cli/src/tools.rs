@@ -516,29 +516,73 @@ fn edit_line(args: &Value, workdir: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     // Unescape JSON artifacts, strip whitespace and trailing newlines
     let old_unescaped = old.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\");
-    let old_trimmed = old_unescaped.trim().lines().next().unwrap_or("").trim();
 
-    // Find all matching lines
-    let matches: Vec<usize> = lines.iter().enumerate()
+    // If model sent multi-line old, delegate to edit_block logic
+    let old_line_count = old_unescaped.trim().lines().count();
+    if old_line_count > 1 {
+        // Redirect to edit_block which handles multi-line matching properly
+        let block_args = serde_json::json!({
+            "path": path,
+            "old": old,
+            "new": new_content,
+        });
+        return edit_block(&block_args, workdir);
+    }
+
+    let old_trimmed = old_unescaped.trim();
+
+    // Find all matching lines (trimmed equality)
+    let mut matches: Vec<usize> = lines.iter().enumerate()
         .filter(|(_, line)| line.trim() == old_trimmed)
         .map(|(i, _)| i)
         .collect();
 
+    // Fallback: substring match if exact trimmed match fails
     if matches.is_empty() {
-        // Show lines that partially match to help the model
-        let partial: Vec<String> = lines.iter().enumerate()
-            .filter(|(_, line)| line.contains(old_trimmed) || old_trimmed.contains(line.trim()))
-            .take(3)
-            .map(|(i, line)| format!("  L{}: {}", i + 1, line))
+        matches = lines.iter().enumerate()
+            .filter(|(_, line)| line.contains(old_trimmed))
+            .map(|(i, _)| i)
             .collect();
+    }
 
-        let hint = if partial.is_empty() {
-            String::new()
+    if matches.is_empty() {
+        // Show actual file content near where the model might have intended.
+        // Use grep-like search for keywords from the old content, or show the
+        // region around line hint if provided.
+        let mut context_hint = String::new();
+
+        if let Some(hint) = hint_line {
+            // Model gave a line number — show what's actually there
+            let start = hint.saturating_sub(3);
+            let end = (hint + 3).min(lines.len());
+            context_hint.push_str(&format!("\nActual content around line {}:\n", hint));
+            for i in start..end {
+                context_hint.push_str(&format!("  L{}: {}\n", i + 1, lines[i]));
+            }
         } else {
-            format!("\nPartial matches:\n{}", partial.join("\n"))
-        };
+            // Find lines that share significant content (not empty/trivial)
+            let keywords: Vec<&str> = old_trimmed.split_whitespace()
+                .filter(|w| w.len() > 3 && !["self", "def", "return", "class", "import", "from", "None", "True", "False"].contains(w))
+                .take(3)
+                .collect();
+            if !keywords.is_empty() {
+                let keyword = keywords[0];
+                let nearby: Vec<String> = lines.iter().enumerate()
+                    .filter(|(_, line)| line.contains(keyword) && line.trim().len() > 5)
+                    .take(3)
+                    .map(|(i, line)| format!("  L{}: {}", i + 1, line.trim()))
+                    .collect();
+                if !nearby.is_empty() {
+                    context_hint.push_str(&format!("\nLines containing '{}':\n{}", keyword, nearby.join("\n")));
+                }
+            }
+        }
 
-        return format!("error: '{}' not found in {}. Read the file to find the exact content.{}", old_trimmed, path, hint);
+        if context_hint.is_empty() {
+            context_hint = "\nUse read_file with start_line/end_line to see the actual content before editing.".to_string();
+        }
+
+        return format!("error: '{}' not found in {}.{}", old_trimmed, path, context_hint);
     }
 
     // Pick the right match
@@ -650,7 +694,7 @@ fn edit_block(args: &Value, workdir: &str) -> String {
         .replace("\\\\", "\\");
 
     // Normalize the old block for matching: trim each line, collapse whitespace
-    let old_lines: Vec<&str> = old_unescaped.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let mut old_lines: Vec<&str> = old_unescaped.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     if old_lines.is_empty() {
         return "error: 'old' block is empty".into();
     }
@@ -693,7 +737,10 @@ fn edit_block(args: &Value, workdir: &str) -> String {
                         // Accept if span is within 3 lines of expected
                         if span.abs_diff(old_lines.len()) <= 3 {
                             match_start = Some(i);
-                            // Adjust old_lines length to match actual span
+                            // Use actual span for replacement range
+                            old_lines = file_lines[i..=end].iter()
+                                .map(|l| l.trim())
+                                .collect();
                             break;
                         }
                     }
@@ -706,11 +753,26 @@ fn edit_block(args: &Value, workdir: &str) -> String {
     let start = match match_start {
         Some(s) => s,
         None => {
-            // Show what we were looking for
             let search_preview = old_lines.iter().take(3).cloned().collect::<Vec<_>>().join(" | ");
+            // Find where the first line of the block occurs to show actual context
+            let first_line = old_lines[0];
+            let mut context_hint = String::new();
+            for (i, fl) in file_lines.iter().enumerate() {
+                if fl.trim().contains(first_line) || first_line.contains(fl.trim()) {
+                    if fl.trim().len() > 5 {
+                        let start = i.saturating_sub(2);
+                        let end = (i + old_lines.len() + 2).min(file_lines.len());
+                        context_hint.push_str(&format!("\nActual content near L{}:\n", i + 1));
+                        for j in start..end {
+                            context_hint.push_str(&format!("  L{}: {}\n", j + 1, file_lines[j]));
+                        }
+                        break;
+                    }
+                }
+            }
             return format!(
-                "error: block not found in {}. Looking for: '{}'. Read the file to find the exact content.",
-                path, search_preview
+                "error: block not found in {}. Looking for: '{}'.{}",
+                path, search_preview, context_hint
             );
         }
     };
@@ -941,7 +1003,48 @@ fn patch_file(args: &Value, workdir: &str) -> String {
 
         let old_unescaped = old.replace("\\\"", "\"").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\");
         let old_trimmed = old_unescaped.trim();
+        let old_line_count = old_trimmed.lines().count();
+
+        if old_line_count > 1 {
+            // Multi-line old: sliding window match (same as edit_block)
+            let old_parts: Vec<&str> = old_trimmed.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            let mut found_start: Option<usize> = None;
+            for i in 0..lines.len().saturating_sub(old_parts.len().saturating_sub(1)) {
+                let mut ok = true;
+                for (j, pat) in old_parts.iter().enumerate() {
+                    if i + j >= lines.len() || lines[i + j].trim() != *pat {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    found_start = Some(i);
+                    break;
+                }
+            }
+            match found_start {
+                Some(idx) => {
+                    let indent: String = lines[idx].chars().take_while(|c| c.is_whitespace()).collect();
+                    let new_lines: Vec<String> = new_content.lines().map(|l| {
+                        let t = l.trim_start();
+                        if t.is_empty() { String::new() } else { format!("{}{}", indent, t) }
+                    }).collect();
+                    let old_preview = old_parts[0].to_string();
+                    lines.splice(idx..idx + old_parts.len(), new_lines);
+                    changes.push((old_preview, new_content.lines().next().unwrap_or("").to_string()));
+                    applied += 1;
+                }
+                None => {
+                    errors.push(format!("'{}' not found", old_parts[0]));
+                }
+            }
+            continue;
+        }
+
         let found = lines.iter().position(|l| l.trim() == old_trimmed);
+
+        // Substring fallback
+        let found = found.or_else(|| lines.iter().position(|l| l.contains(old_trimmed)));
 
         match found {
             Some(idx) => {

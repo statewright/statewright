@@ -322,7 +322,7 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
     serde_json::from_value(json!({
         "id": "fix-bug",
         "initial": "localizing",
-        "meta": { "task_type": "bug_fix", "danger_level": "moderate", "estimated_steps": 8 },
+        "meta": { "task_type": "bug_fix", "danger_level": "moderate", "estimated_steps": 20 },
         "states": {
             "localizing": {
                 "allowed_tools": [],
@@ -332,14 +332,14 @@ fn hardcoded_bug_fix_machine() -> MachineDefinition {
             "planning": {
                 "allowed_tools": ["read_file", "list_directory", "find_files", "run_test", "grep"],
                 "instructions": "Review the localized code sections and test failures provided. Identify the exact bug. Use grep or read_file with start_line/end_line if you need more context. Do NOT modify files yet.",
-                "max_iterations": 5,
+                "max_iterations": 10,
                 "safe_next": "implementing",
                 "on": { "PLAN_READY": "implementing", "DONE": "implementing", "FAIL": "failed" }
             },
             "implementing": {
                 "allowed_tools": ["read_file", "list_directory", "find_files", "grep", "run_test", "inspect_class", "edit_line", "edit_block", "patch_file", "apply_patch", "write_file", "insert_between"],
                 "instructions": "Fix ONLY the bug. Use edit_line, edit_block, patch_file, or apply_patch. Change the fewest lines possible. Use run_test with a path to verify your fix.",
-                "max_iterations": 6,
+                "max_iterations": 15,
                 "safe_next": "testing",
                 "on": { "DONE": "testing", "FAIL": "failed" }
             },
@@ -2182,7 +2182,7 @@ async fn main() {
             let cache_key = format!("{}:{}", tool_name, serde_json::to_string(tool_args).unwrap_or_default());
             let read_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
 
-            let result = if is_read && !is_ranged_read && !modified_files.contains(&read_path) {
+            let mut result = if is_read && !is_ranged_read && !modified_files.contains(&read_path) {
                 if let Some((prev_step, prev_result)) = read_cache.get(&cache_key) {
                     let line_count = prev_result.lines().count();
                     let summary = format!(
@@ -2257,6 +2257,52 @@ async fn main() {
             } else {
                 tools::execute_tool(tool_name, tool_args, &args.workdir)
             };
+
+            // Auto-read-before-edit: when an edit tool fails because content wasn't found,
+            // and the model hasn't read this file recently, inject the file content into
+            // the error response so the model's next attempt uses real content.
+            let is_edit_tool = tool_name.contains("edit") || tool_name == "patch_file";
+            let edit_failed = is_edit_tool && (result.contains("not found") || result.contains("error: block not found"));
+            if edit_failed {
+                let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                let cache_hit = read_cache.keys().any(|k| k.contains(edit_path));
+                if !cache_hit && !edit_path.is_empty() {
+                    // Model hasn't read this file — auto-inject content
+                    let full_edit_path = std::path::Path::new(&args.workdir).join(edit_path);
+                    if full_edit_path.exists() {
+                        let file_content = std::fs::read_to_string(&full_edit_path).unwrap_or_default();
+                        let line_count = file_content.lines().count();
+                        if line_count <= 200 {
+                            // Small file — show the whole thing
+                            println!("  [AUTO-READ] Injecting {} ({} lines) — model hasn't read it", edit_path, line_count);
+                            result.push_str(&format!(
+                                "\n\nHere is the actual content of {} ({} lines):\n{}\n\nUse the EXACT content from above in your next edit.",
+                                edit_path, line_count, file_content
+                            ));
+                        } else {
+                            // Large file — show region around the old content keywords
+                            let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
+                            let keyword = old_arg.split_whitespace()
+                                .find(|w| w.len() > 4 && !["self", "return", "class", "import", "from", "None"].contains(w))
+                                .unwrap_or(old_arg.split_whitespace().next().unwrap_or(""));
+                            let file_lines: Vec<&str> = file_content.lines().collect();
+                            let hit = file_lines.iter().position(|l| l.contains(keyword));
+                            if let Some(idx) = hit {
+                                let start = idx.saturating_sub(10);
+                                let end = (idx + 20).min(file_lines.len());
+                                let excerpt: Vec<String> = file_lines[start..end].iter().enumerate()
+                                    .map(|(i, l)| format!("L{}: {}", start + i + 1, l))
+                                    .collect();
+                                println!("  [AUTO-READ] Injecting {} lines {}-{} (keyword '{}')", edit_path, start+1, end, keyword);
+                                result.push_str(&format!(
+                                    "\n\nHere is the actual content of {} around line {} (keyword '{}'):\n{}\n\nUse the EXACT content from above in your next edit.",
+                                    edit_path, idx + 1, keyword, excerpt.join("\n")
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
 
             // Two-phase file write: intercept CREATE_FILE_READY sentinel.
             // Make a second LLM call for raw file content (no JSON escaping).

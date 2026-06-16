@@ -58,6 +58,36 @@ fn resolve_path(path: &str, workdir: &str) -> String {
             return basename.to_string_lossy().to_string();
         }
     }
+    // FIX 3: Fuzzy path resolution via git ls-files.
+    // Model guesses "matplotlib/legend.py" but real path is "lib/matplotlib/legend.py".
+    // Search for files matching the basename in the repo.
+    if let Some(basename) = Path::new(path).file_name().and_then(|f| f.to_str()) {
+        if let Ok(output) = Command::new("git")
+            .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+            .current_dir(workdir)
+            .output()
+        {
+            let files = String::from_utf8_lossy(&output.stdout);
+            // Find files ending with the same basename
+            let candidates: Vec<&str> = files.lines()
+                .filter(|f| f.ends_with(basename))
+                .collect();
+            if candidates.len() == 1 {
+                // Unique match — use it
+                return candidates[0].to_string();
+            } else if candidates.len() > 1 {
+                // Multiple matches — pick the one with the most path components in common
+                let path_parts: Vec<&str> = path.split('/').collect();
+                let best = candidates.iter()
+                    .max_by_key(|c| {
+                        c.split('/').filter(|p| path_parts.contains(p)).count()
+                    });
+                if let Some(b) = best {
+                    return b.to_string();
+                }
+            }
+        }
+    }
     // Return original — let the tool report the error
     path.to_string()
 }

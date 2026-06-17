@@ -318,6 +318,87 @@ fn find_function_body(lines: &[&str], hit_line: usize) -> (usize, usize) {
     (def_idx.saturating_sub(1) + 1, end)
 }
 
+fn extract_anchor_keyword(text: &str) -> Option<String> {
+    let stopwords = [
+        "self", "return", "class", "import", "from", "None", "and", "or", "not",
+        "the", "this", "that", "with", "for", "while", "if", "else", "elif",
+        "true", "false", "null", "def", "async", "await",
+    ];
+
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
+        .find(|w| w.len() > 4 && !stopwords.contains(&w))
+        .map(|s| s.to_string())
+}
+
+fn excerpt_around_line(lines: &[&str], hit_line: usize, before: usize, after: usize) -> String {
+    let idx = hit_line.saturating_sub(1).min(lines.len());
+    let start = idx.saturating_sub(before);
+    let end = (idx + after).min(lines.len());
+    lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("L{}: {}", start + i + 1, l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_readable_excerpt(
+    file_content: &str,
+    localized_regions: Option<&Vec<(usize, String)>>,
+    old_arg: &str,
+) -> String {
+    let file_lines: Vec<&str> = file_content.lines().collect();
+    if file_lines.is_empty() {
+        return String::new();
+    }
+
+    if let Some(keyword) = extract_anchor_keyword(old_arg) {
+        if let Some(idx) = file_lines.iter().position(|l| l.contains(&keyword)) {
+            return excerpt_around_line(&file_lines, idx + 1, 15, 25);
+        }
+    }
+
+    if let Some(regions) = localized_regions {
+        if let Some((line_num, _pattern)) = regions.iter().min_by_key(|(line_num, _)| *line_num) {
+            return excerpt_around_line(&file_lines, *line_num, 15, 25);
+        }
+    }
+
+    // Fall back to a compact numbered skeleton instead of dumping the whole file.
+    let mut skeleton = Vec::new();
+    let mut emitted = 0usize;
+    for (idx, line) in file_lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let looks_like_symbol = trimmed.starts_with("def ")
+            || trimmed.starts_with("class ")
+            || trimmed.starts_with("async def ")
+            || trimmed.starts_with("fn ")
+            || trimmed.starts_with("struct ")
+            || trimmed.starts_with("enum ")
+            || trimmed.starts_with("impl ");
+        if looks_like_symbol {
+            skeleton.push(format!("L{}: {}", idx + 1, line));
+            emitted += 1;
+        }
+        if emitted >= 80 {
+            break;
+        }
+    }
+
+    if skeleton.is_empty() {
+        file_lines
+            .iter()
+            .take(80)
+            .enumerate()
+            .map(|(i, l)| format!("L{}: {}", i + 1, l))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        skeleton.join("\n")
+    }
+}
+
 fn hardcoded_bug_fix_machine() -> MachineDefinition {
     serde_json::from_value(json!({
         "id": "fix-bug",
@@ -1181,6 +1262,8 @@ async fn main() {
     // Localized regions from programmatic recon — used by context cap to suggest ranges
     // Key: filename, Value: vec of (line_num, pattern) from grep hits
     let mut localized_regions: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    // Best localized excerpt per file from the recon pass.
+    let mut localized_file_contexts: HashMap<String, String> = HashMap::new();
 
     // Localization summary — re-injected into implementing prompt for re-grounding
     let mut localization_summary = String::new();
@@ -1676,6 +1759,7 @@ async fn main() {
                                             format!("({} lines, docstrings stripped)\n{}",
                                                 context_lines.len(), context_lines.join("\n"))
                                         };
+                                        localized_file_contexts.insert(src_file.to_string(), context.clone());
                                         if !localized_code.contains(&context) {
                                             localized_code.push_str(&format!(
                                                 "\n=== {} function at L{} ===\n{}\n",
@@ -2242,8 +2326,13 @@ async fn main() {
                             "BLOCKED: '{}' is {} lines — too large for full read (max {} lines for this model).\n",
                             read_path, line_count, max_full_read_lines
                         );
-                        // Add specific range suggestions from localization data
-                        if let Some(regions) = localized_regions.get(&read_path) {
+                        if let Some(excerpt) = localized_file_contexts.get(&read_path) {
+                            suggestion.push_str("Relevant excerpt from bug localization:\n");
+                            suggestion.push_str(excerpt);
+                            suggestion.push('\n');
+                            suggestion.push_str("Use start_line/end_line if you need to inspect adjacent lines.");
+                        } else if let Some(regions) = localized_regions.get(&read_path) {
+                            // Add specific range suggestions from localization data
                             suggestion.push_str("Relevant sections from bug localization:\n");
                             for (line_num, pattern) in regions {
                                 let start = line_num.saturating_sub(5);
@@ -2275,10 +2364,17 @@ async fn main() {
                         println!("  [CONTEXT CAP] BLOCKED: {} is {} lines (max {}) — use ranged read",
                             read_path, line_count, max_full_read_lines);
                     }
-                    format!(
-                        "BLOCKED: '{}' is {} lines — too large. Use read_file with start_line/end_line, or grep to find sections.",
-                        read_path, line_count
-                    )
+                    if let Some(excerpt) = localized_file_contexts.get(&read_path) {
+                        format!(
+                            "BLOCKED: '{}' is {} lines — too large. Relevant excerpt from bug localization:\n\n{}\n\nUse read_file with start_line/end_line if you need a wider window.",
+                            read_path, line_count, excerpt
+                        )
+                    } else {
+                        format!(
+                            "BLOCKED: '{}' is {} lines — too large. Use read_file with start_line/end_line, or grep to find sections.",
+                            read_path, line_count
+                        )
+                    }
                 } else {
                     let r = tools::execute_tool(tool_name, tool_args, &args.workdir);
                     read_cache.insert(cache_key.clone(), (step, r.clone()));
@@ -2288,9 +2384,8 @@ async fn main() {
                 tools::execute_tool(tool_name, tool_args, &args.workdir)
             };
 
-            // FIX 1: Block edits on unread files — force the model to read first.
-            // Instead of letting the edit fail and injecting content after, BLOCK
-            // the edit entirely and auto-read the file into the conversation.
+            // On first edit of an unread file, inject the file content back into the
+            // conversation so the model can correct itself before retrying.
             let is_edit_tool = tool_name.contains("edit") || tool_name == "patch_file";
             if is_edit_tool {
                 let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
@@ -2302,45 +2397,28 @@ async fn main() {
                         let line_count = file_content.lines().count();
                         println!("  [GATE] Edit blocked — {} not read yet, injecting content", edit_path);
 
-                        let content_preview = if line_count <= 150 {
-                            file_content.clone()
-                        } else {
-                            // Show relevant region based on edit target
-                            let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
-                            let keyword = old_arg.split_whitespace()
-                                .find(|w| w.len() > 4 && !["self", "return", "class", "import", "from", "None"].contains(w))
-                                .unwrap_or("");
-                            let file_lines: Vec<&str> = file_content.lines().collect();
-                            let hit = if !keyword.is_empty() {
-                                file_lines.iter().position(|l| l.contains(keyword))
-                            } else { None };
-                            if let Some(idx) = hit {
-                                let s = idx.saturating_sub(15);
-                                let e = (idx + 25).min(file_lines.len());
-                                file_lines[s..e].iter().enumerate()
-                                    .map(|(i, l)| format!("L{}: {}", s + i + 1, l))
-                                    .collect::<Vec<_>>().join("\n")
-                            } else {
-                                // Show first 80 lines
-                                file_lines.iter().take(80).enumerate()
-                                    .map(|(i, l)| format!("L{}: {}", i + 1, l))
-                                    .collect::<Vec<_>>().join("\n")
-                            }
-                        };
+                        let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
+                        let content_preview = localized_file_contexts
+                            .get(edit_path)
+                            .cloned()
+                            .unwrap_or_else(|| build_readable_excerpt(
+                                &file_content,
+                                localized_regions.get(edit_path),
+                                old_arg,
+                            ));
 
-                        // Mark as read so subsequent edits aren't blocked
                         let cache_key_for_edit = format!("read_file:{}", edit_path);
                         read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
 
                         result = format!(
-                            "BLOCKED: You haven't read {} yet. Here is its content ({} lines):\n\n{}\n\nNow retry your edit using the EXACT content from above.",
+                            "BLOCKED: You haven't read {} yet. Here is the most relevant excerpt ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT content from above.",
                             edit_path, line_count, content_preview
                         );
                     }
                 }
             }
 
-            // Also inject content on edit failures (for subsequent attempts on read files)
+            // On edit failure, inject relevant file content to help the next attempt
             let edit_failed = is_edit_tool && (result.contains("not found") || result.contains("error: block not found"));
             if edit_failed {
                 let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
@@ -2349,19 +2427,16 @@ async fn main() {
                     let full_edit_path = std::path::Path::new(&args.workdir).join(edit_path);
                     if full_edit_path.exists() {
                         let file_content = std::fs::read_to_string(&full_edit_path).unwrap_or_default();
-                        let file_lines: Vec<&str> = file_content.lines().collect();
-                        let keyword = old_arg.split_whitespace()
-                            .find(|w| w.len() > 4 && !["self", "return", "class", "import", "from", "None"].contains(w))
-                            .unwrap_or("");
-                        if !keyword.is_empty() {
-                            if let Some(idx) = file_lines.iter().position(|l| l.contains(keyword)) {
-                                let s = idx.saturating_sub(5);
-                                let e = (idx + 10).min(file_lines.len());
-                                let excerpt: Vec<String> = file_lines[s..e].iter().enumerate()
-                                    .map(|(i, l)| format!("L{}: {}", s + i + 1, l))
-                                    .collect();
-                                result.push_str(&format!("\n\nActual content near '{}':\n{}", keyword, excerpt.join("\n")));
-                            }
+                        let preview = localized_file_contexts
+                            .get(edit_path)
+                            .cloned()
+                            .unwrap_or_else(|| build_readable_excerpt(
+                                &file_content,
+                                localized_regions.get(edit_path),
+                                old_arg,
+                            ));
+                        if !preview.is_empty() {
+                            result.push_str(&format!("\n\nActual content near the edit locus:\n{}", preview));
                         }
                     }
                 }

@@ -354,16 +354,54 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
             (runner, runner_args)
         }
         _ => {
-            // Default: Python / pytest
-            let mut a: Vec<String> = vec!["-m".into(), "pytest".into(), "-xvs".into(),
-                "--tb=short".into(), "--no-header".into(), "-q".into()];
-            if let Some(p) = test_path {
-                a.push(p.to_string());
-            } else if let Some(f) = test_file {
-                a.push(f.to_string());
+            // Python: detect Django vs pytest
+            let p = Path::new(workdir);
+            let is_django = p.join("manage.py").exists()
+                || p.join("django").is_dir()
+                || p.join("setup.cfg").exists() && std::fs::read_to_string(p.join("setup.cfg"))
+                    .map(|c| c.contains("[metadata]") && c.contains("django"))
+                    .unwrap_or(false);
+            let has_pytest_support = p.join("pytest.ini").exists()
+                || p.join("conftest.py").exists()
+                || p.join("pyproject.toml").exists() && std::fs::read_to_string(p.join("pyproject.toml"))
+                    .map(|c| c.contains("[tool.pytest.ini_options]") || c.contains("pytest"))
+                    .unwrap_or(false)
+                || p.join("tox.ini").exists() && std::fs::read_to_string(p.join("tox.ini"))
+                    .map(|c| c.contains("[pytest]"))
+                    .unwrap_or(false);
+
+            if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
+                // Django test suite without pytest support: use the repo's own runner.
+                let mut a: Vec<String> = vec!["tests/runtests.py".into(), "--verbosity=1".into()];
+                if let Some(tp) = test_path {
+                    // Convert path like "tests/forms_tests/tests/test_forms.py" to module
+                    let module = tp.trim_start_matches("tests/")
+                        .trim_end_matches(".py")
+                        .replace('/', ".");
+                    a.push(module);
+                } else if let Some(f) = test_file {
+                    let module = f.trim_start_matches("tests/")
+                        .trim_end_matches(".py")
+                        .replace('/', ".");
+                    a.push(module);
+                }
+                a.extend(extra_args);
+                ("python3".to_string(), a)
+            } else {
+                let mut a: Vec<String> = vec!["-m".into(), "pytest".into(), "-xvs".into(),
+                    "--tb=short".into(), "--no-header".into(), "-q".into()];
+                if is_django {
+                    a.push("-m".into());
+                    a.push("django".into());
+                }
+                if let Some(tp) = test_path {
+                    a.push(tp.to_string());
+                } else if let Some(f) = test_file {
+                    a.push(f.to_string());
+                }
+                a.extend(extra_args);
+                ("python3".to_string(), a)
             }
-            a.extend(extra_args);
-            ("python3".to_string(), a)
         }
     };
 
@@ -381,11 +419,21 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
         }
     }
 
-    let output = Command::new(&cmd)
+    let mut command = Command::new(&cmd);
+    command
         .args(&cmd_args)
         .current_dir(workdir)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output();
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+
+    if cmd == "python3" {
+        let pythonpath = match std::env::var("PYTHONPATH") {
+            Ok(existing) if !existing.is_empty() => format!("{}:{}", workdir, existing),
+            _ => workdir.to_string(),
+        };
+        command.env("PYTHONPATH", pythonpath);
+    }
+
+    let output = command.output();
 
     match output {
         Ok(out) => {

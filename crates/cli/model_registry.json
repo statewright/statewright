@@ -9,7 +9,11 @@
     "max_diff_lines": 10,
     "unescape_tool_args": false,
     "single_quote_json": false,
-    "num_ctx": 8192
+    "num_ctx": 8192,
+    "sandbox_failed_edits": false,
+    "read_only_tests": false,
+    "small_model_edit_tools": false,
+    "enforce_localized_edit_locus": false
   },
   "models": {
     "gemma4": {
@@ -89,10 +93,17 @@
       "family_defaults": {
         "tool_mode": "native",
         "reasoning": true,
-        "response_field": "content"
+        "response_field": "content",
+        "sandbox_failed_edits": true,
+        "read_only_tests": true,
+        "enforce_localized_edit_locus": true
       },
       "sizes": {
-        "8b": { "history_window": 5, "max_full_read_lines": 200 },
+        "8b": {
+          "history_window": 5,
+          "max_full_read_lines": 200,
+          "small_model_edit_tools": true
+        },
         "32b": { "history_window": 10, "max_full_read_lines": 600 }
       }
     }

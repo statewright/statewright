@@ -6,14 +6,14 @@ mod tools;
 use clap::Parser;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
-use std::process::Command;
 use statewright_agent::ollama_client::{OllamaClient, OllamaConfig};
 use statewright_agent::prompt_templates::ChatMessage;
 use statewright_agent::tool_enforcer;
 use statewright_agent::validator::validate_agent_machine;
+use statewright_cli::events::{self, TuiEvent};
 use statewright_engine::MachineDefinition;
-use statewright_cli::events::{self, TuiEvent, StateInfo};
+use std::collections::HashMap;
+use std::process::Command;
 
 /// Tee stdout to a log file using a background thread.
 /// All println! output automatically goes to both stdout and the file.
@@ -23,15 +23,17 @@ struct StdoutTee {
 
 impl StdoutTee {
     fn start(path: &str) -> Self {
-        use std::os::unix::io::FromRawFd;
         use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::io::FromRawFd;
 
         let log_path = path.to_string();
 
         // Create a pipe
         let (read_fd, write_fd) = {
             let mut fds = [0i32; 2];
-            unsafe { libc::pipe(fds.as_mut_ptr()); }
+            unsafe {
+                libc::pipe(fds.as_mut_ptr());
+            }
             (fds[0], fds[1])
         };
 
@@ -39,7 +41,10 @@ impl StdoutTee {
         let orig_stdout = unsafe { libc::dup(1) };
 
         // Redirect stdout to the write end of the pipe
-        unsafe { libc::dup2(write_fd, 1); libc::close(write_fd); }
+        unsafe {
+            libc::dup2(write_fd, 1);
+            libc::close(write_fd);
+        }
 
         // Spawn thread that reads from pipe, writes to both original stdout and file
         let handle = std::thread::spawn(move || {
@@ -55,7 +60,9 @@ impl StdoutTee {
             }
         });
 
-        StdoutTee { _handle: Some(handle) }
+        StdoutTee {
+            _handle: Some(handle),
+        }
     }
 }
 
@@ -70,26 +77,31 @@ impl Drop for StdoutTee {
 /// RAII guard that restores files on drop (normal exit or panic).
 struct RestoreGuard {
     workdir: String,
-    originals: HashMap<String, String>,
+    originals: tools::Snapshot,
 }
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
-        for (name, content) in &self.originals {
-            let path = std::path::Path::new(&self.workdir).join(name);
-            if let Err(e) = std::fs::write(&path, content) {
-                eprintln!("[Restore] Failed to restore {}: {}", name, e);
-            }
-        }
-        println!("\n[Restore] {} file(s) restored to original state", self.originals.len());
+        tools::restore_from_snapshot(&self.workdir, &self.originals);
+        println!(
+            "\n[Restore] {} file(s) restored to original state",
+            self.originals.len()
+        );
     }
 }
 
 #[derive(Parser)]
-#[command(name = "sw-agent", about = "Statewright agent — state machine constrained LLM executor")]
+#[command(
+    name = "sw-agent",
+    about = "Statewright agent — state machine constrained LLM executor"
+)]
 struct Args {
     /// Task description for the agent
-    #[arg(short, long, default_value = "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py")]
+    #[arg(
+        short,
+        long,
+        default_value = "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py"
+    )]
     task: String,
 
     /// Working directory for the agent
@@ -209,9 +221,15 @@ struct ModelConfig {
     programmatic: bool,
 }
 
-fn default_num_ctx() -> u32 { 8192 }
-fn default_temperature() -> f32 { 0.3 }
-fn default_num_predict() -> u32 { 4096 }
+fn default_num_ctx() -> u32 {
+    8192
+}
+fn default_temperature() -> f32 {
+    0.3
+}
+fn default_num_predict() -> u32 {
+    4096
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(default)]
@@ -256,7 +274,6 @@ struct ToolCallRequest {
     args: serde_json::Value,
 }
 
-
 /// Find the extent of a function/class body around a grep hit.
 /// If the hit is on or near a `def`/`class` line, walk indentation to find the full body.
 /// Otherwise fall back to +/-15 line window.
@@ -273,7 +290,8 @@ fn find_function_body(lines: &[&str], hit_line: usize) -> (usize, usize) {
 
     for i in search_start..search_end {
         let trimmed = lines[i].trim_start();
-        if trimmed.starts_with("def ") || trimmed.starts_with("class ")
+        if trimmed.starts_with("def ")
+            || trimmed.starts_with("class ")
             || trimmed.starts_with("async def ")
         {
             def_idx = Some(i);
@@ -320,9 +338,9 @@ fn find_function_body(lines: &[&str], hit_line: usize) -> (usize, usize) {
 
 fn extract_anchor_keyword(text: &str) -> Option<String> {
     let stopwords = [
-        "self", "return", "class", "import", "from", "None", "and", "or", "not",
-        "the", "this", "that", "with", "for", "while", "if", "else", "elif",
-        "true", "false", "null", "def", "async", "await",
+        "self", "return", "class", "import", "from", "None", "and", "or", "not", "the", "this",
+        "that", "with", "for", "while", "if", "else", "elif", "true", "false", "null", "def",
+        "async", "await",
     ];
 
     text.split_whitespace()
@@ -397,6 +415,209 @@ fn build_readable_excerpt(
     } else {
         skeleton.join("\n")
     }
+}
+
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn is_bugfix_mode(args: &Args) -> bool {
+    !args.control && !args.tdd && !args.tdd_greenfield && !args.tdd_chain
+}
+
+fn preferred_edit_tools(allowed_tools: &[String]) -> String {
+    let preferred: Vec<&str> = [
+        "edit_line",
+        "insert_between",
+        "edit_block",
+        "patch_file",
+        "apply_patch",
+        "write_file",
+        "create_file",
+    ]
+    .iter()
+    .copied()
+    .filter(|tool| allowed_tools.iter().any(|allowed| allowed == tool))
+    .collect();
+    if preferred.is_empty() {
+        "edit the code".into()
+    } else {
+        preferred.join(", ")
+    }
+}
+
+fn tool_reference_lines(allowed_tools: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for tool in allowed_tools {
+        let line = match tool.as_str() {
+            "read_file" => Some(
+                r#"- read_file: args: {"path": "filename"} or {"path": "filename", "start_line": 120, "end_line": 150}"#,
+            ),
+            "write_file" => {
+                Some(r#"- write_file: args: {"path": "filename", "content": "full file content"}"#)
+            }
+            "create_file" => Some(r#"- create_file: args: {"path": "filename"}"#),
+            "list_directory" => Some(r#"- list_directory: args: {"path": "."}"#),
+            "run_test" => Some(r#"- run_test: args: {} or {"path": "tests/"}"#),
+            "find_files" => Some(r#"- find_files: args: {"pattern": "*.py"}"#),
+            "inspect_class" => Some(
+                r#"- inspect_class: args: {"class": "ClassName"} or {"class": "ClassName", "attribute": "__slots__"}"#,
+            ),
+            "grep" => Some(
+                r#"- grep: args: {"pattern": "search term"} or {"pattern": "search term", "file": "filename"}"#,
+            ),
+            "diff" => Some(r#"- diff: args: {"path": "filename"}"#),
+            "edit_line" => Some(
+                r#"- edit_line: args: {"path": "filename", "old": "line to find", "new": "replacement"} or {"path": "filename", "line": 100, "new": "new code"}"#,
+            ),
+            "edit_block" => Some(
+                r#"- edit_block: args: {"path": "filename", "old": "multi\nline\nblock", "new": "replacement\nblock"}"#,
+            ),
+            "patch_file" => Some(
+                r#"- patch_file: args: {"path": "filename", "patches": [{"old": "old line", "new": "new line"}]}"#,
+            ),
+            "apply_patch" => {
+                Some(r#"- apply_patch: args: {"patch": "--- a/file\n+++ b/file\n@@ ..."}"#)
+            }
+            "insert_between" => Some(
+                r#"- insert_between: args: {"path": "filename", "after": "line to insert after", "new": "new code"}"#,
+            ),
+            _ => None,
+        };
+        if let Some(line) = line {
+            lines.push(line.to_string());
+        }
+    }
+    lines
+}
+
+fn small_model_bugfix_tools() -> Vec<String> {
+    [
+        "read_file",
+        "list_directory",
+        "find_files",
+        "grep",
+        "run_test",
+        "inspect_class",
+        "edit_line",
+        "insert_between",
+    ]
+    .iter()
+    .map(|tool| tool.to_string())
+    .collect()
+}
+
+fn apply_profile_tool_restrictions(
+    definition: &mut MachineDefinition,
+    profile: &model_registry::ResolvedTraits,
+    bugfix_mode: bool,
+) {
+    if !bugfix_mode || !profile.small_model_edit_tools {
+        return;
+    }
+
+    if let Some(state) = definition.states.get_mut("implementing") {
+        state.allowed_tools = Some(small_model_bugfix_tools());
+        state.instructions = Some(
+            "Fix ONLY the bug. Use edit_line or insert_between for a minimal source-code edit. Change the fewest lines possible. Use run_test with a path to verify your fix.".into()
+        );
+    }
+}
+
+fn parse_sw_test_files() -> HashMap<String, String> {
+    std::env::var("SW_TEST_FILES")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(':')
+                .map(|p| p.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|path| !path.is_empty())
+        .map(|path| (path.clone(), path.replace('\\', "/")))
+        .collect()
+}
+
+fn is_test_path(path: &str, sw_test_files: &HashMap<String, String>) -> bool {
+    let normalized = path.replace('\\', "/");
+    if sw_test_files.contains_key(path) || sw_test_files.values().any(|p| p == &normalized) {
+        return true;
+    }
+
+    let basename = std::path::Path::new(&normalized)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+
+    normalized.starts_with("tests/")
+        || normalized.contains("/tests/")
+        || normalized.starts_with("testing/")
+        || normalized.contains("/testing/")
+        || basename.starts_with("test_")
+        || basename.ends_with("_test.py")
+        || basename.ends_with("_tests.py")
+}
+
+fn extract_patch_paths(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let candidate = trimmed
+                .strip_prefix("+++ b/")
+                .or_else(|| trimmed.strip_prefix("--- a/"))
+                .or_else(|| trimmed.strip_prefix("+++ "))
+                .or_else(|| trimmed.strip_prefix("--- "))?;
+            if candidate == "/dev/null" {
+                None
+            } else {
+                Some(candidate.to_string())
+            }
+        })
+        .collect()
+}
+
+fn targeted_paths_for_tool(
+    tool_name: &str,
+    tool_args: &serde_json::Value,
+    workdir: &str,
+) -> Vec<String> {
+    match tool_name {
+        "apply_patch" => tool_args
+            .get("patch")
+            .and_then(|patch| patch.as_str())
+            .map(extract_patch_paths)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| tools::resolve_repo_path(&path, workdir))
+            .collect(),
+        _ => tool_args
+            .get("path")
+            .and_then(|path| path.as_str())
+            .map(|path| vec![tools::resolve_repo_path(path, workdir)])
+            .unwrap_or_default(),
+    }
+}
+
+fn is_write_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "edit_line"
+            | "edit_block"
+            | "patch_file"
+            | "apply_patch"
+            | "write_file"
+            | "create_file"
+            | "insert_between"
+    )
 }
 
 fn hardcoded_bug_fix_machine() -> MachineDefinition {
@@ -545,28 +766,31 @@ fn build_system_prompt(
     reasoning: bool,
 ) -> String {
     let tools_list = allowed_tools.join(", ");
+    let edit_tools = preferred_edit_tools(allowed_tools);
+    let tool_lines = tool_reference_lines(allowed_tools).join("\n");
     let reasoning_directive = if reasoning {
         "Think step by step about what the bug is and why, then provide your action as a JSON object."
     } else {
         "Respond with ONLY a JSON object, no other text."
     };
     let nav_section = statewright_agent::ollama_client::nav_tools_prompt_section(
-        transitions, current_state, allowed_tools, iterations_remaining,
+        transitions,
+        current_state,
+        allowed_tools,
+        iterations_remaining,
     );
 
     if is_checkpoint && current_state == "implementing" {
         format!(
-r#"You have reached the iteration limit in the "{current_state}" state.
+            r#"You have reached the iteration limit in the "{current_state}" state.
 You MUST make your best edit NOW based on what you have read, then call the transition tool.
 
-Use edit_line, edit_block, or patch_file to make the most likely fix. If you are unsure, make your best guess — the tests will verify. Do NOT just transition without editing.
+Use {edit_tools} to make the most likely fix. If you are unsure, make your best guess — the tests will verify. Do NOT just transition without editing.
 
 TASK: {task}
 
 Available tools: {tools_list}
-- edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}}
-- edit_block: args: {{"path": "filename", "old": "multi\nline\nblock", "new": "replacement\nblock"}}
-- patch_file: args: {{"path": "filename", "patches": [{{"old": "old", "new": "new"}}]}}
+{tool_lines}
 
 {nav_section}
 
@@ -574,11 +798,13 @@ Respond with ONLY a JSON object."#,
             current_state = current_state,
             task = task,
             tools_list = tools_list,
+            edit_tools = edit_tools,
+            tool_lines = tool_lines,
             nav_section = nav_section,
         )
     } else if is_checkpoint {
         format!(
-r#"You have reached the iteration limit in the "{current_state}" state.
+            r#"You have reached the iteration limit in the "{current_state}" state.
 You MUST call the transition tool now. No more work tools.
 
 TASK: {task}
@@ -595,7 +821,10 @@ Respond with ONLY a JSON object."#,
         let state_guidance = match current_state {
             "planning" => "Read the code and test failures to understand the bug. Use grep and read_file with start_line/end_line for large files. When you understand the bug, transition to implementing.".to_string(),
             "implementing" => {
-                let mut s = "You MUST edit the code to fix the bug. Call edit_line, edit_block, or insert_between now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.".to_string();
+                let mut s = format!(
+                    "You MUST edit the code to fix the bug. Call {} now. Do NOT just read files — you already have the information you need. Make your edit, then transition with DONE.",
+                    edit_tools
+                );
                 // Surface assertion hints first (most actionable)
                 if localization.contains("## Assertion Hints") {
                     if let Some(hints_start) = localization.find("## Assertion Hints") {
@@ -617,7 +846,7 @@ Respond with ONLY a JSON object."#,
             _ => instructions.to_string(),
         };
         format!(
-r#"You fix bugs in code. You are in the "{current_state}" state.
+            r#"You fix bugs in code. You are in the "{current_state}" state.
 
 TASK: {task}
 WORKING DIRECTORY: {workdir}
@@ -633,7 +862,7 @@ WORKING DIRECTORY: {workdir}
         )
     } else {
         format!(
-r#"You fix bugs step by step. {reasoning_directive}
+            r#"You fix bugs step by step. {reasoning_directive}
 
 TASK: {task}
 STATE: {current_state}
@@ -644,18 +873,7 @@ To call a tool:
 {{"tool_calls": [{{"name": "TOOL_NAME", "args": {{...}}}}]}}
 
 Available tools: {tools_list}
-- read_file: args: {{"path": "filename"}} or {{"path": "filename", "start_line": 120, "end_line": 150}} for large files
-- write_file: args: {{"path": "filename", "content": "full file content"}} (for small files only)
-- create_file: args: {{"path": "filename"}} — creates a new file. You will be prompted to output the raw content directly. Use this for large files.
-- list_directory: args: {{"path": "."}}
-- run_test: args: {{}} or {{"path": "tests/"}} to scope to a directory
-- find_files: args: {{"pattern": "*.py"}} to search for files by name pattern recursively
-- inspect_class: args: {{"class": "ClassName"}} or {{"class": "ClassName", "attribute": "__slots__"}} to show class hierarchy and check if attribute is defined
-- grep: args: {{"pattern": "search term"}} or {{"pattern": "search term", "file": "filename"}}
-- diff: args: {{"path": "filename"}} (shows changes vs original)
-- edit_line: args: {{"path": "filename", "old": "line to find", "new": "replacement"}} (finds by content). To INSERT a new line: {{"path": "filename", "line": 100, "new": "new code"}} (inserts after line 100)
-- patch_file: args: {{"path": "filename", "patches": [{{"old": "old line", "new": "new line"}}]}}
-- insert_between: args: {{"path": "filename", "after": "line to insert after", "new": "new code"}} optionally {{"before": "line before which to insert"}}
+{tool_lines}
 
 {nav_section}"#,
             task = task,
@@ -663,6 +881,7 @@ Available tools: {tools_list}
             instructions = instructions,
             workdir = workdir,
             tools_list = tools_list,
+            tool_lines = tool_lines,
             nav_section = nav_section,
             reasoning_directive = reasoning_directive,
         )
@@ -690,6 +909,12 @@ async fn main() {
         profile.max_diff_lines = 500;
     }
 
+    profile.sandbox_failed_edits =
+        env_flag("SW_SANDBOX_FAILED_EDITS", profile.sandbox_failed_edits);
+    profile.read_only_tests = env_flag("SW_READ_ONLY_TESTS", profile.read_only_tests);
+    profile.enforce_localized_edit_locus =
+        env_flag("SW_ENFORCE_LOCUS", profile.enforce_localized_edit_locus);
+
     // Load run config from file if provided (MCP gateway writes this)
     let run_config: RunConfig = if let Some(config_path) = &args.config {
         let config_str = std::fs::read_to_string(config_path)
@@ -702,7 +927,11 @@ async fn main() {
 
     // Config overrides CLI args
     let task = run_config.task.as_deref().unwrap_or(&args.task).to_string();
-    let workdir = run_config.workdir.as_deref().unwrap_or(&args.workdir).to_string();
+    let workdir = run_config
+        .workdir
+        .as_deref()
+        .unwrap_or(&args.workdir)
+        .to_string();
     let max_steps = if run_config.guardrails.max_steps > 0 && args.config.is_some() {
         run_config.guardrails.max_steps
     } else {
@@ -713,7 +942,10 @@ async fn main() {
     let make_client_for_state = |state: &str| -> OllamaClient {
         if let Some(mc) = run_config.model_routing.get(state) {
             OllamaClient::new(OllamaConfig {
-                api_url: mc.ollama_url.clone().unwrap_or_else(|| args.ollama_url.clone()),
+                api_url: mc
+                    .ollama_url
+                    .clone()
+                    .unwrap_or_else(|| args.ollama_url.clone()),
                 model: mc.model.clone().unwrap_or_else(|| args.model.clone()),
                 temperature: mc.temperature,
                 max_tokens: mc.num_predict,
@@ -748,9 +980,9 @@ async fn main() {
             temperature: 0.3,
             max_tokens: 4096,
         });
-        let task = std::fs::read_to_string(
-            std::path::Path::new(&args.workdir).join("requirements.md")
-        ).unwrap_or(args.task);
+        let task =
+            std::fs::read_to_string(std::path::Path::new(&args.workdir).join("requirements.md"))
+                .unwrap_or(args.task);
         tdd::run_tdd(&task, &args.workdir, &client, args.max_cycles).await;
         return;
     }
@@ -763,13 +995,18 @@ async fn main() {
         let client = make_client_for_state(target_state);
 
         // Load context from file if provided
-        let context_json: serde_json::Value = args.context_file.as_ref()
+        let context_json: serde_json::Value = args
+            .context_file
+            .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(json!({}));
 
         // Use workflow from config if provided, otherwise fall back to hardcoded machine
-        let definition = run_config.workflow.unwrap_or_else(hardcoded_bug_fix_machine);
+        let mut definition = run_config
+            .workflow
+            .unwrap_or_else(hardcoded_bug_fix_machine);
+        apply_profile_tool_restrictions(&mut definition, &profile, is_bugfix_mode(&args));
         let state_def = match definition.states.get(target_state.as_str()) {
             Some(s) => s,
             None => {
@@ -778,9 +1015,15 @@ async fn main() {
             }
         };
 
-        let allowed_tools = state_def.allowed_tools.as_ref().cloned().unwrap_or_default();
+        let allowed_tools = state_def
+            .allowed_tools
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
         let instructions = state_def.instructions.as_deref().unwrap_or("Proceed.");
-        let transitions: Vec<(String, String)> = state_def.on.iter()
+        let transitions: Vec<(String, String)> = state_def
+            .on
+            .iter()
             .map(|(event, t)| (event.clone(), t.target().to_string()))
             .collect();
 
@@ -790,7 +1033,10 @@ async fn main() {
         if context_json != json!({}) {
             conversation.push(ChatMessage {
                 role: "user".into(),
-                content: format!("Context from previous states:\n{}", serde_json::to_string_pretty(&context_json).unwrap_or_default()),
+                content: format!(
+                    "Context from previous states:\n{}",
+                    serde_json::to_string_pretty(&context_json).unwrap_or_default()
+                ),
             });
         }
 
@@ -798,8 +1044,14 @@ async fn main() {
         // Injects focused context so the model doesn't have to navigate large files.
         {
             let test_output = tools::execute_tool("run_test", &json!({}), &workdir);
-            let test_summary: String = test_output.lines()
-                .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
+            let test_summary: String = test_output
+                .lines()
+                .filter(|l| {
+                    l.contains("FAILED")
+                        || l.contains("assert")
+                        || l.contains("Error")
+                        || l.contains("passed")
+                })
                 .take(10)
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -808,20 +1060,40 @@ async fn main() {
 
             // Grep for keywords from test failures
             let mut grep_results = String::new();
-            let source_files: Vec<&str> = files.lines()
-                .filter(|f| (f.ends_with(".py") || f.ends_with(".rs") || f.ends_with(".js") || f.ends_with(".ts"))
-                    && !f.starts_with("test_") && !f.contains("__pycache__"))
+            let source_files: Vec<&str> = files
+                .lines()
+                .filter(|f| {
+                    (f.ends_with(".py")
+                        || f.ends_with(".rs")
+                        || f.ends_with(".js")
+                        || f.ends_with(".ts"))
+                        && !f.starts_with("test_")
+                        && !f.contains("__pycache__")
+                })
                 .collect();
 
             for line in test_summary.lines() {
                 for word in line.split_whitespace() {
                     let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                     if clean.len() > 3 && (clean.contains('_') || clean.starts_with("test_")) {
-                        let pattern = if clean.starts_with("test_") { &clean[5..] } else { clean };
+                        let pattern = if clean.starts_with("test_") {
+                            &clean[5..]
+                        } else {
+                            clean
+                        };
                         for src in &source_files {
-                            let result = tools::execute_tool("grep", &json!({"pattern": pattern, "file": src}), &workdir);
+                            let result = tools::execute_tool(
+                                "grep",
+                                &json!({"pattern": pattern, "file": src}),
+                                &workdir,
+                            );
                             if result != "no matches found" {
-                                grep_results.push_str(&format!("grep '{}' in {}:\n{}\n", pattern, src, result.lines().take(5).collect::<Vec<_>>().join("\n")));
+                                grep_results.push_str(&format!(
+                                    "grep '{}' in {}:\n{}\n",
+                                    pattern,
+                                    src,
+                                    result.lines().take(5).collect::<Vec<_>>().join("\n")
+                                ));
                             }
                         }
                     }
@@ -834,17 +1106,26 @@ async fn main() {
                 let content = tools::execute_tool("read_file", &json!({"path": src}), &workdir);
                 let line_count = content.lines().count();
                 if line_count <= 200 {
-                    source_excerpts.push_str(&format!("=== {} ({} lines) ===\n{}\n", src, line_count, content));
+                    source_excerpts.push_str(&format!(
+                        "=== {} ({} lines) ===\n{}\n",
+                        src, line_count, content
+                    ));
                 } else {
-                    source_excerpts.push_str(&format!("=== {} ({} lines, showing first 50) ===\n{}\n", src, line_count,
-                        content.lines().take(50).collect::<Vec<_>>().join("\n")));
+                    source_excerpts.push_str(&format!(
+                        "=== {} ({} lines, showing first 50) ===\n{}\n",
+                        src,
+                        line_count,
+                        content.lines().take(50).collect::<Vec<_>>().join("\n")
+                    ));
                 }
             }
 
             let localization = format!(
                 "## Test Results\n{}\n\n## Files\n{}\n\n## Grep Hits\n{}\n\n## Source\n{}\n",
-                test_summary, files.lines().take(20).collect::<Vec<_>>().join(", "),
-                grep_results, source_excerpts
+                test_summary,
+                files.lines().take(20).collect::<Vec<_>>().join(", "),
+                grep_results,
+                source_excerpts
             );
 
             if json_mode {
@@ -854,8 +1135,12 @@ async fn main() {
                     excerpt_lines: localization.lines().count(),
                 });
             }
-            eprintln!("[LOCALIZE] {} source files, {} test lines, {} grep lines",
-                source_files.len(), test_summary.lines().count(), grep_results.lines().count());
+            eprintln!(
+                "[LOCALIZE] {} source files, {} test lines, {} grep lines",
+                source_files.len(),
+                test_summary.lines().count(),
+                grep_results.lines().count()
+            );
 
             conversation.push(ChatMessage {
                 role: "user".into(),
@@ -873,12 +1158,14 @@ async fn main() {
                 // Tier 1 classifier: re-prompt the model to pick a valid transition
                 if !classified {
                     classified = true;
-                    let valid_list = transitions.iter()
+                    let valid_list = transitions
+                        .iter()
                         .map(|(e, t)| format!("  {} → {}", e, t))
                         .collect::<Vec<_>>()
                         .join("\n");
                     // Use only the LAST tool result — not stale history from prior cycles
-                    let last_result = conversation.iter()
+                    let last_result = conversation
+                        .iter()
                         .filter(|m| m.role == "user")
                         .last()
                         .map(|m| m.content.chars().take(500).collect::<String>())
@@ -893,27 +1180,49 @@ async fn main() {
                         target_state, instructions, last_result, valid_list
                     );
 
-                    eprintln!("[CLASSIFY] Asking model to pick a valid transition for '{}'", target_state);
-                    let classify_response = client.chat(vec![
-                        ChatMessage { role: "system".into(), content: "Reply with ONLY the transition event name. No explanation.".into() },
-                        ChatMessage { role: "user".into(), content: classify_prompt },
-                    ]).await;
+                    eprintln!(
+                        "[CLASSIFY] Asking model to pick a valid transition for '{}'",
+                        target_state
+                    );
+                    let classify_response = client
+                        .chat(vec![
+                            ChatMessage {
+                                role: "system".into(),
+                                content:
+                                    "Reply with ONLY the transition event name. No explanation."
+                                        .into(),
+                            },
+                            ChatMessage {
+                                role: "user".into(),
+                                content: classify_prompt,
+                            },
+                        ])
+                        .await;
 
                     if let Ok(raw) = classify_response {
                         // Extract event name: model may respond "TESTS_FAIL" or "TESTS_FAIL → retry" or "TESTS_FAIL."
                         let cleaned = raw.trim().trim_matches('"').trim();
-                        let event = cleaned.split_whitespace().next()
+                        let event = cleaned
+                            .split_whitespace()
+                            .next()
                             .unwrap_or(cleaned)
                             .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
-                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event)
+                        {
                             eprintln!("[CLASSIFY] Model chose: {} → {}", event, target_name);
                             if json_mode {
                                 events::emit_json(&TuiEvent::Transition {
-                                    from: target_state.clone(), to: target_name.clone(),
+                                    from: target_state.clone(),
+                                    to: target_name.clone(),
                                     trigger: Some(event.to_string()),
-                                    rationale: Some("Classified by model after max_iterations".to_string()),
+                                    rationale: Some(
+                                        "Classified by model after max_iterations".to_string(),
+                                    ),
                                 });
-                                events::emit_json(&TuiEvent::Completed { steps: step - 1, success: true });
+                                events::emit_json(&TuiEvent::Completed {
+                                    steps: step - 1,
+                                    success: true,
+                                });
                             }
                             break;
                         } else {
@@ -924,20 +1233,41 @@ async fn main() {
 
                 // Classification failed — exit with failure
                 if json_mode {
-                    events::emit_json(&TuiEvent::Completed { steps: step - 1, success: false });
+                    events::emit_json(&TuiEvent::Completed {
+                        steps: step - 1,
+                        success: false,
+                    });
                 }
-                eprintln!("Max iterations ({}) exceeded in state '{}', classification failed", max_iter, target_state);
+                eprintln!(
+                    "Max iterations ({}) exceeded in state '{}', classification failed",
+                    max_iter, target_state
+                );
                 break;
             }
 
             let system_prompt = build_system_prompt(
-                &task, target_state, instructions, &allowed_tools,
-                &transitions, &workdir, false, Some(max_iter - step), false, "", false,
+                &task,
+                target_state,
+                instructions,
+                &allowed_tools,
+                &transitions,
+                &workdir,
+                false,
+                Some(max_iter - step),
+                false,
+                "",
+                false,
             );
-            let mut messages = vec![ChatMessage { role: "system".into(), content: system_prompt }];
+            let mut messages = vec![ChatMessage {
+                role: "system".into(),
+                content: system_prompt,
+            }];
             // Include accumulated conversation (tool calls + results from prior steps)
             messages.extend(conversation.iter().cloned());
-            messages.push(ChatMessage { role: "user".into(), content: "Proceed with the next action.".into() });
+            messages.push(ChatMessage {
+                role: "user".into(),
+                content: "Proceed with the next action.".into(),
+            });
 
             let raw_response = match client.chat(messages).await {
                 Ok(r) => r,
@@ -955,12 +1285,19 @@ async fn main() {
                     let start = raw_response.find('{');
                     let end = raw_response.rfind('}');
                     match (start, end) {
-                        (Some(s), Some(e)) if e > s => {
-                            serde_json::from_str(&raw_response[s..=e]).unwrap_or(LlmResponse {
-                                transition: None, error: None, tool_calls: None, reasoning: None,
-                            })
-                        }
-                        _ => LlmResponse { transition: None, error: None, tool_calls: None, reasoning: None },
+                        (Some(s), Some(e)) if e > s => serde_json::from_str(&raw_response[s..=e])
+                            .unwrap_or(LlmResponse {
+                                transition: None,
+                                error: None,
+                                tool_calls: None,
+                                reasoning: None,
+                            }),
+                        _ => LlmResponse {
+                            transition: None,
+                            error: None,
+                            tool_calls: None,
+                            reasoning: None,
+                        },
                     }
                 }
             };
@@ -973,12 +1310,20 @@ async fn main() {
                 if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
                     if json_mode {
                         events::emit_json(&TuiEvent::Transition {
-                            from: target_state.clone(), to: target_name.clone(),
-                            trigger: Some(event.clone()), rationale: rationale.clone(),
+                            from: target_state.clone(),
+                            to: target_name.clone(),
+                            trigger: Some(event.clone()),
+                            rationale: rationale.clone(),
                         });
-                        events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                        events::emit_json(&TuiEvent::Completed {
+                            steps: step,
+                            success: true,
+                        });
                     } else {
-                        println!("[TRANSITION] {} -> {} (event: {})", target_state, target_name, event);
+                        println!(
+                            "[TRANSITION] {} -> {} (event: {})",
+                            target_state, target_name, event
+                        );
                         if let Some(r) = &rationale {
                             println!("  rationale: {}", r);
                         }
@@ -986,12 +1331,15 @@ async fn main() {
                     break;
                 } else {
                     // Invalid event — tell the model to pick a valid one
-                    let valid_events: Vec<String> = transitions.iter()
+                    let valid_events: Vec<String> = transitions
+                        .iter()
                         .map(|(e, t)| format!("{} → {}", e, t))
                         .collect();
                     let rejection = format!(
                         "Invalid transition event '{}'. Valid transitions from '{}' are:\n  {}\nAnalyze your results and call transition with the CORRECT event name and a rationale explaining why.",
-                        event, target_state, valid_events.join("\n  ")
+                        event,
+                        target_state,
+                        valid_events.join("\n  ")
                     );
                     if json_mode {
                         events::emit_json(&TuiEvent::GuardBlocked {
@@ -1015,24 +1363,44 @@ async fn main() {
                 for tc in &calls {
                     // Intercept transition tool calls (model calls transition as a tool, not via resp.transition)
                     if tc.name == "transition" || tc.name == "statewright_transition" {
-                        let event = tc.args.get("event").and_then(|v| v.as_str()).unwrap_or("DONE");
-                        let rationale = tc.args.get("rationale").or_else(|| tc.args.get("reason")).and_then(|v| v.as_str());
-                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event) {
+                        let event = tc
+                            .args
+                            .get("event")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("DONE");
+                        let rationale = tc
+                            .args
+                            .get("rationale")
+                            .or_else(|| tc.args.get("reason"))
+                            .and_then(|v| v.as_str());
+                        if let Some((_, target_name)) = transitions.iter().find(|(e, _)| e == event)
+                        {
                             if json_mode {
                                 events::emit_json(&TuiEvent::Transition {
-                                    from: target_state.clone(), to: target_name.clone(),
+                                    from: target_state.clone(),
+                                    to: target_name.clone(),
                                     trigger: Some(event.to_string()),
                                     rationale: rationale.map(|s| s.to_string()),
                                 });
-                                events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                                events::emit_json(&TuiEvent::Completed {
+                                    steps: step,
+                                    success: true,
+                                });
                             }
                             should_break = true;
                             break;
                         } else {
-                            let valid = transitions.iter().map(|(e, t)| format!("{} → {}", e, t)).collect::<Vec<_>>().join(", ");
+                            let valid = transitions
+                                .iter()
+                                .map(|(e, t)| format!("{} → {}", e, t))
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             conversation.push(ChatMessage {
                                 role: "user".into(),
-                                content: format!("Invalid event '{}'. Valid: {}. Pick the correct one.", event, valid),
+                                content: format!(
+                                    "Invalid event '{}'. Valid: {}. Pick the correct one.",
+                                    event, valid
+                                ),
                             });
                             continue;
                         }
@@ -1053,9 +1421,16 @@ async fn main() {
                             result_preview: result.chars().take(500).collect(),
                         });
                     } else {
-                        println!("  [TOOL] {}({}) -> {}", tc.name,
-                            serde_json::to_string(&tc.args).unwrap_or_default().chars().take(60).collect::<String>(),
-                            result.chars().take(200).collect::<String>());
+                        println!(
+                            "  [TOOL] {}({}) -> {}",
+                            tc.name,
+                            serde_json::to_string(&tc.args)
+                                .unwrap_or_default()
+                                .chars()
+                                .take(60)
+                                .collect::<String>(),
+                            result.chars().take(200).collect::<String>()
+                        );
                     }
 
                     conversation.push(ChatMessage {
@@ -1067,27 +1442,46 @@ async fn main() {
                     // TODO: Expose as a per-state workflow flag (e.g. "auto_test": true) so non-Rust TUIs
                     // implementing direct_execution can replicate this behavior. Currently implicit in
                     // sw-agent's --state path only.
-                    let is_edit = matches!(tc.name.as_str(), "edit_line" | "edit_block" | "patch_file" | "apply_patch" | "write_file");
+                    let is_edit = matches!(
+                        tc.name.as_str(),
+                        "edit_line" | "edit_block" | "patch_file" | "apply_patch" | "write_file"
+                    );
                     if is_edit && !result.starts_with("error") {
-                        let test_output = tools::execute_tool("run_test", &serde_json::json!({}), &workdir);
-                        let tests_pass = test_output.contains("passed") && !test_output.contains("failed") && !test_output.contains("FAILED");
+                        let test_output =
+                            tools::execute_tool("run_test", &serde_json::json!({}), &workdir);
+                        let tests_pass = test_output.contains("passed")
+                            && !test_output.contains("failed")
+                            && !test_output.contains("FAILED");
                         if json_mode {
-                            events::emit_json(&TuiEvent::AutoTest { passed: tests_pass, fail_count: 0 });
+                            events::emit_json(&TuiEvent::AutoTest {
+                                passed: tests_pass,
+                                fail_count: 0,
+                            });
                         }
                         if tests_pass {
                             // Find the best forward transition (DONE, TESTS_PASS, or first non-FAIL)
-                            let auto_event = transitions.iter()
+                            let auto_event = transitions
+                                .iter()
                                 .find(|(e, _)| e == "DONE" || e == "TESTS_PASS")
                                 .or_else(|| transitions.iter().find(|(e, _)| e != "FAIL"))
                                 .map(|(e, _)| e.clone());
                             if let Some(event) = auto_event {
-                                let target = transitions.iter().find(|(e, _)| *e == event).map(|(_, t)| t.clone()).unwrap_or("?".into());
+                                let target = transitions
+                                    .iter()
+                                    .find(|(e, _)| *e == event)
+                                    .map(|(_, t)| t.clone())
+                                    .unwrap_or("?".into());
                                 if json_mode {
                                     events::emit_json(&TuiEvent::Transition {
-                                        from: target_state.clone(), to: target,
-                                        trigger: Some(event), rationale: Some("Auto-test pass after edit".into()),
+                                        from: target_state.clone(),
+                                        to: target,
+                                        trigger: Some(event),
+                                        rationale: Some("Auto-test pass after edit".into()),
                                     });
-                                    events::emit_json(&TuiEvent::Completed { steps: step, success: true });
+                                    events::emit_json(&TuiEvent::Completed {
+                                        steps: step,
+                                        success: true,
+                                    });
                                 }
                                 should_break = true;
                                 break;
@@ -1095,7 +1489,9 @@ async fn main() {
                         }
                     }
                 }
-                if should_break { break; }
+                if should_break {
+                    break;
+                }
             }
         }
 
@@ -1119,10 +1515,16 @@ async fn main() {
     // emit: send a TuiEvent as JSONL if --json-events, otherwise pretty-print
     macro_rules! emit {
         ($event:expr) => {
-            if json_mode { events::emit_json(&$event); }
+            if json_mode {
+                events::emit_json(&$event);
+            }
         };
         ($event:expr, $pretty:expr) => {
-            if json_mode { events::emit_json(&$event); } else { println!("{}", $pretty); }
+            if json_mode {
+                events::emit_json(&$event);
+            } else {
+                println!("{}", $pretty);
+            }
         };
     }
 
@@ -1138,7 +1540,15 @@ async fn main() {
     let workdir_for_restore = workdir.clone();
     let originals = tools::snapshot_all(&workdir);
     let original_count = originals.len();
-    emit!(TuiEvent::Setup { files_snapshotted: original_count }, format!("[Setup] Snapshotted {} file(s) for auto-restore\n", original_count));
+    emit!(
+        TuiEvent::Setup {
+            files_snapshotted: original_count
+        },
+        format!(
+            "[Setup] Snapshotted {} file(s) for auto-restore\n",
+            original_count
+        )
+    );
 
     // Restore originals on exit (panic or normal) — unless --no-restore
     let _restore_guard = if args.no_restore {
@@ -1151,7 +1561,7 @@ async fn main() {
     };
 
     // Phase 1: Get or generate the state machine
-    let definition = if args.control {
+    let mut definition = if args.control {
         println!("[Phase 1] CONTROL MODE — flat machine, no guardrails");
         control_flat_machine()
     } else if args.tdd_greenfield {
@@ -1169,10 +1579,18 @@ async fn main() {
             max_tokens: 4096,
         });
 
-        match statewright_agent::generator::generate_machine(&client, &args.task, args.max_retries).await {
+        match statewright_agent::generator::generate_machine(&client, &args.task, args.max_retries)
+            .await
+        {
             Ok(result) => {
-                println!("[Phase 1] State machine generated in {} attempt(s)", result.attempts);
-                println!("[Phase 1] States: {:?}", result.definition.states.keys().collect::<Vec<_>>());
+                println!(
+                    "[Phase 1] State machine generated in {} attempt(s)",
+                    result.attempts
+                );
+                println!(
+                    "[Phase 1] States: {:?}",
+                    result.definition.states.keys().collect::<Vec<_>>()
+                );
                 result.definition
             }
             Err(e) => {
@@ -1182,6 +1600,7 @@ async fn main() {
             }
         }
     };
+    apply_profile_tool_restrictions(&mut definition, &profile, is_bugfix_mode(&args));
 
     // Validate
     if let Err(e) = validate_agent_machine(&definition) {
@@ -1191,13 +1610,18 @@ async fn main() {
     // Print the state machine
     println!("\n--- State Machine ---");
     for (name, state_def) in &definition.states {
-        let tools = state_def.allowed_tools.as_ref()
+        let tools = state_def
+            .allowed_tools
+            .as_ref()
             .map(|t| t.join(", "))
             .unwrap_or_else(|| "(none)".into());
-        let transitions: Vec<String> = state_def.on.iter()
+        let transitions: Vec<String> = state_def
+            .on
+            .iter()
             .map(|(event, t)| format!("{} -> {}", event, t.target()))
             .collect();
-        let max_iter = state_def.max_iterations
+        let max_iter = state_def
+            .max_iterations
             .map(|m| format!(" (max {})", m))
             .unwrap_or_default();
         println!("  {}{} [tools: {}]", name, max_iter, tools);
@@ -1208,14 +1632,16 @@ async fn main() {
     println!("---\n");
 
     // Phase 2: Execute the state machine with conversation history
-    if !json_mode { println!("[Phase 2] Executing agent within state machine constraints\n"); }
+    if !json_mode {
+        println!("[Phase 2] Executing agent within state machine constraints\n");
+    }
 
     // Default client (used when no per-state routing configured)
     // Escalation model (env override or default to gpt-oss:20b)
     let escalation_url = std::env::var("SW_ESCALATION_URL")
         .unwrap_or_else(|_| "https://gpt-oss-20b.ollama.casa.enhasa.cloud/v1".into());
-    let escalation_model = std::env::var("SW_ESCALATION_MODEL")
-        .unwrap_or_else(|_| "gpt-oss:20b".into());
+    let escalation_model =
+        std::env::var("SW_ESCALATION_MODEL").unwrap_or_else(|_| "gpt-oss:20b".into());
 
     // Greenfield needs higher output token limit for file writes.
     // A 200-line file with JSON escaping needs ~6500 tokens.
@@ -1264,12 +1690,12 @@ async fn main() {
     let mut localized_regions: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     // Best localized excerpt per file from the recon pass.
     let mut localized_file_contexts: HashMap<String, String> = HashMap::new();
+    let sw_test_files = parse_sw_test_files();
 
     // Localization summary — re-injected into implementing prompt for re-grounding
     let mut localization_summary = String::new();
 
-    loop {
-
+    'agent_loop: loop {
         // Per-state model routing or escalation-driven model selection
         let client = if run_config.model_routing.contains_key(&current_state) {
             make_client_for_state(&current_state)
@@ -1281,8 +1707,10 @@ async fn main() {
 
         // Don't abort during testing/review/green_check — these are quick programmatic steps
         // that shouldn't count against the LLM's step budget
-        let in_endgame = current_state == "testing" || current_state == "review"
-            || current_state == "completed" || current_state == "green_check"
+        let in_endgame = current_state == "testing"
+            || current_state == "review"
+            || current_state == "completed"
+            || current_state == "green_check"
             || current_state == "red_check";
         if step > max_steps && !in_endgame {
             println!("\n[ABORT] Max steps ({}) exceeded", args.max_steps);
@@ -1303,7 +1731,10 @@ async fn main() {
         };
 
         // Check if final state
-        if matches!(state_def.state_type, Some(statewright_engine::StateType::Final)) {
+        if matches!(
+            state_def.state_type,
+            Some(statewright_engine::StateType::Final)
+        ) {
             if current_state == "completed" {
                 // Summary of what happened
                 let changed = tools::all_diff_stats(&args.workdir);
@@ -1313,9 +1744,25 @@ async fn main() {
                         println!("    {} — {} line(s) changed", file, lines_changed);
                     }
                 }
-                emit!(TuiEvent::Completed { steps: step - 1, success: true }, format!("\n=== COMPLETED in {} steps ===", step - 1));
+                emit!(
+                    TuiEvent::Completed {
+                        steps: step - 1,
+                        success: true
+                    },
+                    format!("\n=== COMPLETED in {} steps ===", step - 1)
+                );
             } else {
-                emit!(TuiEvent::Completed { steps: step - 1, success: false }, format!("\n=== FAILED ({}) after {} steps ===", current_state, step - 1));
+                emit!(
+                    TuiEvent::Completed {
+                        steps: step - 1,
+                        success: false
+                    },
+                    format!(
+                        "\n=== FAILED ({}) after {} steps ===",
+                        current_state,
+                        step - 1
+                    )
+                );
             }
             break;
         }
@@ -1331,7 +1778,10 @@ async fn main() {
                 // 3. Grep source files for keywords from the task/failure
                 // 4. Read ±20 lines around each grep hit
                 // 5. Feed focused excerpts into conversation for the planning state
-                println!("[Step {}] State: localizing — programmatic bug localization", step);
+                println!(
+                    "[Step {}] State: localizing — programmatic bug localization",
+                    step
+                );
 
                 // === LIP: Language-Agnostic Localization ===
 
@@ -1342,31 +1792,47 @@ async fn main() {
                         .current_dir(&args.workdir)
                         .output();
                     match git_output {
-                        Ok(out) if out.status.success() => {
-                            String::from_utf8_lossy(&out.stdout)
-                                .lines().map(|s| s.to_string()).collect()
-                        }
+                        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .map(|s| s.to_string())
+                            .collect(),
                         _ => {
                             // Fallback: list_directory top-level
-                            tools::execute_tool("list_directory", &json!({"path": "."}), &args.workdir)
-                                .lines().map(|s| s.to_string()).collect()
+                            tools::execute_tool(
+                                "list_directory",
+                                &json!({"path": "."}),
+                                &args.workdir,
+                            )
+                            .lines()
+                            .map(|s| s.to_string())
+                            .collect()
                         }
                     }
                 };
                 println!("  [LOCALIZE] {} files in repo", all_files.len());
 
                 // Step 2: Detect language + filter source vs test files
-                let source_extensions = ["py","rs","js","ts","jsx","tsx","go","java","c","cpp","h","hpp","rb","php","kt","swift","cs"];
-                let test_indicators = ["test_","tests/","test/","_test.","_test_",".test.",".spec.","__test__","spec/"];
+                let source_extensions = [
+                    "py", "rs", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp",
+                    "rb", "php", "kt", "swift", "cs",
+                ];
+                let test_indicators = [
+                    "test_", "tests/", "test/", "_test.", "_test_", ".test.", ".spec.", "__test__",
+                    "spec/",
+                ];
 
-                let source_files: Vec<&str> = all_files.iter()
+                let source_files: Vec<&str> = all_files
+                    .iter()
                     .filter(|f| {
                         let ext = f.rsplit('.').next().unwrap_or("");
                         source_extensions.contains(&ext)
                             && !test_indicators.iter().any(|t| f.to_lowercase().contains(t))
-                            && !f.contains("__pycache__") && !f.contains("node_modules")
-                            && !f.contains("/doc/") && !f.contains("/docs/")
-                            && !f.contains("/examples/") && !f.contains("/vendor/")
+                            && !f.contains("__pycache__")
+                            && !f.contains("node_modules")
+                            && !f.contains("/doc/")
+                            && !f.contains("/docs/")
+                            && !f.contains("/examples/")
+                            && !f.contains("/vendor/")
                     })
                     .map(|s| s.as_str())
                     .collect();
@@ -1378,37 +1844,57 @@ async fn main() {
                         *ext_counts.entry(ext.to_string()).or_default() += 1;
                     }
                 }
-                let dominant_lang = ext_counts.into_iter()
+                let dominant_lang = ext_counts
+                    .into_iter()
                     .max_by_key(|(_, c)| *c)
                     .map(|(e, _)| e)
                     .unwrap_or_else(|| "py".into());
-                println!("  [LOCALIZE] {} source files, language: {}", source_files.len(), dominant_lang);
+                println!(
+                    "  [LOCALIZE] {} source files, language: {}",
+                    source_files.len(),
+                    dominant_lang
+                );
 
                 // Step 3: Test runner — detect and run if suite is small
                 let (test_cmd, test_args) = match dominant_lang.as_str() {
                     "rs" => ("cargo", vec!["test", "--", "--nocapture"]),
                     "go" => ("go", vec!["test", "-v", "./..."]),
                     "js" | "ts" | "jsx" | "tsx" => {
-                        if std::path::Path::new(&args.workdir).join("package.json").exists() {
+                        if std::path::Path::new(&args.workdir)
+                            .join("package.json")
+                            .exists()
+                        {
                             ("npm", vec!["test", "--"])
-                        } else { ("echo", vec!["no test runner"]) }
+                        } else {
+                            ("echo", vec!["no test runner"])
+                        }
                     }
-                    _ => ("python3", vec!["-m", "pytest", "-xvs", "--tb=short", "--no-header", "-q"]),
+                    _ => (
+                        "python3",
+                        vec!["-m", "pytest", "-xvs", "--tb=short", "--no-header", "-q"],
+                    ),
                 };
 
                 // Count tests before running (pytest-specific for now, skip for others)
                 let test_count = if dominant_lang == "py" {
                     Command::new("python3")
                         .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
-                        .current_dir(&args.workdir).output().ok()
-                        .and_then(|o| String::from_utf8_lossy(&o.stdout)
-                            .lines().last()
-                            .and_then(|l| l.split_whitespace().next())
-                            .and_then(|n| n.parse::<usize>().ok()))
+                        .current_dir(&args.workdir)
+                        .output()
+                        .ok()
+                        .and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .last()
+                                .and_then(|l| l.split_whitespace().next())
+                                .and_then(|n| n.parse::<usize>().ok())
+                        })
                         .unwrap_or(0)
                 } else if source_files.len() > 200 {
                     999 // Assume large repo = many tests
-                } else { 0 };
+                } else {
+                    0
+                };
 
                 // FIX 5: If SW_TEST_FILES is set (SWE-bench test patch), run those
                 // specific test files instead of skipping. This gives the model test
@@ -1417,21 +1903,37 @@ async fn main() {
 
                 let (test_output, test_summary) = if let Some(ref test_files) = scoped_test_files {
                     // Run only the test files from the SWE-bench test patch
-                    let files: Vec<&str> = test_files.split(':').filter(|f| !f.is_empty()).collect();
+                    let files: Vec<&str> =
+                        test_files.split(':').filter(|f| !f.is_empty()).collect();
                     println!("  [LOCALIZE] Running scoped tests: {:?}", files);
                     let mut combined_output = String::new();
                     for tf in &files {
-                        let output = tools::execute_tool("run_test", &json!({"path": tf}), &args.workdir);
+                        let output =
+                            tools::execute_tool("run_test", &json!({"path": tf}), &args.workdir);
                         combined_output.push_str(&output);
                         combined_output.push('\n');
                     }
-                    let summary: String = combined_output.lines()
-                        .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
-                        .take(15).collect::<Vec<_>>().join("\n");
-                    println!("  [LOCALIZE] Scoped test results:\n{}", summary.lines().take(5).collect::<Vec<_>>().join("\n"));
+                    let summary: String = combined_output
+                        .lines()
+                        .filter(|l| {
+                            l.contains("FAILED")
+                                || l.contains("assert")
+                                || l.contains("Error")
+                                || l.contains("passed")
+                        })
+                        .take(15)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!(
+                        "  [LOCALIZE] Scoped test results:\n{}",
+                        summary.lines().take(5).collect::<Vec<_>>().join("\n")
+                    );
                     (combined_output, summary)
                 } else if test_count > 100 {
-                    println!("  [LOCALIZE] {} tests detected — skipping full suite", test_count);
+                    println!(
+                        "  [LOCALIZE] {} tests detected — skipping full suite",
+                        test_count
+                    );
                     let skip_msg = format!(
                         "{} tests — too many for full run. Use run_test with a scoped path.",
                         test_count
@@ -1439,10 +1941,21 @@ async fn main() {
                     (skip_msg.clone(), skip_msg)
                 } else {
                     let output = tools::execute_tool("run_test", &json!({}), &args.workdir);
-                    let summary: String = output.lines()
-                        .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("passed"))
-                        .take(10).collect::<Vec<_>>().join("\n");
-                    println!("  [LOCALIZE] Test failures:\n{}", summary.lines().take(5).collect::<Vec<_>>().join("\n"));
+                    let summary: String = output
+                        .lines()
+                        .filter(|l| {
+                            l.contains("FAILED")
+                                || l.contains("assert")
+                                || l.contains("Error")
+                                || l.contains("passed")
+                        })
+                        .take(10)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!(
+                        "  [LOCALIZE] Test failures:\n{}",
+                        summary.lines().take(5).collect::<Vec<_>>().join("\n")
+                    );
                     (output, summary)
                 };
 
@@ -1458,7 +1971,58 @@ async fn main() {
                 }
 
                 // Class names (capitalized words) → "class ClassName"
-                let stopwords = ["The","This","When","Since","In","It","But","And","For","If","We","Is","Are","Was","Has","Have","Not","No","Can","Do","Does","Did","Will","Would","Should","Could","May","Might","Must","From","To","With","At","By","On","Of","A","An","Description","Bug","Fix","Error","Issue","Version","File","Method","Function","Note","See","Also"];
+                let stopwords = [
+                    "The",
+                    "This",
+                    "When",
+                    "Since",
+                    "In",
+                    "It",
+                    "But",
+                    "And",
+                    "For",
+                    "If",
+                    "We",
+                    "Is",
+                    "Are",
+                    "Was",
+                    "Has",
+                    "Have",
+                    "Not",
+                    "No",
+                    "Can",
+                    "Do",
+                    "Does",
+                    "Did",
+                    "Will",
+                    "Would",
+                    "Should",
+                    "Could",
+                    "May",
+                    "Might",
+                    "Must",
+                    "From",
+                    "To",
+                    "With",
+                    "At",
+                    "By",
+                    "On",
+                    "Of",
+                    "A",
+                    "An",
+                    "Description",
+                    "Bug",
+                    "Fix",
+                    "Error",
+                    "Issue",
+                    "Version",
+                    "File",
+                    "Method",
+                    "Function",
+                    "Note",
+                    "See",
+                    "Also",
+                ];
                 for word in args.task.split_whitespace() {
                     let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
                     if clean.len() > 2
@@ -1475,8 +2039,12 @@ async fn main() {
                     if clean.starts_with("__") && clean.ends_with("__") && clean.len() > 4 {
                         grep_patterns.push(clean.to_string());
                         // Complementary pattern
-                        if clean == "__dict__" { grep_patterns.push("__slots__".to_string()); }
-                        if clean == "__slots__" { grep_patterns.push("__dict__".to_string()); }
+                        if clean == "__dict__" {
+                            grep_patterns.push("__slots__".to_string());
+                        }
+                        if clean == "__slots__" {
+                            grep_patterns.push("__dict__".to_string());
+                        }
                     }
                 }
 
@@ -1494,8 +2062,13 @@ async fn main() {
                 for line in test_output.lines() {
                     if line.contains("assert") {
                         for word in line.split_whitespace() {
-                            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '.');
-                            if clean.contains('_') && clean.len() > 3 && !clean.starts_with("assert") {
+                            let clean = word.trim_matches(|c: char| {
+                                !c.is_alphanumeric() && c != '_' && c != '.'
+                            });
+                            if clean.contains('_')
+                                && clean.len() > 3
+                                && !clean.starts_with("assert")
+                            {
                                 grep_patterns.push(clean.to_string());
                             }
                         }
@@ -1505,19 +2078,26 @@ async fn main() {
                 grep_patterns.sort();
                 grep_patterns.dedup();
                 let fallback_pattern = match dominant_lang.as_str() {
-                    "rs" => "fn ", "go" => "func ", "js"|"ts" => "function ",
-                    "rb" => "def ", _ => "def ",
+                    "rs" => "fn ",
+                    "go" => "func ",
+                    "js" | "ts" => "function ",
+                    "rb" => "def ",
+                    _ => "def ",
                 };
-                if grep_patterns.is_empty() { grep_patterns.push(fallback_pattern.to_string()); }
-                println!("  [LOCALIZE] Patterns: {:?}", &grep_patterns[..grep_patterns.len().min(5)]);
+                if grep_patterns.is_empty() {
+                    grep_patterns.push(fallback_pattern.to_string());
+                }
+                println!(
+                    "  [LOCALIZE] Patterns: {:?}",
+                    &grep_patterns[..grep_patterns.len().min(5)]
+                );
 
                 // Step 5: Recursive grep + file ranking by keyword density
                 let mut file_scores: HashMap<String, usize> = HashMap::new();
                 for pattern in &grep_patterns {
                     // Recursive grep across entire repo (no file arg = -rn on .)
-                    let grep_result = tools::execute_tool(
-                        "grep", &json!({"pattern": pattern}), &args.workdir,
-                    );
+                    let grep_result =
+                        tools::execute_tool("grep", &json!({"pattern": pattern}), &args.workdir);
                     if grep_result != "no matches found" {
                         for line in grep_result.lines().take(50) {
                             if let Some(file_path) = line.split(':').next() {
@@ -1535,14 +2115,21 @@ async fn main() {
                 let mut enrichment_context = String::new();
 
                 // Extract class names from task
-                let class_names: Vec<String> = args.task.split_whitespace()
+                let class_names: Vec<String> = args
+                    .task
+                    .split_whitespace()
                     .filter_map(|w| {
                         let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
-                        if clean.len() > 2 && clean.chars().next().map_or(false, |c| c.is_uppercase())
-                            && !stopwords.contains(&clean) {
+                        if clean.len() > 2
+                            && clean.chars().next().map_or(false, |c| c.is_uppercase())
+                            && !stopwords.contains(&clean)
+                        {
                             Some(clean.to_string())
-                        } else { None }
-                    }).collect();
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
                 if dominant_lang == "py" && !class_names.is_empty() {
                     // Static analysis: grep-based MRO tracing
@@ -1552,20 +2139,28 @@ async fn main() {
                         for _ in 0..4 {
                             let mut next = Vec::new();
                             for cls in &queue {
-                                if visited.contains(cls) { continue; }
+                                if visited.contains(cls) {
+                                    continue;
+                                }
                                 visited.insert(cls.clone());
                                 let grep_result = tools::execute_tool(
-                                    "grep", &json!({"pattern": format!("class {}(", cls)}), &args.workdir,
+                                    "grep",
+                                    &json!({"pattern": format!("class {}(", cls)}),
+                                    &args.workdir,
                                 );
                                 if grep_result == "no matches found" {
                                     // Also try without parens (base classes with no parents)
                                     let grep2 = tools::execute_tool(
-                                        "grep", &json!({"pattern": format!("class {}:", cls)}), &args.workdir,
+                                        "grep",
+                                        &json!({"pattern": format!("class {}:", cls)}),
+                                        &args.workdir,
                                     );
                                     if grep2 != "no matches found" {
                                         for line in grep2.lines().take(2) {
                                             if let Some(file) = line.split(':').next() {
-                                                *file_scores.entry(file.to_string()).or_default() += 3;
+                                                *file_scores
+                                                    .entry(file.to_string())
+                                                    .or_default() += 3;
                                             }
                                         }
                                     }
@@ -1573,13 +2168,15 @@ async fn main() {
                                 }
                                 for line in grep_result.lines().take(3) {
                                     let parts: Vec<&str> = line.splitn(3, ':').collect();
-                                    if parts.len() < 3 { continue; }
+                                    if parts.len() < 3 {
+                                        continue;
+                                    }
                                     let file = parts[0];
                                     *file_scores.entry(file.to_string()).or_default() += 3;
                                     let def = parts[2];
                                     if let Some(ps) = def.find('(') {
                                         if let Some(pe) = def.find(')') {
-                                            for parent in def[ps+1..pe].split(',') {
+                                            for parent in def[ps + 1..pe].split(',') {
                                                 let p = parent.trim();
                                                 if !p.is_empty() && p != "object" && p != "type" {
                                                     next.push(p.to_string());
@@ -1589,7 +2186,9 @@ async fn main() {
                                     }
                                 }
                             }
-                            if next.is_empty() { break; }
+                            if next.is_empty() {
+                                break;
+                            }
                             queue = next;
                         }
                     }
@@ -1598,9 +2197,16 @@ async fn main() {
                     // Extract dunder attributes mentioned in the task for checking
                     // Extract dunder attributes from task for hierarchy checking
                     // Special case: __dict__ → check __slots__ (absence of __slots__ causes __dict__)
-                    let check_attrs: Vec<&str> = grep_patterns.iter()
+                    let check_attrs: Vec<&str> = grep_patterns
+                        .iter()
                         .filter(|p| p.starts_with("__") && p.ends_with("__"))
-                        .map(|s| if s.as_str() == "__dict__" { "__slots__" } else { s.as_str() })
+                        .map(|s| {
+                            if s.as_str() == "__dict__" {
+                                "__slots__"
+                            } else {
+                                s.as_str()
+                            }
+                        })
                         .collect();
 
                     for class_name in &class_names {
@@ -1620,7 +2226,7 @@ async fn main() {
                             for line in result.lines() {
                                 if line.contains("MISSING") {
                                     if let Some(at_pos) = line.find(" @ ") {
-                                        let file_part = &line[at_pos+3..];
+                                        let file_part = &line[at_pos + 3..];
                                         let file = file_part.split(':').next().unwrap_or("").trim();
                                         if !file.is_empty() {
                                             *file_scores.entry(file.to_string()).or_default() += 10;
@@ -1635,7 +2241,11 @@ async fn main() {
                 // Rank files by score, take top 5
                 let mut ranked_files: Vec<(String, usize)> = file_scores.into_iter().collect();
                 ranked_files.sort_by(|a, b| b.1.cmp(&a.1));
-                let top_files: Vec<&str> = ranked_files.iter().take(5).map(|(f, _)| f.as_str()).collect();
+                let top_files: Vec<&str> = ranked_files
+                    .iter()
+                    .take(5)
+                    .map(|(f, _)| f.as_str())
+                    .collect();
 
                 if !ranked_files.is_empty() {
                     println!("  [LOCALIZE] Top files:");
@@ -1646,7 +2256,9 @@ async fn main() {
 
                 // Build file ranking section for the model's context
                 let file_ranking_section = if ranked_files.len() > 1 {
-                    let mut s = String::from("## Most Relevant Files (ranked by keyword density — start with #1)\n");
+                    let mut s = String::from(
+                        "## Most Relevant Files (ranked by keyword density — start with #1)\n",
+                    );
                     for (i, (f, score)) in ranked_files.iter().take(5).enumerate() {
                         s.push_str(&format!("{}. `{}` (score: {})\n", i + 1, f, score));
                     }
@@ -1659,9 +2271,9 @@ async fn main() {
                 let mut localized_code = String::new();
 
                 for src_file in &top_files {
-                    let file_content = std::fs::read_to_string(
-                        std::path::Path::new(&args.workdir).join(src_file)
-                    ).unwrap_or_default();
+                    let file_content =
+                        std::fs::read_to_string(std::path::Path::new(&args.workdir).join(src_file))
+                            .unwrap_or_default();
                     let file_lines: Vec<&str> = file_content.lines().collect();
 
                     // Track function bodies we've already extracted (avoid duplicates)
@@ -1678,23 +2290,30 @@ async fn main() {
                                 if let Some(line_num_str) = line.split(':').nth(1) {
                                     if let Ok(line_num) = line_num_str.trim().parse::<usize>() {
                                         // Skip if this line is already within an extracted range
-                                        if extracted_ranges.iter().any(|(s, e)| line_num >= *s && line_num <= *e) {
+                                        if extracted_ranges
+                                            .iter()
+                                            .any(|(s, e)| line_num >= *s && line_num <= *e)
+                                        {
                                             continue;
                                         }
 
                                         // Store for context cap suggestions
-                                        localized_regions.entry(src_file.to_string())
+                                        localized_regions
+                                            .entry(src_file.to_string())
                                             .or_default()
                                             .push((line_num, pattern.to_string()));
 
                                         // Level 1: Find the function body containing this hit
-                                        let (func_start, func_end) = find_function_body(&file_lines, line_num);
+                                        let (func_start, func_end) =
+                                            find_function_body(&file_lines, line_num);
                                         extracted_ranges.push((func_start, func_end));
 
                                         // Strip docstrings from function body for cleaner context
                                         let mut stripped_body: Vec<(usize, &str)> = Vec::new();
                                         let mut in_docstring = false;
-                                        for i in func_start.saturating_sub(1)..func_end.min(file_lines.len()) {
+                                        for i in func_start.saturating_sub(1)
+                                            ..func_end.min(file_lines.len())
+                                        {
                                             let trimmed = file_lines[i].trim();
                                             let triple_count = trimmed.matches("\"\"\"").count()
                                                 + trimmed.matches("'''").count();
@@ -1706,19 +2325,27 @@ async fn main() {
                                                 in_docstring = !in_docstring;
                                                 continue;
                                             }
-                                            if in_docstring { continue; }
+                                            if in_docstring {
+                                                continue;
+                                            }
                                             stripped_body.push((i + 1, file_lines[i])); // 1-indexed
                                         }
 
                                         // Level 2: Within the stripped body, find the hotspot
-                                        let test_keywords: Vec<&str> = test_summary.split_whitespace()
+                                        let test_keywords: Vec<&str> = test_summary
+                                            .split_whitespace()
                                             .filter(|w| w.len() > 3)
                                             .collect();
                                         let mut hotspot_line = line_num;
                                         let mut best_score = 0usize;
                                         for (ln, content) in &stripped_body {
-                                            let score = test_keywords.iter()
-                                                .filter(|kw| content.to_lowercase().contains(&kw.to_lowercase()))
+                                            let score = test_keywords
+                                                .iter()
+                                                .filter(|kw| {
+                                                    content
+                                                        .to_lowercase()
+                                                        .contains(&kw.to_lowercase())
+                                                })
                                                 .count();
                                             if score > best_score {
                                                 best_score = score;
@@ -1745,7 +2372,8 @@ async fn main() {
                                         };
 
                                         // Present stripped body (implementation only, docstrings removed)
-                                        let context_lines: Vec<String> = stripped_body.iter()
+                                        let context_lines: Vec<String> = stripped_body
+                                            .iter()
                                             .filter(|(ln, _)| *ln >= show_start && *ln <= show_end)
                                             .map(|(ln, content)| format!("{:>4}: {}", ln, content))
                                             .collect();
@@ -1756,10 +2384,14 @@ async fn main() {
                                                 &args.workdir,
                                             )
                                         } else {
-                                            format!("({} lines, docstrings stripped)\n{}",
-                                                context_lines.len(), context_lines.join("\n"))
+                                            format!(
+                                                "({} lines, docstrings stripped)\n{}",
+                                                context_lines.len(),
+                                                context_lines.join("\n")
+                                            )
                                         };
-                                        localized_file_contexts.insert(src_file.to_string(), context.clone());
+                                        localized_file_contexts
+                                            .insert(src_file.to_string(), context.clone());
                                         if !localized_code.contains(&context) {
                                             localized_code.push_str(&format!(
                                                 "\n=== {} function at L{} ===\n{}\n",
@@ -1774,7 +2406,11 @@ async fn main() {
                 }
 
                 let excerpt_lines = localized_code.lines().count();
-                println!("  [LOCALIZE] Extracted {} lines of relevant code from {} file(s)", excerpt_lines, source_files.len());
+                println!(
+                    "  [LOCALIZE] Extracted {} lines of relevant code from {} file(s)",
+                    excerpt_lines,
+                    source_files.len()
+                );
 
                 // Save localization for re-grounding in implementing state
                 // Extract assertion hints: if test says assert "X" in Y, X is what the code needs
@@ -1785,8 +2421,8 @@ async fn main() {
                     if trimmed.contains("assert") && trimmed.contains("\" in ") {
                         // Extract the quoted string
                         if let Some(start) = trimmed.find('"') {
-                            if let Some(end) = trimmed[start+1..].find('"') {
-                                let hint = &trimmed[start+1..start+1+end];
+                            if let Some(end) = trimmed[start + 1..].find('"') {
+                                let hint = &trimmed[start + 1..start + 1 + end];
                                 if hint.len() > 3 && !hint.contains("assert") {
                                     assertion_hints.push(hint.to_string());
                                 }
@@ -1794,7 +2430,9 @@ async fn main() {
                         }
                     }
                     // Match: AssertionError: message containing "code"
-                    if trimmed.starts_with("AssertionError:") || trimmed.starts_with("AssertionError:") {
+                    if trimmed.starts_with("AssertionError:")
+                        || trimmed.starts_with("AssertionError:")
+                    {
                         for word in trimmed.split('"') {
                             let w = word.trim();
                             if w.contains('=') || w.contains('(') || w.contains('.') {
@@ -1809,8 +2447,14 @@ async fn main() {
                 assertion_hints.dedup();
 
                 let hint_section = if !assertion_hints.is_empty() {
-                    format!("\n\n## Assertion Hints\nThe test expects this code to exist in the source:\n{}\nUse insert_between or edit_line to add the missing code.",
-                        assertion_hints.iter().map(|h| format!("  - `{}`", h)).collect::<Vec<_>>().join("\n"))
+                    format!(
+                        "\n\n## Assertion Hints\nThe test expects this code to exist in the source:\n{}\nUse insert_between or edit_line to add the missing code.",
+                        assertion_hints
+                            .iter()
+                            .map(|h| format!("  - `{}`", h))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
                 } else {
                     String::new()
                 };
@@ -1822,7 +2466,11 @@ async fn main() {
                 };
                 localization_summary = format!(
                     "{}{}\n## Test Failures\n{}\n\n## Relevant Code\n{}{}",
-                    file_ranking_section, enrichment_section, test_summary, localized_code, hint_section
+                    file_ranking_section,
+                    enrichment_section,
+                    test_summary,
+                    localized_code,
+                    hint_section
                 );
 
                 // Feed everything into conversation for the planning state
@@ -1838,7 +2486,15 @@ async fn main() {
                 let from = current_state.clone();
                 current_state = "planning".into();
                 steps_in_current_state = 0;
-                emit!(TuiEvent::Transition { from: from, to: "planning".into(), trigger: Some("LOCALIZED".into()), rationale: Some("Programmatic localization complete".into()) }, "  [TRANSITION] localizing -> planning");
+                emit!(
+                    TuiEvent::Transition {
+                        from: from,
+                        to: "planning".into(),
+                        trigger: Some("LOCALIZED".into()),
+                        rationale: Some("Programmatic localization complete".into())
+                    },
+                    "  [TRANSITION] localizing -> planning"
+                );
                 continue;
             }
 
@@ -1846,14 +2502,16 @@ async fn main() {
                 // Auto-run tests on entry — this is what testing IS
                 let test_result = tools::execute_tool("run_test", &json!({}), &args.workdir);
                 let passed = test_result.contains("passed") && !test_result.contains("failed");
-                let fail_count = test_result.lines()
+                let fail_count = test_result
+                    .lines()
                     .find(|l| l.contains("failed"))
                     .and_then(|l| l.split_whitespace().next())
                     .unwrap_or("?");
 
                 println!("[Step {}] State: testing — auto-running tests", step);
                 // Show test summary
-                let test_summary: String = test_result.lines()
+                let test_summary: String = test_result
+                    .lines()
                     .filter(|l| l.contains("passed") || l.contains("failed"))
                     .last()
                     .unwrap_or("tests complete")
@@ -1861,24 +2519,58 @@ async fn main() {
                     .to_string();
                 println!("  {}", test_summary);
                 if passed {
-                    emit!(TuiEvent::AutoTest { passed: true, fail_count: 0 }, "  [AUTO-TEST] ALL PASSED");
+                    emit!(
+                        TuiEvent::AutoTest {
+                            passed: true,
+                            fail_count: 0
+                        },
+                        "  [AUTO-TEST] ALL PASSED"
+                    );
                     // Show what changed
                     let changed = tools::all_diff_stats(&args.workdir);
                     for (file, lines_changed, total) in &changed {
-                        emit!(TuiEvent::DiffStats { file: file.clone(), changed: *lines_changed, total: *total },
-                            format!("  Changes: {} ({}/{} lines modified)", file, lines_changed, total));
+                        emit!(
+                            TuiEvent::DiffStats {
+                                file: file.clone(),
+                                changed: *lines_changed,
+                                total: *total
+                            },
+                            format!(
+                                "  Changes: {} ({}/{} lines modified)",
+                                file, lines_changed, total
+                            )
+                        );
                     }
                     conversation.push(ChatMessage {
                         role: "user".into(),
-                        content: format!("Tests ran automatically and ALL PASSED:\n{}\n\nProceeding to review.", test_result),
+                        content: format!(
+                            "Tests ran automatically and ALL PASSED:\n{}\n\nProceeding to review.",
+                            test_result
+                        ),
                     });
-                    emit!(TuiEvent::Transition { from: "testing".into(), to: "review".into(), trigger: Some("TESTS_PASS".into()), rationale: Some("All tests passed".into()) }, "  [TRANSITION] testing -> review");
+                    emit!(
+                        TuiEvent::Transition {
+                            from: "testing".into(),
+                            to: "review".into(),
+                            trigger: Some("TESTS_PASS".into()),
+                            rationale: Some("All tests passed".into())
+                        },
+                        "  [TRANSITION] testing -> review"
+                    );
                     current_state = "review".into();
                     steps_in_current_state = 0;
                     continue;
                 } else {
-                    emit!(TuiEvent::AutoTest { passed: false, fail_count: fail_count.parse().unwrap_or(1) },
-                        format!("  [AUTO-TEST] {} failing — returning to implementing", fail_count));
+                    emit!(
+                        TuiEvent::AutoTest {
+                            passed: false,
+                            fail_count: fail_count.parse().unwrap_or(1)
+                        },
+                        format!(
+                            "  [AUTO-TEST] {} failing — returning to implementing",
+                            fail_count
+                        )
+                    );
                     conversation.push(ChatMessage {
                         role: "user".into(),
                         content: format!("Tests ran automatically and FAILED:\n{}\n\nYou are back in implementing. Fix the remaining issues.", test_result),
@@ -1893,26 +2585,42 @@ async fn main() {
             }
         }
 
-        let allowed_tools = state_def.allowed_tools.as_ref().cloned().unwrap_or_default();
+        let allowed_tools = state_def
+            .allowed_tools
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
         let instructions = state_def.instructions.as_deref().unwrap_or("Proceed.");
-        let transitions: Vec<(String, String)> = state_def.on.iter()
+        let transitions: Vec<(String, String)> = state_def
+            .on
+            .iter()
             .map(|(event, t)| (event.clone(), t.target().to_string()))
             .collect();
 
         // Decision checkpoint: max_iterations reached
-        let is_checkpoint = state_def.max_iterations
+        let is_checkpoint = state_def
+            .max_iterations
             .is_some_and(|max| steps_in_current_state > max);
 
         // Hard cutoff: if stuck at 3x the max iterations, force transition
         let hard_limit = state_def.max_iterations.map(|m| m * 3);
         if let Some(limit) = hard_limit {
             if steps_in_current_state > limit {
-                let next = state_def.safe_next.clone()
-                    .or_else(|| state_def.on.iter()
-                        .find(|(e, _)| e.as_str() != "FAIL")
-                        .map(|(_, t)| t.target().to_string()))
+                let next = state_def
+                    .safe_next
+                    .clone()
+                    .or_else(|| {
+                        state_def
+                            .on
+                            .iter()
+                            .find(|(e, _)| e.as_str() != "FAIL")
+                            .map(|(_, t)| t.target().to_string())
+                    })
                     .unwrap_or_else(|| "failed".to_string());
-                println!("[Step {}] HARD LIMIT — forcing {} -> {}", step, current_state, next);
+                println!(
+                    "[Step {}] HARD LIMIT — forcing {} -> {}",
+                    step, current_state, next
+                );
                 current_state = next;
                 steps_in_current_state = 0;
                 continue;
@@ -1926,19 +2634,23 @@ async fn main() {
 
         if is_checkpoint {
             let hard_max = state_def.max_iterations.unwrap() * 3;
-            println!("[Step {}] CHECKPOINT in '{}' — forcing decision (iteration {}/{})",
-                step, current_state,
-                steps_in_current_state,
-                hard_max);
+            println!(
+                "[Step {}] CHECKPOINT in '{}' — forcing decision (iteration {}/{})",
+                step, current_state, steps_in_current_state, hard_max
+            );
         } else {
-            println!("[Step {}] State: {} ({}/{}) | Tools: [{}]",
-                step, current_state,
+            println!(
+                "[Step {}] State: {} ({}/{}) | Tools: [{}]",
+                step,
+                current_state,
                 steps_in_current_state,
                 state_def.max_iterations.unwrap_or(99),
-                allowed_tools.join(", "));
+                allowed_tools.join(", ")
+            );
         }
 
-        let iters_remaining = state_def.max_iterations
+        let iters_remaining = state_def
+            .max_iterations
             .map(|max| max.saturating_sub(steps_in_current_state));
 
         // Determine tool calling mode — use escalation model's profile when escalated
@@ -2003,7 +2715,8 @@ async fn main() {
         if use_native && (!is_checkpoint || force_native) {
             // Native tool calling path
             let tool_defs = statewright_agent::ollama_client::build_tool_definitions_with_nav(
-                &allowed_tools, &transitions,
+                &allowed_tools,
+                &transitions,
             );
             let result = match client.chat_with_tools(messages, tool_defs).await {
                 Ok(r) => r,
@@ -2012,34 +2725,57 @@ async fn main() {
                     eprintln!("  [NATIVE FAILED] {} — falling back to raw JSON", e);
                     // Rebuild messages for raw path
                     let system = build_system_prompt(
-                        &args.task, &current_state, instructions,
-                        &allowed_tools, &transitions, &args.workdir, is_checkpoint,
-                        iters_remaining, false, &localization_summary, reasoning_mode,
+                        &args.task,
+                        &current_state,
+                        instructions,
+                        &allowed_tools,
+                        &transitions,
+                        &args.workdir,
+                        is_checkpoint,
+                        iters_remaining,
+                        false,
+                        &localization_summary,
+                        reasoning_mode,
                     );
-                    let mut msgs = vec![ChatMessage { role: "system".into(), content: system }];
+                    let mut msgs = vec![ChatMessage {
+                        role: "system".into(),
+                        content: system,
+                    }];
                     let hs = conversation.len().saturating_sub(history_window);
                     msgs.extend(conversation[hs..].iter().cloned());
-                    msgs.push(ChatMessage { role: "user".into(), content: "What is your next action?".into() });
+                    msgs.push(ChatMessage {
+                        role: "user".into(),
+                        content: "What is your next action?".into(),
+                    });
 
                     match client.chat(msgs).await {
                         Ok(raw) => {
                             // Parse as raw JSON
                             if let Some(resp) = parse_response(&raw) {
                                 if let Some(calls) = resp.tool_calls {
-                                    for c in calls { tool_calls_to_process.push((c.name, c.args)); }
+                                    for c in calls {
+                                        tool_calls_to_process.push((c.name, c.args));
+                                    }
                                 }
                                 transition_event = resp.transition;
                                 transition_error = resp.error;
-                                conversation.push(ChatMessage { role: "assistant".into(), content: raw });
+                                conversation.push(ChatMessage {
+                                    role: "assistant".into(),
+                                    content: raw,
+                                });
                             }
                             // Continue to processing below
                             statewright_agent::ollama_client::ChatResult {
-                                content: String::new(), tool_calls: vec![],
+                                content: String::new(),
+                                tool_calls: vec![],
                                 mode: statewright_agent::ollama_client::ResponseMode::RawJson,
                                 reasoning: None,
                             }
                         }
-                        Err(e2) => { eprintln!("  [LLM ERROR] {}", e2); break; }
+                        Err(e2) => {
+                            eprintln!("  [LLM ERROR] {}", e2);
+                            break;
+                        }
                     }
                 }
             };
@@ -2053,7 +2789,11 @@ async fn main() {
                         }
                         other => other.clone(),
                     };
-                    println!("  [NATIVE] {}({})", tc.function.name, truncate_json(&args_val, 60));
+                    println!(
+                        "  [NATIVE] {}({})",
+                        tc.function.name,
+                        truncate_json(&args_val, 60)
+                    );
                     tool_calls_to_process.push((tc.function.name.clone(), args_val));
                 }
 
@@ -2073,7 +2813,10 @@ async fn main() {
                 }
 
                 // If no tool calls and no transition from native, the model gave text only
-                if tool_calls_to_process.is_empty() && transition_event.is_none() && !result.content.is_empty() {
+                if tool_calls_to_process.is_empty()
+                    && transition_event.is_none()
+                    && !result.content.is_empty()
+                {
                     println!("  [LLM] {}", truncate(&result.content, 300));
                 }
 
@@ -2107,14 +2850,17 @@ async fn main() {
                     modified_files.insert(path.clone());
                 }
                 // Still try to parse remaining JSON for transitions
-                let has_transition = raw_response.contains("\"transition\"")
-                    || raw_response.contains("\"event\"");
+                let has_transition =
+                    raw_response.contains("\"transition\"") || raw_response.contains("\"event\"");
                 if has_transition {
                     if let Some(resp) = parse_response(&raw_response) {
                         transition_event = resp.transition;
                     }
                 }
-                conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                conversation.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: raw_response,
+                });
                 let paths: Vec<&str> = file_blocks.iter().map(|(p, _)| p.as_str()).collect();
                 conversation.push(ChatMessage {
                     role: "user".into(),
@@ -2122,108 +2868,167 @@ async fn main() {
                 });
                 // Don't fall through to JSON parse — file blocks were the action
             } else {
-
-            match parse_response(&raw_response) {
-                Some(resp) => {
-                    if let Some(calls) = resp.tool_calls {
-                        for c in calls { tool_calls_to_process.push((c.name, c.args)); }
-                    }
-                    transition_event = resp.transition;
-                    transition_error = resp.error;
-                    conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
+                let file_block_errors =
+                    tools::extract_file_block_errors(&raw_response, &args.workdir);
+                if !file_block_errors.is_empty() {
+                    conversation.push(ChatMessage {
+                        role: "assistant".into(),
+                        content: raw_response,
+                    });
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: file_block_errors.join("\n"),
+                    });
+                    continue;
                 }
-                None => {
-                    println!("  [PARSE FAIL] {}", truncate(&raw_response, 200));
-
-                    // Auto-fallback: if this was a write_file that truncated,
-                    // extract the path and redo as two-phase create_file.
-                    let is_write_file_attempt = raw_response.contains("write_file")
-                        && raw_response.contains("\"content\"");
-                    if is_write_file_attempt && args.tdd_greenfield {
-                        // Extract path from the malformed JSON
-                        if let Some(path) = extract_path_from_malformed(&raw_response) {
-                            println!("  [FALLBACK] write_file parse-failed → retrying as create_file for {}", path);
-                            let full_path = std::path::Path::new(&args.workdir).join(&path);
-                            if let Some(parent) = full_path.parent() {
-                                let _ = std::fs::create_dir_all(parent);
+                match parse_response(&raw_response) {
+                    Some(resp) => {
+                        if let Some(calls) = resp.tool_calls {
+                            for c in calls {
+                                tool_calls_to_process.push((c.name, c.args));
                             }
-                            // Phase 2: get raw content
-                            let recent: Vec<ChatMessage> = conversation.iter()
-                                .rev().take(4).rev().cloned().collect();
-                            let mut content_messages = vec![
-                                ChatMessage { role: "system".into(), content: format!(
-                                    "You are writing the file {}. Output the COMPLETE file content — every function, every class, every import. \
-                                     Do NOT abbreviate. Output ONLY raw code. No markdown, no fences, no JSON. Start with line 1.",
+                        }
+                        transition_event = resp.transition;
+                        transition_error = resp.error;
+                        conversation.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: raw_response,
+                        });
+                    }
+                    None => {
+                        println!("  [PARSE FAIL] {}", truncate(&raw_response, 200));
+
+                        // Auto-fallback: if this was a write_file that truncated,
+                        // extract the path and redo as two-phase create_file.
+                        let is_write_file_attempt = raw_response.contains("write_file")
+                            && raw_response.contains("\"content\"");
+                        if is_write_file_attempt && args.tdd_greenfield {
+                            // Extract path from the malformed JSON
+                            if let Some(path) = extract_path_from_malformed(&raw_response) {
+                                println!(
+                                    "  [FALLBACK] write_file parse-failed → retrying as create_file for {}",
                                     path
-                                )},
-                            ];
-                            content_messages.extend(recent);
-                            content_messages.push(ChatMessage { role: "user".into(), content: format!(
+                                );
+                                let full_path =
+                                    match tools::validate_new_repo_file(&path, &args.workdir) {
+                                        Ok(path) => path,
+                                        Err(msg) => {
+                                            conversation.push(ChatMessage {
+                                                role: "assistant".into(),
+                                                content: raw_response,
+                                            });
+                                            conversation.push(ChatMessage {
+                                                role: "user".into(),
+                                                content: msg,
+                                            });
+                                            continue;
+                                        }
+                                    };
+                                // Phase 2: get raw content
+                                let recent: Vec<ChatMessage> =
+                                    conversation.iter().rev().take(4).rev().cloned().collect();
+                                let mut content_messages = vec![ChatMessage {
+                                    role: "system".into(),
+                                    content: format!(
+                                        "You are writing the file {}. Output the COMPLETE file content — every function, every class, every import. \
+                                     Do NOT abbreviate. Output ONLY raw code. No markdown, no fences, no JSON. Start with line 1.",
+                                        path
+                                    ),
+                                }];
+                                content_messages.extend(recent);
+                                content_messages.push(ChatMessage { role: "user".into(), content: format!(
                                 "Output the COMPLETE content for `{}` now. This is your ONE chance — output ALL the code.\n\nTASK: {}",
                                 path, task
                             )});
-                            match client.chat(content_messages).await {
-                                Ok(raw_content) => {
-                                    let content = tools::strip_code_fences(&raw_content);
-                                    if std::fs::write(&full_path, &content).is_ok() {
-                                        let bytes = content.len();
-                                        println!("  [FALLBACK] Wrote {} bytes to {}", bytes, path);
-                                        modified_files.insert(path.clone());
-                                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                                        conversation.push(ChatMessage {
-                                            role: "user".into(),
-                                            content: format!("Created {} ({} bytes). Run tests or continue.", path, bytes),
-                                        });
-                                    } else {
-                                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                                        conversation.push(ChatMessage {
+                                match client.chat(content_messages).await {
+                                    Ok(raw_content) => {
+                                        let content = tools::strip_code_fences(&raw_content);
+                                        if std::fs::write(&full_path, &content).is_ok() {
+                                            let bytes = content.len();
+                                            println!(
+                                                "  [FALLBACK] Wrote {} bytes to {}",
+                                                bytes, path
+                                            );
+                                            modified_files.insert(path.clone());
+                                            conversation.push(ChatMessage {
+                                                role: "assistant".into(),
+                                                content: raw_response,
+                                            });
+                                            conversation.push(ChatMessage {
+                                                role: "user".into(),
+                                                content: format!(
+                                                    "Created {} ({} bytes). Run tests or continue.",
+                                                    path, bytes
+                                                ),
+                                            });
+                                        } else {
+                                            conversation.push(ChatMessage {
+                                                role: "assistant".into(),
+                                                content: raw_response,
+                                            });
+                                            conversation.push(ChatMessage {
                                             role: "user".into(),
                                             content: format!("Failed to write {}. Try create_file instead of write_file.", path),
                                         });
+                                        }
                                     }
-                                }
-                                Err(e) => {
-                                    eprintln!("  [FALLBACK] LLM error: {}", e);
-                                    conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                                    conversation.push(ChatMessage {
+                                    Err(e) => {
+                                        eprintln!("  [FALLBACK] LLM error: {}", e);
+                                        conversation.push(ChatMessage {
+                                            role: "assistant".into(),
+                                            content: raw_response,
+                                        });
+                                        conversation.push(ChatMessage {
                                         role: "user".into(),
                                         content: "Your write_file was too large. Use create_file instead.".into(),
                                     });
+                                    }
                                 }
+                                continue;
+                            }
+                        }
+
+                        // FIX 2: Extract embedded tool calls from prose responses.
+                        // Model outputs "Let me try...edit_line{...}" — extract and execute the JSON.
+                        let extracted = extract_tool_from_prose(&raw_response);
+                        if let Some((tool, args_val)) = extracted {
+                            println!("  [PARSE RECOVER] Extracted {} from prose", tool);
+                            tool_calls_to_process.push((tool, args_val));
+                            conversation.push(ChatMessage {
+                                role: "assistant".into(),
+                                content: raw_response,
+                            });
+                            // Don't continue — fall through to tool processing
+                        } else {
+                            // Standard recovery for truncated writes
+                            let recovered = recover_truncated_write(&raw_response, &args.workdir);
+                            if let Some(ref path) = recovered {
+                                println!(
+                                    "  [PARSE RECOVER] Extracted partial write_file to {}",
+                                    path
+                                );
+                                conversation.push(ChatMessage {
+                                    role: "assistant".into(),
+                                    content: raw_response,
+                                });
+                                conversation.push(ChatMessage {
+                                role: "user".into(),
+                                content: format!("Your response was truncated but I saved what I could to {}. Use edit_block to append remaining functions.", path),
+                            });
+                            } else {
+                                conversation.push(ChatMessage {
+                                    role: "assistant".into(),
+                                    content: raw_response,
+                                });
+                                conversation.push(ChatMessage {
+                                role: "user".into(),
+                                content: "Your response was not valid JSON. Respond with ONLY a JSON object: {\"tool_calls\": [{\"name\": \"TOOL\", \"args\": {...}}]}".into(),
+                            });
                             }
                             continue;
                         }
                     }
-
-                    // FIX 2: Extract embedded tool calls from prose responses.
-                    // Model outputs "Let me try...edit_line{...}" — extract and execute the JSON.
-                    let extracted = extract_tool_from_prose(&raw_response);
-                    if let Some((tool, args_val)) = extracted {
-                        println!("  [PARSE RECOVER] Extracted {} from prose", tool);
-                        tool_calls_to_process.push((tool, args_val));
-                        conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                        // Don't continue — fall through to tool processing
-                    } else {
-                        // Standard recovery for truncated writes
-                        let recovered = recover_truncated_write(&raw_response, &args.workdir);
-                        if let Some(ref path) = recovered {
-                            println!("  [PARSE RECOVER] Extracted partial write_file to {}", path);
-                            conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                            conversation.push(ChatMessage {
-                                role: "user".into(),
-                                content: format!("Your response was truncated but I saved what I could to {}. Use edit_block to append remaining functions.", path),
-                            });
-                        } else {
-                            conversation.push(ChatMessage { role: "assistant".into(), content: raw_response });
-                            conversation.push(ChatMessage {
-                                role: "user".into(),
-                                content: "Your response was not valid JSON. Respond with ONLY a JSON object: {\"tool_calls\": [{\"name\": \"TOOL\", \"args\": {...}}]}".into(),
-                            });
-                        }
-                        continue;
-                    }
                 }
-            }
             } // close else (no file blocks)
         }
 
@@ -2234,13 +3039,18 @@ async fn main() {
             if tool_name == "transition" {
                 // Handle both object args and stringified JSON args
                 let resolved_args = match tool_args {
-                    serde_json::Value::String(s) => {
-                        serde_json::from_str::<serde_json::Value>(s).unwrap_or(serde_json::json!({}))
-                    }
+                    serde_json::Value::String(s) => serde_json::from_str::<serde_json::Value>(s)
+                        .unwrap_or(serde_json::json!({})),
                     other => other.clone(),
                 };
-                let event = resolved_args.get("event").and_then(|e| e.as_str()).unwrap_or("DONE");
-                let error = resolved_args.get("error").and_then(|e| e.as_str()).map(|s| s.to_string());
+                let event = resolved_args
+                    .get("event")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("DONE");
+                let error = resolved_args
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string());
                 println!("  [NAV] transition({})", event);
                 transition_event = Some(event.to_string());
                 transition_error = error;
@@ -2257,15 +3067,17 @@ async fn main() {
                     "iterations_remaining": iters_remaining,
                 });
                 let actions_str = serde_json::to_string_pretty(&actions).unwrap();
-                println!("  [NAV] get_available_actions -> {}", truncate(&actions_str, 200));
+                println!(
+                    "  [NAV] get_available_actions -> {}",
+                    truncate(&actions_str, 200)
+                );
                 tool_output.push_str(&format!("=== available actions ===\n{}\n", actions_str));
                 continue;
             }
 
             // Regular tool — enforce access
-            let enforcement = tool_enforcer::enforce_tools(
-                &definition, &current_state, &[tool_name.clone()],
-            );
+            let enforcement =
+                tool_enforcer::enforce_tools(&definition, &current_state, &[tool_name.clone()]);
 
             if !enforcement.blocked.is_empty() {
                 // Implicit transition: blocked tool belongs to the next state
@@ -2284,6 +3096,68 @@ async fn main() {
                 continue;
             }
 
+            let writes_files = is_write_tool(tool_name);
+            let targeted_paths = if writes_files {
+                targeted_paths_for_tool(tool_name, tool_args, &args.workdir)
+            } else {
+                Vec::new()
+            };
+
+            if writes_files && current_state == "implementing" && profile.read_only_tests {
+                let blocked_tests: Vec<String> = targeted_paths
+                    .iter()
+                    .filter(|path| is_test_path(path, &sw_test_files))
+                    .cloned()
+                    .collect();
+                if !blocked_tests.is_empty() {
+                    let msg = format!(
+                        "BLOCKED: test files are read-only in this bug-fix harness. Read tests if needed, but modify source files only. Blocked path(s): {}",
+                        blocked_tests.join(", ")
+                    );
+                    println!("  [TEST GUARD] {}", msg);
+                    tool_output.push_str(&msg);
+                    tool_output.push('\n');
+                    continue;
+                }
+            }
+
+            if writes_files
+                && current_state == "implementing"
+                && profile.enforce_localized_edit_locus
+            {
+                let allowed_edit_paths: std::collections::HashSet<String> = localized_regions
+                    .keys()
+                    .chain(localized_file_contexts.keys())
+                    .map(|path| tools::resolve_repo_path(path, &args.workdir))
+                    .collect();
+
+                let outside_locus: Vec<String> = targeted_paths
+                    .iter()
+                    .filter(|path| {
+                        !allowed_edit_paths.is_empty() && !allowed_edit_paths.contains(*path)
+                    })
+                    .cloned()
+                    .collect();
+
+                if !outside_locus.is_empty() {
+                    let mut ranked: Vec<String> = allowed_edit_paths.into_iter().collect();
+                    ranked.sort();
+                    let msg = format!(
+                        "BLOCKED: edit target is outside the localized source locus. Requested: {}. Allowed source files: {}",
+                        outside_locus.join(", "),
+                        ranked.join(", ")
+                    );
+                    println!("  [LOCUS GUARD] {}", msg);
+                    tool_output.push_str(&msg);
+                    tool_output.push('\n');
+                    continue;
+                }
+            }
+
+            if writes_files && current_state == "implementing" && profile.sandbox_failed_edits {
+                tools::snapshot_candidate(&args.workdir);
+            }
+
             emit!(TuiEvent::ToolCall {
                 name: tool_name.clone(),
                 args_preview: truncate_json(tool_args, 200),
@@ -2292,9 +3166,18 @@ async fn main() {
             // Read dedup: if this is an unranged read_file for a file we already read
             // and haven't modified since, return a cached summary instead of full content
             let is_read = tool_name == "read_file";
-            let is_ranged_read = is_read && (tool_args.get("start_line").is_some() || tool_args.get("line_start").is_some());
-            let cache_key = format!("{}:{}", tool_name, serde_json::to_string(tool_args).unwrap_or_default());
-            let read_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string();
+            let is_ranged_read = is_read
+                && (tool_args.get("start_line").is_some() || tool_args.get("line_start").is_some());
+            let cache_key = format!(
+                "{}:{}",
+                tool_name,
+                serde_json::to_string(tool_args).unwrap_or_default()
+            );
+            let read_path = tool_args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
 
             let mut result = if is_read && !is_ranged_read && !modified_files.contains(&read_path) {
                 if let Some((prev_step, prev_result)) = read_cache.get(&cache_key) {
@@ -2305,8 +3188,12 @@ async fn main() {
                         prev_step, line_count
                     );
                     if !json_mode {
-                        println!("  [DEDUP] {}({}) -> cached from step {}", tool_name,
-                            truncate_json(tool_args, 60), prev_step);
+                        println!(
+                            "  [DEDUP] {}({}) -> cached from step {}",
+                            tool_name,
+                            truncate_json(tool_args, 60),
+                            prev_step
+                        );
                     }
                     summary
                 } else {
@@ -2319,8 +3206,10 @@ async fn main() {
                     if line_count > max_full_read_lines {
                         // BLOCK: file too large for full read. Suggest ranges from localization.
                         if !json_mode {
-                            println!("  [CONTEXT CAP] BLOCKED: {} is {} lines (max {} for this model) — use ranged read",
-                                read_path, line_count, max_full_read_lines);
+                            println!(
+                                "  [CONTEXT CAP] BLOCKED: {} is {} lines (max {} for this model) — use ranged read",
+                                read_path, line_count, max_full_read_lines
+                            );
                         }
                         let mut suggestion = format!(
                             "BLOCKED: '{}' is {} lines — too large for full read (max {} lines for this model).\n",
@@ -2330,7 +3219,9 @@ async fn main() {
                             suggestion.push_str("Relevant excerpt from bug localization:\n");
                             suggestion.push_str(excerpt);
                             suggestion.push('\n');
-                            suggestion.push_str("Use start_line/end_line if you need to inspect adjacent lines.");
+                            suggestion.push_str(
+                                "Use start_line/end_line if you need to inspect adjacent lines.",
+                            );
                         } else if let Some(regions) = localized_regions.get(&read_path) {
                             // Add specific range suggestions from localization data
                             suggestion.push_str("Relevant sections from bug localization:\n");
@@ -2342,7 +3233,9 @@ async fn main() {
                                     pattern, line_num, start, end
                                 ));
                             }
-                            suggestion.push_str("Use one of these ranges, or use grep to find other sections.");
+                            suggestion.push_str(
+                                "Use one of these ranges, or use grep to find other sections.",
+                            );
                         } else {
                             suggestion.push_str("Use grep to find the section you need, then read_file with start_line/end_line.");
                         }
@@ -2361,8 +3254,10 @@ async fn main() {
                     .unwrap_or(0);
                 if line_count > max_full_read_lines {
                     if !json_mode {
-                        println!("  [CONTEXT CAP] BLOCKED: {} is {} lines (max {}) — use ranged read",
-                            read_path, line_count, max_full_read_lines);
+                        println!(
+                            "  [CONTEXT CAP] BLOCKED: {} is {} lines (max {}) — use ranged read",
+                            read_path, line_count, max_full_read_lines
+                        );
                     }
                     if let Some(excerpt) = localized_file_contexts.get(&read_path) {
                         format!(
@@ -2386,26 +3281,41 @@ async fn main() {
 
             // On first edit of an unread file, inject the file content back into the
             // conversation so the model can correct itself before retrying.
-            let is_edit_tool = tool_name.contains("edit") || tool_name == "patch_file";
+            let is_edit_tool = matches!(
+                tool_name.as_str(),
+                "edit_line"
+                    | "edit_block"
+                    | "patch_file"
+                    | "apply_patch"
+                    | "insert_between"
+                    | "write_file"
+            );
             if is_edit_tool {
                 let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                let has_read = !edit_path.is_empty() && read_cache.keys().any(|k| k.contains(edit_path));
+                let has_read =
+                    !edit_path.is_empty() && read_cache.keys().any(|k| k.contains(edit_path));
                 if !has_read && !edit_path.is_empty() {
                     let full_edit_path = std::path::Path::new(&args.workdir).join(edit_path);
                     if full_edit_path.exists() {
-                        let file_content = std::fs::read_to_string(&full_edit_path).unwrap_or_default();
+                        let file_content =
+                            std::fs::read_to_string(&full_edit_path).unwrap_or_default();
                         let line_count = file_content.lines().count();
-                        println!("  [GATE] Edit blocked — {} not read yet, injecting content", edit_path);
+                        println!(
+                            "  [GATE] Edit blocked — {} not read yet, injecting content",
+                            edit_path
+                        );
 
                         let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
                         let content_preview = localized_file_contexts
                             .get(edit_path)
                             .cloned()
-                            .unwrap_or_else(|| build_readable_excerpt(
-                                &file_content,
-                                localized_regions.get(edit_path),
-                                old_arg,
-                            ));
+                            .unwrap_or_else(|| {
+                                build_readable_excerpt(
+                                    &file_content,
+                                    localized_regions.get(edit_path),
+                                    old_arg,
+                                )
+                            });
 
                         let cache_key_for_edit = format!("read_file:{}", edit_path);
                         read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
@@ -2419,24 +3329,31 @@ async fn main() {
             }
 
             // On edit failure, inject relevant file content to help the next attempt
-            let edit_failed = is_edit_tool && (result.contains("not found") || result.contains("error: block not found"));
+            let edit_failed = is_edit_tool
+                && (result.contains("not found") || result.contains("error: block not found"));
             if edit_failed {
                 let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
                 let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
                 if !edit_path.is_empty() && !old_arg.is_empty() {
                     let full_edit_path = std::path::Path::new(&args.workdir).join(edit_path);
                     if full_edit_path.exists() {
-                        let file_content = std::fs::read_to_string(&full_edit_path).unwrap_or_default();
+                        let file_content =
+                            std::fs::read_to_string(&full_edit_path).unwrap_or_default();
                         let preview = localized_file_contexts
                             .get(edit_path)
                             .cloned()
-                            .unwrap_or_else(|| build_readable_excerpt(
-                                &file_content,
-                                localized_regions.get(edit_path),
-                                old_arg,
-                            ));
+                            .unwrap_or_else(|| {
+                                build_readable_excerpt(
+                                    &file_content,
+                                    localized_regions.get(edit_path),
+                                    old_arg,
+                                )
+                            });
                         if !preview.is_empty() {
-                            result.push_str(&format!("\n\nActual content near the edit locus:\n{}", preview));
+                            result.push_str(&format!(
+                                "\n\nActual content near the edit locus:\n{}",
+                                preview
+                            ));
                         }
                     }
                 }
@@ -2446,7 +3363,10 @@ async fn main() {
             // Make a second LLM call for raw file content (no JSON escaping).
             if result.starts_with("CREATE_FILE_READY:") {
                 let file_path = result.trim_start_matches("CREATE_FILE_READY:").to_string();
-                println!("  [CREATE FILE] Phase 2: requesting raw content for {}", file_path);
+                println!(
+                    "  [CREATE FILE] Phase 2: requesting raw content for {}",
+                    file_path
+                );
 
                 // Build content prompt with task context for the model to work with
                 let content_prompt = format!(
@@ -2459,32 +3379,47 @@ async fn main() {
                     task = task,
                 );
                 // Include recent conversation for context (last 4 messages)
-                let recent: Vec<ChatMessage> = conversation.iter()
-                    .rev().take(4).rev().cloned().collect();
-                let mut content_messages = vec![
-                    ChatMessage { role: "system".into(), content: format!(
+                let recent: Vec<ChatMessage> =
+                    conversation.iter().rev().take(4).rev().cloned().collect();
+                let mut content_messages = vec![ChatMessage {
+                    role: "system".into(),
+                    content: format!(
                         "You are writing the file {}. Output the COMPLETE file content — every function, every class, every import. \
                          Do NOT abbreviate, do NOT use comments like '# ... rest of implementation'. \
                          Output ONLY raw code. No markdown, no fences, no JSON. Start with line 1.",
                         file_path
-                    )},
-                ];
+                    ),
+                }];
                 content_messages.extend(recent);
-                content_messages.push(ChatMessage { role: "user".into(), content: content_prompt });
+                content_messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: content_prompt,
+                });
 
                 match client.chat(content_messages).await {
                     Ok(raw_content) => {
                         let content = tools::strip_code_fences(&raw_content);
-                        let full_path = std::path::Path::new(&args.workdir).join(&file_path);
+                        let full_path =
+                            match tools::validate_new_repo_file(&file_path, &args.workdir) {
+                                Ok(path) => path,
+                                Err(msg) => {
+                                    tool_output.push_str(&format!("{}\n", msg));
+                                    continue;
+                                }
+                            };
                         match std::fs::write(&full_path, &content) {
                             Ok(()) => {
                                 let bytes = content.len();
                                 println!("  [CREATE FILE] Wrote {} bytes to {}", bytes, file_path);
                                 modified_files.insert(file_path.clone());
-                                tool_output.push_str(&format!("Created {} ({} bytes)\n", file_path, bytes));
+                                tool_output.push_str(&format!(
+                                    "Created {} ({} bytes)\n",
+                                    file_path, bytes
+                                ));
                             }
                             Err(e) => {
-                                tool_output.push_str(&format!("error writing {}: {}\n", file_path, e));
+                                tool_output
+                                    .push_str(&format!("error writing {}: {}\n", file_path, e));
                             }
                         }
                     }
@@ -2496,14 +3431,12 @@ async fn main() {
             }
 
             // Track file modifications to invalidate read cache
-            let is_edit = tool_name.contains("edit") || tool_name.contains("patch")
-                || tool_name == "write_file" || tool_name == "apply_patch" || tool_name == "create_file";
-            let edit_succeeded = is_edit && !result.contains("error") && !result.contains("not found");
+            let is_edit = writes_files;
+            let edit_succeeded =
+                is_edit && !result.contains("error") && !result.contains("not found");
             if edit_succeeded {
-                // Mark the file as modified so future reads aren't cached
-                if let Some(path) = tool_args.get("path").and_then(|p| p.as_str()) {
+                for path in &targeted_paths {
                     modified_files.insert(path.to_string());
-                    // Invalidate any cached reads for this file
                     read_cache.retain(|k, _| !k.contains(path));
                 }
             }
@@ -2519,7 +3452,10 @@ async fn main() {
             }
 
             // Pass → short-circuit to completed. Fail + oversized → restore and restrict.
-            if edit_succeeded && current_state == "implementing" {
+            'auto_test: {
+                if !(edit_succeeded && current_state == "implementing") {
+                    break 'auto_test;
+                }
                 // Scope auto-test: prefer SW_TEST_FILES (SWE-bench test patch),
                 // then try tests/ near the edited file, then skip on large repos.
                 let test_scope = if let Ok(test_files) = std::env::var("SW_TEST_FILES") {
@@ -2531,12 +3467,19 @@ async fn main() {
                         json!({})
                     }
                 } else if let Some(edited_path) = tool_args.get("path").and_then(|p| p.as_str()) {
-                    let dir = std::path::Path::new(edited_path).parent().unwrap_or(std::path::Path::new("."));
+                    let dir = std::path::Path::new(edited_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."));
                     let test_dir = dir.join("tests");
                     let full_test_dir = std::path::Path::new(&args.workdir).join(&test_dir);
                     if full_test_dir.is_dir() {
                         json!({"path": test_dir.to_string_lossy()})
-                    } else if dir.join("test").is_dir() || std::path::Path::new(&args.workdir).join(dir).join("test").is_dir() {
+                    } else if dir.join("test").is_dir()
+                        || std::path::Path::new(&args.workdir)
+                            .join(dir)
+                            .join("test")
+                            .is_dir()
+                    {
                         json!({"path": dir.join("test").to_string_lossy()})
                     } else {
                         json!({})
@@ -2545,6 +3488,14 @@ async fn main() {
                     json!({})
                 };
                 let test_result = tools::execute_tool("run_test", &test_scope, &args.workdir);
+                // If test runner is unavailable, skip feedback entirely — don't lie to the model
+                if test_result.starts_with("TEST_ENV_UNAVAILABLE") {
+                    eprintln!(
+                        "  [AUTO-TEST] test runner unavailable — skipping feedback: {}",
+                        &test_result[..test_result.len().min(200)]
+                    );
+                    break 'auto_test;
+                }
                 // Multi-language pass detection:
                 // Python: "X passed" / "FAILED" / "failed"
                 // Go: "PASS" / "FAIL" at line start
@@ -2552,29 +3503,79 @@ async fn main() {
                 // Rust: "test result: ok" / "test result: FAILED"
                 let all_pass = {
                     let r = &test_result;
-                    let no_fail = !r.contains("FAILED") && !r.contains("FAIL ")
-                        && !r.contains("failed") && !r.contains("error:");
-                    let has_pass = r.contains("passed") || r.contains("PASS")
-                        || r.contains("test result: ok") || r.contains("Tests  ");
+                    let no_fail = !r.contains("FAILED")
+                        && !r.contains("FAIL ")
+                        && !r.contains("failed")
+                        && !r.contains("error:");
+                    let has_pass = r.contains("passed")
+                        || r.contains("PASS")
+                        || r.contains("test result: ok")
+                        || r.contains("Tests  ");
                     no_fail && has_pass
                 };
                 let changed = tools::all_diff_stats(&args.workdir);
                 if all_pass {
-                    let diff_summary: Vec<String> = changed.iter()
+                    let diff_summary: Vec<String> = changed
+                        .iter()
                         .map(|(f, c, t)| format!("{} ({}/{} lines)", f, c, t))
                         .collect();
                     println!("  [AUTO-TEST] PASS — short-circuiting to completed");
                     println!("  Changes: {}", diff_summary.join(", "));
-                    emit!(TuiEvent::Transition { from: "implementing".into(), to: "completed".into(),
-                        trigger: Some("AUTO_COMPLETE".into()),
-                        rationale: Some("Edit + tests pass".into()) },
-                        "  [TRANSITION] implementing -> completed (auto)");
+                    emit!(
+                        TuiEvent::Transition {
+                            from: "implementing".into(),
+                            to: "completed".into(),
+                            trigger: Some("AUTO_COMPLETE".into()),
+                            rationale: Some("Edit + tests pass".into())
+                        },
+                        "  [TRANSITION] implementing -> completed (auto)"
+                    );
                     current_state = "completed".into();
-                    break;
+                    break 'agent_loop;
                 } else {
-                    // Tests failed — if edit was oversized, restore and constrain
                     let oversized = changed.iter().any(|(_, c, _)| *c > profile.max_diff_lines);
-                    if oversized {
+                    let touched_test_file = changed
+                        .iter()
+                        .any(|(path, _, _)| is_test_path(path, &sw_test_files));
+                    let syntax_level_failure = test_result.contains("SyntaxError")
+                        || test_result.contains("IndentationError")
+                        || test_result.contains("TabError");
+                    let diff_summary: Vec<String> = changed
+                        .iter()
+                        .map(|(f, c, t)| format!("{} ({}/{} lines)", f, c, t))
+                        .collect();
+                    if profile.sandbox_failed_edits
+                        && (oversized || touched_test_file || syntax_level_failure)
+                    {
+                        let reason = if touched_test_file {
+                            "test file edit"
+                        } else if syntax_level_failure {
+                            "syntax-level failure"
+                        } else {
+                            "oversized edit"
+                        };
+                        println!(
+                            "  [AUTO-TEST] FAIL + {} — restoring candidate snapshot",
+                            reason
+                        );
+                        tools::restore_candidate_snapshot(&args.workdir);
+                        modified_files.clear();
+                        read_cache.clear();
+                        let fail_detail = test_result
+                            .lines()
+                            .filter(|l| {
+                                l.contains("FAILED") || l.contains("Error") || l.contains("assert")
+                            })
+                            .take(5)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        tool_output.push_str(&format!(
+                            "Tests FAILED after your edit. The candidate patch was reverted because it was a {}.\nRejected diff: {}\n{}\nTry a smaller source-only edit.\n",
+                            reason,
+                            diff_summary.join(", "),
+                            fail_detail
+                        ));
+                    } else if oversized {
                         println!("  [AUTO-TEST] FAIL + oversized edit — restoring snapshot");
                         tools::restore_snapshot(&args.workdir);
                         modified_files.clear();
@@ -2583,19 +3584,28 @@ async fn main() {
                     } else {
                         // Small edit, tests failed — keep the edit, let model iterate
                         println!("  [AUTO-TEST] FAIL — edit kept, model can refine");
-                        let fail_detail = test_result.lines()
-                            .filter(|l| l.contains("FAILED") || l.contains("Error") || l.contains("assert"))
-                            .take(5).collect::<Vec<_>>().join("\n");
+                        let fail_detail = test_result
+                            .lines()
+                            .filter(|l| {
+                                l.contains("FAILED") || l.contains("Error") || l.contains("assert")
+                            })
+                            .take(5)
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         let hint = if edit_fail_count >= 2 {
                             "\n\nYou've made multiple failed attempts. The fix might be in a different file. Try: inspect_class to check inheritance hierarchies, grep to search the codebase, or find_files to locate related files."
-                        } else { "" };
-                        tool_output.push_str(&format!("Tests FAILED after your edit. Fix the remaining issue.\n{}{}\n",
-                            fail_detail, hint));
+                        } else {
+                            ""
+                        };
+                        tool_output.push_str(&format!(
+                            "Tests FAILED after your edit. Fix the remaining issue.\n{}{}\n",
+                            fail_detail, hint
+                        ));
                     }
                     // Count failed edit for unified escalation (checked after tool loop)
                     edit_fail_count += 1;
                 }
-            }
+            } // 'auto_test
 
             emit!(TuiEvent::ToolResult {
                 name: tool_name.clone(),
@@ -2610,8 +3620,12 @@ async fn main() {
                 result.replace('\n', " ")
             };
             if !json_mode {
-                println!("  [TOOL] {}({}) -> {}", tool_name,
-                    truncate_json(tool_args, 60), truncate(&display_result, 300));
+                println!(
+                    "  [TOOL] {}({}) -> {}",
+                    tool_name,
+                    truncate_json(tool_args, 60),
+                    truncate(&display_result, 300)
+                );
             }
             tool_output.push_str(&format!("=== {} result ===\n{}\n", tool_name, result));
         }
@@ -2625,27 +3639,37 @@ async fn main() {
 
         // Escalation: also count non-edit implementing steps as stalls
         if current_state == "implementing" {
-            let any_edit_this_step = tool_calls_to_process.iter()
-                .any(|(name, _)| name.contains("edit") || name.contains("patch") || name == "write_file");
+            let any_edit_this_step = tool_calls_to_process
+                .iter()
+                .any(|(name, _)| is_write_tool(name));
             if !any_edit_this_step {
                 edit_fail_count += 1;
             }
             // Unified escalation check (fires from both auto-test failures and stalls)
             if edit_fail_count >= 2 && !reasoning_mode && !escalated_model {
                 reasoning_mode = true;
-                println!("  [ESCALATE] Level 1: reasoning mode (fail_count={})", edit_fail_count);
+                println!(
+                    "  [ESCALATE] Level 1: reasoning mode (fail_count={})",
+                    edit_fail_count
+                );
                 conversation.clear();
                 // FIX 4: Re-inject localization context after clear
                 if !localization_summary.is_empty() {
                     conversation.push(ChatMessage {
                         role: "user".into(),
-                        content: format!("Previous attempts failed. Here is the localization context:\n{}", localization_summary),
+                        content: format!(
+                            "Previous attempts failed. Here is the localization context:\n{}",
+                            localization_summary
+                        ),
                     });
                 }
             } else if edit_fail_count >= 4 && !escalated_model {
                 escalated_model = true;
                 reasoning_mode = false;
-                println!("  [ESCALATE] Level 2: switching to {} (fail_count={})", escalation_model, edit_fail_count);
+                println!(
+                    "  [ESCALATE] Level 2: switching to {} (fail_count={})",
+                    escalation_model, edit_fail_count
+                );
                 conversation.clear();
                 tools::restore_snapshot(&args.workdir);
                 modified_files.clear();
@@ -2659,12 +3683,18 @@ async fn main() {
                 }
             } else if edit_fail_count >= 6 && escalated_model && !reasoning_mode {
                 reasoning_mode = true;
-                println!("  [ESCALATE] Level 3: {} + reasoning (fail_count={})", escalation_model, edit_fail_count);
+                println!(
+                    "  [ESCALATE] Level 3: {} + reasoning (fail_count={})",
+                    escalation_model, edit_fail_count
+                );
                 conversation.clear();
                 if !localization_summary.is_empty() {
                     conversation.push(ChatMessage {
                         role: "user".into(),
-                        content: format!("Last attempt. Read the target file carefully before editing.\n{}", localization_summary),
+                        content: format!(
+                            "Last attempt. Read the target file carefully before editing.\n{}",
+                            localization_summary
+                        ),
                     });
                 }
             }
@@ -2673,7 +3703,11 @@ async fn main() {
         // Handle transition
         if let Some(raw_event) = &transition_event {
             // Sanitize: model might output "DONE -> testing" instead of "DONE"
-            let event = raw_event.split_whitespace().next().unwrap_or(raw_event).trim();
+            let event = raw_event
+                .split_whitespace()
+                .next()
+                .unwrap_or(raw_event)
+                .trim();
 
             if event == "FAIL" {
                 // Intercept FAIL: escalate instead of giving up if escalation is available
@@ -2681,7 +3715,10 @@ async fn main() {
                     edit_fail_count = 4; // Force Level 2
                     escalated_model = true;
                     reasoning_mode = false;
-                    println!("  [FAIL → ESCALATE] Model gave up — switching to {}", escalation_model);
+                    println!(
+                        "  [FAIL → ESCALATE] Model gave up — switching to {}",
+                        escalation_model
+                    );
                     conversation.clear();
                     tools::restore_snapshot(&args.workdir);
                     modified_files.clear();
@@ -2704,12 +3741,22 @@ async fn main() {
             ) {
                 Ok(result) => {
                     if result.requires_approval {
-                        let msg = result.approval_message.as_deref().unwrap_or("Approval required");
+                        let msg = result
+                            .approval_message
+                            .as_deref()
+                            .unwrap_or("Approval required");
                         println!("\n  [APPROVAL GATE] {}", msg);
                         // In production, this is where the system parks and waits for human input.
                         // For the demo, transition to the approval state and let the LLM handle it.
-                        emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone(), trigger: transition_event.clone(), rationale: None },
-                            format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
+                        emit!(
+                            TuiEvent::Transition {
+                                from: current_state.clone(),
+                                to: result.new_state.clone(),
+                                trigger: transition_event.clone(),
+                                rationale: None
+                            },
+                            format!("  [TRANSITION] {} -> {}", current_state, result.new_state)
+                        );
                         current_state = result.new_state;
                         context = result.new_context;
                         steps_in_current_state = 0;
@@ -2726,10 +3773,15 @@ async fn main() {
                     if current_state == "implementing" {
                         let changed_files = tools::all_diff_stats(&args.workdir);
                         if changed_files.is_empty() {
-                            println!("  [EDIT GATE] BLOCKED — no files changed. You must edit before transitioning.");
+                            println!(
+                                "  [EDIT GATE] BLOCKED — no files changed. You must edit before transitioning."
+                            );
                             conversation.push(ChatMessage {
                                 role: "user".into(),
-                                content: "BLOCKED: You have not edited any files. You MUST use edit_line, edit_block, or patch_file to make a change before calling transition. Do it now.".into(),
+                                content: format!(
+                                    "BLOCKED: You have not edited any files. You MUST use {} to make a change before calling transition. Do it now.",
+                                    preferred_edit_tools(&allowed_tools)
+                                ),
                             });
                             steps_in_current_state += 1;
                             continue;
@@ -2746,8 +3798,10 @@ async fn main() {
                             println!("  [DIFF] {} — {}/{} lines changed", file, changed, total);
 
                             if *changed > profile.max_diff_lines && *total > 0 {
-                                println!("  [MINIMIZER] REJECTED — {} changed {} lines (max {}). Restoring and retrying.",
-                                    file, changed, profile.max_diff_lines);
+                                println!(
+                                    "  [MINIMIZER] REJECTED — {} changed {} lines (max {}). Restoring and retrying.",
+                                    file, changed, profile.max_diff_lines
+                                );
                                 tools::restore_snapshot(&args.workdir);
                                 rejected = true;
 
@@ -2774,13 +3828,22 @@ async fn main() {
                         if rejected {
                             // Stay in implementing — don't advance
                             steps_in_current_state += 1;
-                            println!("  [MINIMIZER] Staying in 'implementing' — fix must be smaller");
+                            println!(
+                                "  [MINIMIZER] Staying in 'implementing' — fix must be smaller"
+                            );
                             continue;
                         }
                     }
 
-                    emit!(TuiEvent::Transition { from: current_state.clone(), to: result.new_state.clone(), trigger: transition_event.clone(), rationale: None },
-                        format!("  [TRANSITION] {} -> {}", current_state, result.new_state));
+                    emit!(
+                        TuiEvent::Transition {
+                            from: current_state.clone(),
+                            to: result.new_state.clone(),
+                            trigger: transition_event.clone(),
+                            rationale: None
+                        },
+                        format!("  [TRANSITION] {} -> {}", current_state, result.new_state)
+                    );
                     current_state = result.new_state;
                     context = result.new_context;
                     steps_in_current_state = 0;
@@ -2793,7 +3856,10 @@ async fn main() {
                     println!("  [TRANSITION ERROR] {}", msg);
                     conversation.push(ChatMessage {
                         role: "user".into(),
-                        content: format!("That transition was invalid: {}. Try a different action.", e),
+                        content: format!(
+                            "That transition was invalid: {}. Try a different action.",
+                            e
+                        ),
                     });
                 }
             }
@@ -2807,7 +3873,9 @@ async fn main() {
         println!("[SUCCESS] All tests pass!");
     } else {
         let lines: Vec<&str> = test_result.lines().collect();
-        let summary_start = lines.iter().position(|l| l.contains("FAILED") || l.contains("passed"))
+        let summary_start = lines
+            .iter()
+            .position(|l| l.contains("FAILED") || l.contains("passed"))
             .unwrap_or(lines.len().saturating_sub(5));
         for line in &lines[summary_start..] {
             println!("  {}", line);
@@ -2860,8 +3928,14 @@ fn parse_response(raw: &str) -> Option<LlmResponse> {
 
     // Strip code fences
     let cleaned = if trimmed.starts_with("```") {
-        let after_first = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or(trimmed);
-        after_first.strip_suffix("```").unwrap_or(after_first).trim()
+        let after_first = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
+        after_first
+            .strip_suffix("```")
+            .unwrap_or(after_first)
+            .trim()
     } else {
         trimmed
     };
@@ -2928,7 +4002,10 @@ fn parse_response(raw: &str) -> Option<LlmResponse> {
         if let Some(event) = obj.get("event").and_then(|e| e.as_str()) {
             return Some(LlmResponse {
                 transition: None,
-                error: obj.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()),
+                error: obj
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string()),
                 tool_calls: Some(vec![ToolCallRequest {
                     name: "transition".into(),
                     args: json!({"event": event}),
@@ -3005,12 +4082,23 @@ fn parse_response(raw: &str) -> Option<LlmResponse> {
 /// FIX 2: Extract a tool call embedded in prose.
 /// Handles patterns like: "Let me try...edit_line{"path": "..."}" or "I'll use grep{"pattern": "..."}"
 fn extract_tool_from_prose(raw: &str) -> Option<(String, serde_json::Value)> {
-    let tool_names = ["edit_line", "edit_block", "patch_file", "grep", "read_file",
-                      "list_directory", "find_files", "run_test", "write_file", "transition"];
+    let tool_names = [
+        "edit_line",
+        "edit_block",
+        "patch_file",
+        "grep",
+        "read_file",
+        "list_directory",
+        "find_files",
+        "run_test",
+        "write_file",
+        "transition",
+    ];
 
     for tool in &tool_names {
         // Look for tool_name{ or tool_name({ patterns
-        if let Some(idx) = raw.find(&format!("{}{{", tool))
+        if let Some(idx) = raw
+            .find(&format!("{}{{", tool))
             .or_else(|| raw.find(&format!("{}({{", tool)))
         {
             let json_start = raw[idx..].find('{')? + idx;
@@ -3048,7 +4136,10 @@ fn extract_tool_from_prose(raw: &str) -> Option<(String, serde_json::Value)> {
                 '{' | '[' => depth += 1,
                 '}' | ']' => {
                     depth -= 1;
-                    if depth == 0 { end = Some(idx + i + 1); break; }
+                    if depth == 0 {
+                        end = Some(idx + i + 1);
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -3057,7 +4148,11 @@ fn extract_tool_from_prose(raw: &str) -> Option<(String, serde_json::Value)> {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw[idx..e]) {
                 if let Some(calls) = parsed.get("tool_calls").and_then(|c| c.as_array()) {
                     if let Some(first) = calls.first() {
-                        let name = first.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let name = first
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let args = first.get("args").cloned().unwrap_or(serde_json::json!({}));
                         if !name.is_empty() {
                             return Some((name, args));
@@ -3073,23 +4168,29 @@ fn extract_tool_from_prose(raw: &str) -> Option<(String, serde_json::Value)> {
 
 fn recover_truncated_write(raw: &str, workdir: &str) -> Option<String> {
     // Look for write_file pattern: "name": "write_file" ... "path": "..." ... "content": "..."
-    if !raw.contains("write_file") { return None; }
+    if !raw.contains("write_file") {
+        return None;
+    }
 
     // Extract path
     let path_marker = r#""path":"#;
     let path_start = raw.find(path_marker)?;
     let after_path = &raw[path_start + path_marker.len()..];
     let after_path = after_path.trim_start();
-    if !after_path.starts_with('"') { return None; }
+    if !after_path.starts_with('"') {
+        return None;
+    }
     let path_end = after_path[1..].find('"')?;
-    let path = &after_path[1..1+path_end];
+    let path = &after_path[1..1 + path_end];
 
     // Extract content (may be truncated)
     let content_marker = r#""content":"#;
     let content_start = raw.find(content_marker)?;
     let after_content = &raw[content_start + content_marker.len()..];
     let after_content = after_content.trim_start();
-    if !after_content.starts_with('"') { return None; }
+    if !after_content.starts_with('"') {
+        return None;
+    }
 
     // Find the content string — it may be truncated (no closing quote)
     let content_body = &after_content[1..];
@@ -3102,17 +4203,29 @@ fn recover_truncated_write(raw: &str, workdir: &str) -> Option<String> {
     };
 
     // Unescape the JSON string
-    let unescaped = content.replace("\\n", "\n").replace("\\t", "\t")
-        .replace("\\\"", "\"").replace("\\\\", "\\");
+    let unescaped = content
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\\"", "\"")
+        .replace("\\\\", "\\");
 
-    if unescaped.len() < 20 { return None; } // Too small to be useful
+    if unescaped.len() < 20 {
+        return None;
+    } // Too small to be useful
 
-    let full_path = std::path::Path::new(workdir).join(path);
-    if let Some(parent) = full_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    let full_path = match tools::validate_existing_repo_file(path, workdir) {
+        Ok(path) => path,
+        Err(msg) => {
+            println!("  [PARSE RECOVER] {}", msg);
+            return None;
+        }
+    };
     std::fs::write(&full_path, &unescaped).ok()?;
-    println!("  [PARSE RECOVER] Wrote {} bytes (possibly truncated) to {}", unescaped.len(), path);
+    println!(
+        "  [PARSE RECOVER] Wrote {} bytes (possibly truncated) to {}",
+        unescaped.len(),
+        path
+    );
     Some(path.to_string())
 }
 
@@ -3122,10 +4235,14 @@ fn extract_path_from_malformed(raw: &str) -> Option<String> {
     let marker = r#""path":"#;
     let start = raw.find(marker)?;
     let after = &raw[start + marker.len()..].trim_start();
-    if !after.starts_with('"') { return None; }
+    if !after.starts_with('"') {
+        return None;
+    }
     let end = after[1..].find('"')?;
-    let path = &after[1..1+end];
-    if path.is_empty() || path.contains("..") { return None; }
+    let path = &after[1..1 + end];
+    if path.is_empty() || path.contains("..") {
+        return None;
+    }
     // Strip leading ./ if present
     Some(path.trim_start_matches("./").to_string())
 }
@@ -3134,8 +4251,13 @@ fn find_unescaped_quote(s: &str) -> Option<usize> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' { i += 2; continue; }
-        if bytes[i] == b'"' { return Some(i); }
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return Some(i);
+        }
         i += 1;
     }
     None
@@ -3147,7 +4269,9 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         // Find a valid char boundary at or before max
         let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
         format!("{}...", &s[..end])
     }
 }

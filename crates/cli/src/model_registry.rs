@@ -27,6 +27,10 @@ pub struct ModelTraits {
     pub unescape_tool_args: Option<bool>,
     pub single_quote_json: Option<bool>,
     pub num_ctx: Option<u32>,
+    pub sandbox_failed_edits: Option<bool>,
+    pub read_only_tests: Option<bool>,
+    pub small_model_edit_tools: Option<bool>,
+    pub enforce_localized_edit_locus: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -56,6 +60,10 @@ pub struct ResolvedTraits {
     pub unescape_tool_args: bool,
     pub single_quote_json: bool,
     pub num_ctx: u32,
+    pub sandbox_failed_edits: bool,
+    pub read_only_tests: bool,
+    pub small_model_edit_tools: bool,
+    pub enforce_localized_edit_locus: bool,
 }
 
 impl ModelRegistry {
@@ -93,6 +101,10 @@ impl ModelRegistry {
             unescape_tool_args: merged.unescape_tool_args.unwrap_or(false),
             single_quote_json: merged.single_quote_json.unwrap_or(false),
             num_ctx: merged.num_ctx.unwrap_or(8192),
+            sandbox_failed_edits: merged.sandbox_failed_edits.unwrap_or(false),
+            read_only_tests: merged.read_only_tests.unwrap_or(false),
+            small_model_edit_tools: merged.small_model_edit_tools.unwrap_or(false),
+            enforce_localized_edit_locus: merged.enforce_localized_edit_locus.unwrap_or(false),
         }
     }
 }
@@ -106,7 +118,11 @@ fn parse_model_tag(tag: &str) -> (&str, Option<&str>) {
 
 fn merge_traits(base: &mut ModelTraits, from: &ModelTraits) {
     macro_rules! merge {
-        ($f:ident) => { if from.$f.is_some() { base.$f = from.$f.clone(); } };
+        ($f:ident) => {
+            if from.$f.is_some() {
+                base.$f = from.$f.clone();
+            }
+        };
     }
     merge!(tool_mode);
     merge!(reasoning);
@@ -117,4 +133,8 @@ fn merge_traits(base: &mut ModelTraits, from: &ModelTraits) {
     merge!(unescape_tool_args);
     merge!(single_quote_json);
     merge!(num_ctx);
+    merge!(sandbox_failed_edits);
+    merge!(read_only_tests);
+    merge!(small_model_edit_tools);
+    merge!(enforce_localized_edit_locus);
 }

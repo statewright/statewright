@@ -620,6 +620,110 @@ fn is_write_tool(tool_name: &str) -> bool {
     )
 }
 
+fn test_exit_code(output: &str) -> Option<i32> {
+    output.lines().find_map(|line| {
+        line.strip_prefix("SW_TEST_EXIT_CODE=")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+    })
+}
+
+fn test_env_unavailable(output: &str) -> bool {
+    output.starts_with("TEST_ENV_UNAVAILABLE")
+        || output
+            .lines()
+            .any(|line| line.trim() == "SW_TEST_ENV_UNAVAILABLE=1")
+}
+
+fn test_has_syntax_failure(output: &str) -> bool {
+    output.contains("SyntaxError")
+        || output.contains("IndentationError")
+        || output.contains("TabError")
+}
+
+fn test_passed(output: &str) -> bool {
+    if test_env_unavailable(output) {
+        return false;
+    }
+    if let Some(code) = test_exit_code(output) {
+        if code != 0 {
+            return false;
+        }
+    }
+
+    let lower = output.to_ascii_lowercase();
+    let has_nonzero_failed = lower.contains(" failed")
+        && !lower.contains(" 0 failed")
+        && !lower.contains(", 0 failed")
+        && !lower.contains("= 0 failed");
+    let no_fail = !output.contains("FAILED")
+        && !output.contains("FAIL ")
+        && !has_nonzero_failed
+        && !output.contains("error:")
+        && !output.contains("Error:")
+        && !output.contains("Traceback")
+        && !output.contains("SyntaxError")
+        && !output.contains("IndentationError")
+        && !output.contains("ModuleNotFoundError")
+        && !output.contains("exception")
+        && !output.contains("DO *NOT* COMMIT");
+    let has_pass = (output.contains("passed") && !output.contains("0 passed"))
+        || output.contains("PASS")
+        || output.contains("test result: ok")
+        || output.contains("Tests  ");
+    no_fail && has_pass
+}
+
+fn failure_excerpt(output: &str, limit: usize) -> String {
+    output
+        .lines()
+        .filter(|line| {
+            line.starts_with("FAILED")
+                || line.starts_with("ERROR")
+                || line.contains("failed")
+                || line.contains("Error")
+                || line.contains("AssertionError")
+                || line.contains("assert ")
+                || line.contains("DO *NOT* COMMIT")
+        })
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn scoped_test_file_from_env() -> Option<String> {
+    std::env::var("SW_TEST_FILES").ok().and_then(|tf| {
+        let files: Vec<&str> = tf.split(':').filter(|f| !f.is_empty()).collect();
+        files
+            .iter()
+            .find(|f| f.contains("test"))
+            .or_else(|| files.first())
+            .map(|s| s.to_string())
+    })
+}
+
+#[cfg(test)]
+mod harness_result_tests {
+    use super::test_passed;
+
+    #[test]
+    fn test_passed_requires_zero_exit_code() {
+        let output = "SW_TEST_EXIT_CODE=1\n---\n42 passed, 1 exceptions\n";
+        assert!(!test_passed(output));
+    }
+
+    #[test]
+    fn test_passed_rejects_do_not_commit() {
+        let output = "SW_TEST_EXIT_CODE=0\n---\n42 passed\nDO *NOT* COMMIT!\n";
+        assert!(!test_passed(output));
+    }
+
+    #[test]
+    fn test_passed_accepts_clean_zero_exit() {
+        let output = "SW_TEST_EXIT_CODE=0\n---\n42 passed in 0.42s\n";
+        assert!(test_passed(output));
+    }
+}
+
 fn hardcoded_bug_fix_machine() -> MachineDefinition {
     serde_json::from_value(json!({
         "id": "fix-bug",
@@ -1678,6 +1782,7 @@ async fn main() {
     // Read dedup: track file reads to avoid re-injecting full content
     // Key: (tool_name, canonical_args), Value: (step_number, result)
     let mut read_cache: HashMap<String, (u32, String)> = HashMap::new();
+    let mut read_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     // Track which files have been modified (edits invalidate cache)
     let mut modified_files: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -1770,7 +1875,10 @@ async fn main() {
         // PROGRAMMATIC STATE ENTRY ACTIONS
         // These run automatically when entering a state — no LLM call needed.
         // The state machine does the obvious thing so the model doesn't have to.
-        if steps_in_current_state == 1 {
+        // Guard is == 0 so the block fires BEFORE the first LLM call in the state.
+        // (steps_in_current_state is set to 0 on transition; the increment at line ~2733
+        //  is below this block and only reached when we fall through to the LLM call.)
+        if steps_in_current_state == 0 {
             if current_state == "localizing" {
                 // PROGRAMMATIC LOCALIZATION
                 // 1. List files
@@ -1877,11 +1985,62 @@ async fn main() {
 
                 // Count tests before running (pytest-specific for now, skip for others)
                 let test_count = if dominant_lang == "py" {
-                    Command::new("python3")
-                        .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
-                        .current_dir(&args.workdir)
-                        .output()
-                        .ok()
+                    let collect_output = if let Ok(test_cmd) = std::env::var("SW_TEST_CMD") {
+                        if test_cmd.contains("pytest") {
+                            let env_name = std::env::var("SW_TEST_CONDA_ENV")
+                                .unwrap_or_else(|_| "testbed".to_string());
+                            Command::new("conda")
+                                .args([
+                                    "run",
+                                    "-n",
+                                    &env_name,
+                                    "--no-capture-output",
+                                    "python3",
+                                    "-m",
+                                    "pytest",
+                                    "--collect-only",
+                                    "-q",
+                                    "--no-header",
+                                ])
+                                .current_dir(&args.workdir)
+                                .output()
+                                .ok()
+                        } else {
+                            None
+                        }
+                    } else if std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1")
+                        && std::process::Command::new("conda")
+                            .arg("--version")
+                            .output()
+                            .is_ok()
+                    {
+                        let env_name = std::env::var("SW_TEST_CONDA_ENV")
+                            .unwrap_or_else(|_| "testbed".to_string());
+                        Command::new("conda")
+                            .args([
+                                "run",
+                                "-n",
+                                &env_name,
+                                "--no-capture-output",
+                                "python3",
+                                "-m",
+                                "pytest",
+                                "--collect-only",
+                                "-q",
+                                "--no-header",
+                            ])
+                            .current_dir(&args.workdir)
+                            .output()
+                            .ok()
+                    } else {
+                        Command::new("python3")
+                            .args(["-m", "pytest", "--collect-only", "-q", "--no-header"])
+                            .current_dir(&args.workdir)
+                            .output()
+                            .ok()
+                    };
+
+                    collect_output
                         .and_then(|o| {
                             String::from_utf8_lossy(&o.stdout)
                                 .lines()
@@ -2499,9 +2658,12 @@ async fn main() {
             }
 
             if current_state == "testing" {
-                // Auto-run tests on entry — this is what testing IS
-                let test_result = tools::execute_tool("run_test", &json!({}), &args.workdir);
-                let passed = test_result.contains("passed") && !test_result.contains("failed");
+                // Auto-run tests on entry — scope to SW_TEST_FILES like implementing auto-test.
+                let testing_scope = scoped_test_file_from_env()
+                    .map(|f| json!({"path": f}))
+                    .unwrap_or(json!({}));
+                let test_result = tools::execute_tool("run_test", &testing_scope, &args.workdir);
+                let passed = test_passed(&test_result);
                 let fail_count = test_result
                     .lines()
                     .find(|l| l.contains("failed"))
@@ -2571,15 +2733,54 @@ async fn main() {
                             fail_count
                         )
                     );
+                    let changed = tools::all_diff_stats(&args.workdir);
+                    let oversized = changed
+                        .iter()
+                        .any(|(_, changed_lines, _)| *changed_lines > profile.max_diff_lines);
+                    let touched_test_file = changed
+                        .iter()
+                        .any(|(path, _, _)| is_test_path(path, &sw_test_files));
+                    let restore_required = !changed.is_empty()
+                        && (oversized
+                            || touched_test_file
+                            || test_has_syntax_failure(&test_result));
+                    if restore_required {
+                        tools::restore_candidate_snapshot(&args.workdir);
+                        modified_files.clear();
+                        read_cache.clear();
+                        read_paths.clear();
+                        eprintln!("  [TESTING] structural failure — restored candidate snapshot");
+                    } else {
+                        eprintln!(
+                            "  [TESTING] ordinary failure — keeping source diff for refinement"
+                        );
+                    }
+                    let failure_excerpt = failure_excerpt(&test_result, 20);
+                    let retry_instruction = if restore_required {
+                        "The rejected candidate patch was restored because it caused a structural failure. Make a smaller source-only attempt."
+                    } else if changed.is_empty() {
+                        "No source diff is present. Make a source-code edit before testing again."
+                    } else {
+                        "Your current source diff was kept. Refine it using the failure output."
+                    };
                     conversation.push(ChatMessage {
                         role: "user".into(),
-                        content: format!("Tests ran automatically and FAILED:\n{}\n\nYou are back in implementing. Fix the remaining issues.", test_result),
+                        content: format!(
+                            "Tests ran automatically and FAILED.\n\n{}\n\nFailure summary:\n{}\n\nFull output:\n{}\n\nYou are back in implementing.",
+                            retry_instruction,
+                            failure_excerpt,
+                            &test_result[..test_result.len().min(3000)]
+                        ),
                     });
                     current_state = "implementing".into();
                     steps_in_current_state = 0;
-                    tools::snapshot_files(&args.workdir);
                     println!("  [TRANSITION] testing -> implementing");
-                    println!("  [SNAPSHOT] Working directory snapshotted");
+                    if restore_required {
+                        tools::snapshot_files(&args.workdir);
+                        println!(
+                            "  [SNAPSHOT] Working directory snapshotted after structural restore"
+                        );
+                    }
                     continue;
                 }
             }
@@ -3158,6 +3359,63 @@ async fn main() {
                 tools::snapshot_candidate(&args.workdir);
             }
 
+            let is_edit_tool = matches!(
+                tool_name.as_str(),
+                "edit_line"
+                    | "edit_block"
+                    | "patch_file"
+                    | "apply_patch"
+                    | "insert_between"
+                    | "write_file"
+            );
+            if is_edit_tool && current_state == "implementing" {
+                let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                let resolved_edit_path = tools::resolve_repo_path(edit_path, &args.workdir);
+                let has_read = !resolved_edit_path.is_empty()
+                    && read_paths.contains(&resolved_edit_path)
+                    && !modified_files.contains(&resolved_edit_path);
+                if !has_read && !resolved_edit_path.is_empty() {
+                    let full_edit_path =
+                        std::path::Path::new(&args.workdir).join(&resolved_edit_path);
+                    if full_edit_path.exists() {
+                        let file_content =
+                            std::fs::read_to_string(&full_edit_path).unwrap_or_default();
+                        let line_count = file_content.lines().count();
+                        println!(
+                            "  [GATE] Edit blocked — {} not read yet, injecting content",
+                            resolved_edit_path
+                        );
+
+                        let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
+                        let content_preview = localized_file_contexts
+                            .get(&resolved_edit_path)
+                            .or_else(|| localized_file_contexts.get(edit_path))
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                build_readable_excerpt(
+                                    &file_content,
+                                    localized_regions
+                                        .get(&resolved_edit_path)
+                                        .or_else(|| localized_regions.get(edit_path)),
+                                    old_arg,
+                                )
+                            });
+
+                        let cache_key_for_edit = format!("read_file:{}", resolved_edit_path);
+                        read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
+                        read_paths.insert(resolved_edit_path.clone());
+
+                        let msg = format!(
+                            "BLOCKED: You haven't read {} yet. Here is the most relevant excerpt ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT content from above.",
+                            resolved_edit_path, line_count, content_preview
+                        );
+                        tool_output.push_str(&msg);
+                        tool_output.push('\n');
+                        continue;
+                    }
+                }
+            }
+
             emit!(TuiEvent::ToolCall {
                 name: tool_name.clone(),
                 args_preview: truncate_json(tool_args, 200),
@@ -3279,53 +3537,8 @@ async fn main() {
                 tools::execute_tool(tool_name, tool_args, &args.workdir)
             };
 
-            // On first edit of an unread file, inject the file content back into the
-            // conversation so the model can correct itself before retrying.
-            let is_edit_tool = matches!(
-                tool_name.as_str(),
-                "edit_line"
-                    | "edit_block"
-                    | "patch_file"
-                    | "apply_patch"
-                    | "insert_between"
-                    | "write_file"
-            );
-            if is_edit_tool {
-                let edit_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                let has_read =
-                    !edit_path.is_empty() && read_cache.keys().any(|k| k.contains(edit_path));
-                if !has_read && !edit_path.is_empty() {
-                    let full_edit_path = std::path::Path::new(&args.workdir).join(edit_path);
-                    if full_edit_path.exists() {
-                        let file_content =
-                            std::fs::read_to_string(&full_edit_path).unwrap_or_default();
-                        let line_count = file_content.lines().count();
-                        println!(
-                            "  [GATE] Edit blocked — {} not read yet, injecting content",
-                            edit_path
-                        );
-
-                        let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
-                        let content_preview = localized_file_contexts
-                            .get(edit_path)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                build_readable_excerpt(
-                                    &file_content,
-                                    localized_regions.get(edit_path),
-                                    old_arg,
-                                )
-                            });
-
-                        let cache_key_for_edit = format!("read_file:{}", edit_path);
-                        read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
-
-                        result = format!(
-                            "BLOCKED: You haven't read {} yet. Here is the most relevant excerpt ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT content from above.",
-                            edit_path, line_count, content_preview
-                        );
-                    }
-                }
+            if is_read && !read_path.is_empty() && !result.starts_with("error") {
+                read_paths.insert(tools::resolve_repo_path(&read_path, &args.workdir));
             }
 
             // On edit failure, inject relevant file content to help the next attempt
@@ -3432,12 +3645,15 @@ async fn main() {
 
             // Track file modifications to invalidate read cache
             let is_edit = writes_files;
-            let edit_succeeded =
-                is_edit && !result.contains("error") && !result.contains("not found");
+            let edit_succeeded = is_edit
+                && !result.contains("BLOCKED")
+                && !result.contains("error")
+                && !result.contains("not found");
             if edit_succeeded {
                 for path in &targeted_paths {
                     modified_files.insert(path.to_string());
                     read_cache.retain(|k, _| !k.contains(path));
+                    read_paths.remove(path);
                 }
             }
 
@@ -3458,14 +3674,20 @@ async fn main() {
                 }
                 // Scope auto-test: prefer SW_TEST_FILES (SWE-bench test patch),
                 // then try tests/ near the edited file, then skip on large repos.
-                let test_scope = if let Ok(test_files) = std::env::var("SW_TEST_FILES") {
-                    // SWE-bench: run only the test files from the test patch
-                    let first_file = test_files.split(':').find(|f| !f.is_empty());
-                    if let Some(f) = first_file {
-                        json!({"path": f})
-                    } else {
-                        json!({})
-                    }
+                // If SW_TEST_FILES is set but empty (test patch failed to apply),
+                // fall through to the adjacent-directory heuristic rather than
+                // immediately producing an unresolvable scope.
+                let sw_test_first = std::env::var("SW_TEST_FILES").ok().and_then(|tf| {
+                    let files: Vec<&str> = tf.split(':').filter(|f| !f.is_empty()).collect();
+                    // Prefer a file whose name contains "test" (avoids picking models.py etc.)
+                    files
+                        .iter()
+                        .find(|f| f.contains("test"))
+                        .or_else(|| files.first())
+                        .map(|s| s.to_string())
+                });
+                let test_scope = if let Some(f) = sw_test_first {
+                    json!({"path": f})
                 } else if let Some(edited_path) = tool_args.get("path").and_then(|p| p.as_str()) {
                     let dir = std::path::Path::new(edited_path)
                         .parent()
@@ -3487,33 +3709,28 @@ async fn main() {
                 } else {
                     json!({})
                 };
+                // Skip auto-test when scope is unresolved — unscoped full-suite
+                // runs on large repos produce truncated output with unreliable
+                // pass/fail detection (false positives in scikit-learn smoke).
+                if test_scope.get("path").is_none() && test_scope.get("file").is_none() {
+                    eprintln!("  [AUTO-TEST] no resolvable test scope — skipping");
+                    break 'auto_test;
+                }
                 let test_result = tools::execute_tool("run_test", &test_scope, &args.workdir);
                 // If test runner is unavailable, skip feedback entirely — don't lie to the model
-                if test_result.starts_with("TEST_ENV_UNAVAILABLE") {
+                if test_env_unavailable(&test_result) {
                     eprintln!(
                         "  [AUTO-TEST] test runner unavailable — skipping feedback: {}",
                         &test_result[..test_result.len().min(200)]
                     );
                     break 'auto_test;
                 }
-                // Multi-language pass detection:
-                // Python: "X passed" / "FAILED" / "failed"
-                // Go: "PASS" / "FAIL" at line start
-                // JS/TS: "Tests  X passed" or "✓" / "FAIL" or "✗"
-                // Rust: "test result: ok" / "test result: FAILED"
-                let all_pass = {
-                    let r = &test_result;
-                    let no_fail = !r.contains("FAILED")
-                        && !r.contains("FAIL ")
-                        && !r.contains("failed")
-                        && !r.contains("error:");
-                    let has_pass = r.contains("passed")
-                        || r.contains("PASS")
-                        || r.contains("test result: ok")
-                        || r.contains("Tests  ");
-                    no_fail && has_pass
-                };
+                let all_pass = test_passed(&test_result);
                 let changed = tools::all_diff_stats(&args.workdir);
+                if changed.is_empty() {
+                    eprintln!("  [AUTO-TEST] no diff after edit — skipping");
+                    break 'auto_test;
+                }
                 if all_pass {
                     let diff_summary: Vec<String> = changed
                         .iter()
@@ -3531,15 +3748,13 @@ async fn main() {
                         "  [TRANSITION] implementing -> completed (auto)"
                     );
                     current_state = "completed".into();
-                    break 'agent_loop;
+                    continue 'agent_loop;
                 } else {
                     let oversized = changed.iter().any(|(_, c, _)| *c > profile.max_diff_lines);
                     let touched_test_file = changed
                         .iter()
                         .any(|(path, _, _)| is_test_path(path, &sw_test_files));
-                    let syntax_level_failure = test_result.contains("SyntaxError")
-                        || test_result.contains("IndentationError")
-                        || test_result.contains("TabError");
+                    let syntax_level_failure = test_has_syntax_failure(&test_result);
                     let diff_summary: Vec<String> = changed
                         .iter()
                         .map(|(f, c, t)| format!("{} ({}/{} lines)", f, c, t))
@@ -3561,14 +3776,8 @@ async fn main() {
                         tools::restore_candidate_snapshot(&args.workdir);
                         modified_files.clear();
                         read_cache.clear();
-                        let fail_detail = test_result
-                            .lines()
-                            .filter(|l| {
-                                l.contains("FAILED") || l.contains("Error") || l.contains("assert")
-                            })
-                            .take(5)
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        read_paths.clear();
+                        let fail_detail = failure_excerpt(&test_result, 5);
                         tool_output.push_str(&format!(
                             "Tests FAILED after your edit. The candidate patch was reverted because it was a {}.\nRejected diff: {}\n{}\nTry a smaller source-only edit.\n",
                             reason,
@@ -3580,18 +3789,12 @@ async fn main() {
                         tools::restore_snapshot(&args.workdir);
                         modified_files.clear();
                         read_cache.clear();
+                        read_paths.clear();
                         tool_output.push_str("Tests FAILED and your edit changed too many lines. Snapshot restored. Use edit_line for small, targeted changes. You can make multiple small edits — each one is tested automatically.\n");
                     } else {
                         // Small edit, tests failed — keep the edit, let model iterate
                         println!("  [AUTO-TEST] FAIL — edit kept, model can refine");
-                        let fail_detail = test_result
-                            .lines()
-                            .filter(|l| {
-                                l.contains("FAILED") || l.contains("Error") || l.contains("assert")
-                            })
-                            .take(5)
-                            .collect::<Vec<_>>()
-                            .join("\n");
+                        let fail_detail = failure_excerpt(&test_result, 5);
                         let hint = if edit_fail_count >= 2 {
                             "\n\nYou've made multiple failed attempts. The fix might be in a different file. Try: inspect_class to check inheritance hierarchies, grep to search the codebase, or find_files to locate related files."
                         } else {
@@ -3674,6 +3877,7 @@ async fn main() {
                 tools::restore_snapshot(&args.workdir);
                 modified_files.clear();
                 read_cache.clear();
+                read_paths.clear();
                 // FIX 4: Fresh start with localization + what we know
                 if !localization_summary.is_empty() {
                     conversation.push(ChatMessage {
@@ -3849,6 +4053,7 @@ async fn main() {
                     steps_in_current_state = 0;
                     // Reset per-state caches
                     read_cache.clear();
+                    read_paths.clear();
                     modified_files.clear();
                 }
                 Err(e) => {
@@ -3866,12 +4071,46 @@ async fn main() {
         }
     }
 
-    // Final verification
+    // Final verification — scope to SW_TEST_FILES if available so we test the
+    // same patch-specific tests that auto-test used, not the full suite.
+    // An unscoped full-suite run can produce false positives on large repos
+    // (the bug-specific tests may be in the truncated/middle section of output).
     println!("\n--- Final Verification ---");
-    let test_result = tools::execute_tool("run_test", &json!({}), &args.workdir);
-    if test_result.contains("passed") && !test_result.contains("failed") {
+    let final_test_scope = std::env::var("SW_TEST_FILES")
+        .ok()
+        .and_then(|tf| {
+            let files: Vec<&str> = tf.split(':').filter(|f| !f.is_empty()).collect();
+            files
+                .iter()
+                .find(|f| f.contains("test"))
+                .or_else(|| files.first())
+                .map(|s| s.to_string())
+        })
+        .map(|f| json!({"path": f}))
+        .unwrap_or(json!({}));
+    // Guard: if no edits were made (empty git diff), the agent didn't fix anything.
+    // A passing test on an unmodified repo is not a solve.
+    // Use git diff rather than the snapshot system — snapshots aren't populated
+    // when --no-restore is set (SWE-bench eval-image mode).
+    let git_diff_empty = std::process::Command::new("git")
+        .args(["diff", "--quiet"])
+        .current_dir(&args.workdir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true);
+    if git_diff_empty {
+        println!("[FINAL_VERIFICATION] FAIL — no edits were made");
+        println!("[FINAL_VERIFICATION] FAIL");
+        return;
+    }
+    let test_result = tools::execute_tool("run_test", &final_test_scope, &args.workdir);
+    if test_env_unavailable(&test_result) {
+        println!("[FINAL_VERIFICATION] UNAVAILABLE");
+    } else if test_passed(&test_result) {
+        println!("[FINAL_VERIFICATION] PASS");
         println!("[SUCCESS] All tests pass!");
     } else {
+        println!("[FINAL_VERIFICATION] FAIL");
         let lines: Vec<&str> = test_result.lines().collect();
         let summary_start = lines
             .iter()

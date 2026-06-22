@@ -221,11 +221,76 @@ pub fn resolve_repo_path(path: &str, workdir: &str) -> String {
     resolve_path(path, workdir)
 }
 
-fn write_blocked_message(path: &str) -> String {
-    format!(
-        "BLOCKED: '{}' is not an existing file in the repository. Locate the correct existing file with find_files/grep/list_directory before editing. If the task truly requires a new file, use create_file with a path under an existing repository directory.",
-        path
-    )
+fn path_leaf(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+}
+
+fn path_segments(path: &str) -> Vec<String> {
+    Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str().map(|s| s.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn suggest_repo_paths(path: &str, workdir: &str) -> Vec<String> {
+    let files = list_current_files(workdir);
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let normalized = path.replace('\\', "/");
+    let target_leaf = match path_leaf(&normalized) {
+        Some(leaf) if !leaf.is_empty() => leaf,
+        _ => return Vec::new(),
+    };
+    let target_segments = path_segments(&normalized);
+    let mut scored: Vec<(usize, String)> = Vec::new();
+
+    for candidate in files {
+        let candidate_leaf = match path_leaf(&candidate) {
+            Some(leaf) => leaf,
+            None => continue,
+        };
+        if candidate_leaf != target_leaf {
+            continue;
+        }
+
+        let candidate_segments = path_segments(&candidate);
+        let suffix_matches = target_segments
+            .iter()
+            .rev()
+            .zip(candidate_segments.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let depth_bonus = candidate_segments.len().saturating_sub(1);
+        let score = suffix_matches * 100 + depth_bonus;
+        scored.push((score, candidate));
+    }
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, path)| path).take(8).collect()
+}
+
+fn write_blocked_message(path: &str, workdir: &str) -> String {
+    let suggestions = suggest_repo_paths(path, workdir);
+    if suggestions.is_empty() {
+        format!(
+            "BLOCKED: '{}' is not an existing file in the repository. Locate the correct existing file with find_files/grep/list_directory before editing. If the task truly requires a new file, use create_file with a path under an existing repository directory.",
+            path
+        )
+    } else {
+        format!(
+            "BLOCKED: '{}' is not an existing file in the repository. Closest leaf matches: {}. If you meant the same filename in another package, pick one of those paths. Otherwise use find_files/grep/list_directory to locate the correct file before editing.",
+            path,
+            suggestions.join(", ")
+        )
+    }
 }
 
 fn create_blocked_message(path: &str) -> String {
@@ -239,13 +304,24 @@ pub fn validate_existing_repo_file(
     path: &str,
     workdir: &str,
 ) -> Result<std::path::PathBuf, String> {
-    if path.contains("..") || path.starts_with('/') {
+    if path.starts_with('/') {
+        let suggestions = suggest_repo_paths(path, workdir);
+        if suggestions.is_empty() {
+            return Err("error: path traversal detected".into());
+        }
+        return Err(format!(
+            "BLOCKED: '{}' is outside the repository. Closest leaf matches: {}. Use one of those repository-relative paths.",
+            path,
+            suggestions.join(", ")
+        ));
+    }
+    if path.contains("..") {
         return Err("error: path traversal detected".into());
     }
 
     let full_path = Path::new(workdir).join(path);
     if !full_path.exists() || !full_path.is_file() {
-        return Err(write_blocked_message(path));
+        return Err(write_blocked_message(path, workdir));
     }
 
     let canonical = full_path
@@ -539,6 +615,7 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
         .unwrap_or_default();
 
     let lang = detect_language(workdir);
+    let eval_test_cmd = std::env::var("SW_TEST_CMD").ok();
 
     let (cmd, cmd_args) = match lang {
         "go" => {
@@ -598,7 +675,42 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                         .map(|c| c.contains("[pytest]"))
                         .unwrap_or(false);
 
-            if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
+            if let Some(test_cmd) = eval_test_cmd.as_ref() {
+                let mut parts: Vec<String> =
+                    test_cmd.split_whitespace().map(|s| s.to_string()).collect();
+                if parts.is_empty() {
+                    parts = vec!["python3".into(), "-m".into(), "pytest".into()];
+                }
+                let push_unique = |parts: &mut Vec<String>, value: String| {
+                    if !value.is_empty() && !parts.iter().any(|part| part == &value) {
+                        parts.push(value);
+                    }
+                };
+                if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
+                    // Keep Django module-style directive handling when the repo runner is used.
+                    if let Some(tp) = test_path {
+                        let module = tp
+                            .trim_start_matches("tests/")
+                            .trim_end_matches(".py")
+                            .replace('/', ".");
+                        push_unique(&mut parts, module);
+                    } else if let Some(f) = test_file {
+                        let module = f
+                            .trim_start_matches("tests/")
+                            .trim_end_matches(".py")
+                            .replace('/', ".");
+                        push_unique(&mut parts, module);
+                    } else if let Ok(module) = std::env::var("SW_TEST_LABEL") {
+                        push_unique(&mut parts, module);
+                    }
+                } else if let Some(tp) = test_path {
+                    push_unique(&mut parts, tp.to_string());
+                } else if let Some(f) = test_file {
+                    push_unique(&mut parts, f.to_string());
+                }
+                parts.extend(extra_args);
+                (parts[0].clone(), parts[1..].to_vec())
+            } else if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
                 // Django test suite without pytest support: use the repo's own runner.
                 let mut a: Vec<String> = vec!["tests/runtests.py".into(), "--verbosity=1".into()];
                 if let Some(tp) = test_path {
@@ -659,9 +771,28 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
         }
     }
 
-    let mut command = Command::new(&cmd);
+    let use_eval_conda = std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1")
+        && cmd == "python3"
+        && command_exists("conda");
+    let conda_env = std::env::var("SW_TEST_CONDA_ENV").unwrap_or_else(|_| "testbed".to_string());
+
+    let (run_cmd, run_args) = if use_eval_conda {
+        let mut wrapped = vec![
+            "run".to_string(),
+            "-n".to_string(),
+            conda_env,
+            "--no-capture-output".to_string(),
+            cmd.clone(),
+        ];
+        wrapped.extend(cmd_args.clone());
+        ("conda".to_string(), wrapped)
+    } else {
+        (cmd.clone(), cmd_args.clone())
+    };
+
+    let mut command = Command::new(&run_cmd);
     command
-        .args(&cmd_args)
+        .args(&run_args)
         .current_dir(workdir)
         .env("PYTHONDONTWRITEBYTECODE", "1");
 
@@ -680,28 +811,45 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             let combined = format!("{}\n{}", stdout, stderr);
+            let exit_code = out.status.code().unwrap_or(-1);
+            let header = format!(
+                "SW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_COMMAND={} {:?}\n---\n",
+                exit_code, run_cmd, run_args
+            );
             // Detect missing test runner before classifying as pass/fail
-            let env_miss = ["No module named pytest", "No module named", "command not found"];
+            let env_miss = [
+                "No module named pytest",
+                "No module named 'pytest'",
+                "pytest: command not found",
+                "command not found: pytest",
+                "No module named unittest",
+                "No module named 'unittest'",
+            ];
             if env_miss.iter().any(|p| combined.contains(p)) {
-                return format!("TEST_ENV_UNAVAILABLE: {}", &combined[..combined.len().min(500)]);
+                return format!(
+                    "TEST_ENV_UNAVAILABLE: {}\nSW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=1\n",
+                    &combined[..combined.len().min(500)],
+                    exit_code
+                );
             }
             // Truncate to prevent context blowup on huge test output
             if combined.len() > 8000 {
                 let truncated = &combined[..4000];
                 let tail = &combined[combined.len() - 3000..];
                 format!(
-                    "{}...\n[truncated {} bytes]\n...{}",
+                    "{}{}...\n[truncated {} bytes]\n...{}",
+                    header,
                     truncated,
                     combined.len() - 7000,
                     tail
                 )
             } else {
-                combined
+                format!("{}{}", header, combined)
             }
         }
         Err(e) => format!(
             "error running tests ({}): {} — cmd: {} {:?}",
-            lang, e, cmd, cmd_args
+            lang, e, run_cmd, run_args
         ),
     }
 }
@@ -2285,6 +2433,49 @@ mod tests {
             dir.path().to_str().unwrap(),
         );
         assert!(result.contains("traversal"));
+    }
+
+    #[test]
+    fn suggest_repo_paths_matches_filename_leaf() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("src/pkg")).unwrap();
+        fs::create_dir_all(dir.path().join("tests/pkg")).unwrap();
+        fs::write(dir.path().join("src/pkg/abc.py"), "x = 1\n").unwrap();
+        fs::write(dir.path().join("tests/pkg/abc.py"), "x = 2\n").unwrap();
+        fs::write(dir.path().join("src/pkg/other.py"), "x = 3\n").unwrap();
+
+        let suggestions =
+            suggest_repo_paths("/non-existent/path/to/abc.py", dir.path().to_str().unwrap());
+
+        assert_eq!(suggestions, vec!["src/pkg/abc.py", "tests/pkg/abc.py"]);
+    }
+
+    #[test]
+    fn write_blocked_message_includes_leaf_matches() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("src/pkg")).unwrap();
+        fs::write(dir.path().join("src/pkg/abc.py"), "x = 1\n").unwrap();
+
+        let message = write_blocked_message("/missing/abc.py", dir.path().to_str().unwrap());
+        assert!(message.contains("Closest leaf matches"));
+        assert!(message.contains("src/pkg/abc.py"));
+    }
+
+    #[test]
+    fn validate_existing_repo_file_suggests_for_absolute_wrong_path() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("src/pkg")).unwrap();
+        fs::write(dir.path().join("src/pkg/abc.py"), "x = 1\n").unwrap();
+
+        let err = validate_existing_repo_file(
+            "/non-existent/path/to/abc.py",
+            dir.path().to_str().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("outside the repository"));
+        assert!(err.contains("Closest leaf matches"));
+        assert!(err.contains("src/pkg/abc.py"));
     }
 
     // --- strip_code_fences tests ---

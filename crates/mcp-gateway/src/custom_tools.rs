@@ -546,13 +546,15 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
         assert!(tools.iter().any(|t| t.name == "statewright_list_workflows"));
         assert!(tools.iter().any(|t| t.name == "statewright_load_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_status"));
+        assert!(tools.iter().any(|t| t.name == "statewright_run_agent"));
+        assert!(tools.iter().any(|t| t.name == "statewright_get_model_traits"));
     }
 
     #[test]

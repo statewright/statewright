@@ -1310,19 +1310,46 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     lastNudgeTime = 0
   }
 
-  const apiKey = getApiKey()
-  if (!apiKey) {
-    console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
-    return
+  // ── Lazy-mode init ───────────────────────────────────────────────────────────
+  // When no STATEWRIGHT_WORKFLOW or STATEWRIGHT_BRANCH_SESSION_ID is set, defer
+  // gateway connection and tool registration until the first /statewright command.
+  // This keeps statewright tools hidden from the model during plain spi sessions,
+  // preventing imported session context from locking the model into an old workflow.
+  const lazyMode = !process.env.STATEWRIGHT_WORKFLOW && !process.env.STATEWRIGHT_BRANCH_SESSION_ID
+  let lazyInitDone = false
+
+  async function ensureLazyInit(): Promise<boolean> {
+    if (lazyInitDone) return true
+    const key = getApiKey()
+    if (!key) {
+      console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
+      return false
+    }
+    if (!(await gwInit())) {
+      console.warn("[statewright] Could not connect to gateway at", GW_URL)
+      return false
+    }
+    console.log(`[statewright] Connected to ${GW_URL}`)
+    registerStatewrightTools()
+    lazyInitDone = true
+    return true
   }
 
-  // Initialize gateway session
-  if (!(await gwInit())) {
-    console.warn("[statewright] Could not connect to gateway at", GW_URL)
-    return
-  }
+  if (!lazyMode) {
+    const apiKey = getApiKey()
+    if (!apiKey) {
+      console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
+      return
+    }
 
-  console.log(`[statewright] Connected to ${GW_URL}`)
+    // Initialize gateway session
+    if (!(await gwInit())) {
+      console.warn("[statewright] Could not connect to gateway at", GW_URL)
+      return
+    }
+
+    console.log(`[statewright] Connected to ${GW_URL}`)
+  }
 
   // --- Text-only Ollama provider for plugin orchestration mode ---
   // When orchestration="plugin" and the model has a small context window,
@@ -1418,7 +1445,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   }
 
   // --- Custom tools ---
+  // Wrapped in registerStatewrightTools() so lazy-mode sessions can defer
+  // registration until the first /statewright command activates the gateway.
 
+  function registerStatewrightTools() {
   pi.registerTool({
     name: "statewright_get_state",
     label: "Get Workflow State",
@@ -1916,12 +1946,28 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       }
     },
   })
+  } // end registerStatewrightTools()
+
+  // In non-lazy mode register tools immediately; lazy mode defers until first /statewright use.
+  if (!lazyMode) {
+    registerStatewrightTools()
+  }
 
   // --- /statewright command ---
 
   pi.registerCommand("statewright", {
     description: "Statewright workflow control: load, deactivate, pause, status, list",
     async handler(args, ctx) {
+      // Lazy init: connect to gateway + register tools on first /statewright use.
+      if (!lazyInitDone) {
+        const ok = await ensureLazyInit()
+        if (!ok) {
+          ctx.ui.notify("[statewright] Could not connect to gateway. Check STATEWRIGHT_GATEWAY_URL / STATEWRIGHT_API_KEY.", "error")
+          return
+        }
+        ctx.ui?.setStatus?.("!statewright", formatStatusBar(stateCache))
+      }
+
       const parts = args.trim().split(/\s+/)
       const sub = parts[0]?.toLowerCase() ?? "status"
 

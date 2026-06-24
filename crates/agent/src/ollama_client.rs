@@ -163,7 +163,11 @@ impl OllamaClient {
     pub fn new(config: OllamaConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(180))
+                .build()
+                .expect("failed to build HTTP client"),
         }
     }
 
@@ -181,45 +185,42 @@ impl OllamaClient {
             options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
         };
 
-        let response = self
-            .http
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let body: ChatResponse = response.json().await?;
-
-        let choice = body.choices
-            .into_iter()
-            .next()
-            .ok_or(OllamaError::NoResponse)?;
-
-        // If content is empty but reasoning exists, use reasoning as content
-        // This handles reasoning models (gpt-oss) that put everything in the thinking chain
-        let content = choice.message.content.unwrap_or_default();
-        if content.is_empty() {
-            if let Some(reasoning) = &choice.message.reasoning {
-                // Try to extract a tool call or transition from the reasoning
-                if reasoning.contains("tool_calls") || reasoning.contains("transition")
-                    || reasoning.contains("tool_call") || reasoning.contains("{")
-                {
-                    return Ok(reasoning.clone());
-                }
-
-                // Try Harmony token-level parser (if feature enabled)
-                if let Some(tool_call) = crate::harmony::try_parse_harmony(reasoning) {
-                    return Ok(tool_call);
-                }
-
-                // Try regex-based Harmony extraction as fallback
-                if let Some(tool_call) = extract_harmony_tool_call(reasoning) {
-                    return Ok(tool_call);
-                }
+        let mut last_err: OllamaError = OllamaError::NoResponse;
+        for attempt in 0u32..3 {
+            let send_result = self.http.post(&url).json(&request).send().await;
+            match send_result {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(resp) => {
+                        let body: ChatResponse = resp.json().await?;
+                        let choice = body.choices.into_iter().next().ok_or(OllamaError::NoResponse)?;
+                        let content = choice.message.content.unwrap_or_default();
+                        if content.is_empty() {
+                            if let Some(reasoning) = &choice.message.reasoning {
+                                if reasoning.contains("tool_calls") || reasoning.contains("transition")
+                                    || reasoning.contains("tool_call") || reasoning.contains("{")
+                                {
+                                    return Ok(reasoning.clone());
+                                }
+                                if let Some(tool_call) = crate::harmony::try_parse_harmony(reasoning) {
+                                    return Ok(tool_call);
+                                }
+                                if let Some(tool_call) = extract_harmony_tool_call(reasoning) {
+                                    return Ok(tool_call);
+                                }
+                            }
+                        }
+                        return Ok(content);
+                    }
+                    Err(e) => last_err = e.into(),
+                },
+                Err(e) => last_err = e.into(),
+            }
+            if attempt < 2 {
+                eprintln!("  [HTTP] attempt {} failed, retrying in {}s: {}", attempt + 1, 5 * (attempt + 1), last_err);
+                tokio::time::sleep(std::time::Duration::from_secs(5 * (attempt as u64 + 1))).await;
             }
         }
-        Ok(content)
+        Err(last_err)
     }
 
     /// Send a chat request with native tool definitions.
@@ -240,32 +241,29 @@ impl OllamaClient {
             options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
         };
 
-        let response = self
-            .http
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?
-            .error_for_status()?;
-
-        let body: ChatResponse = response.json().await?;
-
-        let choice = body
-            .choices
-            .into_iter()
-            .next()
-            .ok_or(OllamaError::NoResponse)?;
-
-        let tool_calls = choice.message.tool_calls.unwrap_or_default();
-        let content = choice.message.content.unwrap_or_default();
-        let reasoning = choice.message.reasoning;
-
-        Ok(ChatResult {
-            content,
-            tool_calls,
-            mode: ResponseMode::NativeToolCalling,
-            reasoning,
-        })
+        let mut last_err: OllamaError = OllamaError::NoResponse;
+        for attempt in 0u32..3 {
+            let send_result = self.http.post(&url).json(&request).send().await;
+            match send_result {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(resp) => {
+                        let body: ChatResponse = resp.json().await?;
+                        let choice = body.choices.into_iter().next().ok_or(OllamaError::NoResponse)?;
+                        let tool_calls = choice.message.tool_calls.unwrap_or_default();
+                        let content = choice.message.content.unwrap_or_default();
+                        let reasoning = choice.message.reasoning;
+                        return Ok(ChatResult { content, tool_calls, mode: ResponseMode::NativeToolCalling, reasoning });
+                    }
+                    Err(e) => last_err = e.into(),
+                },
+                Err(e) => last_err = e.into(),
+            }
+            if attempt < 2 {
+                eprintln!("  [HTTP] attempt {} failed, retrying in {}s: {}", attempt + 1, 5 * (attempt + 1), last_err);
+                tokio::time::sleep(std::time::Duration::from_secs(5 * (attempt as u64 + 1))).await;
+            }
+        }
+        Err(last_err)
     }
 
     /// Send a chat request and parse the response as JSON.

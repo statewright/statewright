@@ -39,9 +39,13 @@ pub async fn run_tdd_chain(
 ) -> bool {
     let strategy = ConversationStrategy::for_model_size(model_size_gb);
     println!("\n=== Statewright TDD + Debug Chaining ===");
-    println!("Conversation strategy: {:?} (model ~{:.0}GB)\n", strategy, model_size_gb);
+    println!(
+        "Conversation strategy: {:?} (model ~{:.0}GB)\n",
+        strategy, model_size_gb
+    );
 
-    let requirements = tools::execute_tool("read_file", &json!({"path": "requirements.md"}), workdir);
+    let requirements =
+        tools::execute_tool("read_file", &json!({"path": "requirements.md"}), workdir);
     println!("[Requirements]\n{}\n", requirements);
 
     // Phase 1: Design stubs (or use pre-existing ones)
@@ -57,12 +61,16 @@ pub async fn run_tdd_chain(
         println!("--- Phase 1: Using existing stubs ---");
     }
 
-    let req_lines: Vec<&str> = requirements.lines()
+    let req_lines: Vec<&str> = requirements
+        .lines()
         .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
         .collect();
 
     let total = req_lines.len().min(max_cycles as usize);
-    println!("\n--- Phase 2: TDD Cycles with Debug Chaining ({} requirements) ---\n", total);
+    println!(
+        "\n--- Phase 2: TDD Cycles with Debug Chaining ({} requirements) ---\n",
+        total
+    );
 
     let mut conversation: Vec<ChatMessage> = Vec::new();
     let mut pass_count = 0u32;
@@ -102,7 +110,9 @@ pub async fn run_tdd_chain(
 
         // Verify RED
         let red_result = tools::execute_tool("run_test", &json!({}), workdir);
-        let has_failures = red_result.contains("failed") || red_result.contains("ERROR") || red_result.contains("error");
+        let has_failures = red_result.contains("failed")
+            || red_result.contains("ERROR")
+            || red_result.contains("error");
         if has_failures {
             println!("│ [RED] ✓ Test fails as expected");
         } else {
@@ -140,7 +150,9 @@ pub async fn run_tdd_chain(
 
         // Verify GREEN
         let green_result = tools::execute_tool("run_test", &json!({}), workdir);
-        let all_pass = green_result.contains("passed") && !green_result.contains("failed") && !green_result.contains("ERROR");
+        let all_pass = green_result.contains("passed")
+            && !green_result.contains("failed")
+            && !green_result.contains("ERROR");
 
         if all_pass {
             pass_count += 1;
@@ -157,12 +169,15 @@ pub async fn run_tdd_chain(
         invoke_count += 1;
 
         // The debug machine: localize → diagnose → fix
-        let debug_success = run_debug_child(client, workdir, &green_result, &mut conversation).await;
+        let debug_success =
+            run_debug_child(client, workdir, &green_result, &mut conversation).await;
 
         if debug_success {
             // Verify after debug fix
             let verify_result = tools::execute_tool("run_test", &json!({}), workdir);
-            let fixed = verify_result.contains("passed") && !verify_result.contains("failed") && !verify_result.contains("ERROR");
+            let fixed = verify_result.contains("passed")
+                && !verify_result.contains("failed")
+                && !verify_result.contains("ERROR");
             if fixed {
                 pass_count += 1;
                 println!("│ [DEBUG] ✓ Debug machine fixed the issue — all tests pass");
@@ -181,11 +196,15 @@ pub async fn run_tdd_chain(
     // Final
     println!("--- Final Verification ---");
     let final_result = tools::execute_tool("run_test", &json!({}), workdir);
-    let final_pass = final_result.contains("passed") && !final_result.contains("failed") && !final_result.contains("ERROR");
+    let final_pass = final_result.contains("passed")
+        && !final_result.contains("failed")
+        && !final_result.contains("ERROR");
 
-    let test_summary = final_result.lines()
+    let test_summary = final_result
+        .lines()
         .filter(|l| l.contains("passed") || l.contains("failed"))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
 
     if final_pass {
         println!("[SUCCESS] {}", test_summary.trim());
@@ -193,13 +212,19 @@ pub async fn run_tdd_chain(
         println!("[RESULT] {}", test_summary.trim());
     }
 
-    println!("\nStats: {}/{} cycles passed, {} debug invocations", pass_count, total, invoke_count);
+    println!(
+        "\nStats: {}/{} cycles passed, {} debug invocations",
+        pass_count, total, invoke_count
+    );
 
     // Show generated code
     let kv = tools::execute_tool("read_file", &json!({"path": "kvstore.py"}), workdir);
     let tests = tools::execute_tool("read_file", &json!({"path": "test_kvstore.py"}), workdir);
-    println!("Generated: kvstore.py ({} lines), test_kvstore.py ({} lines)\n",
-        kv.lines().count(), tests.lines().count());
+    println!(
+        "Generated: kvstore.py ({} lines), test_kvstore.py ({} lines)\n",
+        kv.lines().count(),
+        tests.lines().count()
+    );
 
     final_pass
 }
@@ -216,15 +241,24 @@ async fn run_debug_child(
 
     // Step 1: LOCALIZE (programmatic)
     println!("│ │ [LOCALIZE] Analyzing test failures...");
-    let failure_lines: Vec<&str> = test_output.lines()
-        .filter(|l| l.contains("FAILED") || l.contains("assert") || l.contains("Error") || l.contains("raise"))
+    let failure_lines: Vec<&str> = test_output
+        .lines()
+        .filter(|l| {
+            l.contains("FAILED")
+                || l.contains("assert")
+                || l.contains("Error")
+                || l.contains("raise")
+        })
         .take(10)
         .collect();
     let failure_summary = failure_lines.join("\n");
 
     // Grep for relevant code
     let kvstore_content = tools::execute_tool("read_file", &json!({"path": "kvstore.py"}), workdir);
-    println!("│ │ [LOCALIZE] kvstore.py: {} lines", kvstore_content.lines().count());
+    println!(
+        "│ │ [LOCALIZE] kvstore.py: {} lines",
+        kvstore_content.lines().count()
+    );
 
     // Feed localized info into conversation
     conversation.push(ChatMessage {
@@ -241,16 +275,27 @@ async fn run_debug_child(
     // Step 2: DIAGNOSE + FIX (LLM)
     println!("│ │ [FIX] Diagnosing and fixing...");
     let fixed = call_llm_for_action(
-        client, workdir,
+        client,
+        workdir,
         "Read the test failures and the current code. Identify what's wrong and fix it. \
         Use edit_line for targeted fixes or write_file to rewrite kvstore.py.",
-        &["read_file", "write_file", "edit_line", "edit_block", "patch_file", "grep"],
+        &[
+            "read_file",
+            "write_file",
+            "edit_line",
+            "edit_block",
+            "patch_file",
+            "grep",
+        ],
         5,
         conversation,
-    ).await;
+    )
+    .await;
 
-    println!("│ └── Debug Machine {} ──┘",
-        if fixed { "COMPLETE" } else { "FAILED" });
+    println!(
+        "│ └── Debug Machine {} ──┘",
+        if fixed { "COMPLETE" } else { "FAILED" }
+    );
 
     fixed
 }
@@ -259,14 +304,16 @@ async fn run_debug_child(
 async fn create_stubs(client: &OllamaClient, workdir: &str) -> bool {
     let mut conv = Vec::new();
     call_llm_for_action(
-        client, workdir,
+        client,
+        workdir,
         "Read requirements.md. Then use write_file to create kvstore.py with a KVStore class. \
         Include __init__(self) with self._store = {}. Each method should just contain `pass`. \
         You MUST call write_file.",
         &["read_file", "write_file", "list_directory"],
         5,
         &mut conv,
-    ).await;
+    )
+    .await;
 
     let check = tools::execute_tool("read_file", &json!({"path": "kvstore.py"}), workdir);
     !check.starts_with("error")
@@ -300,7 +347,7 @@ async fn call_llm_for_action(
 
     for _ in 0..max_iter {
         let system = format!(
-r#"You build software step by step. Respond with ONLY a JSON object.
+            r#"You build software step by step. Respond with ONLY a JSON object.
 
 INSTRUCTIONS: {instructions}
 
@@ -320,10 +367,16 @@ When done: {{"transition": "DONE"}}"#,
             tools_list = tools_list,
         );
 
-        let mut messages = vec![ChatMessage { role: "system".into(), content: system }];
+        let mut messages = vec![ChatMessage {
+            role: "system".into(),
+            content: system,
+        }];
         let hist_start = conversation.len().saturating_sub(8);
         messages.extend(conversation[hist_start..].iter().cloned());
-        messages.push(ChatMessage { role: "user".into(), content: "Next action?".into() });
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: "Next action?".into(),
+        });
 
         let raw = match client.chat(messages).await {
             Ok(r) => r,
@@ -336,18 +389,29 @@ When done: {{"transition": "DONE"}}"#,
         let response: LlmResponse = match parse(&raw) {
             Some(r) => r,
             None => {
-                conversation.push(ChatMessage { role: "assistant".into(), content: raw });
-                conversation.push(ChatMessage { role: "user".into(), content: "Respond with ONLY JSON.".into() });
+                conversation.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: raw,
+                });
+                conversation.push(ChatMessage {
+                    role: "user".into(),
+                    content: "Respond with ONLY JSON.".into(),
+                });
                 continue;
             }
         };
 
-        conversation.push(ChatMessage { role: "assistant".into(), content: raw });
+        conversation.push(ChatMessage {
+            role: "assistant".into(),
+            content: raw,
+        });
 
         if let Some(calls) = &response.tool_calls {
             let mut output = String::new();
             for call in calls {
-                if call.name == "transition" { return true; }
+                if call.name == "transition" {
+                    return true;
+                }
                 if !allowed_tools.contains(&call.name.as_str()) {
                     output.push_str(&format!("BLOCKED: '{}'\n", call.name));
                     continue;
@@ -358,11 +422,16 @@ When done: {{"transition": "DONE"}}"#,
                 output.push_str(&format!("=== {} ===\n{}\n", call.name, result));
             }
             if !output.is_empty() {
-                conversation.push(ChatMessage { role: "user".into(), content: format!("Results:\n{}", output) });
+                conversation.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!("Results:\n{}", output),
+                });
             }
         }
 
-        if response.transition.is_some() { return true; }
+        if response.transition.is_some() {
+            return true;
+        }
     }
 
     true // max iterations = done
@@ -371,14 +440,23 @@ When done: {{"transition": "DONE"}}"#,
 fn parse(raw: &str) -> Option<LlmResponse> {
     let trimmed = raw.trim();
     let cleaned = if trimmed.starts_with("```") {
-        let after = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or(trimmed);
+        let after = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
         after.strip_suffix("```").unwrap_or(after).trim()
-    } else { trimmed };
+    } else {
+        trimmed
+    };
 
-    if let Ok(r) = serde_json::from_str::<LlmResponse>(cleaned) { return Some(r); }
+    if let Ok(r) = serde_json::from_str::<LlmResponse>(cleaned) {
+        return Some(r);
+    }
     if let Some(s) = cleaned.find('{') {
         if let Some(e) = cleaned.rfind('}') {
-            if let Ok(r) = serde_json::from_str::<LlmResponse>(&cleaned[s..=e]) { return Some(r); }
+            if let Ok(r) = serde_json::from_str::<LlmResponse>(&cleaned[s..=e]) {
+                return Some(r);
+            }
         }
     }
     None

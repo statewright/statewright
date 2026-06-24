@@ -238,6 +238,32 @@ fn path_segments(path: &str) -> Vec<String> {
         .collect()
 }
 
+fn filename_stem(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn leaf_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut curr = vec![0; b_chars.len() + 1];
+
+    for (i, ca) in a_chars.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b_chars.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[b_chars.len()]
+}
+
 fn suggest_repo_paths(path: &str, workdir: &str) -> Vec<String> {
     let files = list_current_files(workdir);
     if files.is_empty() {
@@ -250,6 +276,10 @@ fn suggest_repo_paths(path: &str, workdir: &str) -> Vec<String> {
         _ => return Vec::new(),
     };
     let target_segments = path_segments(&normalized);
+    let target_stem = filename_stem(&target_leaf);
+    let requested_test_path = target_segments
+        .iter()
+        .any(|segment| segment.contains("test") || segment == "tests" || segment == "testing");
     let mut scored: Vec<(usize, String)> = Vec::new();
 
     for candidate in files {
@@ -257,10 +287,7 @@ fn suggest_repo_paths(path: &str, workdir: &str) -> Vec<String> {
             Some(leaf) => leaf,
             None => continue,
         };
-        if candidate_leaf != target_leaf {
-            continue;
-        }
-
+        let candidate_stem = filename_stem(&candidate_leaf);
         let candidate_segments = path_segments(&candidate);
         let suffix_matches = target_segments
             .iter()
@@ -268,9 +295,39 @@ fn suggest_repo_paths(path: &str, workdir: &str) -> Vec<String> {
             .zip(candidate_segments.iter().rev())
             .take_while(|(a, b)| a == b)
             .count();
-        let depth_bonus = candidate_segments.len().saturating_sub(1);
-        let score = suffix_matches * 100 + depth_bonus;
-        scored.push((score, candidate));
+        let segment_overlap = target_segments
+            .iter()
+            .filter(|segment| {
+                candidate_segments
+                    .iter()
+                    .any(|candidate| candidate == *segment)
+            })
+            .count();
+        let candidate_test_path = candidate_segments
+            .iter()
+            .any(|segment| segment.contains("test") || segment == "tests" || segment == "testing");
+
+        let mut score = suffix_matches * 100 + segment_overlap * 20;
+        if candidate_leaf == target_leaf {
+            score += 1000;
+        } else if candidate_stem == target_stem {
+            score += 700;
+        } else if candidate_leaf.contains(&target_leaf) || target_leaf.contains(&candidate_leaf) {
+            score += 300;
+        } else {
+            let distance = leaf_distance(&candidate_leaf, &target_leaf);
+            if distance <= 2 {
+                score += 220usize.saturating_sub(distance * 40);
+            }
+        }
+        if requested_test_path == candidate_test_path {
+            score += 25;
+        }
+        score += candidate_segments.len().saturating_sub(1);
+
+        if score >= 180 {
+            scored.push((score, candidate));
+        }
     }
 
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -602,6 +659,14 @@ fn list_directory(args: &Value, workdir: &str) -> String {
 }
 
 fn run_test_with_args(args: &Value, workdir: &str) -> String {
+    if std::env::var("SW_TEST_PREFLIGHT_UNAVAILABLE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return "TEST_ENV_UNAVAILABLE: test runner preflight failed\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=1\n".into();
+    }
+
     let test_path = args.get("path").and_then(|p| p.as_str());
     let test_file = args.get("test_file").and_then(|p| p.as_str());
     let extra_args: Vec<String> = args
@@ -862,7 +927,9 @@ fn grep(args: &Value, workdir: &str) -> String {
     let file = args.get("file").and_then(|f| f.as_str());
 
     let mut cmd = Command::new("grep");
-    cmd.args(["-rn", pattern]);
+    // -H forces filename prefix even when a single file is given; without it, Linux grep
+    // omits the filename and the FILENAME:LINE:CONTENT parse in localization Step 7 breaks.
+    cmd.args(["-rHn", pattern]);
     if let Some(f) = file {
         cmd.arg(f);
     } else {
@@ -2448,6 +2515,46 @@ mod tests {
             suggest_repo_paths("/non-existent/path/to/abc.py", dir.path().to_str().unwrap());
 
         assert_eq!(suggestions, vec!["src/pkg/abc.py", "tests/pkg/abc.py"]);
+    }
+
+    #[test]
+    fn suggest_repo_paths_recovers_small_filename_typo() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("django/db/models/sql")).unwrap();
+        fs::write(
+            dir.path().join("django/db/models/sql/compiler.py"),
+            "x = 1\n",
+        )
+        .unwrap();
+
+        let suggestions = suggest_repo_paths(
+            "django/db/models/sql/complier.py",
+            dir.path().to_str().unwrap(),
+        );
+
+        assert_eq!(
+            suggestions.first().map(String::as_str),
+            Some("django/db/models/sql/compiler.py")
+        );
+    }
+
+    #[test]
+    fn suggest_repo_paths_uses_package_overlap_for_stem_match() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("sklearn/pipeline")).unwrap();
+        fs::create_dir_all(dir.path().join("tests/pipeline")).unwrap();
+        fs::write(dir.path().join("sklearn/pipeline/_base.py"), "x = 1\n").unwrap();
+        fs::write(dir.path().join("tests/pipeline/test_base.py"), "x = 2\n").unwrap();
+
+        let suggestions = suggest_repo_paths(
+            "/wrong/sklearn/pipeline/base.py",
+            dir.path().to_str().unwrap(),
+        );
+
+        assert_eq!(
+            suggestions.first().map(String::as_str),
+            Some("sklearn/pipeline/_base.py")
+        );
     }
 
     #[test]

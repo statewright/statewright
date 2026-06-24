@@ -24,19 +24,15 @@ struct ToolCall {
 }
 
 /// Run a TDD greenfield software creation session.
-pub async fn run_tdd(
-    task: &str,
-    workdir: &str,
-    client: &OllamaClient,
-    max_cycles: u32,
-) -> bool {
+pub async fn run_tdd(task: &str, workdir: &str, client: &OllamaClient, max_cycles: u32) -> bool {
     println!("\n=== Statewright TDD: Greenfield Software Creation ===\n");
     println!("Task: {}", task);
     println!("Working dir: {}", workdir);
     println!();
 
     // Read requirements
-    let requirements = tools::execute_tool("read_file", &json!({"path": "requirements.md"}), workdir);
+    let requirements =
+        tools::execute_tool("read_file", &json!({"path": "requirements.md"}), workdir);
     println!("[Requirements]\n{}\n", requirements);
 
     // Phase 1: Design — create stubs
@@ -64,12 +60,16 @@ pub async fn run_tdd(
     println!("[Stubs created] kvstore.py exists\n");
 
     // Phase 2: TDD Cycles
-    let req_lines: Vec<&str> = requirements.lines()
+    let req_lines: Vec<&str> = requirements
+        .lines()
         .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
         .collect();
 
     let total_requirements = req_lines.len().min(max_cycles as usize);
-    println!("--- Phase 2: TDD Cycles ({} requirements) ---\n", total_requirements);
+    println!(
+        "--- Phase 2: TDD Cycles ({} requirements) ---\n",
+        total_requirements
+    );
 
     let mut conversation: Vec<ChatMessage> = Vec::new();
     let mut cycle = 0u32;
@@ -77,7 +77,12 @@ pub async fn run_tdd(
 
     for (i, req) in req_lines.iter().enumerate().take(total_requirements) {
         cycle += 1;
-        println!("╔══ Cycle {}/{}: {} ══╗", cycle, total_requirements, req.trim());
+        println!(
+            "╔══ Cycle {}/{}: {} ══╗",
+            cycle,
+            total_requirements,
+            req.trim()
+        );
 
         // RED: Write a failing test
         println!("│ [RED] Writing test...");
@@ -104,13 +109,16 @@ pub async fn run_tdd(
 
         // Verify RED: test must fail
         let red_result = tools::execute_tool("run_test", &json!({}), workdir);
-        let red_failed = red_result.contains("failed") || red_result.contains("ERROR") || red_result.contains("error");
+        let red_failed = red_result.contains("failed")
+            || red_result.contains("ERROR")
+            || red_result.contains("error");
 
         if !red_failed {
             println!("│ [RED] Test didn't fail — test doesn't test new behavior");
             // Don't skip — the implementation might still be needed
         } else {
-            let fail_count = red_result.lines()
+            let fail_count = red_result
+                .lines()
                 .find(|l| l.contains("failed"))
                 .unwrap_or("? failed");
             println!("│ [RED] ✓ Test fails as expected ({})", fail_count.trim());
@@ -125,7 +133,8 @@ pub async fn run_tdd(
         // GREEN: Implement to pass
         println!("│ [GREEN] Implementing...");
         let implemented = run_creative_state(
-            client, workdir,
+            client,
+            workdir,
             "implementing",
             &format!(
                 "Make all tests pass. Implement the method for:\n{}\n\n\
@@ -136,7 +145,8 @@ pub async fn run_tdd(
             &["read_file", "write_file", "edit_line", "patch_file", "grep"],
             5,
             &mut conversation,
-        ).await;
+        )
+        .await;
 
         if !implemented {
             println!("│ [GREEN] Failed to implement");
@@ -146,11 +156,14 @@ pub async fn run_tdd(
 
         // Verify GREEN: all tests must pass
         let green_result = tools::execute_tool("run_test", &json!({}), workdir);
-        let all_pass = green_result.contains("passed") && !green_result.contains("failed") && !green_result.contains("ERROR");
+        let all_pass = green_result.contains("passed")
+            && !green_result.contains("failed")
+            && !green_result.contains("ERROR");
 
         if all_pass {
             all_pass_count += 1;
-            let pass_count = green_result.lines()
+            let pass_count = green_result
+                .lines()
                 .find(|l| l.contains("passed"))
                 .unwrap_or("? passed");
             println!("│ [GREEN] ✓ All tests pass ({})", pass_count.trim());
@@ -163,7 +176,8 @@ pub async fn run_tdd(
             });
         }
 
-        println!("╚══ Cycle {} {} ══╝\n",
+        println!(
+            "╚══ Cycle {} {} ══╝\n",
             cycle,
             if all_pass { "COMPLETE" } else { "PARTIAL" }
         );
@@ -172,16 +186,30 @@ pub async fn run_tdd(
     // Final verification
     println!("--- Final Verification ---");
     let final_result = tools::execute_tool("run_test", &json!({}), workdir);
-    let final_pass = final_result.contains("passed") && !final_result.contains("failed") && !final_result.contains("ERROR");
+    let final_pass = final_result.contains("passed")
+        && !final_result.contains("failed")
+        && !final_result.contains("ERROR");
 
     if final_pass {
-        let pass_count = final_result.lines()
+        let pass_count = final_result
+            .lines()
             .find(|l| l.contains("passed"))
             .unwrap_or("? passed");
-        println!("[SUCCESS] {} — {}/{} cycles completed", pass_count.trim(), all_pass_count, cycle);
+        println!(
+            "[SUCCESS] {} — {}/{} cycles completed",
+            pass_count.trim(),
+            all_pass_count,
+            cycle
+        );
     } else {
-        let summary: Vec<&str> = final_result.lines()
-            .filter(|l| l.contains("PASSED") || l.contains("FAILED") || l.contains("passed") || l.contains("failed"))
+        let summary: Vec<&str> = final_result
+            .lines()
+            .filter(|l| {
+                l.contains("PASSED")
+                    || l.contains("FAILED")
+                    || l.contains("passed")
+                    || l.contains("failed")
+            })
             .take(15)
             .collect();
         println!("[RESULT]\n{}", summary.join("\n"));
@@ -215,7 +243,7 @@ async fn run_creative_state(
 
     for iter in 1..=max_iterations {
         let system = format!(
-r#"You build software step by step. Respond with ONLY a JSON object.
+            r#"You build software step by step. Respond with ONLY a JSON object.
 
 STATE: {state_name}
 INSTRUCTIONS: {instructions}
@@ -238,10 +266,16 @@ When done with this state:
             tools_list = tools_list,
         );
 
-        let mut messages = vec![ChatMessage { role: "system".into(), content: system }];
+        let mut messages = vec![ChatMessage {
+            role: "system".into(),
+            content: system,
+        }];
         let hist_start = conversation.len().saturating_sub(8);
         messages.extend(conversation[hist_start..].iter().cloned());
-        messages.push(ChatMessage { role: "user".into(), content: "Next action?".into() });
+        messages.push(ChatMessage {
+            role: "user".into(),
+            content: "Next action?".into(),
+        });
 
         let raw = match client.chat(messages).await {
             Ok(r) => r,
@@ -254,7 +288,10 @@ When done with this state:
         let response: LlmResponse = match parse_response(&raw) {
             Some(r) => r,
             None => {
-                conversation.push(ChatMessage { role: "assistant".into(), content: raw });
+                conversation.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: raw,
+                });
                 conversation.push(ChatMessage {
                     role: "user".into(),
                     content: "Respond with ONLY a JSON object.".into(),
@@ -263,7 +300,10 @@ When done with this state:
             }
         };
 
-        conversation.push(ChatMessage { role: "assistant".into(), content: raw });
+        conversation.push(ChatMessage {
+            role: "assistant".into(),
+            content: raw,
+        });
 
         // Handle tool calls
         if let Some(calls) = &response.tool_calls {
@@ -277,7 +317,10 @@ When done with this state:
 
                 // Enforce tools
                 if !allowed.contains(&name.to_string()) {
-                    tool_output.push_str(&format!("BLOCKED: '{}' not available. Use: {}\n", name, tools_list));
+                    tool_output.push_str(&format!(
+                        "BLOCKED: '{}' not available. Use: {}\n",
+                        name, tools_list
+                    ));
                     continue;
                 }
 
@@ -310,7 +353,10 @@ When done with this state:
 fn parse_response(raw: &str) -> Option<LlmResponse> {
     let trimmed = raw.trim();
     let cleaned = if trimmed.starts_with("```") {
-        let after = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or(trimmed);
+        let after = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or(trimmed);
         after.strip_suffix("```").unwrap_or(after).trim()
     } else {
         trimmed

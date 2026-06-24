@@ -336,17 +336,27 @@ fn find_function_body(lines: &[&str], hit_line: usize) -> (usize, usize) {
     (def_idx.saturating_sub(1) + 1, end)
 }
 
-fn extract_anchor_keyword(text: &str) -> Option<String> {
+fn extract_anchor_keywords(text: &str) -> Vec<String> {
     let stopwords = [
         "self", "return", "class", "import", "from", "None", "and", "or", "not", "the", "this",
         "that", "with", "for", "while", "if", "else", "elif", "true", "false", "null", "def",
         "async", "await",
     ];
 
-    text.split_whitespace()
+    let mut keywords = Vec::new();
+    for keyword in text
+        .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
-        .find(|w| w.len() > 4 && !stopwords.contains(&w))
-        .map(|s| s.to_string())
+        .filter(|w| w.len() > 4 && !stopwords.contains(w))
+    {
+        if !keywords.iter().any(|existing| existing == keyword) {
+            keywords.push(keyword.to_string());
+        }
+        if keywords.len() >= 8 {
+            break;
+        }
+    }
+    keywords
 }
 
 fn excerpt_around_line(lines: &[&str], hit_line: usize, before: usize, after: usize) -> String {
@@ -361,6 +371,149 @@ fn excerpt_around_line(lines: &[&str], hit_line: usize, before: usize, after: us
         .join("\n")
 }
 
+#[derive(Clone)]
+struct LocusExcerpt {
+    start: usize,
+    end: usize,
+    score: usize,
+    reason: String,
+    excerpt: String,
+}
+
+fn window_bounds(lines_len: usize, hit_line: usize, before: usize, after: usize) -> (usize, usize) {
+    if lines_len == 0 {
+        return (0, 0);
+    }
+    let idx = hit_line.saturating_sub(1).min(lines_len.saturating_sub(1));
+    let start = idx.saturating_sub(before) + 1;
+    let end = (idx + after).min(lines_len);
+    (start, end)
+}
+
+fn window_overlap(a: (usize, usize), b: (usize, usize)) -> usize {
+    let start = a.0.max(b.0);
+    let end = a.1.min(b.1);
+    end.saturating_sub(start)
+}
+
+fn ranked_locus_excerpts(
+    file_content: &str,
+    localized_regions: Option<&Vec<(usize, String)>>,
+    old_arg: &str,
+) -> Vec<LocusExcerpt> {
+    let file_lines: Vec<&str> = file_content.lines().collect();
+    if file_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates: Vec<(usize, usize, usize, String)> = Vec::new();
+    for token in extract_anchor_keywords(old_arg) {
+        let token_lc = token.to_lowercase();
+        let mut hits = 0usize;
+        for (idx, line) in file_lines.iter().enumerate() {
+            if line.to_lowercase().contains(&token_lc) {
+                let (start, end) = window_bounds(file_lines.len(), idx + 1, 15, 25);
+                candidates.push((
+                    start,
+                    end,
+                    120usize.saturating_add(token.len()),
+                    format!("token match: {}", token),
+                ));
+                hits += 1;
+                if hits >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(regions) = localized_regions {
+        for (line_num, pattern) in regions.iter().take(6) {
+            let (start, end) = window_bounds(file_lines.len(), *line_num, 15, 25);
+            candidates.push((start, end, 90, format!("localized hit: {}", pattern)));
+        }
+    }
+
+    if candidates.is_empty() {
+        for (idx, line) in file_lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            let looks_like_symbol = trimmed.starts_with("def ")
+                || trimmed.starts_with("class ")
+                || trimmed.starts_with("async def ")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("struct ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("impl ");
+            if looks_like_symbol {
+                let (start, end) = window_bounds(file_lines.len(), idx + 1, 2, 18);
+                candidates.push((start, end, 40, "symbol skeleton fallback".into()));
+            }
+            if candidates.len() >= 8 {
+                break;
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        candidates.push((
+            1,
+            file_lines.len().min(80),
+            1,
+            "file prefix fallback".into(),
+        ));
+    }
+
+    candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+
+    let mut selected: Vec<LocusExcerpt> = Vec::new();
+    for (start, end, score, reason) in candidates {
+        let span = end.saturating_sub(start).max(1);
+        let overlaps_existing = selected.iter().any(|existing| {
+            window_overlap((start, end), (existing.start, existing.end)) > span / 2
+        });
+        if overlaps_existing {
+            continue;
+        }
+
+        let excerpt = file_lines[start.saturating_sub(1)..end.min(file_lines.len())]
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("L{}: {}", start + i, l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        selected.push(LocusExcerpt {
+            start,
+            end,
+            score,
+            reason,
+            excerpt,
+        });
+        if selected.len() >= 3 {
+            break;
+        }
+    }
+    selected
+}
+
+fn format_locus_excerpts(excerpts: &[LocusExcerpt]) -> String {
+    excerpts
+        .iter()
+        .enumerate()
+        .map(|(idx, excerpt)| {
+            format!(
+                "Candidate {}: lines {}-{} (score {}, {})\n{}",
+                idx + 1,
+                excerpt.start,
+                excerpt.end,
+                excerpt.score,
+                excerpt.reason,
+                excerpt.excerpt
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 fn build_readable_excerpt(
     file_content: &str,
     localized_regions: Option<&Vec<(usize, String)>>,
@@ -371,10 +524,9 @@ fn build_readable_excerpt(
         return String::new();
     }
 
-    if let Some(keyword) = extract_anchor_keyword(old_arg) {
-        if let Some(idx) = file_lines.iter().position(|l| l.contains(&keyword)) {
-            return excerpt_around_line(&file_lines, idx + 1, 15, 25);
-        }
+    let ranked = ranked_locus_excerpts(file_content, localized_regions, old_arg);
+    if !ranked.is_empty() {
+        return format_locus_excerpts(&ranked);
     }
 
     if let Some(regions) = localized_regions {
@@ -703,7 +855,7 @@ fn scoped_test_file_from_env() -> Option<String> {
 
 #[cfg(test)]
 mod harness_result_tests {
-    use super::test_passed;
+    use super::{ranked_locus_excerpts, test_passed};
 
     #[test]
     fn test_passed_requires_zero_exit_code() {
@@ -721,6 +873,38 @@ mod harness_result_tests {
     fn test_passed_accepts_clean_zero_exit() {
         let output = "SW_TEST_EXIT_CODE=0\n---\n42 passed in 0.42s\n";
         assert!(test_passed(output));
+    }
+
+    #[test]
+    fn ranked_locus_excerpts_returns_diverse_anchor_windows() {
+        let content = r#"
+class SQLCompiler:
+    def as_sql(self):
+        pass
+
+    def unrelated(self):
+        return self.query
+
+    def get_order_by(self):
+        if self.query.order_by:
+            return self.query.order_by
+        return []
+
+class Other:
+    def get_order_by(self):
+        return []
+"#;
+        let regions = vec![(9, "order_by".to_string()), (14, "order_by".to_string())];
+
+        let excerpts = ranked_locus_excerpts(content, Some(&regions), "if self.union_order_by:");
+
+        assert!(!excerpts.is_empty());
+        assert!(excerpts.len() <= 3);
+        assert!(
+            excerpts
+                .iter()
+                .any(|excerpt| excerpt.reason.contains("localized hit"))
+        );
     }
 }
 
@@ -1778,6 +1962,13 @@ async fn main() {
     let mut reasoning_mode = false;
     let mut escalated_model = false;
     let mut persistent_hint: Option<String> = None;
+
+    // Per-file consecutive edit_line failure counter for locus-loop detection.
+    // When a file accumulates LOCUS_RESET_THRESHOLD consecutive failures, we inject
+    // the full current file content into the tool result to reset the model's stale
+    // mental model (it hallucinates anchor text that no longer exists after prior edits).
+    let mut consecutive_locus_fails: HashMap<String, u32> = HashMap::new();
+    const LOCUS_RESET_THRESHOLD: u32 = 3;
 
     // Read dedup: track file reads to avoid re-injecting full content
     // Key: (tool_name, canonical_args), Value: (step_number, result)
@@ -3311,9 +3502,24 @@ async fn main() {
                     .cloned()
                     .collect();
                 if !blocked_tests.is_empty() {
+                    // Detect path-resolution mismatch: model asked for a non-test path
+                    // (e.g. bare "models.py") but resolve_repo_path found only test files.
+                    let original_path = tool_args.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                    let resolved_to_test = !is_test_path(original_path, &sw_test_files)
+                        && blocked_tests.iter().all(|bt| is_test_path(bt, &sw_test_files));
+                    let resolution_note = if resolved_to_test {
+                        format!(
+                            " Note: '{}' was auto-resolved to a test-directory path ('{}') because no source file with that name exists. The source file you need may have a different path — use find_files or list_directory to locate it.",
+                            original_path,
+                            blocked_tests.join(", ")
+                        )
+                    } else {
+                        String::new()
+                    };
                     let msg = format!(
-                        "BLOCKED: test files are read-only in this bug-fix harness. Read tests if needed, but modify source files only. Blocked path(s): {}",
-                        blocked_tests.join(", ")
+                        "BLOCKED: test files are read-only in this bug-fix harness. Read tests if needed, but modify source files only. Blocked path(s): {}.{}",
+                        blocked_tests.join(", "),
+                        resolution_note
                     );
                     println!("  [TEST GUARD] {}", msg);
                     tool_output.push_str(&msg);
@@ -3387,26 +3593,36 @@ async fn main() {
                         );
 
                         let old_arg = tool_args.get("old").and_then(|o| o.as_str()).unwrap_or("");
-                        let content_preview = localized_file_contexts
-                            .get(&resolved_edit_path)
-                            .or_else(|| localized_file_contexts.get(edit_path))
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                build_readable_excerpt(
-                                    &file_content,
-                                    localized_regions
-                                        .get(&resolved_edit_path)
-                                        .or_else(|| localized_regions.get(edit_path)),
-                                    old_arg,
-                                )
-                            });
+                        let content_preview = if old_arg.trim().is_empty() {
+                            localized_file_contexts
+                                .get(&resolved_edit_path)
+                                .or_else(|| localized_file_contexts.get(edit_path))
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    build_readable_excerpt(
+                                        &file_content,
+                                        localized_regions
+                                            .get(&resolved_edit_path)
+                                            .or_else(|| localized_regions.get(edit_path)),
+                                        old_arg,
+                                    )
+                                })
+                        } else {
+                            build_readable_excerpt(
+                                &file_content,
+                                localized_regions
+                                    .get(&resolved_edit_path)
+                                    .or_else(|| localized_regions.get(edit_path)),
+                                old_arg,
+                            )
+                        };
 
                         let cache_key_for_edit = format!("read_file:{}", resolved_edit_path);
                         read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
                         read_paths.insert(resolved_edit_path.clone());
 
                         let msg = format!(
-                            "BLOCKED: You haven't read {} yet. Here is the most relevant excerpt ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT content from above.",
+                            "BLOCKED: You haven't read {} yet. Here are the most relevant candidate loci ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT current text from one candidate above.",
                             resolved_edit_path, line_count, content_preview
                         );
                         tool_output.push_str(&msg);
@@ -3552,21 +3768,68 @@ async fn main() {
                     if full_edit_path.exists() {
                         let file_content =
                             std::fs::read_to_string(&full_edit_path).unwrap_or_default();
-                        let preview = localized_file_contexts
-                            .get(edit_path)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                build_readable_excerpt(
-                                    &file_content,
-                                    localized_regions.get(edit_path),
-                                    old_arg,
-                                )
-                            });
-                        if !preview.is_empty() {
+
+                        // Track consecutive failures on this specific file.
+                        let fail_n = consecutive_locus_fails
+                            .entry(edit_path.to_string())
+                            .or_insert(0);
+                        *fail_n += 1;
+
+                        if *fail_n >= LOCUS_RESET_THRESHOLD {
+                            // Threshold hit: inject the full current file so the model's stale
+                            // mental model is overwritten with ground truth.  Candidate loci alone
+                            // are not enough — the model keeps reconstructing the wrong anchor from
+                            // memory.  Showing the whole file forces a re-read.
+                            let line_count = file_content.lines().count();
+                            // Cap at 400 lines to avoid blowing the context window on huge files;
+                            // if the file is larger, show the localized region instead.
+                            let body = if line_count <= 400 {
+                                file_content.clone()
+                            } else {
+                                // Use localized region if available, else first 200 + last 100 lines
+                                if let Some(regions) = localized_regions.get(edit_path) {
+                                    let lines: Vec<&str> =
+                                        file_content.lines().collect();
+                                    // Span from min to max localized line with ±60 line buffer
+                                    let min_ln = regions.iter().map(|(l, _)| *l).min().unwrap_or(1);
+                                    let max_ln = regions.iter().map(|(l, _)| *l).max().unwrap_or(1);
+                                    let start = min_ln.saturating_sub(61);
+                                    let end = (max_ln + 60).min(lines.len());
+                                    lines[start..end].join("\n")
+                                } else {
+                                    let lines: Vec<&str> =
+                                        file_content.lines().collect();
+                                    let head = lines[..200.min(lines.len())].join("\n");
+                                    let tail = lines[lines.len().saturating_sub(100)..].join("\n");
+                                    format!("{}\n...[{} lines omitted]...\n{}", head, line_count - 300, tail)
+                                }
+                            };
+                            println!(
+                                "  [LOCUS RESET] {} consecutive edit failures on {} — injecting current file content",
+                                fail_n, edit_path
+                            );
                             result.push_str(&format!(
-                                "\n\nActual content near the edit locus:\n{}",
-                                preview
+                                "\n\n[LOCUS RESET] {} consecutive edit failures on this file. \
+                                 Your previous edits changed the file and your anchor text no longer exists. \
+                                 CURRENT FILE CONTENT ({} lines):\n```\n{}\n```\n\
+                                 You MUST use an exact verbatim sequence of lines from the above as your old= value. \
+                                 Do NOT reconstruct from memory.",
+                                fail_n, line_count, body
                             ));
+                            *fail_n = 0;
+                        } else {
+                            // Below threshold: show candidate loci as before
+                            let preview = build_readable_excerpt(
+                                &file_content,
+                                localized_regions.get(edit_path),
+                                old_arg,
+                            );
+                            if !preview.is_empty() {
+                                result.push_str(&format!(
+                                    "\n\nEdit anchor was not found. Candidate loci using current file content:\n{}",
+                                    preview
+                                ));
+                            }
                         }
                     }
                 }
@@ -3651,6 +3914,7 @@ async fn main() {
                 && !result.contains("not found");
             if edit_succeeded {
                 for path in &targeted_paths {
+                    consecutive_locus_fails.remove(path); // reset per-file locus counter
                     modified_files.insert(path.to_string());
                     read_cache.retain(|k, _| !k.contains(path));
                     read_paths.remove(path);

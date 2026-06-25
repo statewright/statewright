@@ -1383,7 +1383,9 @@ async fn main() {
         args.max_steps
     };
 
-    // Helper: get OllamaClient for a given state (per-state model routing)
+    // Helper: get OllamaClient for a given state (per-state model routing).
+    // thinking_level is not passed here — it requires state_def, which is loaded later.
+    // Single-state path rebuilds the client after state_def is available.
     let make_client_for_state = |state: &str| -> OllamaClient {
         if let Some(mc) = run_config.model_routing.get(state) {
             OllamaClient::new(OllamaConfig {
@@ -1394,6 +1396,7 @@ async fn main() {
                 model: mc.model.clone().unwrap_or_else(|| args.model.clone()),
                 temperature: mc.temperature,
                 max_tokens: mc.num_predict,
+                thinking_level: None,
             })
         } else {
             OllamaClient::new(OllamaConfig {
@@ -1401,6 +1404,7 @@ async fn main() {
                 model: args.model.clone(),
                 temperature: 0.3,
                 max_tokens: 4096,
+                thinking_level: None,
             })
         }
     };
@@ -1412,6 +1416,7 @@ async fn main() {
             model: args.model,
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         });
         tdd_chain::run_tdd_chain(&args.workdir, &client, args.max_cycles, args.model_size).await;
         return;
@@ -1424,6 +1429,7 @@ async fn main() {
             model: args.model,
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         });
         let task =
             std::fs::read_to_string(std::path::Path::new(&args.workdir).join("requirements.md"))
@@ -1437,7 +1443,9 @@ async fn main() {
     // e.g.: sw-agent --state implementing --workdir /path --task "Fix the bug" --json-events
     if let Some(target_state) = &args.state {
         let json_mode = args.json_events;
-        let client = make_client_for_state(target_state);
+
+        // Extract model routing for this state before consuming run_config.workflow.
+        let model_config = run_config.model_routing.get(target_state.as_str()).cloned();
 
         // Load context from file if provided
         let context_json: serde_json::Value = args
@@ -1458,6 +1466,26 @@ async fn main() {
                 eprintln!("State '{}' not found in workflow", target_state);
                 std::process::exit(1);
             }
+        };
+
+        // Build client now that we have state_def — incorporates both model routing and
+        // per-state thinking_level. thinking_level is only forwarded to non-Ollama endpoints.
+        let client = if let Some(mc) = &model_config {
+            OllamaClient::new(OllamaConfig {
+                api_url: mc.ollama_url.clone().unwrap_or_else(|| args.ollama_url.clone()),
+                model: mc.model.clone().unwrap_or_else(|| args.model.clone()),
+                temperature: mc.temperature,
+                max_tokens: mc.num_predict,
+                thinking_level: state_def.thinking_level.clone(),
+            })
+        } else {
+            OllamaClient::new(OllamaConfig {
+                api_url: args.ollama_url.clone(),
+                model: args.model.clone(),
+                temperature: 0.3,
+                max_tokens: 4096,
+                thinking_level: state_def.thinking_level.clone(),
+            })
         };
 
         let allowed_tools = state_def
@@ -2022,6 +2050,7 @@ async fn main() {
             model: args.model.clone(),
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         });
 
         match statewright_agent::generator::generate_machine(&client, &args.task, args.max_retries)
@@ -2097,12 +2126,14 @@ async fn main() {
         model: args.model.clone(),
         temperature: 0.3,
         max_tokens: output_tokens,
+        thinking_level: None,
     });
     let escalation_client = OllamaClient::new(OllamaConfig {
         api_url: escalation_url.clone(),
         model: escalation_model.clone(),
         temperature: 0.3,
         max_tokens: output_tokens,
+        thinking_level: None,
     });
 
     let mut current_state = definition.initial.clone();

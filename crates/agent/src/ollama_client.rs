@@ -8,6 +8,10 @@ pub struct OllamaConfig {
     pub model: String,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// Per-state thinking level. Only forwarded to non-Ollama endpoints that support it
+    /// (OpenAI o-series, Anthropic). Maps to `reasoning_effort` in the API request.
+    /// Values: "off" (suppress), "low", "medium", "high" / "max"
+    pub thinking_level: Option<String>,
 }
 
 impl Default for OllamaConfig {
@@ -17,6 +21,7 @@ impl Default for OllamaConfig {
             model: "qwen2.5-coder:32b".into(),
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         }
     }
 }
@@ -42,6 +47,10 @@ struct ChatRequest {
     /// for tool definitions + code context. Required for gpt-oss/reasoning models.
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
+    /// Reasoning effort level for OpenAI o-series and Anthropic models.
+    /// Not sent to Ollama endpoints — those ignore it or may reject unknown fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -157,6 +166,27 @@ impl From<reqwest::Error> for OllamaError {
     }
 }
 
+// ─── Thinking-level helpers ──────────────────────────────────────────────
+
+/// Returns true for endpoints that are Ollama (local or remote Ollama instance).
+/// Ollama ignores unknown request fields, but we skip `reasoning_effort` anyway
+/// to avoid surprises if a future version rejects it.
+fn is_ollama_endpoint(url: &str) -> bool {
+    url.contains("ollama") || url.contains("localhost") || url.contains("127.0.0.1")
+}
+
+/// Map a Statewright thinking_level string to the OpenAI `reasoning_effort` value.
+/// Returns None for "off" (suppress reasoning entirely — don't send the field).
+fn map_thinking_level(level: &str) -> Option<String> {
+    match level {
+        "off" => None,
+        "low" => Some("low".into()),
+        "medium" => Some("medium".into()),
+        "high" | "max" => Some("high".into()),
+        other => Some(other.into()),
+    }
+}
+
 // ─── Client implementation ───────────────────────────────────────────────
 
 impl OllamaClient {
@@ -176,6 +206,12 @@ impl OllamaClient {
     pub async fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, OllamaError> {
         let url = format!("{}/chat/completions", self.config.api_url);
 
+        let reasoning_effort = if !is_ollama_endpoint(&self.config.api_url) {
+            self.config.thinking_level.as_deref().and_then(map_thinking_level)
+        } else {
+            None
+        };
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages,
@@ -183,6 +219,7 @@ impl OllamaClient {
             max_tokens: self.config.max_tokens,
             tools: None,
             options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
+            reasoning_effort,
         };
 
         let mut last_err: OllamaError = OllamaError::NoResponse;
@@ -232,6 +269,12 @@ impl OllamaClient {
     ) -> Result<ChatResult, OllamaError> {
         let url = format!("{}/chat/completions", self.config.api_url);
 
+        let reasoning_effort = if !is_ollama_endpoint(&self.config.api_url) {
+            self.config.thinking_level.as_deref().and_then(map_thinking_level)
+        } else {
+            None
+        };
+
         let request = ChatRequest {
             model: self.config.model.clone(),
             messages,
@@ -239,6 +282,7 @@ impl OllamaClient {
             max_tokens: self.config.max_tokens,
             tools: Some(tools),
             options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
+            reasoning_effort,
         };
 
         let mut last_err: OllamaError = OllamaError::NoResponse;
@@ -636,6 +680,39 @@ mod tests {
         let config = OllamaConfig::default();
         assert!(config.api_url.contains("localhost:11434"));
         assert_eq!(config.temperature, 0.3);
+        assert_eq!(config.thinking_level, None);
+    }
+
+    #[test]
+    fn is_ollama_endpoint_detects_local() {
+        assert!(is_ollama_endpoint("http://localhost:11434/v1"));
+        assert!(is_ollama_endpoint("http://127.0.0.1:11434/v1"));
+        assert!(is_ollama_endpoint("https://qwen3-8b.ollama.casa.enhasa.cloud/v1"));
+    }
+
+    #[test]
+    fn is_ollama_endpoint_passes_openai() {
+        assert!(!is_ollama_endpoint("https://api.openai.com/v1"));
+        assert!(!is_ollama_endpoint("https://openrouter.ai/api/v1"));
+        assert!(!is_ollama_endpoint("https://api.anthropic.com/v1"));
+    }
+
+    #[test]
+    fn map_thinking_level_off_returns_none() {
+        assert_eq!(map_thinking_level("off"), None);
+    }
+
+    #[test]
+    fn map_thinking_level_maps_correctly() {
+        assert_eq!(map_thinking_level("low"), Some("low".into()));
+        assert_eq!(map_thinking_level("medium"), Some("medium".into()));
+        assert_eq!(map_thinking_level("high"), Some("high".into()));
+        assert_eq!(map_thinking_level("max"), Some("high".into()));
+    }
+
+    #[test]
+    fn map_thinking_level_passes_through_unknown() {
+        assert_eq!(map_thinking_level("auto"), Some("auto".into()));
     }
 
     #[test]

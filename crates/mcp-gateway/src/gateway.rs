@@ -1556,16 +1556,27 @@ impl Gateway {
                 let model = arguments.get("model").and_then(|m| m.as_str()).unwrap_or("gemma4:31b");
                 let agent_workdir = arguments.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
 
-                // Build config for the agent
-                let config = json!({
+                // Resolve active session for workflow definition and current state.
+                // This is the path for TUIs (Claude Code, Hermes) that cannot spawn sw-agent
+                // locally — the gateway runs it server-side using the loaded workflow.
+                let (workflow_json, current_state) = self.session_manager.get(&self.session_id)
+                    .map(|s| (serde_json::to_value(&s.definition).ok(), Some(s.current_state.clone())))
+                    .unwrap_or((None, None));
+
+                // Build config for the agent — include the active workflow so sw-agent
+                // uses the correct state machine rather than its hardcoded fallback.
+                let mut config = json!({
                     "task": task,
                     "workdir": agent_workdir,
                     "model_routing": {
-                        "planning": { "model": model, "temperature": 0.3, "num_predict": 4096 },
+                        "planning":     { "model": model, "temperature": 0.3, "num_predict": 4096 },
                         "implementing": { "model": model, "temperature": 0.2, "num_predict": 4096 },
                     },
                     "guardrails": { "max_steps": 20, "max_diff_lines": 5 }
                 });
+                if let Some(wf) = workflow_json {
+                    config["workflow"] = wf;
+                }
 
                 // Write config to temp file
                 let config_path = format!("/tmp/sw-agent-config-{}.json", std::time::SystemTime::now()
@@ -1577,10 +1588,23 @@ impl Gateway {
                         )).unwrap());
                 }
 
+                // Build spawn args — target the current state if known (single-state execution),
+                // otherwise sw-agent runs from the workflow initial state.
+                let mut sw_args: Vec<String> = vec![
+                    "--json-events".into(),
+                    "--config".into(),
+                    config_path.clone(),
+                    "--workdir".into(),
+                    agent_workdir.to_string(),
+                ];
+                if let Some(state) = current_state {
+                    sw_args.push("--state".into());
+                    sw_args.push(state);
+                }
+
                 // Spawn sw-agent subprocess
                 let output = match tokio::process::Command::new("sw-agent")
-                    .args(["--json-events", "--use-hardcoded-machine", "--config", &config_path,
-                           "--workdir", agent_workdir])
+                    .args(&sw_args)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .output()
@@ -1803,6 +1827,70 @@ mod tests {
         // Verify state changed
         let session = gw.session_manager.get("test-session").unwrap();
         assert_eq!(session.current_state, "implementing");
+    }
+
+    #[tokio::test]
+    async fn invoke_transition_does_not_advance_to_on_complete() {
+        // Workflow with an invoke transition: planning --DEBUG--> {invoke: "debug_machine", on_complete: "testing"}
+        // After firing DEBUG, parent must stay in "planning" (not jump to "testing").
+        // The response must carry an "invoke" key for the client to act on.
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "invoke-test",
+            "initial": "planning",
+            "states": {
+                "planning": {
+                    "on": {
+                        "DEBUG": { "invoke": "debug_machine", "on_complete": "testing" },
+                        "DONE": "completed"
+                    }
+                },
+                "testing": { "on": { "DONE": "completed" } },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        })).unwrap();
+
+        let mgr = SessionManager::new();
+        mgr.create("invoke-session".into(), def.clone());
+        let mut wf = HashMap::new();
+        wf.insert("invoke-test".into(), def);
+        let mut gw = Gateway::new(
+            mgr,
+            UpstreamManager::empty(),
+            "invoke-session".into(),
+            wf,
+            Some("invoke-test".into()),
+            String::new(),
+            None,
+        );
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_transition",
+                "arguments": { "event": "DEBUG" }
+            })),
+            id: Some(json!(1)),
+        };
+        let resp = gw.handle_message(req).await.unwrap();
+        assert!(resp.error.is_none());
+
+        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let result: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        // Response must indicate the invoke and the eventual destination
+        assert_eq!(result["transitioned"], true);
+        assert_eq!(result["from"], "planning");
+        assert_eq!(result["to"], "testing");         // on_complete — eventual destination
+        assert!(result.get("invoke").is_some(), "response must carry invoke key");
+        assert_eq!(result["invoke"]["machine"], "debug_machine");
+        assert_eq!(result["invoke"]["on_complete"], "testing");
+
+        // Parent session must NOT have advanced — stays in "planning" until sub-machine completes
+        let session = gw.session_manager.get("invoke-session").unwrap();
+        assert_eq!(session.current_state, "planning",
+            "parent state must not advance to on_complete before sub-machine runs");
     }
 
     #[tokio::test]

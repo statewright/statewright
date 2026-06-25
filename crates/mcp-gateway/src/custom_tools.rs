@@ -26,6 +26,38 @@ pub fn handle_transition(
     ) {
         Ok(result) if result.transitioned => {
             let old_state = session.current_state.clone();
+
+            // Invoke transition: don't advance parent state — sub-machine must run first.
+            // The engine sets new_state = on_complete (via target()), but the client must
+            // drive the named sub-machine to completion before the parent can advance there.
+            // Returning early without mutating session keeps the parent in its current state.
+            if let Some(ref invoke) = result.invoke {
+                let (used, limit, _pct) = session.usage();
+                let mut invoke_response = json!({
+                    "transitioned": true,
+                    "from": old_state,
+                    "to": invoke.on_complete,
+                    "requires_approval": result.requires_approval,
+                    "approval_message": result.approval_message,
+                    "transition_count": session.transition_count,
+                    "usage": {
+                        "transitions": used,
+                        "limit": limit,
+                        "remaining": limit.map(|l| l.saturating_sub(used)),
+                    },
+                    "invoke": {
+                        "machine": invoke.machine,
+                        "on_complete": invoke.on_complete,
+                        "on_fail": invoke.on_fail,
+                        "input": invoke.input,
+                    },
+                });
+                if let Some(warning) = session.usage_warning() {
+                    invoke_response["usage"]["warning"] = json!(warning);
+                }
+                return Ok(invoke_response);
+            }
+
             session.current_state = result.new_state.clone();
             session.context = result.new_context;
             session.iteration_count = 0;

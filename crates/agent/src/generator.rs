@@ -188,6 +188,7 @@ mod tests {
             model: "test".into(),
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         };
         let client = OllamaClient::new(config);
 
@@ -219,6 +220,7 @@ mod tests {
             model: "test".into(),
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         };
         let client = OllamaClient::new(config);
 
@@ -243,6 +245,7 @@ mod tests {
             model: "test".into(),
             temperature: 0.3,
             max_tokens: 4096,
+            thinking_level: None,
         };
         let client = OllamaClient::new(config);
 

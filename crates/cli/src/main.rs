@@ -965,7 +965,7 @@ fn scoped_test_file_from_env() -> Option<String> {
 
 #[cfg(test)]
 mod harness_result_tests {
-    use super::{ranked_locus_excerpts, test_passed};
+    use super::{parse_response, ranked_locus_excerpts, test_passed};
 
     #[test]
     fn test_passed_requires_zero_exit_code() {
@@ -1005,6 +1005,31 @@ mod harness_result_tests {
                       FAILED (failures=1)\n\
                       SW_TEST_EXIT_CODE=1\nSW_TEST_ENV_UNAVAILABLE=0\n";
         assert!(!test_passed(output));
+    }
+
+    #[test]
+    fn parse_response_heals_missing_tool_call_close_brace() {
+        // qwen3:8b consistently omits the closing } for tool_call objects before ].
+        // Model emits: {"tool_calls": [{"name": "insert_between", "args": {...}], "transition": "DONE"}
+        //   (missing }  before ] — the tool_call object is never closed)
+        let raw = r#"{"tool_calls": [{"name": "insert_between", "args": {"path": "django/db/models/enums.py", "after": "class Choices(", "new": "    do_not_call_in_templates = True"}], "transition": "DONE"}]}"#;
+        let result = parse_response(raw);
+        assert!(result.is_some(), "should heal missing tool_call closing brace");
+        let r = result.unwrap();
+        assert_eq!(r.transition.as_deref(), Some("DONE"));
+        let calls = r.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "insert_between");
+    }
+
+    #[test]
+    fn parse_response_heals_is_idempotent_on_valid_json() {
+        // Valid JSON with proper }}] should parse without healing (at direct-parse step)
+        let raw = r#"{"tool_calls": [{"name": "edit_line", "args": {"path": "f.py", "old": "x", "new": "y"}}], "transition": "DONE"}"#;
+        let result = parse_response(raw);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_eq!(r.transition.as_deref(), Some("DONE"));
     }
 
     #[test]
@@ -4792,11 +4817,59 @@ fn parse_response(raw: &str) -> Option<LlmResponse> {
         }
 
         if depth == 0 && end > start {
-            if let Ok(r) = serde_json::from_str::<LlmResponse>(&cleaned[start..=end]) {
+            let candidate = &cleaned[start..=end];
+            if let Ok(r) = serde_json::from_str::<LlmResponse>(candidate) {
                 // Only accept if it has actual content — otherwise fall through
                 // to bare event/transition parsers below
                 if r.transition.is_some() || r.tool_calls.is_some() || r.error.is_some() {
                     return Some(r);
+                }
+            } else if cleaned.contains("}]") {
+                // serde_json rejected the extracted candidate.
+                // Heal: qwen3:8b omits closing } for tool_call objects before ].
+                // Pattern: {"tool_calls": [{"name": "...", "args": {...}], "transition": "T"}]}
+                //                                                       ^--- missing } here
+                // Apply }]→}}] to raw cleaned (not candidate — candidate may include
+                // trailing ]} garbage that prevents the brace extractor from stopping
+                // at the right }), then re-run brace extraction.
+                let healed = cleaned.replacen("}]", "}}]", 1);
+                if let Some(h_start) = healed.find('{') {
+                    let h_bytes = healed.as_bytes();
+                    let mut h_depth = 0i32;
+                    let mut h_in_string = false;
+                    let mut h_escape = false;
+                    let mut h_end = h_start;
+                    for i in h_start..h_bytes.len() {
+                        if h_escape {
+                            h_escape = false;
+                            continue;
+                        }
+                        match h_bytes[i] {
+                            b'\\' if h_in_string => h_escape = true,
+                            b'"' => h_in_string = !h_in_string,
+                            b'{' if !h_in_string => h_depth += 1,
+                            b'}' if !h_in_string => {
+                                h_depth -= 1;
+                                if h_depth == 0 {
+                                    h_end = i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if h_depth == 0 && h_end > h_start {
+                        if let Ok(r) =
+                            serde_json::from_str::<LlmResponse>(&healed[h_start..=h_end])
+                        {
+                            if r.transition.is_some()
+                                || r.tool_calls.is_some()
+                                || r.error.is_some()
+                            {
+                                return Some(r);
+                            }
+                        }
+                    }
                 }
             }
         }

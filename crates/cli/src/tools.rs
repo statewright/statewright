@@ -1011,7 +1011,7 @@ fn diff(args: &Value, workdir: &str) -> String {
 fn edit_line(args: &Value, workdir: &str) -> String {
     let path = match args.get("path").and_then(|p| p.as_str()) {
         Some(p) => p,
-        None => return "error: missing 'path' argument".into(),
+        None => return "error: edit_line requires a 'path' argument. Example: edit_line({\"path\": \"django/db/models/enums.py\", \"old\": \"class Choices:\", \"new\": \"class Choices:\\n    do_not_call_in_templates = True\"})".into(),
     };
     let old = args.get("old").and_then(|o| o.as_str());
     let new_content = match args.get("new").and_then(|n| n.as_str()) {

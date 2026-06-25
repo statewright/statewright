@@ -396,6 +396,58 @@ fn window_overlap(a: (usize, usize), b: (usize, usize)) -> usize {
     end.saturating_sub(start)
 }
 
+/// Resolve a Python dotted module path to a relative file path in the source file list.
+/// "django.contrib.auth.forms" → "django/contrib/auth/forms.py" (or __init__ variant).
+fn resolve_python_import(module_path: &str, source_files: &[&str]) -> Option<String> {
+    let as_path = module_path.replace('.', "/");
+    let candidates = [
+        format!("{}.py", as_path),
+        format!("{}/__init__.py", as_path),
+        format!("src/{}.py", as_path),
+        format!("src/{}/__init__.py", as_path),
+    ];
+    for c in &candidates {
+        if source_files.iter().any(|f| *f == c.as_str() || f.ends_with(c.as_str())) {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+/// Parse Python `from X import Y` and `import X` statements, returning resolved file paths.
+fn extract_python_imports(content: &str, source_files: &[&str]) -> Vec<String> {
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("from ") {
+            if let Some(module) = rest.split_whitespace().next() {
+                // Strip leading dots (relative imports)
+                let module = module.trim_start_matches('.');
+                if !module.is_empty() {
+                    if let Some(path) = resolve_python_import(module, source_files) {
+                        result.push(path);
+                    }
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("import ") {
+            for module in rest.split(',') {
+                let base = module.trim().split(' ').next().unwrap_or("").trim_start_matches('.');
+                if !base.is_empty() {
+                    if let Some(path) = resolve_python_import(base, source_files) {
+                        result.push(path);
+                    }
+                }
+            }
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
+}
+
 fn ranked_locus_excerpts(
     file_content: &str,
     localized_regions: Option<&Vec<(usize, String)>>,
@@ -698,6 +750,33 @@ fn parse_sw_test_files() -> HashMap<String, String> {
         .collect()
 }
 
+/// Read SW_TEST_FILES test file(s) and return a compact excerpt for model injection.
+/// Used by TEST_INJECTION (implementing state) and FORCED_REVIEW (testing state).
+fn sw_test_files_excerpt(workdir: &str) -> String {
+    let tf = match std::env::var("SW_TEST_FILES") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return String::new(),
+    };
+    let max_lines: usize = 150;
+    let mut out = String::new();
+    for test_file in tf.split(':').filter(|f| !f.is_empty()) {
+        let path = std::path::Path::new(workdir).join(test_file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let lines: Vec<&str> = content.lines().collect();
+            let take = lines.len().min(max_lines);
+            out.push_str(&format!("\n--- {} ---\n", test_file));
+            out.push_str(&lines[..take].join("\n"));
+            if lines.len() > max_lines {
+                out.push_str(&format!(
+                    "\n... ({} more lines not shown)\n",
+                    lines.len() - max_lines
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn is_test_path(path: &str, sw_test_files: &HashMap<String, String>) -> bool {
     let normalized = path.replace('\\', "/");
     if sw_test_files.contains_key(path) || sw_test_files.values().any(|p| p == &normalized) {
@@ -786,6 +865,28 @@ fn test_env_unavailable(output: &str) -> bool {
             .any(|line| line.trim() == "SW_TEST_ENV_UNAVAILABLE=1")
 }
 
+// Detects cases where the test subprocess returned non-zero but without any
+// assertion failure content — indicates runner/harness error, not a code defect.
+// Observed with `conda run python tests/runtests.py` on Django eval images where
+// the conda wrapper adds exit overhead independent of test outcomes.
+fn test_is_runner_error(output: &str) -> bool {
+    let exit_nonzero = test_exit_code(output).map_or(false, |c| c != 0);
+    if !exit_nonzero {
+        return false;
+    }
+    // Any Python execution evidence = real signal, not runner overhead.
+    // "Traceback (most recent call last):" is the canonical header for ALL Python
+    // exceptions (NameError, OSError, ImportError, etc.) — one pattern vs. whack-a-mole.
+    let has_assertion_content = output.contains("Traceback (most recent call last)")
+        || output.contains("AssertionError")
+        || (output.contains("FAILED") && output.contains("::")) // pytest: FAILED path::test
+        || output.contains("FAIL: ") // Django runtests.py: FAIL: test_name (module.Class)
+        || output.contains("ERROR: ") // Django runtests.py: ERROR: test_name (module.Class)
+        || output.contains("assert ")
+        || output.contains("\nE   "); // pytest failure body line prefix
+    !has_assertion_content
+}
+
 fn test_has_syntax_failure(output: &str) -> bool {
     output.contains("SyntaxError")
         || output.contains("IndentationError")
@@ -796,7 +897,8 @@ fn test_passed(output: &str) -> bool {
     if test_env_unavailable(output) {
         return false;
     }
-    if let Some(code) = test_exit_code(output) {
+    let exit_code = test_exit_code(output);
+    if let Some(code) = exit_code {
         if code != 0 {
             return false;
         }
@@ -818,6 +920,14 @@ fn test_passed(output: &str) -> bool {
         && !output.contains("ModuleNotFoundError")
         && !output.contains("exception")
         && !output.contains("DO *NOT* COMMIT");
+
+    // When exit code is authoritatively 0 and no failure strings, that's a pass.
+    // This handles Django/unittest "Ran N tests\n\nOK" format which has no "passed" string.
+    // Do NOT require has_pass when SW_TEST_EXIT_CODE=0 is present — it's the ground truth.
+    if exit_code == Some(0) && no_fail {
+        return true;
+    }
+
     let has_pass = (output.contains("passed") && !output.contains("0 passed"))
         || output.contains("PASS")
         || output.contains("test result: ok")
@@ -873,6 +983,28 @@ mod harness_result_tests {
     fn test_passed_accepts_clean_zero_exit() {
         let output = "SW_TEST_EXIT_CODE=0\n---\n42 passed in 0.42s\n";
         assert!(test_passed(output));
+    }
+
+    #[test]
+    fn test_passed_accepts_django_ok_format() {
+        // Django runtests.py outputs "Ran N tests in Xs\n\nOK" — no "passed" string.
+        // Previously test_passed returned false here, causing 0/10 on all Django instances.
+        let output = "System check identified no issues (0 silenced).\n\
+                      Ran 5 tests in 0.012s\n\n\
+                      OK\n\
+                      SW_TEST_EXIT_CODE=0\nSW_TEST_ENV_UNAVAILABLE=0\n";
+        assert!(test_passed(output));
+    }
+
+    #[test]
+    fn test_passed_rejects_django_fail() {
+        // Django failing test: exit 1 + "FAILED" in output
+        let output = "FAIL: test_bulk_update (queries.tests.BulkUpdateTests)\n\
+                      AssertionError: 0 != 2\n\
+                      Ran 5 tests in 0.012s\n\n\
+                      FAILED (failures=1)\n\
+                      SW_TEST_EXIT_CODE=1\nSW_TEST_ENV_UNAVAILABLE=0\n";
+        assert!(!test_passed(output));
     }
 
     #[test]
@@ -1959,6 +2091,7 @@ async fn main() {
     // Escalation ladder: track failed edit attempts in implementing
     // Level 0: fast (no reasoning) → Level 1: reasoning → Level 2: bigger model → Level 3: bigger + reasoning
     let mut edit_fail_count = 0u32;
+    let mut gate_fired_this_step = false; // set when GATE blocks an edit, cleared each step
     let mut reasoning_mode = false;
     let mut escalated_model = false;
     let mut persistent_hint: Option<String> = None;
@@ -1969,6 +2102,11 @@ async fn main() {
     // mental model (it hallucinates anchor text that no longer exists after prior edits).
     let mut consecutive_locus_fails: HashMap<String, u32> = HashMap::new();
     const LOCUS_RESET_THRESHOLD: u32 = 3;
+
+    // LOCUS GUARD block counter. After 3 hard blocks, localization is probably wrong
+    // (e.g. Django fix file isn't in the grep-ranked top-5). Allow edits through but
+    // keep counting misses in telemetry so we can diagnose in postmortem.
+    let mut locus_block_count: u32 = 0;
 
     // Read dedup: track file reads to avoid re-injecting full content
     // Key: (tool_name, canonical_args), Value: (step_number, result)
@@ -2372,14 +2510,35 @@ async fn main() {
                     "Note",
                     "See",
                     "Also",
+                    // Django/web framework ORM primitives — match everywhere, produce ranking noise
+                    "QuerySet",
+                    "Model",
+                    "Field",
+                    "Manager",
+                    "View",
+                    "Form",
+                    "Admin",
+                    "Migration",
+                    "Serializer",
+                    "Permission",
+                    "Signal",
+                    "Request",
+                    "Response",
+                    "Django",
+                    "Python",
                 ];
-                for word in args.task.split_whitespace() {
-                    let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
-                    if clean.len() > 2
-                        && clean.chars().next().map_or(false, |c| c.is_uppercase())
-                        && !stopwords.contains(&clean)
-                    {
-                        grep_patterns.push(format!("class {}", clean));
+                // Skip class-name pattern extraction on large repos (>300 source files).
+                // Capitalized words from issue descriptions are English prose on framework repos
+                // and match every source file uniformly, producing noise not signal.
+                if source_files.len() <= 300 {
+                    for word in args.task.split_whitespace() {
+                        let clean = word.trim_matches(|c: char| !c.is_alphanumeric());
+                        if clean.len() > 2
+                            && clean.chars().next().map_or(false, |c| c.is_uppercase())
+                            && !stopwords.contains(&clean)
+                        {
+                            grep_patterns.push(format!("class {}", clean));
+                        }
                     }
                 }
 
@@ -2585,6 +2744,56 @@ async fn main() {
                                 }
                             }
                         }
+                    }
+                }
+
+                // Import trace: BFS from test files through Python import graph.
+                // On large framework repos (Django, etc.) the fix file is often
+                // transitively imported by the test, not directly grep-matchable.
+                // This widens the LOCUS GUARD allowed set without grep noise.
+                if dominant_lang == "py" && source_files.len() > 200 {
+                    let seed_files: Vec<String> = if let Some(ref tf) = scoped_test_files {
+                        tf.split(':').filter(|f| !f.is_empty()).map(|s| s.to_string()).collect()
+                    } else {
+                        source_files.iter()
+                            .filter(|f| test_indicators.iter().any(|t| f.contains(t)))
+                            .take(3)
+                            .map(|s| s.to_string())
+                            .collect()
+                    };
+
+                    let mut trace_visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let mut hop_queue: std::collections::VecDeque<(String, usize)> = seed_files
+                        .into_iter()
+                        .map(|f| (f, 0usize))
+                        .collect();
+
+                    while let Some((file, hop)) = hop_queue.pop_front() {
+                        if hop >= 3 || trace_visited.contains(&file) {
+                            continue;
+                        }
+                        trace_visited.insert(file.clone());
+                        let full_path = std::path::Path::new(&args.workdir).join(&file);
+                        let content = std::fs::read_to_string(&full_path).unwrap_or_default();
+                        let imported = extract_python_imports(&content, &source_files);
+                        for imp in imported {
+                            if !trace_visited.contains(&imp) {
+                                // Score: closer hops rank higher. Don't override grep hits.
+                                let trace_score = 3usize.saturating_sub(hop);
+                                file_scores.entry(imp.clone()).or_insert(trace_score);
+                                // Mark as import-traced so LOCUS GUARD knows about it
+                                localized_file_contexts.entry(imp.clone())
+                                    .or_insert_with(|| format!("[import-trace hop {}]", hop + 1));
+                                hop_queue.push_back((imp, hop + 1));
+                            }
+                        }
+                    }
+                    if !trace_visited.is_empty() {
+                        println!(
+                            "  [IMPORT-TRACE] visited {} files, {} added to locus",
+                            trace_visited.len(),
+                            localized_file_contexts.len()
+                        );
                     }
                 }
 
@@ -2823,6 +3032,20 @@ async fn main() {
                     hint_section
                 );
 
+                // TEST_INJECTION: append failing test file content so the model has a
+                // machine-readable spec to implement against, not just prose description.
+                let test_excerpt = sw_test_files_excerpt(&args.workdir);
+                if !test_excerpt.is_empty() {
+                    localization_summary.push_str(&format!(
+                        "\n\n## Failing Tests (your fix must make these pass)\n{}",
+                        test_excerpt
+                    ));
+                    println!(
+                        "  [TEST_INJECT] injected {} chars of test content into localization",
+                        test_excerpt.len()
+                    );
+                }
+
                 // Feed everything into conversation for the planning state
                 conversation.push(ChatMessage {
                     role: "user".into(),
@@ -2854,6 +3077,37 @@ async fn main() {
                     .map(|f| json!({"path": f}))
                     .unwrap_or(json!({}));
                 let test_result = tools::execute_tool("run_test", &testing_scope, &args.workdir);
+                // Runner error (non-zero exit, no assertions) — stay in testing state,
+                // let the model call run_test itself or call transition based on its judgment.
+                // Do NOT tell the model "tests failed" when the runner is the problem.
+                if test_is_runner_error(&test_result) {
+                    eprintln!(
+                        "  [TESTING] runner error (non-zero, no assertions) — forced review"
+                    );
+                    // Test runner returned non-zero with no Python traceback or assertion content —
+                    // pure harness overhead. Model cannot verify via tests; force a review step
+                    // against the test spec before allowing TESTS_PASS.
+                    let test_excerpt = sw_test_files_excerpt(&args.workdir);
+                    let review_msg = if test_excerpt.is_empty() {
+                        "Tests could not run in this environment. Use read_file to carefully \
+                         review your implementation against the issue requirements, then call \
+                         transition(event=TESTS_PASS) if correct or transition(event=TESTS_FAIL) \
+                         to return to implementing.".to_string()
+                    } else {
+                        format!(
+                            "Tests could not run in this environment.\n\n\
+                             Verify your implementation against these test requirements:\n{}\n\n\
+                             Use read_file to confirm your changes satisfy what these tests expect, \
+                             then call transition(event=TESTS_PASS) or transition(event=TESTS_FAIL).",
+                            test_excerpt
+                        )
+                    };
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: review_msg,
+                    });
+                    // Fall through to normal model step (no continue — model drives)
+                } else {
                 let passed = test_passed(&test_result);
                 let fail_count = test_result
                     .lines()
@@ -2974,6 +3228,7 @@ async fn main() {
                     }
                     continue;
                 }
+                } // close else (not runner error)
             }
         }
 
@@ -3532,32 +3787,51 @@ async fn main() {
                 && current_state == "implementing"
                 && profile.enforce_localized_edit_locus
             {
+                // Normalize paths: strip leading "./" so "django/foo.py" and
+                // "./django/foo.py" compare equal regardless of which the model uses.
+                let norm = |p: &str| -> String {
+                    let resolved = tools::resolve_repo_path(p, &args.workdir);
+                    resolved.strip_prefix("./").unwrap_or(&resolved).to_string()
+                };
+
                 let allowed_edit_paths: std::collections::HashSet<String> = localized_regions
                     .keys()
                     .chain(localized_file_contexts.keys())
-                    .map(|path| tools::resolve_repo_path(path, &args.workdir))
+                    .map(|path| norm(path))
                     .collect();
 
                 let outside_locus: Vec<String> = targeted_paths
                     .iter()
                     .filter(|path| {
-                        !allowed_edit_paths.is_empty() && !allowed_edit_paths.contains(*path)
+                        !allowed_edit_paths.is_empty() && !allowed_edit_paths.contains(&norm(path))
                     })
                     .cloned()
                     .collect();
 
                 if !outside_locus.is_empty() {
-                    let mut ranked: Vec<String> = allowed_edit_paths.into_iter().collect();
-                    ranked.sort();
-                    let msg = format!(
-                        "BLOCKED: edit target is outside the localized source locus. Requested: {}. Allowed source files: {}",
-                        outside_locus.join(", "),
-                        ranked.join(", ")
-                    );
-                    println!("  [LOCUS GUARD] {}", msg);
-                    tool_output.push_str(&msg);
-                    tool_output.push('\n');
-                    continue;
+                    locus_block_count += 1;
+                    if locus_block_count <= 3 {
+                        // Hard block for first 3 attempts — teach the model where to look
+                        let mut ranked: Vec<String> = allowed_edit_paths.into_iter().collect();
+                        ranked.sort();
+                        let msg = format!(
+                            "BLOCKED: edit target is outside the localized source locus. Requested: {}. Allowed source files: {}",
+                            outside_locus.join(", "),
+                            ranked.join(", ")
+                        );
+                        println!("  [LOCUS GUARD] block #{} {}", locus_block_count, msg);
+                        tool_output.push_str(&msg);
+                        tool_output.push('\n');
+                        continue;
+                    } else {
+                        // Soft: localization is likely wrong — allow through, log miss
+                        println!(
+                            "  [LOCUS GUARD] block #{} — softened, allowing {} (localization likely wrong)",
+                            locus_block_count,
+                            outside_locus.join(", ")
+                        );
+                        // Don't `continue` — fall through to execute the edit
+                    }
                 }
             }
 
@@ -3620,6 +3894,10 @@ async fn main() {
                         let cache_key_for_edit = format!("read_file:{}", resolved_edit_path);
                         read_cache.insert(cache_key_for_edit, (step, content_preview.clone()));
                         read_paths.insert(resolved_edit_path.clone());
+                        // Injection counts as a re-read — clear modified flag so the
+                        // immediately-following edit is not blocked again by the same GATE.
+                        modified_files.remove(&resolved_edit_path);
+                        gate_fired_this_step = true;
 
                         let msg = format!(
                             "BLOCKED: You haven't read {} yet. Here are the most relevant candidate loci ({} lines total):\n\n{}\n\nNow retry your edit using the EXACT current text from one candidate above.",
@@ -3754,7 +4032,11 @@ async fn main() {
             };
 
             if is_read && !read_path.is_empty() && !result.starts_with("error") {
-                read_paths.insert(tools::resolve_repo_path(&read_path, &args.workdir));
+                let resolved_read = tools::resolve_repo_path(&read_path, &args.workdir);
+                read_paths.insert(resolved_read.clone());
+                // Explicit re-read of a modified file clears the stale-content flag so the
+                // next edit attempt is not blocked by GATE (model has fresh content now).
+                modified_files.remove(&resolved_read);
             }
 
             // On edit failure, inject relevant file content to help the next attempt
@@ -3989,6 +4271,13 @@ async fn main() {
                     );
                     break 'auto_test;
                 }
+                if test_is_runner_error(&test_result) {
+                    eprintln!(
+                        "  [AUTO-TEST] runner error (non-zero exit, no assertions) — skipping feedback: {}",
+                        &test_result[..test_result.len().min(200)]
+                    );
+                    break 'auto_test;
+                }
                 let all_pass = test_passed(&test_result);
                 let changed = tools::all_diff_stats(&args.workdir);
                 if changed.is_empty() {
@@ -4104,23 +4393,33 @@ async fn main() {
             });
         }
 
-        // Escalation: also count non-edit implementing steps as stalls
+        // Escalation: also count non-edit implementing steps as stalls.
+        // Exception: a step where GATE fired (blocking an edit and injecting content)
+        // is not a stall — the model had a valid edit attempt and received content to work with.
+        // Similarly, a step that fired GATE in the previous step (model legitimately reading
+        // before re-editing) is not a stall.
         if current_state == "implementing" {
             let any_edit_this_step = tool_calls_to_process
                 .iter()
                 .any(|(name, _)| is_write_tool(name));
-            if !any_edit_this_step {
+            let gate_exemption = gate_fired_this_step; // this step's GATE block
+            gate_fired_this_step = false; // reset for next step
+            if !any_edit_this_step && !gate_exemption {
                 edit_fail_count += 1;
             }
             // Unified escalation check (fires from both auto-test failures and stalls)
-            if edit_fail_count >= 2 && !reasoning_mode && !escalated_model {
+            // Thresholds are intentionally high: model needs 5+ attempts to use GATE-injected
+            // candidate loci from error messages before we wipe and restart.
+            if edit_fail_count >= 5 && !reasoning_mode && !escalated_model {
                 reasoning_mode = true;
                 println!(
                     "  [ESCALATE] Level 1: reasoning mode (fail_count={})",
                     edit_fail_count
                 );
+                // Preserve the last tool result before clearing — it contains GATE-injected
+                // candidate lines that show the model what the file actually looks like.
+                let last_tool_result = conversation.last().cloned();
                 conversation.clear();
-                // FIX 4: Re-inject localization context after clear
                 if !localization_summary.is_empty() {
                     conversation.push(ChatMessage {
                         role: "user".into(),
@@ -4130,7 +4429,11 @@ async fn main() {
                         ),
                     });
                 }
-            } else if edit_fail_count >= 4 && !escalated_model {
+                // Re-inject the last error so the model can see actual file content / anchor candidates
+                if let Some(msg) = last_tool_result {
+                    conversation.push(msg);
+                }
+            } else if edit_fail_count >= 10 && !escalated_model {
                 escalated_model = true;
                 reasoning_mode = false;
                 println!(
@@ -4142,14 +4445,13 @@ async fn main() {
                 modified_files.clear();
                 read_cache.clear();
                 read_paths.clear();
-                // FIX 4: Fresh start with localization + what we know
                 if !localization_summary.is_empty() {
                     conversation.push(ChatMessage {
                         role: "user".into(),
                         content: format!("Fresh start. Previous model failed after {} attempts. Localization context:\n{}", edit_fail_count, localization_summary),
                     });
                 }
-            } else if edit_fail_count >= 6 && escalated_model && !reasoning_mode {
+            } else if edit_fail_count >= 15 && escalated_model && !reasoning_mode {
                 reasoning_mode = true;
                 println!(
                     "  [ESCALATE] Level 3: {} + reasoning (fail_count={})",

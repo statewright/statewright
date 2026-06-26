@@ -1,0 +1,12 @@
+{"timestamp":"2026-06-26T13:04:00Z","vendor":"CrowdStrike","type":"malware","severity":"critical","host":"rwy-laptop-17","message":"Trojan blocked after execution attempt"}
+{"timestamp":"2026-06-26T13:08:00Z","vendor":"Okta","type":"credential_access","severity":"high","username":"alex.intern","message":"Impossible travel followed by MFA fatigue"}
+{"timestamp":"2026-06-26T13:22:00Z","vendor":"GitHub","type":"credential_access","severity":"medium","username":"alex.intern","message":"Personal access token created from new location"}
+{"timestamp":"2026-06-26T14:03:00Z","vendor":"Zscaler","type":"data_exfiltration","severity":"high","host":"rwy-laptop-17","message":"Large upload to uncategorized domain"}
+{"timestamp":"2026-06-26T14:14:00Z","vendor":"Defender","type":"malware","severity":"high","entity":"rwy-laptop-17","message":"Suspicious PowerShell child process"}
+{"timestamp":"2026-06-26T14:40:00Z","vendor":"Cloudflare","type":"recon","severity":"low","ip":"203.0.113.42","message":"Repeated probing of admin paths"}
+{"timestamp":"2026-06-26T15:01:00Z","vendor":"Jamf","type":"policy_violation","severity":"medium","host":"marketing-mac-04","message":"Disk encryption disabled"}
+{"timestamp":"2026-06-26T15:11:00Z","vendor":"Google Workspace","type":"data_exfiltration","severity":"critical","username":"alex.intern","message":"External sharing spike on restricted folder"}
+{"timestamp":"2026-06-26T15:25:00Z","vendor":"Wiz","type":"policy_violation","severity":"medium","entity":"staging-api","message":"Public storage bucket detected"}
+{"timestamp":"2026-06-26T15:36:00Z","vendor":"AWS GuardDuty","type":"recon","severity":"medium","ip":"203.0.113.42","message":"Port scan against staging subnet"}
+{"timestamp":"2026-06-26T16:05:00Z","vendor":"Snyk","type":"policy_violation","severity":"informational","entity":"staging-api","message":"Outdated container base image"}
+{"timestamp":"2026-06-26T16:18:00Z","vendor":"Defender","type":"malware","severity":"critical","host":"rwy-laptop-17","message":"Persistence mechanism detected"}

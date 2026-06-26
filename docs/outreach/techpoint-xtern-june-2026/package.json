@@ -1,0 +1,18 @@
+{
+  "name": "techpoint-xtern-ai-workshop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/backend/server.mjs",
+    "test": "node --test src/backend/*.test.mjs",
+    "e2e": "node scripts/e2e.mjs",
+    "check": "npm test && npm run e2e",
+    "reset": "node scripts/apply-version.mjs starter",
+    "gold": "node scripts/apply-version.mjs gold",
+    "demo": "node scripts/demo-tui.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

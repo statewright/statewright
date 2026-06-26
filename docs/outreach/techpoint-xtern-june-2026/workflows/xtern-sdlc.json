@@ -1,0 +1,52 @@
+{
+  "id": "xtern-sdlc",
+  "initial": "spec_review",
+  "states": {
+    "spec_review": {
+      "allowed_tools": ["Read", "Grep", "Glob", "LS"],
+      "instructions": "Read README.md, spec.md, tests, and relevant source. Do not edit files.",
+      "max_iterations": 6,
+      "on": { "SPEC_READ": "test_plan", "FAIL": "failed" }
+    },
+    "test_plan": {
+      "allowed_tools": ["Read", "Grep", "Glob", "LS", "Bash"],
+      "allowed_commands": ["npm test", "node --test*"],
+      "instructions": "Run tests and identify the smallest implementation plan. Do not edit files.",
+      "max_iterations": 4,
+      "on": { "PLAN_READY": "implement", "FAIL": "failed" }
+    },
+    "implement": {
+      "allowed_tools": ["Read", "Grep", "Edit", "Write", "Bash"],
+      "allowed_commands": ["npm test", "node --test*", "npm start"],
+      "instructions": "Make targeted changes that satisfy spec.md and preserve the API contract.",
+      "max_iterations": 10,
+      "on": { "DONE": "unit_test", "FAIL": "failed" }
+    },
+    "unit_test": {
+      "allowed_tools": ["Read", "Bash"],
+      "allowed_commands": ["npm test", "node --test*"],
+      "instructions": "Run the automated tests. Use TESTS_FAIL for failures and TESTS_PASS only when all tests pass.",
+      "max_iterations": 3,
+      "on": {
+        "TESTS_PASS": "integration_review",
+        "TESTS_FAIL": "implement",
+        "FAIL": "failed"
+      }
+    },
+    "integration_review": {
+      "allowed_tools": ["Read", "Bash"],
+      "allowed_commands": ["npm start", "node src/backend/server.mjs", "curl http://localhost:*"],
+      "instructions": "Optionally smoke-test the API and dashboard. Do not edit files in this state.",
+      "max_iterations": 3,
+      "on": {
+        "SMOKE_PASS": "completed",
+        "SMOKE_FAIL": "implement",
+        "SKIP": "completed",
+        "FAIL": "failed"
+      }
+    },
+    "completed": { "type": "final" },
+    "failed": { "type": "final" }
+  },
+  "guards": {}
+}

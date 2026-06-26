@@ -6,6 +6,12 @@ The starter app is intentionally incomplete. Your job is to use an AI coding age
 
 ## Quickstart
 
+Requirements:
+
+- Node.js 20 or newer.
+- Claude Code or Codex CLI if you want to use an agent.
+- `tmux` only if you want the facilitator war-room TUI. The workshop can be completed without it.
+
 ```bash
 npm test
 npm start
@@ -31,6 +37,28 @@ npm run demo    # BBS-style tmux orchestrator for live demos
 
 For a fresh checkout, run `npm install` before `npm run e2e`.
 
+## Install Statewright
+
+Statewright is optional, but it is the point of the guarded-workflow version of this exercise.
+
+In Claude Code:
+
+```text
+/plugin marketplace add statewright/statewright
+/plugin install statewright
+```
+
+In Codex CLI:
+
+```bash
+codex plugin marketplace add statewright/statewright
+codex plugin install statewright
+```
+
+The install flow opens a browser. Sign up at <https://statewright.ai>, generate an API key, and paste it when prompted.
+
+After installation, use the prompt below. It tells the agent to deactivate any current workflow, load the workshop workflow, read the spec, and use tests as the gate.
+
 ## Suggested Agent Prompt
 
 ```text
@@ -40,6 +68,49 @@ Then activate the xtern-sdlc workflow. If xtern-sdlc is not available, create it
 After xtern-sdlc is active, read spec.md first.
 Make npm test pass.
 Then improve the Vue dashboard while preserving the API contract.
+```
+
+## Without tmux
+
+You do not need `tmux` to do the exercise. Use ordinary terminal tabs or panes.
+
+Terminal 1: run the broken starter app.
+
+```bash
+git clone https://github.com/statewright/statewright
+cd statewright/docs/outreach/techpoint-xtern-june-2026
+npm run reset
+HOST=0.0.0.0 PORT=4317 npm start
+```
+
+Open <http://localhost:4317>. If you are connecting from another machine on VPN, use `http://<host-ip>:4317`.
+
+Terminal 2: confirm the starter tests are red.
+
+```bash
+cd statewright/docs/outreach/techpoint-xtern-june-2026
+npm test
+```
+
+Terminal 3: start your agent in the same directory, then paste the suggested prompt.
+
+```bash
+cd statewright/docs/outreach/techpoint-xtern-june-2026
+claude
+```
+
+Or:
+
+```bash
+cd statewright/docs/outreach/techpoint-xtern-june-2026
+codex
+```
+
+When the agent says it is done, rerun `npm test` in Terminal 2. For the browser smoke test, install Playwright first:
+
+```bash
+npm install
+npm run e2e
 ```
 
 ## Files

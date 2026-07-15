@@ -4,5 +4,13 @@
   "description": "Statewright state machine guardrails for opencode",
   "main": "src/index.ts",
   "license": "Apache-2.0",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  },
   "dependencies": {}
 }

@@ -20,14 +20,87 @@ interface HookResponse {
   completed?: boolean
 }
 
-interface StateResponse {
+export interface StateResponse {
   state: string
   isFinal: boolean
   iteration: number
   maxIterations: number | null
   allowedTools: string[]
+  allowedCommands: string[]
   instructions: string | null
   additionalContext: string
+}
+
+// --- Pure logic (exported for testing) ---
+
+/**
+ * Classify a bash command against the current state, mirroring the
+ * claude-code hook and OMX classifier: destructive operations are always
+ * blocked; write-via-redirect and interpreters are blocked when Write/Edit
+ * aren't allowed; when the state defines allowed_commands, the command must
+ * prefix-match one. The destructive check runs on the trimmed command and
+ * treats newline as a separator (both dodge naive `^`-anchored patterns).
+ */
+export function classifyBashCommand(
+  command: string,
+  state: StateResponse,
+): { allowed: boolean; reason?: string } {
+  const tools = state.allowedTools ?? []
+  // opencode tool ids are lowercase; accept both spellings
+  const hasWrite = tools.includes("write") || tools.includes("Write")
+  const hasEdit = tools.includes("edit") || tools.includes("Edit")
+
+  // Destructive operations — always blocked, including chained (;, &&, |,
+  // newline) and subshell ($(), backtick) forms
+  if (
+    /(^|[;&|(\n]\s*|\$\(\s*|`\s*)(rm|rmdir|shred|truncate|unlink)\s/.test(
+      command.trim(),
+    )
+  ) {
+    return {
+      allowed: false,
+      reason: "Destructive operation not permitted in this phase.",
+    }
+  }
+
+  // File write via redirects when Write/Edit not allowed
+  if (!hasWrite && !hasEdit) {
+    if (/([^0-9])?>([^>&])|>>\s*\S/.test(command)) {
+      return {
+        allowed: false,
+        reason: `Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '${state.state}' phase.`,
+      }
+    }
+    if (/sed\s+-i|perl\s+-p?i/.test(command)) {
+      return {
+        allowed: false,
+        reason: `Bash command blocked: in-place file modification detected but Edit not in allowed tools for '${state.state}' phase.`,
+      }
+    }
+    if (/^\s*(python|python3|ruby|node|perl|php)\s/.test(command)) {
+      return {
+        allowed: false,
+        reason: `Bash command blocked: scripting interpreter not permitted without Write/Edit in '${state.state}' phase.`,
+      }
+    }
+  }
+
+  // Allowed commands enforcement (prefix match, same semantics as OMX/pi)
+  const allowedCommands = state.allowedCommands ?? []
+  if (allowedCommands.length > 0) {
+    const cmd = command.trim()
+    const ok = allowedCommands.some(
+      (prefix) => cmd === prefix || cmd.startsWith(prefix + " "),
+    )
+    if (!ok) {
+      return {
+        allowed: false,
+        reason: `Bash command blocked: not in allowed commands for '${state.state}' phase. Allowed: ${allowedCommands.join(", ")}.`,
+      }
+    }
+  }
+
+  return { allowed: true }
 }
 
 function getPort(): string | null {
@@ -113,6 +186,20 @@ export const StatewrightPlugin: Plugin = async ({ client }) => {
         throw new Error(
           `[statewright] BLOCKED: ${resp.additionalContext ?? "Tool not available in current phase"}`,
         )
+      }
+
+      // The gateway enforces at tool granularity; classify bash commands
+      // client-side against the state's allowed_commands, like the
+      // claude-code hook and OMX plugin do.
+      const command = input.args?.command
+      if (input.tool === "bash" && typeof command === "string" && command.trim().length > 0) {
+        const state = await getState(port)
+        if (state) {
+          const verdict = classifyBashCommand(command, state)
+          if (!verdict.allowed) {
+            throw new Error(`[statewright] BLOCKED: ${verdict.reason}`)
+          }
+        }
       }
 
       // Log transition context if present

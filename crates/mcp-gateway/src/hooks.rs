@@ -64,6 +64,7 @@ pub struct StateResponse {
     pub iteration: u32,
     pub max_iterations: Option<u32>,
     pub allowed_tools: Vec<String>,
+    pub allowed_commands: Vec<String>,
     pub instructions: Option<String>,
     pub additional_context: String,
 }
@@ -226,6 +227,7 @@ async fn handle_state(
                 iteration: 0,
                 max_iterations: None,
                 allowed_tools: vec![],
+                allowed_commands: vec![],
                 instructions: None,
                 additional_context: "No active session".into(),
             });
@@ -235,6 +237,10 @@ async fn handle_state(
     let state_def = session.definition.states.get(&session.current_state);
     let allowed_tools = state_def
         .and_then(|s| s.allowed_tools.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    let allowed_commands = state_def
+        .and_then(|s| s.allowed_commands.as_ref())
         .cloned()
         .unwrap_or_default();
     let instructions = state_def.and_then(|s| s.instructions.as_ref()).cloned();
@@ -254,6 +260,7 @@ async fn handle_state(
         iteration: session.iteration_count,
         max_iterations: session.max_iterations(),
         allowed_tools,
+        allowed_commands,
         instructions,
         additional_context: context,
     })

@@ -25,17 +25,112 @@ var SYSTEM_TOOLS = /* @__PURE__ */ new Set([
   "ToolSearch",
   "Skill"
 ]);
-function checkToolAllowed(toolName, cache) {
+function checkToolAllowed(toolName, cache, toolInput = {}) {
   if (toolName.startsWith("statewright_")) return { allowed: true };
   if (toolName.includes("statewright_")) return { allowed: true };
   if (SYSTEM_TOOLS.has(toolName)) return { allowed: true };
   if (cache.allowedTools.length === 0) return { allowed: true };
   if (cache.allowedTools.includes(toolName)) return { allowed: true };
+  if (toolName === "apply_patch" && (cache.allowedTools.includes("Edit") || cache.allowedTools.includes("Write"))) {
+    return { allowed: true };
+  }
+  if (toolName === "view_image" && cache.allowedTools.includes("Read")) {
+    return { allowed: true };
+  }
+  if (toolName === "Bash" && typeof toolInput.command === "string" && cache.allowedTools.some((tool) => ["Read", "Grep", "Glob", "LS"].includes(tool)) && classifyReadOnlyShellCommand(toolInput.command).allowed) {
+    return { allowed: true };
+  }
+  if (isCodexWebRun(toolName)) {
+    const required = codexWebCapabilities(toolInput);
+    if (required.length > 0 && required.every((capability) => cache.allowedTools.includes(capability))) {
+      return { allowed: true };
+    }
+  }
   const transitions = cache.transitions.map((t) => t.event).join(", ");
   return {
     allowed: false,
     reason: `Tool '${toolName}' is not available in the '${cache.state}' phase. Allowed: ${cache.allowedTools.join(", ")}.${transitions ? ` To advance, use statewright_transition with: ${transitions}.` : ""}`
   };
+}
+function isCodexWebRun(toolName) {
+  return toolName.toLowerCase().replace(/[^a-z]/g, "").endsWith("webrun");
+}
+function codexWebCapabilities(toolInput) {
+  const keys = new Set(Object.keys(toolInput));
+  const required = /* @__PURE__ */ new Set();
+  if (keys.has("search_query") || keys.has("image_query")) {
+    required.add("WebSearch");
+  }
+  if (["open", "click", "find", "screenshot", "finance", "weather", "sports", "time"].some(
+    (key) => keys.has(key)
+  )) {
+    required.add("WebFetch");
+  }
+  return [...required];
+}
+function classifyReadOnlyShellCommand(command) {
+  const normalized = command.replace(/(?:^|\s)[012]?>\s*\/dev\/null\b/g, " ").replace(/(?:^|\s)2>&1\b/g, " ").trim();
+  if (!normalized || /[\r\n<>`]|\$\(/.test(normalized)) {
+    return { allowed: false, reason: "Command is not a read-only shell operation." };
+  }
+  const segments = normalized.split(/\s*(?:&&|\|\||;|\|)\s*/);
+  if (segments.some((segment) => !isReadOnlyShellSegment(segment))) {
+    return { allowed: false, reason: "Command is not a read-only shell operation." };
+  }
+  return { allowed: true };
+}
+function isReadOnlyShellSegment(segment) {
+  const trimmed = segment.trim();
+  if (!trimmed || /^[A-Za-z_][A-Za-z0-9_]*=/.test(trimmed)) return false;
+  const commandMatch = trimmed.match(/^((?:\/[^\s]+\/)?[^\s]+)/);
+  if (!commandMatch) return false;
+  const executable = commandMatch[1].split("/").pop() ?? "";
+  const args = trimmed.slice(commandMatch[1].length).trim();
+  if ([
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "fd",
+    "ls",
+    "pwd",
+    "stat",
+    "file",
+    "wc",
+    "cut",
+    "tr",
+    "jq",
+    "du",
+    "dirname",
+    "basename",
+    "realpath",
+    "true",
+    "false"
+  ].includes(executable)) {
+    return true;
+  }
+  if (executable === "sort") {
+    return !/(?:^|\s)(?:-o|--output)(?:\s|=)/.test(args);
+  }
+  if (executable === "uniq") return true;
+  if (executable === "rg") {
+    return !/(?:^|\s)--pre(?:-glob)?(?:\s|=)/.test(args);
+  }
+  if (executable === "sed") {
+    return /^-n\s+(['"]?)[0-9$]+(?:,[0-9$]+)?p\1(?:\s|$)/.test(args);
+  }
+  if (executable === "find") {
+    return !/(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fls|fprint|fprint0)(?:\s|$)/.test(args);
+  }
+  if (executable === "test" || executable === "[") return true;
+  if (executable === "which") return true;
+  if (executable === "command") return /^-v(?:\s|$)/.test(args);
+  if (executable === "git") {
+    const subcommand = args.match(/^(status|diff|log|show|rev-parse|ls-files|grep|describe)(?:\s|$)/);
+    if (subcommand) return true;
+    return /^branch(?:\s+(?:--show-current|--list))?\s*$/.test(args);
+  }
+  return false;
 }
 function classifyBashCommand(command, cache) {
   const hasWrite = cache.allowedTools.includes("Write");
@@ -277,7 +372,7 @@ async function handlePreTool(input, opts) {
   if (!raw) return null;
   const cache = parseGatewayState(raw);
   if (cache.allowedTools.length === 0) return null;
-  const result = checkToolAllowed(toolName, cache);
+  const result = checkToolAllowed(toolName, cache, input.tool_input ?? {});
   if (!result.allowed) {
     return {
       hookSpecificOutput: {
@@ -306,6 +401,37 @@ async function handlePreTool(input, opts) {
 }
 async function handlePostTool(input, opts) {
   const toolName = input.tool_name ?? "";
+  try {
+    if (isActive(opts.sessionDir) && !toolName.includes("statewright_") && opts.apiKey) {
+      const rawCache = readCache(opts.sessionDir);
+      const runIdFile = join(opts.sessionDir, ".run_id");
+      const seqFile = join(opts.sessionDir, ".log_seq");
+      const runId = existsSync(runIdFile) ? readFileSync(runIdFile, "utf8").trim() : "";
+      if (runId && rawCache) {
+        const seq = existsSync(seqFile) ? parseInt(readFileSync(seqFile, "utf8").trim(), 10) + 1 : 1;
+        writeFileSync(seqFile, String(seq));
+        const phase = rawCache.state ?? "unknown";
+        const toolOutput = typeof input.tool_result === "string" ? input.tool_result.slice(0, 102400) : JSON.stringify(input.tool_result ?? "").slice(0, 102400);
+        const pbUrl = process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai";
+        fetch(`${pbUrl}/api/collections/workflow_logs/records`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${opts.apiKey}` },
+          body: JSON.stringify({
+            phase,
+            tool_name: toolName,
+            tool_input: input.tool_input ?? {},
+            tool_output: toolOutput,
+            sequence: seq,
+            duration_ms: 0,
+            run_id: runId
+          }),
+          signal: AbortSignal.timeout(5e3)
+        }).catch(() => {
+        });
+      }
+    }
+  } catch {
+  }
   let swAction = "";
   if (/statewright_start|statewright_load_workflow/.test(toolName))
     swAction = "start";
@@ -523,6 +649,7 @@ export {
   checkInterrupts,
   checkToolAllowed,
   classifyBashCommand,
+  classifyReadOnlyShellCommand,
   formatStateContext,
   handlePostTool,
   handlePreTool,

@@ -38,6 +38,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from "
 import {
   checkToolAllowed,
   classifyBashCommand,
+  classifyReadOnlyShellCommand,
   formatStateContext,
   checkInterrupts,
   handleUserPrompt,
@@ -185,6 +186,49 @@ describe("pure logic", () => {
       const result = checkToolAllowed("Write", MOCK_STATE)
       expect(result.reason).toContain("DONE")
       expect(result.reason).toContain("FAIL")
+    })
+
+    it("maps Codex apply_patch to Edit or Write capability", () => {
+      expect(checkToolAllowed("apply_patch", MOCK_STATE).allowed).toBe(true)
+      const writeOnly = { ...MOCK_STATE, allowedTools: ["Write"] }
+      expect(checkToolAllowed("apply_patch", writeOnly).allowed).toBe(true)
+    })
+
+    it("maps Codex web run operations to the matching web capability", () => {
+      const search = { ...MOCK_STATE, allowedTools: ["WebSearch"] }
+      expect(checkToolAllowed("webrun", search, { search_query: [{ q: "gridmap" }] }).allowed).toBe(true)
+      expect(checkToolAllowed("webrun", search, { open: [{ ref_id: "result" }] }).allowed).toBe(false)
+
+      const fetch = { ...MOCK_STATE, allowedTools: ["WebFetch"] }
+      expect(checkToolAllowed("web__run", fetch, { open: [{ ref_id: "result" }] }).allowed).toBe(true)
+    })
+
+    it("maps Codex Bash reads to Read/Grep/Glob without granting arbitrary shell", () => {
+      const readOnly = { ...MOCK_STATE, allowedTools: ["Read", "Grep", "Glob"] }
+      expect(checkToolAllowed("Bash", readOnly, { command: "sed -n '1,80p' src/main.ts" }).allowed).toBe(true)
+      expect(checkToolAllowed("Bash", readOnly, { command: "rg -n 'needle' src | head -20" }).allowed).toBe(true)
+      expect(checkToolAllowed("Bash", readOnly, { command: "npm test" }).allowed).toBe(false)
+    })
+  })
+
+  describe("classifyReadOnlyShellCommand", () => {
+    it("allows common read pipelines and discarded stderr", () => {
+      expect(classifyReadOnlyShellCommand("rg -n foo src 2>/dev/null | head -20").allowed).toBe(true)
+      expect(classifyReadOnlyShellCommand("git status --short; git diff -- src/main.ts").allowed).toBe(true)
+      expect(classifyReadOnlyShellCommand("find src -type f | sort").allowed).toBe(true)
+    })
+
+    it("blocks writes, interpreters, subprocesses, and executable find actions", () => {
+      for (const command of [
+        "echo changed > file.txt",
+        "python3 inspect.py",
+        "cat $(touch marker)",
+        "find src -type f -exec sh -c 'touch marker' \\;",
+        "sed -i 's/a/b/' file.txt",
+        "npm test",
+      ]) {
+        expect(classifyReadOnlyShellCommand(command).allowed, command).toBe(false)
+      }
     })
   })
 
@@ -461,6 +505,80 @@ describe("handlePreTool", () => {
     const input: HookInput = { tool_name: "Read" }
     const result = await handlePreTool(input, makeOpts())
     expect(result).toBeNull()
+  })
+
+  it("allows a read-only Codex Bash command when the phase grants Read", async () => {
+    const readOnlyState = { ...MOCK_GW_STATE, allowed_tools: ["Read", "Grep", "Glob"] }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(readOnlyState)
+      throw new Error("ENOENT")
+    })
+
+    const result = await handlePreTool(
+      { tool_name: "Bash", tool_input: { command: "rg -n needle src | head -20" } },
+      makeOpts(),
+    )
+    expect(result).toBeNull()
+  })
+
+  it("does not turn Read into unrestricted Codex Bash access", async () => {
+    const readOnlyState = { ...MOCK_GW_STATE, allowed_tools: ["Read", "Grep", "Glob"] }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(readOnlyState)
+      throw new Error("ENOENT")
+    })
+
+    const result = await handlePreTool(
+      { tool_name: "Bash", tool_input: { command: "npm test" } },
+      makeOpts(),
+    )
+    expect(result!.hookSpecificOutput!.permissionDecision).toBe("deny")
+  })
+
+  it("allows Codex apply_patch when the phase grants Edit", async () => {
+    const editState = { ...MOCK_GW_STATE, allowed_tools: ["Read", "Edit"] }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(editState)
+      throw new Error("ENOENT")
+    })
+
+    const result = await handlePreTool(
+      { tool_name: "apply_patch", tool_input: { patch: "*** Begin Patch" } },
+      makeOpts(),
+    )
+    expect(result).toBeNull()
+  })
+
+  it("allows Codex web search only for matching web capability", async () => {
+    const researchState = { ...MOCK_GW_STATE, allowed_tools: ["WebSearch"] }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(researchState)
+      throw new Error("ENOENT")
+    })
+
+    const searchResult = await handlePreTool(
+      { tool_name: "webrun", tool_input: { search_query: [{ q: "gridmap" }] } },
+      makeOpts(),
+    )
+    expect(searchResult).toBeNull()
+
+    const fetchResult = await handlePreTool(
+      { tool_name: "webrun", tool_input: { open: [{ ref_id: "result" }] } },
+      makeOpts(),
+    )
+    expect(fetchResult!.hookSpecificOutput!.permissionDecision).toBe("deny")
   })
 
   it("always allows statewright_ tools", async () => {

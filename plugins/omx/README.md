@@ -43,7 +43,9 @@ Registers four Codex native hooks via `.codex/hooks.json`:
 - **UserPromptSubmit** — fetches current state from gateway, injects phase context
 - **PreToolUse** — blocks tools not allowed in the current phase
 - **PostToolUse** — tracks statewright tool calls, detects file-edit interrupts
-- **Stop** — no-op (workflows persist across turns)
+- **Stop** — blocks Codex from yielding while an active workflow is nonfinal,
+  injects the current phase context again, and permits stopping only after a
+  final state (or when no reliable state is available).
 
 State cache is file-based (`~/.statewright/sessions/`) so PreToolUse enforcement requires zero network calls.
 

@@ -775,7 +775,9 @@ impl Gateway {
                         let approval_mode = session.definition.meta.as_ref()
                             .and_then(|m| m.extra.get("approval_mode"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("none");
+                            // A review-marked transition should never silently advance.
+                            // UI is the local fallback; integrations opt out explicitly.
+                            .unwrap_or("ui");
 
                         if requires_approval && approval_mode == "ui" {
                             // PARK: do not apply the transition

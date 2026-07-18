@@ -467,6 +467,14 @@ case "$ENDPOINT" in
             NEXT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
             INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Branch '${IS_BRANCH_DONE}' done. ${REMAINING} remaining. Now working branch '${NEXT_BRANCH}' (state: ${NEW_STATE}). Tools: ${NEXT_TOOLS}. Complete this branch, then call statewright_transition(event='BRANCH_DONE:${NEXT_BRANCH}').${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}\"}}"
+          elif [ "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" != "" ]; then
+            APPROVAL_MESSAGE=$(echo "$STATE_JSON" | jq -r '.pending_approval.message // "Human review required."' 2>/dev/null || true)
+            APPROVAL_MODE=$(echo "$STATE_JSON" | jq -r '.meta.approval_mode // "ui"' 2>/dev/null || true)
+            if [ "$APPROVAL_MODE" = "external" ]; then
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Approval is pending on the configured external review channel. Do not continue this workflow until that reviewer resolves it.\"}}"
+            else
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
+            fi
           elif [ "$IS_FINAL" = "true" ]; then
             rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
@@ -495,12 +503,49 @@ case "$ENDPOINT" in
     ;;
 
   stop)
-    # Claude Code fires Stop after EVERY agent turn, not just session exit.
-    # Do NOT remove .active here — it kills the workflow between turns.
-    # Workflow deactivation is handled by:
-    #   - is_final detection in user-prompt (line ~135)
-    #   - is_final detection in post-tool transition handler
-    #   - explicit statewright_stop/deactivate/pause tools
+    # Review gates are surfaced from PostToolUse. Stop must not suppress the
+    # host UI's prompt or an external review integration.
+    exit 0
+
+    # Stop is the point at which Claude is about to yield. While a workflow is
+    # nonfinal, block that yield and return the phase context so Claude can
+    # continue without waiting for another user prompt.
+    [ -f "$ACTIVE_FILE" ] || exit 0
+
+    # Stop hooks have a short deadline. The post-transition handler refreshes
+    # the cache, so use it as the fast-path authority and only ask the gateway
+    # when this session has not established a cache yet.
+    STATE_JSON=""
+    CURRENT=""
+    if [ -f "$CACHE_FILE" ]; then
+      STATE_JSON=$(cat "$CACHE_FILE")
+      CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
+    else
+      STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+      CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
+      if [ -n "$CURRENT" ]; then
+        mkdir -p "$PROJECT_DIR"
+        echo "$STATE_JSON" > "$CACHE_FILE"
+      fi
+    fi
+
+    # Without a usable state source, do not trap Claude in an unresolvable
+    # stop loop.
+    [ -n "$CURRENT" ] || exit 0
+
+    IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
+    if [ "$IS_FINAL" = "true" ]; then
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+      exit 0
+    fi
+
+    ITER=$(echo "$STATE_JSON" | jq -r '.iteration // 0' 2>/dev/null || true)
+    MAX=$(echo "$STATE_JSON" | jq -r '.max_iterations // "none"' 2>/dev/null || true)
+    TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | join(", ")' 2>/dev/null || true)
+    TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
+    INSTRUCTIONS=$(echo "$STATE_JSON" | jq -r '.instructions // empty' 2>/dev/null || true)
+    REASON="Statewright workflow remains active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. Transitions: $TRANSITIONS. CONTINUATION REQUIRED: do not stop, summarize, or wait for a new user prompt. Continue immediately with only the state-allowed tools, complete this phase, and call statewright_transition when its exit criteria are met.${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS}"
+    jq -n --arg reason "$REASON" '{"decision":"block","reason":$reason}'
     exit 0
     ;;
 

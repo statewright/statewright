@@ -78,6 +78,8 @@ interface GatewayState {
   blocked_env?: string[]
   run_id?: string
   capture_output?: boolean
+  pending_approval?: { approval_id: string; message?: string | null }
+  meta?: { approval_mode?: string }
   fork?: {
     active: boolean
     current_branch: string
@@ -130,7 +132,7 @@ export function checkToolAllowed(
     return { allowed: true }
   }
   if (
-    toolName === "Bash" &&
+    isCodexShellTool(toolName) &&
     typeof toolInput.command === "string" &&
     cache.allowedTools.some((tool) => ["Read", "Grep", "Glob", "LS"].includes(tool)) &&
     classifyReadOnlyShellCommand(toolInput.command).allowed
@@ -152,6 +154,12 @@ export function checkToolAllowed(
     allowed: false,
     reason: `Tool '${toolName}' is not available in the '${cache.state}' phase. Allowed: ${cache.allowedTools.join(", ")}.${transitions ? ` To advance, use statewright_transition with: ${transitions}.` : ""}`,
   }
+}
+
+function isCodexShellTool(toolName: string): boolean {
+  // The native CLI has used both names across hook integrations. Treat these
+  // as one capability, never as an unrestricted fallback.
+  return toolName === "Bash" || toolName === "exec_command"
 }
 
 function isCodexWebRun(toolName: string): boolean {
@@ -585,7 +593,7 @@ export async function handlePreTool(
   }
 
   // Bash command classification (runs even when Bash is in allowedTools)
-  if (toolName === "Bash" && input.tool_input?.command) {
+  if (isCodexShellTool(toolName) && input.tool_input?.command) {
     const bashResult = classifyBashCommand(
       input.tool_input.command as string,
       cache,
@@ -773,6 +781,18 @@ export async function handlePostTool(
 
       writeCache(opts.sessionDir, raw)
       const cache = parseGatewayState(raw)
+      if (raw.pending_approval) {
+        const message = raw.pending_approval.message ?? "Human review required."
+        const external = raw.meta?.approval_mode === "external"
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: external
+              ? "[statewright] Approval is pending on the configured external review channel. Do not continue this workflow until that reviewer resolves it."
+              : `[statewright] REVIEW REQUIRED: ${message} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.`,
+          },
+        }
+      }
 
       if (isForked) {
         const branches = parsedResult.branches as Record<string, unknown>
@@ -846,8 +866,52 @@ export async function handlePostTool(
   }
 }
 
-export async function handleStop(): Promise<null> {
+export async function handleStop(
+  _input: HookInput,
+  opts: HandlerOpts,
+): Promise<HookOutput | null> {
+  // Approval gates are delivered by PostToolUse so Codex can present its own
+  // review UI. Never suppress that UI from Stop.
   return null
+
+  // A Stop hook fires when Codex is about to yield a final response.  Unlike
+  // UserPromptSubmit, it can keep an autonomous workflow alive without a
+  // human having to send another prompt.
+  if (!isActive(opts.sessionDir)) return null
+
+  // Stop hooks have a short deadline.  The post-transition handler refreshes
+  // this cache, so it is the fast-path authority here.  Only consult the
+  // gateway when a cache has not been established yet.
+  let raw = readCache(opts.sessionDir)
+  if (!raw && opts.apiKey) {
+    raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state")
+    if (raw) writeCache(opts.sessionDir, raw)
+  }
+
+  // No state source means there is nothing reliable to enforce.  Do not trap
+  // the agent in an unresolvable stop loop.
+  if (!raw?.state) return null
+
+  const cache = parseGatewayState(raw)
+  if (cache.isFinal) {
+    deactivate(opts.sessionDir)
+    return {
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext: `[statewright] Workflow complete. Final state: ${cache.state}. Enforcement deactivated.`,
+      },
+    }
+  }
+
+  const continuation = `${formatStateContext(cache)} CONTINUATION REQUIRED: Codex attempted to stop while Statewright is still active in '${cache.state}'. Do not send a final response or wait for a new user prompt. Continue immediately with only the state-allowed tools, complete this phase, and call statewright_transition when its exit criteria are met.`
+  return {
+    decision: "block",
+    reason: `Statewright workflow is active in '${cache.state}'; continue until a final state.`,
+    hookSpecificOutput: {
+      hookEventName: "Stop",
+      additionalContext: continuation,
+    },
+  }
 }
 
 // --- CLI entry point ---
@@ -896,7 +960,7 @@ async function main(): Promise<void> {
       result = await handlePostTool(input, opts)
       break
     case "stop":
-      result = await handleStop()
+      result = await handleStop(input, opts)
       break
   }
 

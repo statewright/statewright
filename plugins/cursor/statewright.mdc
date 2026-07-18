@@ -25,7 +25,7 @@ You are operating under statewright state machine constraints. A state machine g
    **[statewright]** Workflow complete.
    ```
 
-6. **Do not stop working** until you have reached a final state (`isFinal: true`). If you believe the task is complete but the state machine disagrees, transition to the appropriate final state first.
+6. **Continue autonomously** until you reach a final state (`isFinal: true`). If cached state reports `pending_approval`, stop autonomous work and present its review message to the user instead. Resume only after that approval is resolved. If you believe the task is complete but the state machine disagrees, transition to the appropriate final state first.
 
 ## Phase Instructions
 

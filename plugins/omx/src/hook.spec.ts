@@ -206,6 +206,7 @@ describe("pure logic", () => {
     it("maps Codex Bash reads to Read/Grep/Glob without granting arbitrary shell", () => {
       const readOnly = { ...MOCK_STATE, allowedTools: ["Read", "Grep", "Glob"] }
       expect(checkToolAllowed("Bash", readOnly, { command: "sed -n '1,80p' src/main.ts" }).allowed).toBe(true)
+      expect(checkToolAllowed("exec_command", readOnly, { command: "rg -n 'needle' src | head -20" }).allowed).toBe(true)
       expect(checkToolAllowed("Bash", readOnly, { command: "rg -n 'needle' src | head -20" }).allowed).toBe(true)
       expect(checkToolAllowed("Bash", readOnly, { command: "npm test" }).allowed).toBe(false)
     })
@@ -524,6 +525,23 @@ describe("handlePreTool", () => {
     expect(result).toBeNull()
   })
 
+  it("allows read-only exec_command when the phase grants Read", async () => {
+    const readOnlyState = { ...MOCK_GW_STATE, allowed_tools: ["Read", "Grep", "Glob"] }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(readOnlyState)
+      throw new Error("ENOENT")
+    })
+
+    const result = await handlePreTool(
+      { tool_name: "exec_command", tool_input: { command: "rg -n needle src | head -20" } },
+      makeOpts(),
+    )
+    expect(result).toBeNull()
+  })
+
   it("does not turn Read into unrestricted Codex Bash access", async () => {
     const readOnlyState = { ...MOCK_GW_STATE, allowed_tools: ["Read", "Grep", "Glob"] }
     ;(existsSync as Mock).mockImplementation((p: string) =>
@@ -837,8 +855,52 @@ describe("handlePostTool", () => {
 })
 
 describe("handleStop", () => {
-  it("always returns null (no-op)", async () => {
-    const result = await handleStop()
+  beforeEach(() => {
+    vi.clearAllMocks()
+    originalFetch = globalThis.fetch
+    ;(existsSync as Mock).mockReturnValue(false)
+    ;(readFileSync as Mock).mockImplementation(() => { throw new Error("ENOENT") })
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it("allows Codex to stop when there is no active workflow", async () => {
+    const result = await handleStop({}, makeOpts())
+    expect(result).toBeNull()
+  })
+
+  it("does not suppress the host review UI when the workflow is nonfinal", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) => p.includes(".active"))
+    setupGateway()
+
+    const result = await handleStop({}, makeOpts())
+
+    expect(result).toBeNull()
+  })
+
+  it("does not intercept stopping at a final state", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) => p.includes(".active"))
+    setupGateway({ ...MOCK_GW_STATE, state: "completed", is_final: true })
+
+    const result = await handleStop({}, makeOpts())
+
+    expect(result).toBeNull()
+  })
+
+  it("does not create a stop loop when the gateway is unavailable", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache"),
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(MOCK_GW_STATE)
+      throw new Error("ENOENT")
+    })
+    setupFetch(() => null)
+
+    const result = await handleStop({}, makeOpts())
+
     expect(result).toBeNull()
   })
 })

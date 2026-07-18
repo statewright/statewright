@@ -244,6 +244,15 @@ export const StatewrightPlugin: Plugin = async ({ client }) => {
     "session.idle": async () => {
       const state = await getState(port)
       if (!state) return
+      const pending = (state as any).pendingApproval ?? (state as any).pending_approval
+      if (pending) {
+        return {
+          "tui.toast.show": {
+            message: `[statewright] REVIEW REQUIRED: ${pending.message ?? "Human review required."}`,
+            level: "warning",
+          },
+        }
+      }
       if (state.isFinal) {
         return {
           "tui.toast.show": {

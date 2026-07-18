@@ -37,7 +37,7 @@ function checkToolAllowed(toolName, cache, toolInput = {}) {
   if (toolName === "view_image" && cache.allowedTools.includes("Read")) {
     return { allowed: true };
   }
-  if (toolName === "Bash" && typeof toolInput.command === "string" && cache.allowedTools.some((tool) => ["Read", "Grep", "Glob", "LS"].includes(tool)) && classifyReadOnlyShellCommand(toolInput.command).allowed) {
+  if (isCodexShellTool(toolName) && typeof toolInput.command === "string" && cache.allowedTools.some((tool) => ["Read", "Grep", "Glob", "LS"].includes(tool)) && classifyReadOnlyShellCommand(toolInput.command).allowed) {
     return { allowed: true };
   }
   if (isCodexWebRun(toolName)) {
@@ -51,6 +51,9 @@ function checkToolAllowed(toolName, cache, toolInput = {}) {
     allowed: false,
     reason: `Tool '${toolName}' is not available in the '${cache.state}' phase. Allowed: ${cache.allowedTools.join(", ")}.${transitions ? ` To advance, use statewright_transition with: ${transitions}.` : ""}`
   };
+}
+function isCodexShellTool(toolName) {
+  return toolName === "Bash" || toolName === "exec_command";
 }
 function isCodexWebRun(toolName) {
   return toolName.toLowerCase().replace(/[^a-z]/g, "").endsWith("webrun");
@@ -382,7 +385,7 @@ async function handlePreTool(input, opts) {
       }
     };
   }
-  if (toolName === "Bash" && input.tool_input?.command) {
+  if (isCodexShellTool(toolName) && input.tool_input?.command) {
     const bashResult = classifyBashCommand(
       input.tool_input.command,
       cache
@@ -533,6 +536,16 @@ async function handlePostTool(input, opts) {
       if (!raw) return null;
       writeCache(opts.sessionDir, raw);
       const cache = parseGatewayState(raw);
+      if (raw.pending_approval) {
+        const message = raw.pending_approval.message ?? "Human review required.";
+        const external = raw.meta?.approval_mode === "external";
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: external ? "[statewright] Approval is pending on the configured external review channel. Do not continue this workflow until that reviewer resolves it." : `[statewright] REVIEW REQUIRED: ${message} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.`
+          }
+        };
+      }
       if (isForked) {
         const branches = parsedResult.branches;
         const branchNames = Object.keys(branches ?? {});
@@ -596,8 +609,34 @@ async function handlePostTool(input, opts) {
       return null;
   }
 }
-async function handleStop() {
+async function handleStop(_input, opts) {
   return null;
+  if (!isActive(opts.sessionDir)) return null;
+  let raw = readCache(opts.sessionDir);
+  if (!raw && opts.apiKey) {
+    raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state");
+    if (raw) writeCache(opts.sessionDir, raw);
+  }
+  if (!raw?.state) return null;
+  const cache = parseGatewayState(raw);
+  if (cache.isFinal) {
+    deactivate(opts.sessionDir);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "Stop",
+        additionalContext: `[statewright] Workflow complete. Final state: ${cache.state}. Enforcement deactivated.`
+      }
+    };
+  }
+  const continuation = `${formatStateContext(cache)} CONTINUATION REQUIRED: Codex attempted to stop while Statewright is still active in '${cache.state}'. Do not send a final response or wait for a new user prompt. Continue immediately with only the state-allowed tools, complete this phase, and call statewright_transition when its exit criteria are met.`;
+  return {
+    decision: "block",
+    reason: `Statewright workflow is active in '${cache.state}'; continue until a final state.`,
+    hookSpecificOutput: {
+      hookEventName: "Stop",
+      additionalContext: continuation
+    }
+  };
 }
 async function main() {
   const endpoint = process.argv[2] ?? "user-prompt";
@@ -631,7 +670,7 @@ async function main() {
       result = await handlePostTool(input, opts);
       break;
     case "stop":
-      result = await handleStop();
+      result = await handleStop(input, opts);
       break;
   }
   if (result) {

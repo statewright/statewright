@@ -1,7 +1,7 @@
 {
   "name": "statewright",
-  "version": "0.1.0",
-  "description": "State machine workflow enforcement — controls which tools your agent can use in each phase.",
+  "version": "0.1.0+codex.20260718184340",
+  "description": "State machine workflow enforcement \u2014 controls which tools your agent can use in each phase.",
   "author": {
     "name": "statewright.ai",
     "url": "https://statewright.ai"
@@ -9,12 +9,30 @@
   "homepage": "https://statewright.ai",
   "repository": "https://github.com/statewright/statewright",
   "license": "FSL-1.1-ALv2",
-  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"],
-  "hooks": "./hooks/hooks.json",
+  "keywords": [
+    "guardrails",
+    "state-machine",
+    "mcp",
+    "agent-safety",
+    "workflow"
+  ],
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "statewright",
-    "shortDescription": "State machine guardrails — per-state tool enforcement for coding workflows.",
-    "category": "Developer Tools"
+    "shortDescription": "State machine guardrails \u2014 per-state tool enforcement for coding workflows.",
+    "longDescription": "Statewright enforces state-machine workflows for Codex: each phase exposes only the permitted tools, injects the active state context, and steers autonomous work through completion.",
+    "developerName": "Statewright",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://statewright.ai",
+    "privacyPolicyURL": "https://statewright.ai/privacy",
+    "termsOfServiceURL": "https://statewright.ai/terms",
+    "defaultPrompt": [
+      "Start a Statewright workflow and continue autonomously until it reaches a final state."
+    ],
+    "brandColor": "#2563EB"
   }
 }

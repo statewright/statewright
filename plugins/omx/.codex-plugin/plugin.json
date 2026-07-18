@@ -1,7 +1,7 @@
 {
   "name": "statewright",
-  "version": "0.1.0",
-  "description": "State machine workflow enforcement — controls which tools your agent can use in each phase.",
+  "version": "0.1.0+codex.20260718184624",
+  "description": "State machine workflow enforcement \u2014 controls which tools your agent can use in each phase.",
   "author": {
     "name": "statewright.ai",
     "url": "https://statewright.ai"
@@ -9,14 +9,24 @@
   "homepage": "https://statewright.ai",
   "repository": "https://github.com/statewright/statewright",
   "license": "FSL-1.1-ALv2",
-  "keywords": ["guardrails", "state-machine", "mcp", "agent-safety", "workflow"],
+  "keywords": [
+    "guardrails",
+    "state-machine",
+    "mcp",
+    "agent-safety",
+    "workflow"
+  ],
   "interface": {
     "displayName": "statewright",
-    "shortDescription": "State machine guardrails — per-state tool enforcement for coding workflows.",
+    "shortDescription": "State machine guardrails \u2014 per-state tool enforcement for coding workflows.",
     "longDescription": "Enforce Statewright workflow phases in Codex with capability-aware tool guardrails, transitions, and interrupts.",
     "developerName": "statewright.ai",
     "category": "Developer Tools",
-    "capabilities": ["Workflow Enforcement", "Tool Guardrails", "Interrupts"],
+    "capabilities": [
+      "Workflow Enforcement",
+      "Tool Guardrails",
+      "Interrupts"
+    ],
     "websiteURL": "https://statewright.ai",
     "defaultPrompt": [
       "Activate a Statewright workflow for this task."

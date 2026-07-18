@@ -65,6 +65,10 @@ Bash commands are classified: read-only commands (`ls`, `cat`, `pytest`) pass th
 
 If the model generates text for 30 seconds without calling a tool, the plugin aborts the stream, injects a steering message with available tools and transitions, and triggers a follow-up turn. States with thinking levels get 90 seconds instead.
 
+Autonomous continuation stops at an approval gate, not at every nonfinal state:
+when cached state contains `pending_approval`, present its review message and
+wait for resolution. Otherwise Pi continues steering through the state machine.
+
 ## Development
 
 ```bash

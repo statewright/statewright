@@ -49,7 +49,8 @@ statewright_list_workflows()
 - **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive
 - **PreToolUse**: enforces allowed_tools per state, bash discernment, command whitelisting
 - **PostToolUse**: interrupt detection (file pattern matching), fork/join status, capture
-- **Stop**: no-op (workflow persists across turns)
+- **Stop**: blocks Codex from yielding while an active workflow is nonfinal and
+  permits it only after a final state.
 
 ## License
 

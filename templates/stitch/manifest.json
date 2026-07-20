@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "description": "Reusable Statewright SDLC submachines. Register each manifest name; the feature DAG invokes them by name.",
+  "workflows": [
+    { "name": "[stitch] intake-localize v1", "file": "intake-localize.json" },
+    { "name": "[stitch] decision-slice v1", "file": "decision-slice.json" },
+    { "name": "[stitch] red-build-validate v1", "file": "red-build-validate.json" },
+    { "name": "[stitch] debug-triage v1", "file": "debug-triage.json" },
+    { "name": "[stitch] adversarial-review v1", "file": "adversarial-review.json" },
+    { "name": "[stitch] feature-dag v1", "file": "feature-dag.json" }
+  ]
+}

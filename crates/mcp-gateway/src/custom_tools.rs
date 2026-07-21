@@ -304,6 +304,14 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                         "type": "string",
                         "description": "Project identifier (cwd hash) for per-project run scoping"
                     },
+                    "stitch_id": {
+                        "type": "string",
+                        "description": "Optional task-level lineage ID. Generated automatically for [stitch] workflows."
+                    },
+                    "task_intent": {
+                        "type": "string",
+                        "description": "Optional bounded task intent stored with a newly generated stitch."
+                    },
                     "resume": {
                         "type": "boolean",
                         "description": "Resume from the last paused run of this workflow instead of starting fresh"
@@ -344,6 +352,28 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             input_schema: json!({
                 "type": "object",
                 "properties": {}
+            }),
+        },
+        ToolInfo {
+            name: "statewright_search_references".into(),
+            description: Some(
+                "Search the local repository reference index with deterministic lexical ranking. Plugin clients return read-only provenance, source hashes, rank reasons, and bounded excerpts.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Task, identifier, path, failed hypothesis, or validation signature to find"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 8
+                    }
+                },
+                "required": ["query"]
             }),
         },
         ToolInfo {
@@ -451,6 +481,7 @@ pub fn is_custom_tool(name: &str) -> bool {
             | "statewright_deactivate"
             | "statewright_pause"
             | "statewright_get_status"
+            | "statewright_search_references"
             | "statewright_create_workflow"
             | "statewright_force_state"
             | "statewright_run_agent"
@@ -578,13 +609,18 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
         assert!(tools.iter().any(|t| t.name == "statewright_list_workflows"));
         assert!(tools.iter().any(|t| t.name == "statewright_load_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_status"));
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.name == "statewright_search_references")
+        );
         assert!(tools.iter().any(|t| t.name == "statewright_run_agent"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_model_traits"));
     }
@@ -597,6 +633,7 @@ mod tests {
         assert!(is_custom_tool("statewright_load_workflow"));
         assert!(is_custom_tool("statewright_deactivate"));
         assert!(is_custom_tool("statewright_get_status"));
+        assert!(is_custom_tool("statewright_search_references"));
         assert!(is_custom_tool("statewright_create_workflow"));
         assert!(!is_custom_tool("read_file"));
         assert!(!is_custom_tool("statewright_other"));

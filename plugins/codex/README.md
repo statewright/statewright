@@ -45,10 +45,11 @@ statewright_list_workflows()
 ```
 
 `statewright_search_references(query)` is a local, read-only companion to
-`statewright_search_docs`. It lexically searches allowlisted repository files
-and recent commits, returning bounded excerpts with path/line, source hash,
-commit, and rank reasons. It excludes ignored files, common generated folders,
-and secret-like filenames; it never sends repository contents to the gateway.
+`statewright_search_docs`. It incrementally maintains a lexical index below Git
+metadata for allowlisted guidance, workflows, code, and bounded evidence plus
+recent commits. Results include path/line, source class, source hash, commit,
+and rank reasons. Ignored files, generated folders, secret paths, and detected
+credential material are excluded; repository contents never reach the gateway.
 
 ## Hook events
 

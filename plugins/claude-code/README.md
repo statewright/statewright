@@ -41,9 +41,10 @@ Every prompt, statewright checks your workflow state and tells Claude which tool
 Build your own at [statewright.ai/workflows](https://statewright.ai/workflows).
 
 `statewright_search_references(query)` is a deterministic, read-only local
-reference search. Results include path/line provenance, source hash, commit,
-and rank reasons; ignored files, generated folders, and secret-like filenames
-are excluded before any result is returned.
+reference index stored below Git metadata. Results include source class,
+path/line provenance, source hash, commit, and rank reasons. Ignored files,
+generated folders, secret paths, and detected credential material are excluded
+before any result is returned.
 
 ## Status line
 

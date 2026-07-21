@@ -46,6 +46,10 @@ path/line provenance, source hash, commit, and rank reasons. Ignored files,
 generated folders, secret paths, and detected credential material are excluded
 before any result is returned.
 
+The plugin bootstraps Statewright as a command MCP server, so this tool runs
+against the active local checkout; only workflow-control calls go to the hosted
+gateway.
+
 ## Status line
 
 Show the current workflow state in your Claude Code status bar. Add to `~/.claude/settings.json`:

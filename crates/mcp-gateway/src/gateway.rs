@@ -10,6 +10,11 @@ use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolInfo}
 use crate::session::{GatewaySession, SessionManager};
 use crate::upstream::UpstreamManager;
 
+#[cfg(any(feature = "metering", test))]
+fn pocketbase_relation_id(value: Option<&str>) -> &str {
+    value.unwrap_or("")
+}
+
 /// A suspended parent workflow while its invoked child is active.
 #[derive(Debug, Clone)]
 struct InvocationFrame {
@@ -189,6 +194,11 @@ impl Gateway {
             let pool = self.db_pool.as_ref()?;
             let now = chrono::Utc::now().to_rfc3339();
             let project = self.project_id.clone().unwrap_or_default();
+            // PocketBase relation columns are NOT NULL and encode an unset
+            // optional relation as the empty string rather than SQL NULL.
+            let stitch_id = pocketbase_relation_id(self.stitch_id.as_deref()).to_string();
+            let parent_run_id =
+                pocketbase_relation_id(self.parent_run_id.as_deref()).to_string();
             let result = sqlx::query_scalar::<_, String>(
                 "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, stitch_id, parent_run_id, created, updated) \
                  VALUES (gen_random_uuid()::text, $1, $2, 'running', $3, '[]'::jsonb, 0, $4, $5, $6, $7, $3, $3) RETURNING id"
@@ -198,8 +208,8 @@ impl Gateway {
             .bind(&now)
             .bind(&self.session_id)
             .bind(&project)
-            .bind(&self.stitch_id)
-            .bind(&self.parent_run_id)
+            .bind(&stitch_id)
+            .bind(&parent_run_id)
             .fetch_one(pool)
             .await;
             return match result {
@@ -2150,6 +2160,12 @@ impl Gateway {
 mod tests {
     use super::*;
     use statewright_engine::MachineDefinition;
+
+    #[test]
+    fn pocketbase_optional_relations_use_empty_ids() {
+        assert_eq!(pocketbase_relation_id(None), "");
+        assert_eq!(pocketbase_relation_id(Some("run-123")), "run-123");
+    }
 
     fn test_definition() -> MachineDefinition {
         serde_json::from_value(json!({

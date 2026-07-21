@@ -60,9 +60,15 @@ echo "  Installing hook..."
 curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/hook.sh" -o "$PLUGIN_DIR/hook.sh"
 chmod +x "$PLUGIN_DIR/hook.sh"
 
+# The command MCP server keeps repository-local tools local. Keep its sibling
+# reference index beside it because the proxy resolves it relative to itself.
+curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/mcp-proxy.sh" -o "$PLUGIN_DIR/mcp-proxy.sh"
+curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/reference-search.mjs" -o "$PLUGIN_DIR/reference-search.mjs"
+chmod +x "$PLUGIN_DIR/mcp-proxy.sh" "$PLUGIN_DIR/reference-search.mjs"
+
 # Add MCP server
 echo "  Adding MCP server..."
-claude mcp add statewright -s user -- https://github.com/statewright/statewright 2>/dev/null || true
+claude mcp add statewright -s user -- bash "$PLUGIN_DIR/mcp-proxy.sh" 2>/dev/null || true
 
 # Merge hooks into ~/.claude/settings.json
 echo "  Configuring hooks..."

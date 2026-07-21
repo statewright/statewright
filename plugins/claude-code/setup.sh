@@ -79,7 +79,9 @@ if os.path.isdir(plugin_agents):
             shutil.copy2(src, dst)
             print(f"Installed agent: {agent_file}")
 
-# Generate MCP config with auth from saved API key
+# Configure the packaged command MCP server. It reads the saved key itself for
+# gateway calls, while repository-local tools (including reference search) run
+# in the user's checkout rather than on the hosted gateway.
 key_path = os.path.expanduser("~/.statewright/api_key")
 if os.path.exists(key_path):
     with open(key_path) as kf:
@@ -92,10 +94,13 @@ if os.path.exists(key_path):
                 with open(mcp_path) as mf:
                     existing_mcp = json.load(mf)
             except: pass
+        proxy_script = os.path.join(plugin_cache, "mcp-proxy.sh")
+        if not os.path.isfile(proxy_script):
+            raise RuntimeError("Could not find the packaged Statewright MCP proxy")
         existing_mcp.setdefault("mcpServers", {})["statewright"] = {
-            "type": "http",
-            "url": "https://mcp.statewright.ai",
-            "headers": {"Authorization": f"Bearer {api_key}"}
+            "command": "bash",
+            "args": [proxy_script],
+            "env": {"STATEWRIGHT_GATEWAY_URL": "https://mcp.statewright.ai"}
         }
         with open(mcp_path, "w") as mf:
             json.dump(existing_mcp, mf, indent=2)

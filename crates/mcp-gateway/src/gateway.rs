@@ -7,14 +7,29 @@ use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
 use crate::interceptors::{self, PreCallDecision};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolInfo};
-use crate::session::SessionManager;
+use crate::session::{GatewaySession, SessionManager};
 use crate::upstream::UpstreamManager;
+
+/// A suspended parent workflow while its invoked child is active.
+#[derive(Debug, Clone)]
+struct InvocationFrame {
+    parent_session_id: String,
+    parent_workflow: Option<String>,
+    parent_run_id: Option<String>,
+    parent_parent_run_id: Option<String>,
+    parent_state: String,
+    on_complete: String,
+    on_fail: Option<String>,
+    child_workflow: String,
+}
 
 /// Core MCP gateway that dispatches messages.
 pub struct Gateway {
     pub session_manager: SessionManager,
     pub upstream: UpstreamManager,
     session_id: String,
+    /// Stable transport identity used to derive idempotent client scopes.
+    root_session_id: String,
     workflows: HashMap<String, MachineDefinition>,
     active_workflow: Option<String>,
     /// Owner ID for step metering (from PocketBase API key lookup).
@@ -27,6 +42,12 @@ pub struct Gateway {
     current_run_id: Option<String>,
     /// Project ID (cwd hash from client, scopes runs per-project).
     project_id: Option<String>,
+    /// Task-level identity shared by every run in a stitched invocation tree.
+    stitch_id: Option<String>,
+    /// Parent run of the currently active workflow run.
+    parent_run_id: Option<String>,
+    /// Suspended parents, ordered outermost to innermost.
+    invocation_stack: Vec<InvocationFrame>,
 }
 
 impl Gateway {
@@ -42,6 +63,7 @@ impl Gateway {
         Self {
             session_manager,
             upstream,
+            root_session_id: session_id.clone(),
             session_id,
             workflows,
             active_workflow,
@@ -50,6 +72,9 @@ impl Gateway {
             db_pool,
             current_run_id: None,
             project_id: None,
+            stitch_id: None,
+            parent_run_id: None,
+            invocation_stack: Vec::new(),
         }
     }
 
@@ -71,6 +96,94 @@ impl Gateway {
         fingerprint == self.api_key_fingerprint
     }
 
+    fn is_stitch_workflow(workflow_name: &str) -> bool {
+        workflow_name.starts_with("[stitch] ")
+    }
+
+    /// A workflow may declare `meta.failure_states`; otherwise conventional
+    /// terminal failure names are used. This keeps the invoke contract generic
+    /// while making success/failure routing explicit for reusable submachines.
+    fn terminal_failed(definition: &MachineDefinition, state: &str) -> bool {
+        if let Some(failure_states) = definition
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.extra.get("failure_states"))
+            .and_then(|value| value.as_array())
+        {
+            return failure_states
+                .iter()
+                .any(|value| value.as_str() == Some(state));
+        }
+
+        matches!(
+            state.to_ascii_lowercase().as_str(),
+            "failed" | "failure" | "blocked" | "error" | "cancelled" | "canceled"
+        )
+    }
+
+    fn merge_context(parent: &serde_json::Value, child: &serde_json::Value) -> serde_json::Value {
+        if child.is_object() {
+            statewright_engine::apply_context_patch(parent, child)
+        } else {
+            parent.clone()
+        }
+    }
+
+    #[cfg(feature = "metering")]
+    async fn record_stitch_start(&self, stitch_id: &str, workflow_name: &str, task_intent: &str) {
+        let Some(pool) = self.db_pool.as_ref() else {
+            return;
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO workflow_stitches (id, owner, root_workflow, task_intent, status, run_count, started_at, created, updated) \
+             VALUES ($1, $2, $3, $4, 'running', 0, $5, $5, $5) ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(stitch_id)
+        .bind(&self.owner_id)
+        .bind(workflow_name)
+        .bind(task_intent)
+        .bind(&now)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(%error, %stitch_id, "Failed to create stitch record");
+        }
+    }
+
+    #[cfg(not(feature = "metering"))]
+    async fn record_stitch_start(
+        &self,
+        _stitch_id: &str,
+        _workflow_name: &str,
+        _task_intent: &str,
+    ) {
+    }
+
+    fn record_stitch_end(&self, status: &str) {
+        let Some(stitch_id) = self.stitch_id.clone() else {
+            return;
+        };
+        #[cfg(feature = "metering")]
+        if let Some(pool) = &self.db_pool {
+            let pool = pool.clone();
+            let now = chrono::Utc::now().to_rfc3339();
+            let status = status.to_string();
+            tokio::spawn(async move {
+                let _ = sqlx::query(
+                    "UPDATE workflow_stitches SET status = $1, completed_at = $2, updated = $2 WHERE id = $3",
+                )
+                .bind(&status)
+                .bind(&now)
+                .bind(&stitch_id)
+                .execute(&pool)
+                .await;
+            });
+        }
+        #[cfg(not(feature = "metering"))]
+        let _ = (stitch_id, status);
+    }
+
     /// Create a workflow run record. Returns the generated run_id.
     async fn record_run_start(
         &mut self,
@@ -83,20 +196,36 @@ impl Gateway {
             let now = chrono::Utc::now().to_rfc3339();
             let project = self.project_id.clone().unwrap_or_default();
             let result = sqlx::query_scalar::<_, String>(
-                "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, created, updated) \
-                 VALUES (gen_random_uuid()::text, $1, $2, 'running', $3, '[]'::jsonb, 0, $4, $5, $3, $3) RETURNING id"
+                "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, stitch_id, parent_run_id, created, updated) \
+                 VALUES (gen_random_uuid()::text, $1, $2, 'running', $3, '[]'::jsonb, 0, $4, $5, $6, $7, $3, $3) RETURNING id"
             )
             .bind(&self.owner_id)
             .bind(workflow_name)
             .bind(&now)
             .bind(&self.session_id)
             .bind(&project)
+            .bind(&self.stitch_id)
+            .bind(&self.parent_run_id)
             .fetch_one(pool)
             .await;
             return match result {
                 Ok(run_id) => {
                     tracing::info!(workflow = workflow_name, run_id = %run_id, "Run started");
                     self.current_run_id = Some(run_id.clone());
+                    if let Some(stitch_id) = &self.stitch_id {
+                        let _ = sqlx::query(
+                            "UPDATE workflow_stitches \
+                             SET run_count = run_count + 1, \
+                                 root_run_id = COALESCE(NULLIF(root_run_id, ''), $1), \
+                                 updated = $2 \
+                             WHERE id = $3",
+                        )
+                        .bind(&run_id)
+                        .bind(chrono::Utc::now().to_rfc3339())
+                        .bind(stitch_id)
+                        .execute(pool)
+                        .await;
+                    }
                     Some(run_id)
                 }
                 Err(e) => {
@@ -191,6 +320,235 @@ impl Gateway {
                 .execute(&pool)
                 .await;
             });
+        }
+    }
+
+    async fn begin_invoke(
+        &mut self,
+        parent: &GatewaySession,
+        event: &str,
+        event_data: &serde_json::Value,
+        invoke: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let machine = invoke
+            .get("machine")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Invoke transition is missing a machine name".to_string())?
+            .to_string();
+        let on_complete = invoke
+            .get("on_complete")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Invoke transition is missing on_complete".to_string())?
+            .to_string();
+        let on_fail = invoke
+            .get("on_fail")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+
+        let mut child_definition = self
+            .workflows
+            .get(&machine)
+            .cloned()
+            .ok_or_else(|| format!("Invoked workflow '{}' is not registered", machine))?;
+        statewright_engine::validate_definition(&child_definition)
+            .map_err(|error| format!("Invoked workflow '{}' is invalid: {}", machine, error))?;
+
+        if let Some(input) = invoke.get("input").filter(|value| value.is_object()) {
+            child_definition.context = Self::merge_context(&child_definition.context, input);
+        }
+
+        let parent_session_id = self.session_id.clone();
+        let parent_run_id = self.current_run_id.clone();
+        let parent_context = Self::merge_context(&parent.context, event_data);
+        self.session_manager.update_state(
+            &parent_session_id,
+            parent.current_state.clone(),
+            parent_context,
+        );
+        self.record_step();
+        self.record_run_transition(
+            &parent.current_state,
+            &format!("INVOKE:{}", machine),
+            event,
+            event_data,
+        );
+
+        let child_session_id = format!(
+            "{}_inv_{}",
+            parent_session_id,
+            uuid::Uuid::new_v4().as_simple()
+        );
+        self.session_manager
+            .create(child_session_id.clone(), child_definition.clone());
+        if let Some(limit) = parent.plan_limit {
+            self.session_manager
+                .set_plan_limit(&child_session_id, limit);
+        }
+
+        self.invocation_stack.push(InvocationFrame {
+            parent_session_id,
+            parent_workflow: self.active_workflow.clone(),
+            parent_run_id: parent_run_id.clone(),
+            parent_parent_run_id: self.parent_run_id.clone(),
+            parent_state: parent.current_state.clone(),
+            on_complete: on_complete.clone(),
+            on_fail: on_fail.clone(),
+            child_workflow: machine.clone(),
+        });
+
+        self.session_id = child_session_id;
+        self.active_workflow = Some(machine.clone());
+        self.parent_run_id = parent_run_id.clone();
+        self.current_run_id = None;
+        let child_run_id = self
+            .record_run_start(&machine, &child_definition.initial)
+            .await;
+
+        tracing::info!(
+            child = machine,
+            parent_state = parent.current_state,
+            depth = self.invocation_stack.len(),
+            "Submachine invoked"
+        );
+
+        Ok(json!({
+            "invoked": true,
+            "machine": machine,
+            "initial_state": child_definition.initial,
+            "on_complete": on_complete,
+            "on_fail": on_fail,
+            "run_id": child_run_id,
+            "stitch_id": self.stitch_id,
+            "parent_run_id": parent_run_id,
+            "invoke_depth": self.invocation_stack.len(),
+        }))
+    }
+
+    /// Close the active child and restore parents until a non-final workflow is
+    /// reached. A child that completes a parent into its own final state can
+    /// therefore unwind multiple nested invokes in one deterministic step.
+    fn unwind_invocations(
+        &mut self,
+        mut success: bool,
+        mut child_state: String,
+        mut child_context: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut completed = Vec::new();
+
+        loop {
+            let child_workflow = self.active_workflow.clone();
+            let child_run_id = self.current_run_id.clone();
+            let child_status = if success { "completed" } else { "failed" };
+            self.record_run_end(&child_state, child_status);
+            completed.push(json!({
+                "workflow": child_workflow,
+                "run_id": child_run_id,
+                "final_state": child_state,
+                "status": child_status,
+            }));
+
+            let Some(frame) = self.invocation_stack.pop() else {
+                self.record_stitch_end(child_status);
+                return json!({
+                    "stitch_complete": self.stitch_id.is_some(),
+                    "stitch_id": self.stitch_id,
+                    "active_workflow": self.active_workflow,
+                    "active_state": child_state,
+                    "completed_runs": completed,
+                });
+            };
+
+            debug_assert_eq!(
+                frame.child_workflow,
+                child_workflow.clone().unwrap_or_default()
+            );
+            self.session_id = frame.parent_session_id.clone();
+            self.active_workflow = frame.parent_workflow.clone();
+            self.current_run_id = frame.parent_run_id.clone();
+            self.parent_run_id = frame.parent_parent_run_id.clone();
+
+            let Some(parent) = self.session_manager.get(&frame.parent_session_id) else {
+                self.record_stitch_end("failed");
+                return json!({
+                    "stitch_complete": true,
+                    "stitch_id": self.stitch_id,
+                    "error": "Suspended parent session was not found",
+                    "completed_runs": completed,
+                });
+            };
+
+            let target = if success {
+                Some(frame.on_complete.clone())
+            } else {
+                frame.on_fail.clone().or_else(|| {
+                    parent
+                        .definition
+                        .states
+                        .contains_key("failed")
+                        .then(|| "failed".to_string())
+                })
+            };
+
+            let Some(target) = target else {
+                self.record_run_transition(
+                    &frame.parent_state,
+                    &frame.parent_state,
+                    "INVOKE_FAILED",
+                    &json!({"child_state": child_state, "reason": "on_fail is not defined"}),
+                );
+                self.record_run_end(&frame.parent_state, "failed");
+                self.record_stitch_end("failed");
+                return json!({
+                    "stitch_complete": true,
+                    "stitch_id": self.stitch_id,
+                    "active_workflow": self.active_workflow,
+                    "active_state": frame.parent_state,
+                    "error": "Child failed and the parent invoke has no on_fail target",
+                    "completed_runs": completed,
+                });
+            };
+
+            let merged_context = Self::merge_context(&parent.context, &child_context);
+            self.session_manager.update_state(
+                &frame.parent_session_id,
+                target.clone(),
+                merged_context.clone(),
+            );
+            let completion_event = if success {
+                "INVOKE_COMPLETED"
+            } else {
+                "INVOKE_FAILED"
+            };
+            self.record_run_transition(
+                &frame.parent_state,
+                &target,
+                completion_event,
+                &json!({
+                    "child_workflow": frame.child_workflow,
+                    "child_state": child_state,
+                    "child_status": child_status,
+                }),
+            );
+
+            let parent = self
+                .session_manager
+                .get(&frame.parent_session_id)
+                .expect("parent session disappeared after update");
+            if !parent.is_final() {
+                return json!({
+                    "stitch_complete": false,
+                    "stitch_id": self.stitch_id,
+                    "active_workflow": self.active_workflow,
+                    "active_state": parent.current_state,
+                    "active_run_id": self.current_run_id,
+                    "invoke_depth": self.invocation_stack.len(),
+                    "completed_runs": completed,
+                });
+            }
+
+            success = !Self::terminal_failed(&parent.definition, &parent.current_state);
+            child_state = parent.current_state;
+            child_context = parent.context;
         }
     }
 
@@ -816,7 +1174,7 @@ impl Gateway {
                 // Evaluate transition against ORIGINAL context (client data must not bypass guards)
                 let prev_state = session.current_state.clone();
                 match custom_tools::handle_transition(&mut session, event) {
-                    Ok(result) => {
+                    Ok(mut result) => {
                         let new_state = session.current_state.clone();
                         let requires_approval =
                             result["requires_approval"].as_bool().unwrap_or(false);
@@ -878,6 +1236,37 @@ impl Gateway {
                                 ))
                                 .unwrap(),
                             );
+                        }
+
+                        // Invoke is a first-class submachine switch. The
+                        // parent remains suspended in its current state until
+                        // the child reaches a final state, at which point the
+                        // stack is unwound through on_complete/on_fail.
+                        if let Some(invoke) = result.get("invoke").cloned() {
+                            return match self
+                                .begin_invoke(&session, event, &event_data, &invoke)
+                                .await
+                            {
+                                Ok(active_child) => {
+                                    result["invoke"] = active_child;
+                                    JsonRpcResponse::success(
+                                        id,
+                                        serde_json::to_value(
+                                            crate::protocol::ToolCallResult::text(
+                                                serde_json::to_string_pretty(&result).unwrap(),
+                                            ),
+                                        )
+                                        .unwrap(),
+                                    )
+                                }
+                                Err(error) => JsonRpcResponse::success(
+                                    id,
+                                    serde_json::to_value(
+                                        crate::protocol::ToolCallResult::error(error),
+                                    )
+                                    .unwrap(),
+                                ),
+                            };
                         }
 
                         // Check if this transition forks into branches
@@ -1005,12 +1394,23 @@ impl Gateway {
                         self.session_manager.update_state(
                             &self.session_id,
                             new_state.clone(),
-                            final_context,
+                            final_context.clone(),
                         );
                         self.record_step();
                         self.record_run_transition(&prev_state, &new_state, event, &event_data);
                         if session.is_final() {
-                            self.record_run_end(&new_state, "completed");
+                            let success = !Self::terminal_failed(&session.definition, &new_state);
+                            if self.invocation_stack.is_empty() {
+                                let status = if success { "completed" } else { "failed" };
+                                self.record_run_end(&new_state, status);
+                                self.record_stitch_end(status);
+                            } else {
+                                result["stitch"] = self.unwind_invocations(
+                                    success,
+                                    new_state.clone(),
+                                    final_context,
+                                );
+                            }
                         }
                         JsonRpcResponse::success(
                             id,
@@ -1223,10 +1623,21 @@ impl Gateway {
             "statewright_load_workflow" => {
                 let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
+                if !self.invocation_stack.is_empty() {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "Cannot replace a workflow while a submachine invocation is active. Complete or deactivate the stitch first."
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                    );
+                }
+
                 // Accept session_id from client for per-session scoping
                 if let Some(sid) = arguments.get("session_id").and_then(|s| s.as_str()) {
                     // Create a session-scoped key: api_key_session + client_session
-                    let scoped_id = format!("{}_{}", self.session_id, sid);
+                    let scoped_id = format!("{}_{}", self.root_session_id, sid);
                     self.session_id = scoped_id;
                     self.project_id = Some(sid.to_string());
                 }
@@ -1337,6 +1748,23 @@ impl Gateway {
                     .get("resume")
                     .and_then(|r| r.as_bool())
                     .unwrap_or(false);
+                self.parent_run_id = None;
+                self.stitch_id = arguments
+                    .get("stitch_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        Self::is_stitch_workflow(workflow_name)
+                            .then(|| uuid::Uuid::new_v4().to_string())
+                    });
+                if let Some(stitch_id) = self.stitch_id.clone() {
+                    let task_intent = arguments
+                        .get("task_intent")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(workflow_name);
+                    self.record_stitch_start(&stitch_id, workflow_name, task_intent)
+                        .await;
+                }
                 let capture_output = definition
                     .meta
                     .as_ref()
@@ -1418,6 +1846,8 @@ impl Gateway {
                     "initial_state": current_state,
                     "states": definition.states.keys().collect::<Vec<_>>(),
                     "run_id": run_id,
+                    "stitch_id": self.stitch_id,
+                    "parent_run_id": self.parent_run_id,
                     "capture_output": capture_output,
                     "resumed": resumed_state.is_some(),
                 });
@@ -1493,7 +1923,18 @@ impl Gateway {
                         );
                     }
                 }
+                while let Some(frame) = self.invocation_stack.pop() {
+                    self.session_id = frame.parent_session_id;
+                    self.current_run_id = frame.parent_run_id;
+                    self.parent_run_id = frame.parent_parent_run_id;
+                    if let Some(parent) = self.session_manager.get(&self.session_id) {
+                        self.record_run_end(&parent.current_state, "stopped");
+                    }
+                }
+                self.record_stitch_end("stopped");
                 self.active_workflow = None;
+                self.current_run_id = None;
+                self.parent_run_id = None;
                 let result = json!({ "deactivated": true });
                 JsonRpcResponse::success(
                     id,
@@ -1504,6 +1945,16 @@ impl Gateway {
                 )
             }
             "statewright_pause" => {
+                if !self.invocation_stack.is_empty() {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "Pause is not supported while a submachine invocation is active; complete or deactivate the stitch first."
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                    );
+                }
                 let session = match self.session_manager.get(&self.session_id) {
                     Some(s) => s,
                     None => {
@@ -1577,6 +2028,10 @@ impl Gateway {
                     "transition_count": session.as_ref().map(|s| s.transition_count),
                     "is_final": session.as_ref().map(|s| s.is_final()),
                     "available_workflows": self.workflows.keys().collect::<Vec<_>>(),
+                    "stitch_id": self.stitch_id,
+                    "run_id": self.current_run_id,
+                    "parent_run_id": self.parent_run_id,
+                    "invoke_depth": self.invocation_stack.len(),
                     "usage": usage,
                 });
                 JsonRpcResponse::success(
@@ -1587,6 +2042,14 @@ impl Gateway {
                     .unwrap(),
                 )
             }
+            "statewright_search_references" => JsonRpcResponse::success(
+                id,
+                serde_json::to_value(crate::protocol::ToolCallResult::error(
+                    "Reference search must run in the installed Statewright plugin so repository contents remain local."
+                        .to_string(),
+                ))
+                .unwrap(),
+            ),
             "statewright_create_workflow" => {
                 let wf_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let definition = arguments.get("definition").cloned().unwrap_or(json!({}));
@@ -1940,6 +2403,59 @@ mod tests {
         )
     }
 
+    async fn call_tool(
+        gateway: &mut Gateway,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let response = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({ "name": name, "arguments": arguments })),
+                id: Some(json!(99)),
+            })
+            .await
+            .unwrap();
+        let text = response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        serde_json::from_str(&text).unwrap_or_else(|_| json!({ "message": text }))
+    }
+
+    fn stitched_workflows() -> HashMap<String, MachineDefinition> {
+        [
+            (
+                "[stitch] feature-dag v1",
+                include_str!("../../../templates/stitch/feature-dag.json"),
+            ),
+            (
+                "[stitch] intake-localize v1",
+                include_str!("../../../templates/stitch/intake-localize.json"),
+            ),
+            (
+                "[stitch] decision-slice v1",
+                include_str!("../../../templates/stitch/decision-slice.json"),
+            ),
+            (
+                "[stitch] red-build-validate v1",
+                include_str!("../../../templates/stitch/red-build-validate.json"),
+            ),
+            (
+                "[stitch] debug-triage v1",
+                include_str!("../../../templates/stitch/debug-triage.json"),
+            ),
+            (
+                "[stitch] adversarial-review v1",
+                include_str!("../../../templates/stitch/adversarial-review.json"),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, definition)| (name.to_string(), serde_json::from_str(definition).unwrap()))
+        .collect()
+    }
+
     #[tokio::test]
     async fn initialize_returns_server_info() {
         let mut gw = test_gateway();
@@ -2000,7 +2516,7 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         let names: Vec<String> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap().into())
@@ -2047,7 +2563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invoke_transition_does_not_advance_to_on_complete() {
+    async fn invoke_transition_runs_child_then_resumes_parent() {
         // Workflow with an invoke transition: planning --DEBUG--> {invoke: "debug_machine", on_complete: "testing"}
         // After firing DEBUG, parent must stay in "planning" (not jump to "testing").
         // The response must carry an "invoke" key for the client to act on.
@@ -2068,10 +2584,23 @@ mod tests {
         }))
         .unwrap();
 
+        let child: MachineDefinition = serde_json::from_value(json!({
+            "id": "debug-machine",
+            "initial": "working",
+            "meta": { "failure_states": ["blocked"] },
+            "states": {
+                "working": { "on": { "DONE": "complete", "BLOCKED": "blocked" } },
+                "complete": { "type": "final" },
+                "blocked": { "type": "final" }
+            }
+        }))
+        .unwrap();
+
         let mgr = SessionManager::new();
         mgr.create("invoke-session".into(), def.clone());
         let mut wf = HashMap::new();
         wf.insert("invoke-test".into(), def);
+        wf.insert("debug_machine".into(), child);
         let mut gw = Gateway::new(
             mgr,
             UpstreamManager::empty(),
@@ -2100,7 +2629,7 @@ mod tests {
             .to_string();
         let result: serde_json::Value = serde_json::from_str(&text).unwrap();
 
-        // Response must indicate the invoke and the eventual destination
+        // Response must indicate the invoke and activate its child.
         assert_eq!(result["transitioned"], true);
         assert_eq!(result["from"], "planning");
         assert_eq!(result["to"], "testing"); // on_complete — eventual destination
@@ -2110,13 +2639,225 @@ mod tests {
         );
         assert_eq!(result["invoke"]["machine"], "debug_machine");
         assert_eq!(result["invoke"]["on_complete"], "testing");
+        assert_eq!(result["invoke"]["initial_state"], "working");
+        assert_eq!(gw.active_workflow.as_deref(), Some("debug_machine"));
+        assert_eq!(gw.invocation_stack.len(), 1);
 
-        // Parent session must NOT have advanced — stays in "planning" until sub-machine completes
+        // Parent remains suspended while get_state follows the active child.
         let session = gw.session_manager.get("invoke-session").unwrap();
         assert_eq!(
             session.current_state, "planning",
             "parent state must not advance to on_complete before sub-machine runs"
         );
+        let child_session = gw.session_manager.get(gw.session_id()).unwrap();
+        assert_eq!(child_session.current_state, "working");
+
+        let complete = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_transition",
+                "arguments": { "event": "DONE", "data": { "hypothesis": "confirmed" } }
+            })),
+            id: Some(json!(2)),
+        };
+        let response = gw.handle_message(complete).await.unwrap();
+        let text = response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let result: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(result["stitch"]["stitch_complete"], false);
+        assert_eq!(result["stitch"]["active_workflow"], "invoke-test");
+        assert_eq!(result["stitch"]["active_state"], "testing");
+        assert_eq!(gw.session_id(), "invoke-session");
+        assert!(gw.invocation_stack.is_empty());
+        let parent = gw.session_manager.get("invoke-session").unwrap();
+        assert_eq!(parent.current_state, "testing");
+        assert_eq!(parent.context["hypothesis"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn stitched_feature_dag_chains_all_submachines_and_keeps_one_identity() {
+        let workflows = stitched_workflows();
+        let root = workflows["[stitch] feature-dag v1"].clone();
+        let manager = SessionManager::new();
+        manager.create("transport".into(), root);
+        let mut gateway = Gateway::new(
+            manager,
+            UpstreamManager::empty(),
+            "transport".into(),
+            workflows,
+            Some("[stitch] feature-dag v1".into()),
+            String::new(),
+            None,
+        );
+
+        let loaded = call_tool(
+            &mut gateway,
+            "statewright_load_workflow",
+            json!({
+                "name": "[stitch] feature-dag v1",
+                "session_id": "repo-a",
+                "task_intent": "prove reusable chaining"
+            }),
+        )
+        .await;
+        let stitch_id = loaded["stitch_id"].as_str().unwrap().to_string();
+        assert_eq!(gateway.session_id(), "transport_repo-a");
+
+        // Reusing the same client scope is idempotent rather than recursively
+        // appending `_repo-a` to the active session ID.
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_load_workflow",
+            json!({ "name": "[stitch] feature-dag v1", "session_id": "repo-a", "stitch_id": stitch_id }),
+        )
+        .await;
+        assert_eq!(gateway.session_id(), "transport_repo-a");
+
+        let intake = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DONE"}),
+        )
+        .await;
+        assert_eq!(intake["invoke"]["machine"], "[stitch] intake-localize v1");
+        assert_eq!(intake["invoke"]["stitch_id"], stitch_id);
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"SLICE_READY"}),
+        )
+        .await;
+        assert_eq!(
+            gateway.active_workflow.as_deref(),
+            Some("[stitch] feature-dag v1")
+        );
+        assert_eq!(
+            gateway
+                .session_manager
+                .get(gateway.session_id())
+                .unwrap()
+                .current_state,
+            "decision"
+        );
+
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DONE"}),
+        )
+        .await;
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DECISION_RECORDED"}),
+        )
+        .await;
+        assert_eq!(
+            gateway
+                .session_manager
+                .get(gateway.session_id())
+                .unwrap()
+                .current_state,
+            "build"
+        );
+
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DONE"}),
+        )
+        .await;
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"BASELINE_READY"}),
+        )
+        .await;
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"READY_TO_VALIDATE"}),
+        )
+        .await;
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"PASSED"}),
+        )
+        .await;
+        assert_eq!(
+            gateway
+                .session_manager
+                .get(gateway.session_id())
+                .unwrap()
+                .current_state,
+            "review"
+        );
+
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DONE"}),
+        )
+        .await;
+        let completed = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"APPROVED"}),
+        )
+        .await;
+        assert_eq!(completed["stitch"]["stitch_complete"], true);
+        assert_eq!(completed["stitch"]["stitch_id"], stitch_id);
+        assert_eq!(completed["stitch"]["active_state"], "complete");
+        assert!(gateway.invocation_stack.is_empty());
+        assert_eq!(gateway.stitch_id.as_deref(), Some(stitch_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stitched_child_failure_routes_parent_through_on_fail() {
+        let workflows = stitched_workflows();
+        let root = workflows["[stitch] feature-dag v1"].clone();
+        let manager = SessionManager::new();
+        manager.create("transport".into(), root);
+        let mut gateway = Gateway::new(
+            manager,
+            UpstreamManager::empty(),
+            "transport".into(),
+            workflows,
+            Some("[stitch] feature-dag v1".into()),
+            String::new(),
+            None,
+        );
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_load_workflow",
+            json!({ "name": "[stitch] feature-dag v1" }),
+        )
+        .await;
+        let _ = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"DONE"}),
+        )
+        .await;
+        let failed = call_tool(
+            &mut gateway,
+            "statewright_transition",
+            json!({"event":"BLOCKED"}),
+        )
+        .await;
+
+        assert_eq!(failed["stitch"]["stitch_complete"], true);
+        assert_eq!(
+            failed["stitch"]["active_workflow"],
+            "[stitch] feature-dag v1"
+        );
+        assert_eq!(failed["stitch"]["active_state"], "blocked");
+        assert!(gateway.invocation_stack.is_empty());
     }
 
     #[tokio::test]

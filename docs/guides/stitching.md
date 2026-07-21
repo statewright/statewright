@@ -15,13 +15,21 @@ intake/localize -> decision/slice -> red/build/validate -> review
 ```
 
 Register the manifest entries with `statewright_create_workflow`, then load
-`[stitch] feature-dag v1`. The DAG uses existing `invoke` transitions; clients
-or the direct agent executor run the named child machine and resume the parent.
+`[stitch] feature-dag v1`. The gateway treats `invoke` as a submachine stack:
+it activates the registered child, suspends the parent, and restores the parent
+through `on_complete` or `on_fail` when the child reaches a final state. Nested
+children unwind deterministically without the client manually loading parents.
 `debug/triage` is the only failure loop: it must return a distinct hypothesis
 before build can be attempted again.
 
+Loading a `[stitch]` workflow creates one `workflow_stitch` identity. The root
+and every invoked `workflow_run` share `stitch_id`; each child also records
+`parent_run_id`. Status, run count, and the root run are accounted at the stitch
+level while normal workflows retain null lineage.
+
 For evidence retrieval, use `statewright_search_references`. It is intentionally
-local and deterministic: an unchanged working tree yields the same ordered
-results, each with path/line, source hash, commit SHA, rank reasons, and a
-bounded excerpt. It is not an embeddings service or a source of synthesized
-conclusions.
+local and deterministic. Its lazy index lives under Git metadata, reuses
+unchanged chunks, and re-ingests changed allowlisted sources on the next query.
+Results include path/line, source class, source hash, commit SHA, rank reasons,
+and a bounded excerpt. It is not an embeddings service or a source of
+synthesized conclusions.

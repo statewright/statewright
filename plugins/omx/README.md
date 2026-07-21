@@ -23,7 +23,11 @@ bash install.sh
 
 1. Get an API key at [statewright.ai/keys](https://statewright.ai/keys)
 2. Save it: `echo 'sw_live_...' > ~/.statewright/api_key`
-3. Start OMX — the plugin activates automatically
+3. Add the same local command MCP used by the Codex plugin:
+   ```bash
+   codex mcp add statewright -- bash /path/to/statewright/plugins/codex/mcp-proxy.sh
+   ```
+4. Start OMX — the hook plugin activates automatically
 
 ## Usage
 
@@ -48,6 +52,11 @@ Registers four Codex native hooks via `.codex/hooks.json`:
   final state (or when no reliable state is available).
 
 State cache is file-based (`~/.statewright/sessions/`) so PreToolUse enforcement requires zero network calls.
+
+The command MCP also exposes `statewright_search_references(query)`. It runs
+the incremental reference index against the active checkout and returns only
+bounded, provenance-addressable excerpts; it never sends repository artifacts
+to the managed gateway.
 
 ## Development
 

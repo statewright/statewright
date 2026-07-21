@@ -17,11 +17,13 @@ vi.mock("node:fs", () => ({
 // Mock node:os
 vi.mock("node:os", () => ({
   homedir: vi.fn(() => "/home/test"),
+  tmpdir: vi.fn(() => "/tmp"),
 }))
 
 // Mock node:path
 vi.mock("node:path", () => ({
   join: vi.fn((...args: string[]) => args.join("/")),
+  dirname: vi.fn((path: string) => path.replace(/\/[^/]+$/, "")),
 }))
 
 // Mock minimatch
@@ -39,6 +41,7 @@ vi.mock("typebox", () => ({
   Type: {
     Object: vi.fn((schema: unknown, opts?: unknown) => ({ type: "object", properties: schema })),
     String: vi.fn((opts: unknown) => ({ type: "string", ...(opts as Record<string, unknown>) })),
+    Number: vi.fn((opts: unknown) => ({ type: "number", ...(opts as Record<string, unknown>) })),
     Boolean: vi.fn(() => ({ type: "boolean" })),
     Optional: vi.fn((inner: unknown) => inner),
     Array: vi.fn((inner: unknown, opts?: unknown) => ({ type: "array", items: inner })),
@@ -234,12 +237,14 @@ describe("statewright Pi extension", () => {
     originalFetch = globalThis.fetch
     process.env.STATEWRIGHT_API_KEY = API_KEY
     process.env.STATEWRIGHT_GATEWAY_URL = "http://localhost:3001"
+    process.env.STATEWRIGHT_WORKFLOW = "test-workflow"
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
     delete process.env.STATEWRIGHT_API_KEY
     delete process.env.STATEWRIGHT_GATEWAY_URL
+    delete process.env.STATEWRIGHT_WORKFLOW
   })
 
   describe("initialization", () => {
@@ -271,19 +276,20 @@ describe("statewright Pi extension", () => {
       warn.mockRestore()
     })
 
-    it("registers 4 tools and 3 event handlers on success", async () => {
+    it("registers workflow tools plus local reference search on success", async () => {
       setupFetch([{ match: "/mcp", body: MOCK_STATE }])
       const log = vi.spyOn(console, "log").mockImplementation(() => {})
       const pi = createMockPi()
 
       await statewrightExtension(asPi(pi))
 
-      expect(pi.registerTool).toHaveBeenCalledTimes(9)
+      expect(pi.registerTool).toHaveBeenCalledTimes(10)
       const names = pi._tools.map((t) => t.name)
       expect(names).toContain("statewright_get_state")
       expect(names).toContain("statewright_transition")
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
+      expect(names).toContain("statewright_search_references")
 
       expect(pi.on).toHaveBeenCalledTimes(7)
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))

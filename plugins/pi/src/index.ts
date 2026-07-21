@@ -17,9 +17,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { Type } from "typebox"
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, unlinkSync, rmdirSync } from "node:fs"
-import { join, basename } from "node:path"
+import { join, basename, dirname } from "node:path"
 import { homedir, tmpdir } from "node:os"
 import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import { minimatch } from "minimatch"
 
 // --- ANSI colors for TUI rendering ---
@@ -143,6 +144,10 @@ function swLog(msg: string) { if (process.env.STATEWRIGHT_DEBUG) console.error(`
 // --- Gateway client ---
 
 const GW_URL = process.env.STATEWRIGHT_GATEWAY_URL || "https://mcp.statewright.ai"
+const pluginDir = dirname(fileURLToPath(import.meta.url))
+const REFERENCE_SEARCH = existsSync(join(pluginDir, "..", "reference-search.mjs"))
+  ? join(pluginDir, "..", "reference-search.mjs")
+  : join(pluginDir, "..", "..", "shared", "reference-search.mjs")
 const KEY_PATH = join(homedir(), ".statewright", "api_key")
 
 function getApiKey(): string | null {
@@ -234,6 +239,29 @@ async function gwCall(
     }
   }
   return null
+}
+
+function searchLocalReferences(query: string, limit = 8): Promise<string> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [REFERENCE_SEARCH, "--root", process.cwd(), "--query", query, "--limit", String(limit)], {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+    let stdout = ""
+    child.stdout.on("data", (data: Buffer) => { stdout += data.toString() })
+    child.on("error", () => resolve("Reference search unavailable."))
+    child.on("close", () => {
+      try {
+        const result = JSON.parse(stdout)
+        if (result.error) return resolve(String(result.error))
+        if (!result.results?.length) return resolve("No provenance-addressable references found.")
+        resolve(result.results.map((hit: { source_kind: string; path: string; line_start: number; line_end: number; commit_sha?: string; source_hash: string; rank: number; rank_reasons: string[]; excerpt: string }) =>
+          `## [${hit.source_kind}] ${hit.path}:${hit.line_start}-${hit.line_end}\ncommit: ${hit.commit_sha ?? "uncommitted"}\nhash: ${hit.source_hash}\nrank: ${hit.rank} [${hit.rank_reasons.join(", ")}]\n${hit.excerpt}`,
+        ).join("\n\n"))
+      } catch {
+        resolve("Reference search unavailable.")
+      }
+    })
+  })
 }
 
 async function gwInit(): Promise<boolean> {
@@ -1643,6 +1671,19 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       } catch {
         return { content: [{ type: "text", text: "Docs search failed." }] }
       }
+    },
+  })
+
+  pi.registerTool({
+    name: "statewright_search_references",
+    label: "Search Local References",
+    description: "Search the active checkout locally with deterministic lexical ranking. Returns read-only provenance, source hashes, rank reasons, and excerpts; ignored and secret material is excluded.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Task, identifier, changed path, failed hypothesis, or validation signature to find" }),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 20 })),
+    }),
+    async execute(_id, params: { query: string; limit?: number }) {
+      return { content: [{ type: "text", text: await searchLocalReferences(params.query, params.limit) }] }
     },
   })
 

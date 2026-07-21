@@ -3,6 +3,10 @@
     "statewright": {
       "command": "statewright-gateway",
       "args": ["--config", ".statewright/config.json", "--hook-server"]
+    },
+    "statewright-references": {
+      "command": "node",
+      "args": [".statewright/reference-mcp.mjs"]
     }
   }
 }

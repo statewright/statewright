@@ -6,6 +6,7 @@ State machine guardrails for [Pi coding agent](https://pi.dev). Enforces which t
 
 ```bash
 cp -r plugins/pi ~/.pi/agent/extensions/statewright
+cp plugins/shared/reference-search.mjs ~/.pi/agent/extensions/statewright/
 ```
 
 Or add to `~/.pi/agent/settings.json`:
@@ -13,6 +14,9 @@ Or add to `~/.pi/agent/settings.json`:
 ```json
 { "extensions": ["path/to/statewright/plugins/pi"] }
 ```
+
+When using the settings-path install, copy
+`plugins/shared/reference-search.mjs` into that `plugins/pi` directory too.
 
 ## Setup
 
@@ -48,6 +52,14 @@ Control reasoning effort. `xhigh` for planning, `off` for grunt work.
 ### Native tool restrictions
 
 Tools not in `allowed_tools` are removed from the schema — the model can't see them.
+
+### Local reference search
+
+`statewright_search_references(query)` incrementally indexes the active
+checkout and returns deterministic, provenance-addressable excerpts. The search
+runs inside the Pi extension process boundary: ignored, generated, secret, and
+credential-like content is excluded and repository contents are never sent to
+the gateway.
 
 ### Parallel fork/join
 

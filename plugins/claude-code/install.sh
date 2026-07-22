@@ -63,8 +63,9 @@ chmod +x "$PLUGIN_DIR/hook.sh"
 # The command MCP server keeps repository-local tools local. Keep its sibling
 # reference index beside it because the proxy resolves it relative to itself.
 curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/mcp-proxy.sh" -o "$PLUGIN_DIR/mcp-proxy.sh"
+curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/client-id.sh" -o "$PLUGIN_DIR/client-id.sh"
 curl -sf "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/reference-search.mjs" -o "$PLUGIN_DIR/reference-search.mjs"
-chmod +x "$PLUGIN_DIR/mcp-proxy.sh" "$PLUGIN_DIR/reference-search.mjs"
+chmod +x "$PLUGIN_DIR/mcp-proxy.sh" "$PLUGIN_DIR/client-id.sh" "$PLUGIN_DIR/reference-search.mjs"
 
 # Add MCP server
 echo "  Adding MCP server..."

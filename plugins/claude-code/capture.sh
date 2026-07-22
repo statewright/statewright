@@ -13,10 +13,16 @@ PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 [ -z "$HOOK_INPUT" ] && exit 0
 
-# Check if capture is enabled for this session (opt-in via workflow meta.capture_output)
+# Resolve the same local session directory used by the MCP proxy and guard hook.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
-SESSION_KEY="${SESSION_KEY:0:12}"
+CLIENT_ID=$(statewright_client_id claude "$HOOK_SESSION")
+SESSION_KEY="${CLIENT_ID#swc_}"
+SESSION_KEY="${SESSION_KEY:0:16}"
+
+# Check if capture is enabled for this session (opt-in via workflow meta.capture_output)
 [ ! -f "$HOME/.statewright/sessions/$SESSION_KEY/.capture_enabled" ] && exit 0
 
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)

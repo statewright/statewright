@@ -50,6 +50,16 @@ The plugin bootstraps Statewright as a command MCP server, so this tool runs
 against the active local checkout; only workflow-control calls go to the hosted
 gateway.
 
+The MCP proxy and hooks also share an opaque identity derived from
+`CLAUDE_SESSION_ID` (or the host process when no session variable is exposed).
+Two Claude Code sessions can therefore use the same API key and repository
+without loading, transitioning, or deactivating each other's workflow. An
+embedding can override the source identity with `STATEWRIGHT_CLIENT_ID`.
+
+See [workflow stitching](../../docs/guides/stitching.md),
+[local reference recall](../../docs/guides/local-reference-recall.md), and
+[MCP session isolation](../../docs/guides/session-isolation.md) for details.
+
 ## Status line
 
 Show the current workflow state in your Claude Code status bar. Add to `~/.claude/settings.json`:

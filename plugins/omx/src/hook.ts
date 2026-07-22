@@ -15,6 +15,7 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { createHash } from "node:crypto"
 import { minimatch } from "minimatch"
 
 // --- Types ---
@@ -62,6 +63,7 @@ export interface HandlerOpts {
   apiKey: string | null
   gwUrl: string
   sessionDir: string
+  clientId: string
 }
 
 interface GatewayState {
@@ -379,6 +381,7 @@ export function checkInterrupts(
 async function gwCall(
   gwUrl: string,
   apiKey: string,
+  clientId: string,
   toolName: string,
   args: Record<string, unknown> = {},
 ): Promise<GatewayState | null> {
@@ -388,6 +391,7 @@ async function gwCall(
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
+        "X-Statewright-Client-Id": clientId,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -406,6 +410,20 @@ async function gwCall(
   } catch {
     return null
   }
+}
+
+export function resolveClientId(
+  inputSessionId?: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const material =
+    env.STATEWRIGHT_CLIENT_ID ??
+    env.CODEX_THREAD_ID ??
+    env.CODEX_SESSION_ID ??
+    inputSessionId ??
+    `process:${process.ppid}`
+  const digest = createHash("sha256").update(material).digest("hex").slice(0, 32)
+  return `swc_${digest}`
 }
 
 function parseGatewayState(raw: GatewayState): StateCache {
@@ -527,7 +545,7 @@ export async function handleUserPrompt(
   }
 
   // Active workflow: fetch state from gateway
-  const raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state")
+  const raw = await gwCall(opts.gwUrl, opts.apiKey, opts.clientId, "statewright_get_state")
   if (!raw?.state) {
     return {
       hookSpecificOutput: {
@@ -720,6 +738,7 @@ export async function handlePostTool(
         const raw = await gwCall(
           opts.gwUrl,
           opts.apiKey,
+          opts.clientId,
           "statewright_get_state",
         )
         if (raw) {
@@ -775,6 +794,7 @@ export async function handlePostTool(
       const raw = await gwCall(
         opts.gwUrl,
         opts.apiKey,
+        opts.clientId,
         "statewright_get_state",
       )
       if (!raw) return null
@@ -854,6 +874,7 @@ export async function handlePostTool(
         const raw = await gwCall(
           opts.gwUrl,
           opts.apiKey,
+          opts.clientId,
           "statewright_get_state",
         )
         if (raw) writeCache(opts.sessionDir, raw)
@@ -884,7 +905,7 @@ export async function handleStop(
   // gateway when a cache has not been established yet.
   let raw = readCache(opts.sessionDir)
   if (!raw && opts.apiKey) {
-    raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state")
+    raw = await gwCall(opts.gwUrl, opts.apiKey, opts.clientId, "statewright_get_state")
     if (raw) writeCache(opts.sessionDir, raw)
   }
 
@@ -939,14 +960,11 @@ async function main(): Promise<void> {
 
   const gwUrl =
     process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"
-  const sessionKey = (
-    input.session_id ??
-    process.env.CODEX_SESSION_ID ??
-    "default"
-  ).slice(0, 12)
+  const clientId = resolveClientId(input.session_id)
+  const sessionKey = clientId.slice(4, 20)
   const sessionDir = join(swDir, "sessions", sessionKey)
 
-  const opts: HandlerOpts = { apiKey, gwUrl, sessionDir }
+  const opts: HandlerOpts = { apiKey, gwUrl, sessionDir, clientId }
 
   let result: HookOutput | null = null
   switch (endpoint) {

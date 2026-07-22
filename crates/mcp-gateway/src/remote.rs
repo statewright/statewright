@@ -55,6 +55,42 @@ struct RemoteSession {
     tx: mpsc::Sender<String>,
 }
 
+const CLIENT_ID_HEADER: &str = "x-statewright-client-id";
+
+/// Derive the mutable gateway boundary for one streamable HTTP client.
+///
+/// The API-key fingerprint is the tenant boundary. A client-provided identity
+/// creates an isolated session inside that tenant. The returned canonical key
+/// can be echoed through `Mcp-Session-Id`; raw branch IDs remain compatible
+/// with the fork session names created by the gateway.
+fn streamable_session_key(
+    api_key_fingerprint: &str,
+    client_id: Option<&str>,
+    mcp_session_id: Option<&str>,
+) -> String {
+    let base = format!("http_{}", api_key_fingerprint);
+    let root = client_id.filter(|value| !value.is_empty()).map_or_else(
+        || base.clone(),
+        |value| {
+            let fingerprint = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_OID,
+                format!("statewright-client:{}", value).as_bytes(),
+            );
+            format!("{}__{}", base, fingerprint)
+        },
+    );
+
+    match mcp_session_id.filter(|value| !value.is_empty()) {
+        Some(session_id)
+            if session_id == root || session_id.starts_with(&format!("{}_br_", root)) =>
+        {
+            session_id.to_string()
+        }
+        Some(branch_id) if branch_id.starts_with("br_") => format!("{}_{}", root, branch_id),
+        _ => root,
+    }
+}
+
 /// Configuration for the remote transport.
 pub struct RemoteConfig {
     pub pb_url: String,
@@ -203,7 +239,7 @@ struct MessageQuery {
 }
 
 /// POST /mcp — Streamable HTTP transport (MCP 2025-03-26 spec).
-/// Each request creates or reuses a session keyed by API key.
+/// Each request creates or reuses a session keyed by API key + MCP client ID.
 /// Returns JSON-RPC response directly in the HTTP response body.
 async fn handle_streamable_http(
     State(state): State<Arc<RemoteState>>,
@@ -223,33 +259,21 @@ async fn handle_streamable_http(
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
     let api_key_fingerprint = api_key_hash.to_string();
 
-    // Accept Mcp-Session-Id header for branch subprocess isolation.
-    // Only branch IDs (starting with "br_") create separate sessions.
-    // Regular session IDs (echoed back from prior responses) are ignored for key computation
-    // to maintain backward compatibility with clients that send the header on every request.
-    let client_session_header = headers
+    // `X-Statewright-Client-Id` is stable for one Codex/Claude/etc. host
+    // session. `Mcp-Session-Id` is either the canonical key echoed from a
+    // prior response or a branch subprocess ID.
+    let client_id = headers
+        .get(CLIENT_ID_HEADER)
+        .and_then(|v| v.to_str().ok());
+    let mcp_session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // Detect branch session IDs: either "br_*" prefix (from subprocess env)
-    // or echoed-back full keys containing "_br_" (defense in depth).
-    let session_key = if let Some(ref hdr) = client_session_header {
-        if hdr.starts_with("br_") {
-            format!("http_{}_{}", api_key_fingerprint, hdr)
-        } else if hdr.contains("_br_") {
-            // Echoed-back full key — use as-is if it's scoped to this API key
-            if hdr.starts_with(&format!("http_{}", api_key_fingerprint)) {
-                hdr.clone()
-            } else {
-                format!("http_{}", api_key_fingerprint)
-            }
-        } else {
-            format!("http_{}", api_key_fingerprint)
-        }
-    } else {
-        format!("http_{}", api_key_fingerprint)
-    };
+        .filter(|value| !value.is_empty());
+    let session_key = streamable_session_key(
+        &api_key_fingerprint,
+        client_id,
+        mcp_session_id,
+    );
 
     // Use shared SessionManager for this API key (parent + branches share state)
     let session_manager = state.get_session_manager(&api_key_fingerprint).await;
@@ -599,6 +623,93 @@ mod tests {
 
     // --- Health endpoint ---
 
+    #[test]
+    fn streamable_http_separates_clients_with_the_same_api_key() {
+        let fingerprint = "account-fingerprint";
+        let client_a = streamable_session_key(fingerprint, Some("codex-thread-a"), None);
+        let client_b = streamable_session_key(fingerprint, Some("codex-thread-b"), None);
+
+        assert_ne!(client_a, client_b);
+        assert_eq!(
+            client_a,
+            streamable_session_key(fingerprint, Some("codex-thread-a"), None)
+        );
+        assert_eq!(
+            client_a,
+            streamable_session_key(fingerprint, Some("codex-thread-a"), Some(&client_a))
+        );
+    }
+
+    #[test]
+    fn branch_ids_are_scoped_under_the_client_root() {
+        let fingerprint = "account-fingerprint";
+        let root = streamable_session_key(fingerprint, Some("codex-thread-a"), None);
+        let branch = streamable_session_key(
+            fingerprint,
+            Some("codex-thread-a"),
+            Some("br_validation"),
+        );
+
+        assert_eq!(branch, format!("{}_br_validation", root));
+        assert_ne!(
+            branch,
+            streamable_session_key(
+                fingerprint,
+                Some("codex-thread-b"),
+                Some("br_validation"),
+            )
+        );
+    }
+
+    #[test]
+    fn canonical_session_ids_cannot_cross_client_roots() {
+        let fingerprint = "account-fingerprint";
+        let client_a = streamable_session_key(fingerprint, Some("codex-thread-a"), None);
+        let client_b = streamable_session_key(fingerprint, Some("codex-thread-b"), None);
+
+        assert_eq!(
+            streamable_session_key(fingerprint, Some("codex-thread-b"), Some(&client_a)),
+            client_b
+        );
+    }
+
+    #[test]
+    fn legacy_branch_sessions_still_accept_their_canonical_echo() {
+        let fingerprint = "account-fingerprint";
+        let branch = streamable_session_key(fingerprint, None, Some("br_validation"));
+
+        assert_eq!(
+            streamable_session_key(fingerprint, None, Some(&branch)),
+            branch
+        );
+    }
+
+    #[tokio::test]
+    async fn client_scoped_keys_keep_mutable_machine_state_independent() {
+        let state = test_state();
+        let fingerprint = "account-fingerprint";
+        let client_a = streamable_session_key(fingerprint, Some("codex-thread-a"), None);
+        let client_b = streamable_session_key(fingerprint, Some("codex-thread-b"), None);
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "isolation-test",
+            "initial": "planning",
+            "context": {},
+            "states": {
+                "planning": { "on": { "DONE": "complete" } },
+                "complete": { "type": "final" }
+            }
+        }))
+        .unwrap();
+        let manager = state.get_session_manager(fingerprint).await;
+        manager.create(client_a.clone(), definition.clone());
+        manager.create(client_b.clone(), definition);
+
+        assert!(manager.update_state(&client_a, "complete".into(), json!({"by": "a"})));
+        assert_eq!(manager.get(&client_a).unwrap().current_state, "complete");
+        assert_eq!(manager.get(&client_b).unwrap().current_state, "planning");
+        assert_eq!(manager.get(&client_b).unwrap().context, json!({}));
+    }
+
     #[tokio::test]
     async fn health_returns_ok() {
         let app = build_router(test_state());
@@ -852,4 +963,3 @@ mod tests {
         assert!(session.pending_approval.is_none());
     }
 }
-

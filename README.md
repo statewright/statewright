@@ -96,6 +96,27 @@ Three layers, each independently useful:
 
 The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface that spawns `sw-agent` as a subprocess and renders its JSONL event stream in real time. It handles keyboard input, demo mode, and fixture selection.
 
+### Composition, recall, and session boundaries
+
+Long feature work does not need one custom workflow per prompt. The bundled
+[`[stitch]` templates](docs/guides/stitching.md) compose reusable intake,
+decision, red/build/validate, triage, and adversarial-review submachines. Each
+child keeps its own tools and exit contract while the gateway records one
+stitch lineage across the root and child runs. Gateways with metering storage
+also persist that lineage for later audit.
+
+`statewright_search_references` provides
+[local reference recall](docs/guides/local-reference-recall.md) over guidance,
+ADRs, specs, workflows, code, validation summaries, and recent commits. It uses
+deterministic lexical ranking, returns path/hash/commit provenance, and keeps
+repository content inside the plugin process.
+
+Concurrent terminals are separated by an opaque
+[MCP client identity](docs/guides/session-isolation.md) beneath the API-key
+tenant. Hooks and tool calls in one Codex or Claude session therefore address
+the same state machine without sharing mutable state with another session in
+the same repository.
+
 ### Per-state model routing
 
 States can specify which model to use via the `model` field. A `default_model` in `meta` applies to states without an explicit override. Clients that support programmatic model switching (Pi, the Rust harness) enforce this; others treat it as advisory.
@@ -131,6 +152,15 @@ In this example, `diagnose` uses Haiku (fast, cheap reconnaissance), `propose_fi
 | Command allow-lists | Only prefix-matched commands run (e.g. `pytest`, `cargo test`) |
 | Conditional transitions | Programmatic guards on context data: `test_result eq pass`, `coverage gt 80` |
 | Approval gates | `requires_approval` pauses for human review |
+| Interrupts | Edit a file matching a glob pattern? Auto-transition to a validation state, then return where you were |
+| Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
+| Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |
+| Session isolation | API-key tenant plus opaque host-session identity; concurrent clients do not share mutable state |
+| Per-state model routing | Route cheap states to small models, expensive states to frontier models. `model` per state, `default_model` in `meta`. |
+| Thinking level control | Per-state `thinking_level` field (`high`, `medium`, `low`, `off`) for clients that support reasoning effort tuning. |
+| Tool escalation detection | Validator warns when a state jumps 2+ privilege levels without an approval gate |
+
+Full guardrail reference in [the docs](https://docs.statewright.ai/tools/reference).
 
 ### Approval routing
 
@@ -152,15 +182,6 @@ PostToolUse hook asks the host UI to present the review message. Their Stop
 hooks deliberately pass through: they must not hide or replace the host's
 approval prompt. An `external` approval mode leaves that prompt to the
 configured integration instead.
-| Interrupts | Edit a file matching a glob pattern? Auto-transition to a validation state, then return where you were |
-| Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
-| Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |
-| Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
-| Per-state model routing | Route cheap states to small models, expensive states to frontier models. `model` per state, `default_model` in `meta`. |
-| Thinking level control | Per-state `thinking_level` field (`high`, `medium`, `low`, `off`) for clients that support reasoning effort tuning. |
-| Tool escalation detection | Validator warns when a state jumps 2+ privilege levels without an approval gate |
-
-Full guardrail reference in [the docs](https://docs.statewright.ai/tools/reference).
 
 ## Define your own workflows
 
@@ -234,6 +255,10 @@ The gateway exposes these tools to the connected agent:
 | `statewright_get_status` | Gateway health: active workflow, state, available workflows |
 | `statewright_run_agent` | Spawn the Rust agent executor (`sw-agent`) for direct-to-Ollama bug fixing |
 | `statewright_force_state` | Jump to any state bypassing guards (debug mode only, gated on `meta.debug`) |
+
+Installed plugins may add local companion tools. In particular,
+`statewright_search_references` searches the active checkout without sending
+repository content to the managed gateway.
 
 ## Pricing
 

@@ -30,10 +30,19 @@ Or manual setup:
 [mcp_servers.statewright]
 command = "bash"
 args = ["/path/to/mcp-proxy.sh"]
-env_vars = ["STATEWRIGHT_API_KEY", "STATEWRIGHT_GATEWAY_URL"]
+env_vars = ["STATEWRIGHT_API_KEY", "STATEWRIGHT_GATEWAY_URL", "STATEWRIGHT_CLIENT_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"]
 ```
 
 Codex does not propagate parent environment variables to MCP child processes by default. The `env_vars` field explicitly forwards them.
+
+## Session isolation
+
+The MCP proxy and hooks derive the same opaque ID from `CODEX_THREAD_ID` (or
+`CODEX_SESSION_ID`) and send it with every gateway request. This separates two
+Codex sessions that use the same API key and checkout. If Codex exposes neither
+variable, the plugin falls back to the host process boundary rather than cwd.
+Set `STATEWRIGHT_CLIENT_ID` only when an embedding needs to supply its own
+stable session identity.
 
 ## Usage
 
@@ -50,6 +59,11 @@ metadata for allowlisted guidance, workflows, code, and bounded evidence plus
 recent commits. Results include path/line, source class, source hash, commit,
 and rank reasons. Ignored files, generated folders, secret paths, and detected
 credential material are excluded; repository contents never reach the gateway.
+
+See [workflow stitching](../../docs/guides/stitching.md),
+[local reference recall](../../docs/guides/local-reference-recall.md), and
+[MCP session isolation](../../docs/guides/session-isolation.md) for the runtime
+boundaries behind these tools.
 
 ## Hook events
 

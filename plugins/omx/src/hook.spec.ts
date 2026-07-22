@@ -45,6 +45,7 @@ import {
   handlePreTool,
   handlePostTool,
   handleStop,
+  resolveClientId,
   type StateCache,
   type HookInput,
 } from "./hook.js"
@@ -144,6 +145,7 @@ function makeOpts(overrides: Record<string, string | null> = {}) {
     apiKey: API_KEY,
     gwUrl: "http://localhost:3001",
     sessionDir: "/home/test/.statewright/sessions/abc12345",
+    clientId: "swc_test-client",
     ...overrides,
   }
 }
@@ -151,6 +153,28 @@ function makeOpts(overrides: Record<string, string | null> = {}) {
 // --- Tests ---
 
 describe("pure logic", () => {
+  describe("client identity", () => {
+    it("prefers the Codex thread ID and hashes it before transport", () => {
+      const first = resolveClientId("hook-session", {
+        CODEX_THREAD_ID: "thread-a",
+        CODEX_SESSION_ID: "session-a",
+      })
+      const second = resolveClientId("different-hook-session", {
+        CODEX_THREAD_ID: "thread-a",
+      })
+
+      expect(first).toBe(second)
+      expect(first).toMatch(/^swc_[a-f0-9]{32}$/)
+      expect(first).not.toContain("thread-a")
+    })
+
+    it("separates distinct Codex threads", () => {
+      expect(resolveClientId(undefined, { CODEX_THREAD_ID: "thread-a" })).not.toBe(
+        resolveClientId(undefined, { CODEX_THREAD_ID: "thread-b" }),
+      )
+    })
+  })
+
   describe("checkToolAllowed", () => {
     it("allows tools in allowedTools list", () => {
       const result = checkToolAllowed("Edit", MOCK_STATE)
@@ -427,6 +451,14 @@ describe("handleUserPrompt", () => {
     expect(result).not.toBeNull()
     expect(result!.hookSpecificOutput!.additionalContext).toContain("AUTONOMOUS MODE")
     expect(result!.hookSpecificOutput!.additionalContext).toContain("implementing")
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:3001/mcp",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "X-Statewright-Client-Id": "swc_test-client",
+        }),
+      }),
+    )
     // Should have written cache
     expect(writeFileSync).toHaveBeenCalled()
   })

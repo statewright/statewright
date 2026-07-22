@@ -23,13 +23,21 @@ API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || 
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 
-# Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env
+# Session-scoped state shared with the MCP proxy.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
-SESSION_KEY="${SESSION_KEY:0:12}"
+CLIENT_ID=$(statewright_client_id claude "$HOOK_SESSION")
+SESSION_KEY="${CLIENT_ID#swc_}"
+SESSION_KEY="${SESSION_KEY:0:16}"
 PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
+SESSION_HEADERS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
+if [ -n "${STATEWRIGHT_BRANCH_SESSION_ID:-}" ]; then
+  SESSION_HEADERS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_BRANCH_SESSION_ID}")
+fi
 
 # --- Auto-bootstrap settings.json + MCP config ---
 SETTINGS="$HOME/.claude/settings.json"
@@ -58,6 +66,7 @@ mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
+    "${SESSION_HEADERS[@]}" \
     -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 

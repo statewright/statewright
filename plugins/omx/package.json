@@ -1,6 +1,6 @@
 {
   "name": "statewright-omx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Statewright state machine guardrails for Oh My Codex (OMX)",
   "type": "module",
   "main": "dist/hook.js",

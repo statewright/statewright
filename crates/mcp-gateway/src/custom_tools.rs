@@ -298,7 +298,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Client session identifier for per-session state isolation"
+                        "description": "Legacy project/run metadata. MCP client isolation is established by the transport header."
                     },
                     "project_id": {
                         "type": "string",

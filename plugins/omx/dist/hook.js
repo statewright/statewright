@@ -8,6 +8,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { createHash } from "crypto";
 import { minimatch } from "minimatch";
 var SYSTEM_TOOLS = /* @__PURE__ */ new Set([
   "TodoRead",
@@ -222,13 +223,14 @@ function checkInterrupts(filePath, interrupts, interruptReturn) {
   }
   return null;
 }
-async function gwCall(gwUrl, apiKey, toolName, args = {}) {
+async function gwCall(gwUrl, apiKey, clientId, toolName, args = {}) {
   try {
     const resp = await fetch(`${gwUrl}/mcp`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`,
+        "X-Statewright-Client-Id": clientId
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -245,6 +247,11 @@ async function gwCall(gwUrl, apiKey, toolName, args = {}) {
   } catch {
     return null;
   }
+}
+function resolveClientId(inputSessionId, env = process.env) {
+  const material = env.STATEWRIGHT_CLIENT_ID ?? env.CODEX_THREAD_ID ?? env.CODEX_SESSION_ID ?? inputSessionId ?? `process:${process.ppid}`;
+  const digest = createHash("sha256").update(material).digest("hex").slice(0, 32);
+  return `swc_${digest}`;
 }
 function parseGatewayState(raw) {
   return {
@@ -339,7 +346,7 @@ async function handleUserPrompt(input, opts) {
       }
     };
   }
-  const raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state");
+  const raw = await gwCall(opts.gwUrl, opts.apiKey, opts.clientId, "statewright_get_state");
   if (!raw?.state) {
     return {
       hookSpecificOutput: {
@@ -485,6 +492,7 @@ async function handlePostTool(input, opts) {
         const raw = await gwCall(
           opts.gwUrl,
           opts.apiKey,
+          opts.clientId,
           "statewright_get_state"
         );
         if (raw) {
@@ -531,6 +539,7 @@ async function handlePostTool(input, opts) {
       const raw = await gwCall(
         opts.gwUrl,
         opts.apiKey,
+        opts.clientId,
         "statewright_get_state"
       );
       if (!raw) return null;
@@ -599,6 +608,7 @@ async function handlePostTool(input, opts) {
         const raw = await gwCall(
           opts.gwUrl,
           opts.apiKey,
+          opts.clientId,
           "statewright_get_state"
         );
         if (raw) writeCache(opts.sessionDir, raw);
@@ -614,7 +624,7 @@ async function handleStop(_input, opts) {
   if (!isActive(opts.sessionDir)) return null;
   let raw = readCache(opts.sessionDir);
   if (!raw && opts.apiKey) {
-    raw = await gwCall(opts.gwUrl, opts.apiKey, "statewright_get_state");
+    raw = await gwCall(opts.gwUrl, opts.apiKey, opts.clientId, "statewright_get_state");
     if (raw) writeCache(opts.sessionDir, raw);
   }
   if (!raw?.state) return null;
@@ -655,9 +665,10 @@ async function main() {
     }
   }
   const gwUrl = process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
-  const sessionKey = (input.session_id ?? process.env.CODEX_SESSION_ID ?? "default").slice(0, 12);
+  const clientId = resolveClientId(input.session_id);
+  const sessionKey = clientId.slice(4, 20);
   const sessionDir = join(swDir, "sessions", sessionKey);
-  const opts = { apiKey, gwUrl, sessionDir };
+  const opts = { apiKey, gwUrl, sessionDir, clientId };
   let result = null;
   switch (endpoint) {
     case "user-prompt":
@@ -693,5 +704,6 @@ export {
   handlePostTool,
   handlePreTool,
   handleStop,
-  handleUserPrompt
+  handleUserPrompt,
+  resolveClientId
 };

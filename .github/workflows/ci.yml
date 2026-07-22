@@ -16,5 +16,7 @@ jobs:
         run: cargo check --workspace
       - name: Test
         run: cargo test --workspace
+      - name: Test local plugin helpers
+        run: node --test plugins/shared/*.test.mjs
       - name: Build gateway
         run: cargo build --release -p statewright-mcp-gateway

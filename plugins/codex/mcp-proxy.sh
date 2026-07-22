@@ -8,6 +8,14 @@ PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
+
+CLIENT_ID=$(statewright_client_id codex)
+SESSION_HEADERS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
+if [ -n "${STATEWRIGHT_BRANCH_SESSION_ID:-}" ]; then
+  SESSION_HEADERS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_BRANCH_SESSION_ID}")
+fi
 
 # --- Tool discovery (defined before main loop) ---
 upload_client_tools() {
@@ -212,6 +220,7 @@ while IFS= read -r line; do
   RESPONSE=$(curl -sf --max-time 10 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
+    "${SESSION_HEADERS[@]}" \
     -d "$line" 2>/dev/null)
 
   if [ -n "$RESPONSE" ]; then

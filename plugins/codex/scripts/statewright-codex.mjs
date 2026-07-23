@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AppServerClient } from "./lib/app-server-client.mjs";
 import { StatewrightCodexOrchestrator } from "./lib/orchestrator.mjs";
 import {
@@ -193,7 +195,17 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isMainModule() {
+  try {
+    return Boolean(
+      process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url),
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main().then(
     (result) => {
       if (result?.status === "approval_required") process.exitCode = 3;

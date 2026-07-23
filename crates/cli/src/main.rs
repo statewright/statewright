@@ -2784,16 +2784,13 @@ fn causal_post_edit_can_audit(
         == causal_control::EvidenceTier::Efficacy
 }
 
-/// CLU policy may set legacy exploration variables while it tunes bounded
-/// localization. The causal controller keeps its repair trajectory serial,
-/// regardless of those policy defaults.
+/// The causal controller keeps repair serial, but it must not discard the
+/// locally ranked hypothesis agenda or its retained candidate evidence.
 fn enforce_causal_serial_env() {
     unsafe {
         std::env::set_var("SW_CANDIDATE_FANOUT_DISABLED", "1");
         std::env::set_var("SW_CANDIDATE_FANOUT", "0");
         std::env::set_var("SW_SCOUT_LANE_ESCALATION", "0");
-        std::env::set_var("SW_CANDIDATE_BANK", "0");
-        std::env::set_var("SW_PATCH_TOURNAMENT", "0");
     }
 }
 
@@ -3068,6 +3065,19 @@ fn advance_patch_hypothesis(
     log_patch_attempt(next, "selected", rejected_outcome);
     write_candidate_state_artifacts(hypotheses, *active_index, false, rejected_outcome);
     Some(render_patch_hypothesis_prompt(next, hypotheses.len()))
+}
+
+fn advance_causal_failover_hypothesis(
+    causal_one_pass: bool,
+    hypotheses: &[PatchHypothesis],
+    active_index: &mut usize,
+    exhausted: bool,
+    detail: &str,
+) -> Option<String> {
+    if !causal_one_pass || exhausted {
+        return None;
+    }
+    advance_patch_hypothesis(hypotheses, active_index, "model_declined_hypothesis", detail)
 }
 
 fn should_repair_parse_fail_on_active_hypothesis(
@@ -8820,10 +8830,9 @@ async fn main() {
                     candidate_bank = candidate_bank::CandidateBank::from_env();
                     if causal_one_pass {
                         enforce_causal_serial_env();
-                        enable_patch_tournament = false;
                         candidate_bank = candidate_bank::CandidateBank::from_env();
                         println!(
-                            "  [CAUSAL_REPAIR] preserved CLU localization policy but rejected CLU exploration expansion"
+                            "  [CAUSAL_REPAIR] preserved CLU serial hypothesis agenda; parallel fanout remains disabled"
                         );
                     }
                     println!(
@@ -9837,6 +9846,26 @@ async fn main() {
                         let assessment = causal_scope_assessment
                             .as_ref()
                             .expect("causal mode records every completed sandbox test execution");
+                        let changed = tools::all_diff_stats(&args.workdir);
+                        if !changed.is_empty() {
+                            if assessment.signal.is_pass_like() {
+                                candidate_bank.record_feedback_pass_candidate(
+                                    &args.workdir,
+                                    &changed,
+                                    &test_result,
+                                    &testing_scope_desc,
+                                    true,
+                                );
+                            } else {
+                                candidate_bank.record_failed_candidate(
+                                    &args.workdir,
+                                    &changed,
+                                    &test_result,
+                                    &testing_scope_desc,
+                                    same_auto_test_failure_count.saturating_add(1),
+                                );
+                            }
+                        }
                         let audit_only = passed && assessment.signal.is_pass_like();
                         let target = if audit_only {
                             trusted_pass_state_name(&definition)
@@ -14180,6 +14209,45 @@ Localization context:
                     conversation.clear();
                     tools::restore_snapshot(&args.workdir);
                     modified_files.clear();
+                    continue;
+                }
+                let err = transition_error
+                    .clone()
+                    .unwrap_or_else(|| "agent reported failure".into());
+                if let Some(next_prompt) = advance_causal_failover_hypothesis(
+                    causal_one_pass,
+                    &patch_hypotheses,
+                    &mut active_patch_hypothesis_index,
+                    patch_hypotheses_exhausted,
+                    &err,
+                ) {
+                    println!(
+                        "  [CAUSAL_REPAIR] model declined current hypothesis; restoring clean boundary and advancing"
+                    );
+                    tools::restore_snapshot(&args.workdir);
+                    modified_files.clear();
+                    read_cache.clear();
+                    read_paths.clear();
+                    observation_cache.clear();
+                    same_auto_test_failure_count = 0;
+                    same_test_diagnostic_required = false;
+                    edit_fail_count = 0;
+                    off_hypothesis_edit_count = 0;
+                    edit_path_argument_fail_count = 0;
+                    conversation.clear();
+                    conversation.push(ChatMessage {
+                        role: "user".into(),
+                        content: format!(
+                            "The prior hypothesis was declined before it produced a usable repair. The harness restored the clean source boundary and selected the next ranked source locus. Do not retry the rejected path without new evidence.\n\n{}",
+                            next_prompt
+                        ),
+                    });
+                    current_state = if definition.states.contains_key("patch_planning") {
+                        "patch_planning".to_string()
+                    } else {
+                        implementation_state_name(&definition)
+                    };
+                    steps_in_current_state = 0;
                     continue;
                 }
                 let err = transition_error.unwrap_or_else(|| "agent reported failure".into());

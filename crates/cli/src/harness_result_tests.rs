@@ -1,6 +1,7 @@
 use super::{
     auto_test_failure_signature, baseline_prove_repair_scope, causal_post_edit_can_audit,
-    compact_test_telemetry, extract_paths_from_malformed, inspect_class_locations,
+    compact_test_telemetry, enforce_causal_serial_env, extract_paths_from_malformed,
+    inspect_class_locations,
     is_stagnation_diagnostic_tool, malformed_response_path_diagnostics, parse_response,
     pre_completion_guard_failure, ranked_locus_excerpts, remaining_fanout_budget_seconds,
     restore_env, source_scope_ambiguous_candidate_count_with_window,
@@ -16,6 +17,7 @@ use std::sync::Mutex;
 
 static SW_TEST_CAN_COMPLETE_ENV_LOCK: Mutex<()> = Mutex::new(());
 static ARTIFACT_ENV_LOCK: Mutex<()> = Mutex::new(());
+static CAUSAL_SERIAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn source_scope_validation_covers_near_tied_candidates_only() {
@@ -3080,6 +3082,77 @@ fn patch_hypothesis_advances_after_stagnation() {
     assert!(prompt.contains("Patch hypothesis 2/2"));
     assert!(prompt.contains("pkg/b.py"));
     restore_env("SW_ARTIFACT_DIR", previous);
+}
+
+#[test]
+fn causal_failover_advances_to_the_next_ranked_hypothesis() {
+    let hypotheses = vec![
+        super::PatchHypothesis {
+            id: 1,
+            path: "pkg/first.py".to_string(),
+            score: 100,
+            reason: "top locus".to_string(),
+        },
+        super::PatchHypothesis {
+            id: 2,
+            path: "pkg/second.py".to_string(),
+            score: 90,
+            reason: "alternate locus".to_string(),
+        },
+    ];
+    let mut active = 0usize;
+
+    let prompt = super::advance_causal_failover_hypothesis(
+        true,
+        &hypotheses,
+        &mut active,
+        false,
+        "model emitted FAIL before patching",
+    )
+    .expect("causal mode should advance rather than terminally fail");
+
+    assert_eq!(active, 1);
+    assert!(prompt.contains("pkg/second.py"));
+    assert!(super::advance_causal_failover_hypothesis(
+        false,
+        &hypotheses,
+        &mut active,
+        false,
+        "non-causal mode keeps its existing failure policy",
+    )
+    .is_none());
+}
+
+#[test]
+fn causal_serial_env_keeps_local_candidate_selection_but_disables_fanout() {
+    let _guard = CAUSAL_SERIAL_ENV_LOCK.lock().unwrap();
+    let keys = [
+        "SW_CANDIDATE_FANOUT_DISABLED",
+        "SW_CANDIDATE_FANOUT",
+        "SW_SCOUT_LANE_ESCALATION",
+        "SW_CANDIDATE_BANK",
+        "SW_PATCH_TOURNAMENT",
+    ];
+    let previous: Vec<_> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+    unsafe {
+        std::env::set_var("SW_CANDIDATE_BANK", "1");
+        std::env::set_var("SW_PATCH_TOURNAMENT", "best_of_n");
+    }
+
+    enforce_causal_serial_env();
+
+    assert_eq!(std::env::var("SW_CANDIDATE_FANOUT_DISABLED").ok().as_deref(), Some("1"));
+    assert_eq!(std::env::var("SW_CANDIDATE_FANOUT").ok().as_deref(), Some("0"));
+    assert_eq!(std::env::var("SW_SCOUT_LANE_ESCALATION").ok().as_deref(), Some("0"));
+    assert_eq!(std::env::var("SW_CANDIDATE_BANK").ok().as_deref(), Some("1"));
+    assert_eq!(std::env::var("SW_PATCH_TOURNAMENT").ok().as_deref(), Some("best_of_n"));
+
+    for (key, value) in previous {
+        restore_env(key, value);
+    }
 }
 
 #[test]

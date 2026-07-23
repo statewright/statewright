@@ -3156,7 +3156,7 @@ fn structured_machine_routes_through_triage_and_audit() {
     assert!(definition.states.contains_key("completion_audit"));
     let evidence_state = &definition.states["task_evidence_acquisition"];
     assert_eq!(evidence_state.max_iterations, Some(2));
-    assert_eq!(evidence_state.safe_next.as_deref(), Some("completion_audit"));
+    assert_eq!(evidence_state.safe_next.as_deref(), Some("failure_triage"));
     let evidence_tools = evidence_state.allowed_tools.as_ref().unwrap();
     assert!(evidence_tools.contains(&"write_task_reproducer".to_string()));
     assert!(evidence_tools.contains(&"run_task_reproducer".to_string()));
@@ -3183,7 +3183,15 @@ fn structured_machine_routes_through_triage_and_audit() {
             "task_evidence_acquisition",
             "TASK_EVIDENCE_UNAVAILABLE"
         ),
-        "completion_audit"
+        "failure_triage"
+    );
+    assert_eq!(
+        transition_target(&definition, "task_evidence_acquisition", "DONE"),
+        "failure_triage"
+    );
+    assert_eq!(
+        transition_target(&definition, "task_evidence_acquisition", "FAIL"),
+        "failure_triage"
     );
     assert_eq!(
         transition_target(&definition, "micro_validation", "VALIDATION_FEEDBACK_ONLY"),
@@ -3240,17 +3248,17 @@ fn post_patch_task_evidence_delta_routes_are_typed_and_bounded() {
         2
     ));
     assert!(!super::task_evidence_budget_exhausted("editing", 20));
-    assert!(super::task_evidence_fail_must_audit(
+    assert!(super::task_evidence_fail_must_repair(
         true,
         "task_evidence_acquisition",
         "FAIL"
     ));
-    assert!(!super::task_evidence_fail_must_audit(
+    assert!(!super::task_evidence_fail_must_repair(
         true,
         "editing",
         "FAIL"
     ));
-    assert!(!super::task_evidence_fail_must_audit(
+    assert!(!super::task_evidence_fail_must_repair(
         false,
         "task_evidence_acquisition",
         "FAIL"

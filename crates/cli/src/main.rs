@@ -2472,7 +2472,7 @@ fn task_evidence_budget_exhausted(state: &str, steps_in_state: u32) -> bool {
     state == "task_evidence_acquisition" && steps_in_state >= 2
 }
 
-fn task_evidence_fail_must_audit(causal_one_pass: bool, state: &str, event: &str) -> bool {
+fn task_evidence_fail_must_repair(causal_one_pass: bool, state: &str, event: &str) -> bool {
     causal_one_pass && state == "task_evidence_acquisition" && event == "FAIL"
 }
 
@@ -6141,14 +6141,14 @@ fn hardcoded_bug_fix_machine_v2() -> MachineDefinition {
                 "allowed_tools": ["read_file", "find_files", "grep", "inspect_class", "diff", "write_task_reproducer", "run_task_reproducer"],
                 "instructions": "Preserve the current source patch. Spend at most two turns acquiring issue-specific efficacy evidence: use existing issue/localization context to write one behavioral scratch reproducer, or run it if already qualified. Do not edit production files, repository tests, or the retained patch. The harness validates the scratch test on the untouched baseline and immediately reruns a qualified reproducer against the candidate. If no reproducer qualifies, continue to completion audit with the retained patch rather than guessing or aborting.",
                 "max_iterations": 2,
-                "safe_next": "completion_audit",
+                "safe_next": "failure_triage",
                 "on": {
                     "TASK_EVIDENCE_FIXED": "completion_audit",
                     "TASK_EVIDENCE_CHANGED": "completion_audit",
                     "TASK_EVIDENCE_REPAIR": "failure_triage",
-                    "TASK_EVIDENCE_UNAVAILABLE": "completion_audit",
-                    "DONE": "completion_audit",
-                    "FAIL": "completion_audit"
+                    "TASK_EVIDENCE_UNAVAILABLE": "failure_triage",
+                    "DONE": "failure_triage",
+                    "FAIL": "failure_triage"
                 }
             },
             "failure_triage": {
@@ -10156,7 +10156,7 @@ async fn main() {
         if causal_one_pass
             && task_evidence_budget_exhausted(&current_state, steps_in_current_state)
         {
-            let target = trusted_pass_state_name(&definition);
+            let target = failure_triage_state_name(&definition);
             record_causal_event(
                 &mut causal_repair_controller,
                 causal_repair::CausalEvent::ValidationObserved {
@@ -14133,8 +14133,8 @@ Localization context:
                 .unwrap_or(raw_event)
                 .trim();
 
-            if task_evidence_fail_must_audit(causal_one_pass, &current_state, event) {
-                let target = trusted_pass_state_name(&definition);
+            if task_evidence_fail_must_repair(causal_one_pass, &current_state, event) {
+                let target = failure_triage_state_name(&definition);
                 record_causal_event(
                     &mut causal_repair_controller,
                     causal_repair::CausalEvent::ValidationObserved {

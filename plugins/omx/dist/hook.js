@@ -228,7 +228,8 @@ async function gwCall(gwUrl, apiKey, toolName, args = {}) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`,
+        ...process.env.STATEWRIGHT_MCP_SESSION_ID ? { "Mcp-Session-Id": process.env.STATEWRIGHT_MCP_SESSION_ID } : {}
       },
       body: JSON.stringify({
         jsonrpc: "2.0",

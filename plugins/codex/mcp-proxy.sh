@@ -6,6 +6,10 @@
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
+SESSION_HEADER_ARGS=()
+if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
+  SESSION_HEADER_ARGS=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
+fi
 
 # --- Tool discovery (defined before main loop) ---
 upload_client_tools() {
@@ -195,6 +199,7 @@ while IFS= read -r line; do
   RESPONSE=$(curl -sf --max-time 10 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
+    "${SESSION_HEADER_ARGS[@]}" \
     -d "$line" 2>/dev/null)
 
   if [ -n "$RESPONSE" ]; then

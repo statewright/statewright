@@ -2,7 +2,10 @@
   "mcpServers": {
     "statewright": {
       "command": "bash",
-      "args": ["${PLUGIN_ROOT}/mcp-proxy.sh"]
+      "args": ["${PLUGIN_ROOT}/mcp-proxy.sh"],
+      "env": {
+        "STATEWRIGHT_MCP_SESSION_ID": "${STATEWRIGHT_MCP_SESSION_ID}"
+      }
     }
   }
 }

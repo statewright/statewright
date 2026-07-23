@@ -431,6 +431,23 @@ describe("handleUserPrompt", () => {
     expect(writeFileSync).toHaveBeenCalled()
   })
 
+  it("forwards the adapter MCP session id to the gateway", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") ? true : false
+    )
+    setupGateway()
+    process.env.STATEWRIGHT_MCP_SESSION_ID = "br_codex_test-session"
+
+    try {
+      await handleUserPrompt({} as HookInput, makeOpts())
+      const request = fetchMock.mock.calls[0]?.[1] as RequestInit
+      const headers = new Headers(request.headers)
+      expect(headers.get("mcp-session-id")).toBe("br_codex_test-session")
+    } finally {
+      delete process.env.STATEWRIGHT_MCP_SESSION_ID
+    }
+  })
+
   it("gracefully degrades when gateway unreachable", async () => {
     ;(existsSync as Mock).mockImplementation((p: string) =>
       p.includes(".active") ? true : false

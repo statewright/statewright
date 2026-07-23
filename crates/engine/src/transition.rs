@@ -10,12 +10,13 @@ pub fn resolve_transition(
     context: &Value,
     definition: &MachineDefinition,
 ) -> Result<TransitionResult, TransitionError> {
-    let state_def = definition
-        .states
-        .get(current_state)
-        .ok_or_else(|| TransitionError::StateNotFound {
-            state: current_state.to_string(),
-        })?;
+    let state_def =
+        definition
+            .states
+            .get(current_state)
+            .ok_or_else(|| TransitionError::StateNotFound {
+                state: current_state.to_string(),
+            })?;
 
     let transition = match state_def.on.get(event) {
         Some(t) => t,
@@ -329,7 +330,8 @@ mod tests {
         let r = resolve_transition("draft", "SUBMIT", &json!({}), &ctx, &def).unwrap();
         assert_eq!(r.new_state, "pending_payment");
 
-        let r = resolve_transition("pending_payment", "CONFIRM_PAYMENT", &json!({}), &ctx, &def).unwrap();
+        let r = resolve_transition("pending_payment", "CONFIRM_PAYMENT", &json!({}), &ctx, &def)
+            .unwrap();
         assert_eq!(r.new_state, "confirmed");
 
         let r = resolve_transition("confirmed", "SHIP", &json!({}), &ctx, &def).unwrap();
@@ -362,7 +364,10 @@ mod tests {
 
         let result = resolve_transition("planning", "READY", &json!({}), &json!({}), &def).unwrap();
         assert!(result.requires_approval);
-        assert_eq!(result.approval_message.as_deref(), Some("Agent wants to start executing"));
+        assert_eq!(
+            result.approval_message.as_deref(),
+            Some("Agent wants to start executing")
+        );
     }
 
     // safe_next tests
@@ -385,7 +390,8 @@ mod tests {
         .unwrap();
 
         // Model says "COMPLETE" but the event is "FINISH" — safe_next catches it
-        let result = resolve_transition("working", "COMPLETE", &json!({}), &json!({}), &def).unwrap();
+        let result =
+            resolve_transition("working", "COMPLETE", &json!({}), &json!({}), &def).unwrap();
         assert!(result.transitioned);
         assert_eq!(result.new_state, "done");
     }
@@ -474,9 +480,8 @@ mod tests {
         }))
         .unwrap();
 
-        let result = resolve_transition(
-            "testing", "TESTS_FAIL", &json!({}), &json!({}), &def,
-        ).unwrap();
+        let result =
+            resolve_transition("testing", "TESTS_FAIL", &json!({}), &json!({}), &def).unwrap();
 
         assert!(result.transitioned);
         assert_eq!(result.new_state, "testing"); // on_complete target
@@ -650,7 +655,8 @@ mod tests {
     fn return_target_resolves_from_context() {
         let def = interrupt_machine();
         let ctx = json!({"_interrupt_return": "implementing"});
-        let result = resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
+        let result =
+            resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
         assert!(result.transitioned);
         assert_eq!(result.new_state, "implementing");
     }
@@ -673,7 +679,8 @@ mod tests {
     fn return_target_cleans_up_context() {
         let def = interrupt_machine();
         let ctx = json!({"_interrupt_return": "implementing", "some_data": "kept"});
-        let result = resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
+        let result =
+            resolve_transition("pb_validating", "VALIDATED", &json!({}), &ctx, &def).unwrap();
         assert_eq!(result.new_state, "implementing");
         // _interrupt_return should be removed from context
         assert!(result.new_context.get("_interrupt_return").is_none());
@@ -745,14 +752,21 @@ mod tests {
     #[test]
     fn fork_target_returns_on_complete() {
         let def = fork_machine();
-        let transition = def.states.get("building").unwrap().on.get("BUILD_DONE").unwrap();
+        let transition = def
+            .states
+            .get("building")
+            .unwrap()
+            .on
+            .get("BUILD_DONE")
+            .unwrap();
         assert_eq!(transition.target(), "deploying");
     }
 
     #[test]
     fn fork_transition_returns_fork_result() {
         let def = fork_machine();
-        let result = resolve_transition("building", "BUILD_DONE", &json!({}), &json!({}), &def).unwrap();
+        let result =
+            resolve_transition("building", "BUILD_DONE", &json!({}), &json!({}), &def).unwrap();
         assert!(result.transitioned);
         assert_eq!(result.new_state, "deploying");
         let fork = result.fork.unwrap();
@@ -823,7 +837,8 @@ mod tests {
     fn fuzzy_resolves_target_name_to_event() {
         // "completed" is a target, not an event — should resolve to TESTS_PASS
         let def = verification_machine();
-        let result = resolve_transition("verification", "completed", &json!({}), &json!({}), &def).unwrap();
+        let result =
+            resolve_transition("verification", "completed", &json!({}), &json!({}), &def).unwrap();
         assert_eq!(result.new_state, "completed");
         assert!(result.transitioned);
     }
@@ -832,7 +847,8 @@ mod tests {
     fn fuzzy_resolves_substring_match() {
         // "PASS" is a substring of "TESTS_PASS"
         let def = verification_machine();
-        let result = resolve_transition("verification", "PASS", &json!({}), &json!({}), &def).unwrap();
+        let result =
+            resolve_transition("verification", "PASS", &json!({}), &json!({}), &def).unwrap();
         assert_eq!(result.new_state, "completed");
     }
 
@@ -868,7 +884,8 @@ mod tests {
     fn exact_match_takes_priority_over_fuzzy() {
         // Event "FAIL" exists exactly — should not fuzzy-match to "TESTS_FAIL"
         let def = verification_machine();
-        let result = resolve_transition("verification", "FAIL", &json!({}), &json!({}), &def).unwrap();
+        let result =
+            resolve_transition("verification", "FAIL", &json!({}), &json!({}), &def).unwrap();
         assert_eq!(result.new_state, "failed");
     }
 }

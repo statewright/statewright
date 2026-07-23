@@ -55,7 +55,11 @@ pub fn enforce_tools(
         None
     };
 
-    ToolEnforcementResult { allowed, blocked, implicit_transition }
+    ToolEnforcementResult {
+        allowed,
+        blocked,
+        implicit_transition,
+    }
 }
 
 /// If a blocked tool is available in a state reachable via a single transition,
@@ -88,11 +92,7 @@ pub fn get_allowed_tools(
     definition: &MachineDefinition,
     current_state: &str,
 ) -> Option<Vec<String>> {
-    definition
-        .states
-        .get(current_state)?
-        .allowed_tools
-        .clone()
+    definition.states.get(current_state)?.allowed_tools.clone()
 }
 
 #[cfg(test)]

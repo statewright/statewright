@@ -54,7 +54,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Remote mode: HTTP+SSE transport, no config file needed
     if args.remote {
-        tracing::info!(addr = args.remote_addr, pb_url = args.pb_url, "Starting remote MCP transport");
+        tracing::info!(
+            addr = args.remote_addr,
+            pb_url = args.pb_url,
+            "Starting remote MCP transport"
+        );
         let addr = statewright_mcp_gateway::remote::start_remote_server(
             statewright_mcp_gateway::remote::RemoteConfig {
                 pb_url: args.pb_url,
@@ -70,9 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let config_path = args.config.ok_or("--config is required for stdio/hook mode")?;
-    let config = GatewayConfig::from_file(&config_path)
-        .map_err(|e| format!("Config error: {}", e))?;
+    let config_path = args
+        .config
+        .ok_or("--config is required for stdio/hook mode")?;
+    let config =
+        GatewayConfig::from_file(&config_path).map_err(|e| format!("Config error: {}", e))?;
 
     // Validate all workflow definitions
     for (name, def) in &config.workflows {
@@ -80,7 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Invalid workflow '{}': {}", name, e))?;
     }
 
-    let default_def = config.workflows.get(&config.default)
+    let default_def = config
+        .workflows
+        .get(&config.default)
         .ok_or_else(|| format!("Default workflow '{}' not found", config.default))?;
 
     tracing::info!(
@@ -95,13 +103,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("No upstream servers configured — custom tools only");
         UpstreamManager::empty()
     } else {
-        UpstreamManager::start(config.upstream_servers).await
+        UpstreamManager::start(config.upstream_servers)
+            .await
             .map_err(|e| format!("Failed to start upstream servers: {}", e))?
     };
 
     // Plan limit: self-hosted = unlimited, cloud = fetched from API at startup.
     let plan_limit: Option<u64> = if let Some(ref _api_key) = config.api_key {
-        let _cloud_url = config.cloud_url.as_deref().unwrap_or("https://mcp.statewright.ai");
+        let _cloud_url = config
+            .cloud_url
+            .as_deref()
+            .unwrap_or("https://mcp.statewright.ai");
         tracing::info!("Cloud mode: plan limit check enabled");
         None
     } else {
@@ -125,7 +137,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start hook server if requested
     if args.hook_server {
-        let addr = hooks::start_hook_server(session_manager.clone(), session_id.clone()).await
+        let addr = hooks::start_hook_server(session_manager.clone(), session_id.clone())
+            .await
             .map_err(|e| format!("Failed to start hook server: {}", e))?;
 
         std::fs::write(&args.hook_port_file, addr.port().to_string())

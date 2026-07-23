@@ -228,11 +228,12 @@ impl UpstreamManager {
             .map_err(|e| format!("Flush failed: {}", e))?;
 
         let mut line = String::new();
-        server
-            .reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Failed to read initialize response from '{}': {}", server.name, e))?;
+        server.reader.read_line(&mut line).await.map_err(|e| {
+            format!(
+                "Failed to read initialize response from '{}': {}",
+                server.name, e
+            )
+        })?;
 
         // Send initialized notification
         let notification = JsonRpcRequest {
@@ -252,7 +253,11 @@ impl UpstreamManager {
             .write_all(b"\n")
             .await
             .map_err(|e| format!("Write newline failed: {}", e))?;
-        server.stdin.flush().await.map_err(|e| format!("Flush failed: {}", e))?;
+        server
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Flush failed: {}", e))?;
 
         Ok(())
     }
@@ -274,15 +279,24 @@ impl UpstreamManager {
             .write_all(request_line.as_bytes())
             .await
             .map_err(|e| format!("Failed to write tools/list to '{}': {}", server.name, e))?;
-        server.stdin.write_all(b"\n").await.map_err(|e| format!("Write newline failed: {}", e))?;
-        server.stdin.flush().await.map_err(|e| format!("Flush failed: {}", e))?;
+        server
+            .stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("Write newline failed: {}", e))?;
+        server
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| format!("Flush failed: {}", e))?;
 
         let mut line = String::new();
-        server
-            .reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| format!("Failed to read tools/list response from '{}': {}", server.name, e))?;
+        server.reader.read_line(&mut line).await.map_err(|e| {
+            format!(
+                "Failed to read tools/list response from '{}': {}",
+                server.name, e
+            )
+        })?;
 
         let response: JsonRpcResponse = serde_json::from_str(line.trim())
             .map_err(|e| format!("Failed to parse tools/list response: {}", e))?;
@@ -326,11 +340,19 @@ mod tests {
     fn mock_includes_tools_in_all_tools() {
         let mgr = UpstreamManager::mock(vec![
             (
-                ToolInfo { name: "Edit".into(), description: Some("Edit".into()), input_schema: serde_json::json!({}) },
+                ToolInfo {
+                    name: "Edit".into(),
+                    description: Some("Edit".into()),
+                    input_schema: serde_json::json!({}),
+                },
                 ToolCallResult::text("ok"),
             ),
             (
-                ToolInfo { name: "Read".into(), description: Some("Read".into()), input_schema: serde_json::json!({}) },
+                ToolInfo {
+                    name: "Read".into(),
+                    description: Some("Read".into()),
+                    input_schema: serde_json::json!({}),
+                },
                 ToolCallResult::text("ok"),
             ),
         ]);
@@ -342,25 +364,32 @@ mod tests {
 
     #[tokio::test]
     async fn mock_call_tool_returns_canned_result() {
-        let mut mgr = UpstreamManager::mock(vec![
-            (
-                ToolInfo { name: "Edit".into(), description: None, input_schema: serde_json::json!({}) },
-                ToolCallResult::text("file edited successfully"),
-            ),
-        ]);
-        let result = mgr.call_tool("Edit", serde_json::json!({"file": "test.rs"})).await.unwrap();
+        let mut mgr = UpstreamManager::mock(vec![(
+            ToolInfo {
+                name: "Edit".into(),
+                description: None,
+                input_schema: serde_json::json!({}),
+            },
+            ToolCallResult::text("file edited successfully"),
+        )]);
+        let result = mgr
+            .call_tool("Edit", serde_json::json!({"file": "test.rs"}))
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.content[0].text, "file edited successfully");
     }
 
     #[tokio::test]
     async fn mock_call_tool_unknown_tool_errors() {
-        let mut mgr = UpstreamManager::mock(vec![
-            (
-                ToolInfo { name: "Edit".into(), description: None, input_schema: serde_json::json!({}) },
-                ToolCallResult::text("ok"),
-            ),
-        ]);
+        let mut mgr = UpstreamManager::mock(vec![(
+            ToolInfo {
+                name: "Edit".into(),
+                description: None,
+                input_schema: serde_json::json!({}),
+            },
+            ToolCallResult::text("ok"),
+        )]);
         let result = mgr.call_tool("Deploy", serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No upstream server"));

@@ -1,9 +1,9 @@
 use crate::ollama_client::{OllamaClient, OllamaError};
 use crate::prompt_templates;
 use crate::tool_enforcer;
-use statewright_engine::{MachineDefinition, StateType, TransitionError};
 use serde::Deserialize;
 use serde_json::Value;
+use statewright_engine::{MachineDefinition, StateType, TransitionError};
 
 /// Tracks the full state of an executing agent session.
 #[derive(Debug, Clone)]
@@ -19,7 +19,10 @@ pub struct ExecutionState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionStatus {
     Running,
-    AwaitingApproval { event: String, message: String },
+    AwaitingApproval {
+        event: String,
+        message: String,
+    },
     AwaitingInvoke {
         machine: String,
         on_complete: String,
@@ -27,7 +30,9 @@ pub enum ExecutionStatus {
         input: Option<Value>,
     },
     Completed,
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 /// Registry of sub-machine definitions that can be invoked.
@@ -139,8 +144,7 @@ impl ExecutionState {
 
         let transitions: Vec<(String, String)> = state_def
             .map(|s| {
-                s.on
-                    .iter()
+                s.on.iter()
                     .map(|(event, t)| (event.clone(), t.target().to_string()))
                     .collect()
             })
@@ -158,7 +162,10 @@ impl ExecutionState {
         );
 
         // Call the LLM
-        let raw_response = client.chat(messages).await.map_err(ExecutionError::Ollama)?;
+        let raw_response = client
+            .chat(messages)
+            .await
+            .map_err(ExecutionError::Ollama)?;
 
         // Parse the response — try to extract structured action
         let action = parse_llm_response(&raw_response);
@@ -245,8 +252,7 @@ impl ExecutionState {
                             self.context = result.new_context;
 
                             // Check if we reached a final state
-                            if let Some(target_def) =
-                                self.definition.states.get(&result.new_state)
+                            if let Some(target_def) = self.definition.states.get(&result.new_state)
                             {
                                 if matches!(target_def.state_type, Some(StateType::Final)) {
                                     self.status = ExecutionStatus::Completed;
@@ -332,7 +338,9 @@ impl ExecutionState {
             if !self.context.is_object() {
                 self.context = Value::Object(serde_json::Map::new());
             }
-            if let (Some(parent), Some(child)) = (self.context.as_object_mut(), child_ctx.as_object()) {
+            if let (Some(parent), Some(child)) =
+                (self.context.as_object_mut(), child_ctx.as_object())
+            {
                 for (k, v) in child {
                     parent.insert(k.clone(), v.clone());
                 }
@@ -463,7 +471,11 @@ impl std::fmt::Display for ExecutionError {
             ExecutionError::Ollama(e) => write!(f, "ollama error: {}", e),
             ExecutionError::Transition(e) => write!(f, "transition error: {}", e),
             ExecutionError::MaxIterationsExceeded { state, limit } => {
-                write!(f, "max iterations ({}) exceeded in state '{}'", limit, state)
+                write!(
+                    f,
+                    "max iterations ({}) exceeded in state '{}'",
+                    limit, state
+                )
             }
         }
     }
@@ -534,7 +546,9 @@ mod tests {
 
                 let next_response = {
                     let mut iter = responses.lock().unwrap();
-                    iter.next().unwrap_or_else(|| r#"{"transition": "FAIL", "error": "no more mock responses"}"#.into())
+                    iter.next().unwrap_or_else(|| {
+                        r#"{"transition": "FAIL", "error": "no more mock responses"}"#.into()
+                    })
                 };
 
                 tokio::spawn(async move {
@@ -555,7 +569,8 @@ mod tests {
                     let body_str = serde_json::to_string(&body).unwrap();
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body_str.len(), body_str
+                        body_str.len(),
+                        body_str
                     );
                     let _ = stream.write_all(resp.as_bytes()).await;
                 });
@@ -585,9 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn step_advances_state_on_transition() {
-        let responses = vec![
-            r#"{"transition": "PLAN_READY"}"#.into(),
-        ];
+        let responses = vec![r#"{"transition": "PLAN_READY"}"#.into()];
         let (url, handle) = start_sequenced_mock(responses).await;
         let client = mock_client(&url);
 
@@ -645,7 +658,10 @@ mod tests {
         // testing → (approval gate) → parks
         exec.step(&client).await.unwrap();
         assert_eq!(exec.current_state, "testing"); // hasn't moved yet
-        assert!(matches!(exec.status, ExecutionStatus::AwaitingApproval { .. }));
+        assert!(matches!(
+            exec.status,
+            ExecutionStatus::AwaitingApproval { .. }
+        ));
 
         if let ExecutionStatus::AwaitingApproval { message, .. } = &exec.status {
             assert_eq!(message, "Tests pass. Review changes?");
@@ -715,7 +731,7 @@ mod tests {
         exec.step(&client).await.unwrap(); // → implementing
         exec.step(&client).await.unwrap(); // → testing
         exec.step(&client).await.unwrap(); // → awaiting approval
-        exec.approve().unwrap();            // → review
+        exec.approve().unwrap(); // → review
 
         exec.step(&client).await.unwrap(); // → completed
         assert_eq!(exec.current_state, "completed");
@@ -787,7 +803,10 @@ mod tests {
         assert_eq!(exec.current_state, "testing");
 
         exec.step(&client).await.unwrap();
-        assert!(matches!(exec.status, ExecutionStatus::AwaitingApproval { .. }));
+        assert!(matches!(
+            exec.status,
+            ExecutionStatus::AwaitingApproval { .. }
+        ));
 
         exec.approve().unwrap();
         assert_eq!(exec.current_state, "review");
@@ -904,7 +923,12 @@ mod tests {
         exec.step(&client).await.unwrap(); // testing → TESTS_FAIL → AwaitingInvoke
 
         match &exec.status {
-            ExecutionStatus::AwaitingInvoke { machine, on_complete, on_fail, input } => {
+            ExecutionStatus::AwaitingInvoke {
+                machine,
+                on_complete,
+                on_fail,
+                input,
+            } => {
                 assert_eq!(machine, "debug_machine");
                 assert_eq!(on_complete, "testing");
                 assert_eq!(on_fail.as_deref(), Some("failed"));
@@ -930,7 +954,8 @@ mod tests {
         exec.step(&client).await.unwrap();
 
         // Sub-machine completed — resume at on_complete (testing)
-        exec.complete_invoke(Some(json!({"fix_applied": true}))).unwrap();
+        exec.complete_invoke(Some(json!({"fix_applied": true})))
+            .unwrap();
 
         assert_eq!(exec.current_state, "testing");
         assert_eq!(exec.status, ExecutionStatus::Running);

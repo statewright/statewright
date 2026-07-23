@@ -52,3 +52,9 @@ plugins/claude-code/test-bash-discernment.sh
 
 # Test fixtures with their own git repos
 self-hosted/fixtures/
+
+# Scratch outputs
+gold.validate-gold*.json
+logs/
+plugins/smoke-test/
+tmp/

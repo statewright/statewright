@@ -1,12 +1,17 @@
+use crate::{solver_test_plan, task_reproducer, test_runtime::GitValidationSandbox, validation_oracle};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Default)]
 pub struct Snapshot {
-    files: HashMap<String, String>,
+    files: HashMap<String, Vec<u8>>,
 }
 
 impl Snapshot {
@@ -15,11 +20,83 @@ impl Snapshot {
     }
 }
 
-/// File snapshots taken before implementing — used for diff/minimize.
-static SNAPSHOTS: std::sync::LazyLock<Mutex<Snapshot>> =
-    std::sync::LazyLock::new(|| Mutex::new(Snapshot::default()));
-static CANDIDATE_SNAPSHOT: std::sync::LazyLock<Mutex<Snapshot>> =
-    std::sync::LazyLock::new(|| Mutex::new(Snapshot::default()));
+/// File snapshots taken before implementing, isolated by repository root.
+static SNAPSHOTS: std::sync::LazyLock<Mutex<HashMap<String, Snapshot>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static CANDIDATE_SNAPSHOTS: std::sync::LazyLock<Mutex<HashMap<String, Snapshot>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Edit locus gate: tracks consecutive edit failures per file.
+/// After 3 consecutive failures on the same file, edit_line is blocked
+/// until read_file is called for that file.
+static EDIT_FAIL_COUNT: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static EDIT_BLOCKED: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+static UNSCOPED_TEST_PROBE_USED: std::sync::LazyLock<Mutex<bool>> =
+    std::sync::LazyLock::new(|| Mutex::new(false));
+static VALIDATION_SANDBOX: std::sync::LazyLock<Mutex<Option<GitValidationSandbox>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+static TASK_REPRODUCER_ISSUE: std::sync::LazyLock<Mutex<String>> =
+    std::sync::LazyLock::new(|| Mutex::new(String::new()));
+static ACTIVE_TASK_REPRODUCER: std::sync::LazyLock<Mutex<Option<ActiveTaskReproducer>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+pub struct ValidationSandboxGuard;
+
+/// Whether the current process has a baseline-qualified scratch reproducer.
+/// The answer is intentionally process-local: a child agent must qualify its
+/// own reproducer instead of inheriting an unverified parent artifact.
+pub fn has_qualified_task_reproducer() -> bool {
+    ACTIVE_TASK_REPRODUCER
+        .lock()
+        .map(|slot| slot.is_some())
+        .unwrap_or(false)
+}
+
+#[derive(Clone)]
+struct ActiveTaskReproducer {
+    source_path: PathBuf,
+    qualified: task_reproducer::QualifiedReproducer,
+    baseline_output: String,
+    baseline_observation: validation_oracle::TestObservation,
+}
+
+impl Drop for ValidationSandboxGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = VALIDATION_SANDBOX.lock() {
+            if let Some(sandbox) = slot.take() {
+                if let Err(err) = sandbox.teardown() {
+                    eprintln!("[VALIDATION_SANDBOX] teardown_failed {err}");
+                }
+            }
+        }
+    }
+}
+
+pub fn enable_validation_sandbox(
+    model_workdir: &str,
+    parent: &Path,
+) -> Result<ValidationSandboxGuard, String> {
+    let sandbox = GitValidationSandbox::create(model_workdir, parent)?;
+    let mut slot = VALIDATION_SANDBOX
+        .lock()
+        .map_err(|_| "validation sandbox lock poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("validation sandbox already enabled".to_string());
+    }
+    *slot = Some(sandbox);
+    Ok(ValidationSandboxGuard)
+}
+
+pub fn set_task_reproducer_issue(task: &str) {
+    if let Ok(mut issue) = TASK_REPRODUCER_ISSUE.lock() {
+        *issue = task.to_string();
+    }
+}
 
 fn should_ignore_snapshot_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
@@ -50,7 +127,14 @@ fn should_ignore_snapshot_path(path: &str) -> bool {
 
 fn list_repo_files(workdir: &str) -> Vec<String> {
     if let Ok(output) = Command::new("git")
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
         .current_dir(workdir)
         .output()
     {
@@ -111,7 +195,7 @@ fn snapshot_workdir(workdir: &str) -> Snapshot {
 
     for rel_path in list_repo_files(workdir) {
         let path = Path::new(workdir).join(&rel_path);
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = std::fs::read(&path) {
             files.insert(rel_path, content);
         }
     }
@@ -119,11 +203,27 @@ fn snapshot_workdir(workdir: &str) -> Snapshot {
     Snapshot { files }
 }
 
+fn snapshot_key(workdir: &str) -> String {
+    std::fs::canonicalize(workdir)
+        .unwrap_or_else(|_| Path::new(workdir).to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn stored_snapshot(store: &Mutex<HashMap<String, Snapshot>>, workdir: &str) -> Option<Snapshot> {
+    store.lock().unwrap().get(&snapshot_key(workdir)).cloned()
+}
+
 fn restore_snapshot_inner(workdir: &str, snapshot: &Snapshot) {
     let snapshot_paths: HashSet<&str> = snapshot.files.keys().map(|k| k.as_str()).collect();
 
     for rel_path in list_current_files(workdir) {
         if !snapshot_paths.contains(rel_path.as_str()) {
+            if std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1")
+                && crate::validation_oracle::is_protected_setup_artifact(&rel_path)
+            {
+                continue;
+            }
             let path = Path::new(workdir).join(&rel_path);
             if let Err(e) = std::fs::remove_file(&path) {
                 eprintln!("  [RESTORE] Failed to remove {}: {}", rel_path, e);
@@ -157,18 +257,19 @@ pub fn snapshot_all(workdir: &str) -> Snapshot {
 /// Snapshot files into the internal store (for diff tool, called when entering implementing).
 pub fn snapshot_files(workdir: &str) {
     let mut snaps = SNAPSHOTS.lock().unwrap();
-    *snaps = snapshot_workdir(workdir);
+    snaps.insert(snapshot_key(workdir), snapshot_workdir(workdir));
 }
 
 /// Snapshot files before a single candidate edit so failed auto-tests can revert only that edit.
 pub fn snapshot_candidate(workdir: &str) {
-    let mut snaps = CANDIDATE_SNAPSHOT.lock().unwrap();
-    *snaps = snapshot_workdir(workdir);
+    let mut snaps = CANDIDATE_SNAPSHOTS.lock().unwrap();
+    snaps.insert(snapshot_key(workdir), snapshot_workdir(workdir));
 }
 
 pub fn restore_candidate_snapshot(workdir: &str) {
-    let snapshot = CANDIDATE_SNAPSHOT.lock().unwrap().clone();
-    restore_snapshot_inner(workdir, &snapshot);
+    if let Some(snapshot) = stored_snapshot(&CANDIDATE_SNAPSHOTS, workdir) {
+        restore_snapshot_inner(workdir, &snapshot);
+    }
 }
 
 /// Resolve a path argument: if the full path doesn't exist in workdir,
@@ -191,7 +292,14 @@ fn resolve_path(path: &str, workdir: &str) -> String {
     // Search for files matching the basename in the repo.
     if let Some(basename) = Path::new(path).file_name().and_then(|f| f.to_str()) {
         if let Ok(output) = Command::new("git")
-            .args(["ls-files", "--cached", "--others", "--exclude-standard"])
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ])
             .current_dir(workdir)
             .output()
         {
@@ -201,15 +309,6 @@ fn resolve_path(path: &str, workdir: &str) -> String {
             if candidates.len() == 1 {
                 // Unique match — use it
                 return candidates[0].to_string();
-            } else if candidates.len() > 1 {
-                // Multiple matches — pick the one with the most path components in common
-                let path_parts: Vec<&str> = path.split('/').collect();
-                let best = candidates
-                    .iter()
-                    .max_by_key(|c| c.split('/').filter(|p| path_parts.contains(p)).count());
-                if let Some(b) = best {
-                    return b.to_string();
-                }
             }
         }
     }
@@ -350,6 +449,18 @@ fn write_blocked_message(path: &str, workdir: &str) -> String {
     }
 }
 
+pub fn repo_path_exists_exact(path: &str, workdir: &str) -> bool {
+    if path.is_empty() || path.starts_with('/') || path.contains("..") {
+        return false;
+    }
+    let full_path = Path::new(workdir).join(path);
+    full_path.exists() && full_path.is_file()
+}
+
+pub fn repo_path_missing_diagnostic(path: &str, workdir: &str) -> String {
+    write_blocked_message(path, workdir)
+}
+
 fn create_blocked_message(path: &str) -> String {
     format!(
         "BLOCKED: cannot create '{}'. New files must be placed under an existing repository directory. Use list_directory/find_files to locate the correct package or test directory first.",
@@ -427,9 +538,16 @@ pub fn validate_new_repo_file(path: &str, workdir: &str) -> Result<std::path::Pa
     Ok(full_path)
 }
 
-/// Rewrite path arguments in a tool call's args, applying resolve_path.
-fn resolve_args_paths(args: &Value, workdir: &str) -> Value {
+/// Resolve unique path suggestions only for read-oriented tools. Mutations must
+/// name the exact repository path so a hallucinated path cannot edit another file.
+fn resolve_args_paths(name: &str, args: &Value, workdir: &str) -> Value {
     let mut args = args.clone();
+    if !matches!(
+        name,
+        "read_file" | "list_directory" | "grep" | "find_files" | "inspect_class"
+    ) {
+        return args;
+    }
     if let Some(obj) = args.as_object_mut() {
         if let Some(p) = obj
             .get("path")
@@ -451,12 +569,19 @@ fn resolve_args_paths(args: &Value, workdir: &str) -> Value {
 
 /// Execute a tool call against the working directory.
 pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
-    let args = &resolve_args_paths(args, workdir);
+    let args = &resolve_args_paths(name, args, workdir);
     match name {
         "read_file" => read_file(args, workdir),
         "write_file" => write_file(args, workdir),
         "list_directory" => list_directory(args, workdir),
-        "run_test" => run_test_with_args(args, workdir),
+        "run_test" => {
+            let started = std::time::Instant::now();
+            let output = run_test_with_sandbox(args, workdir);
+            crate::validation_oracle::record_test_execution(args, workdir, &output, started.elapsed());
+            output
+        }
+        "write_task_reproducer" => write_task_reproducer(args, workdir),
+        "run_task_reproducer" => run_task_reproducer(workdir),
         "grep" => grep(args, workdir),
         "diff" => diff(args, workdir),
         "edit_line" => edit_line(args, workdir),
@@ -468,6 +593,232 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "inspect_class" => inspect_class(args, workdir),
         "create_file" => create_file(args, workdir),
         _ => format!("unknown tool: {}", name),
+    }
+}
+
+fn write_task_reproducer(args: &Value, workdir: &str) -> String {
+    let source = match args.get("source").and_then(Value::as_str) {
+        Some(source) => source,
+        None => return "ERROR: write_task_reproducer requires a source string.".to_string(),
+    };
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("test_task_reproducer.py");
+    if let Some(reason) = task_reproducer::source_preflight_error(source) {
+        return format!(
+            "[TASK_REPRODUCER] REJECTED reason={}\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\nCorrect the scratch source before retrying, or continue with direct repair.\n",
+            reason
+        );
+    }
+    let plan = match solver_test_plan::load_from_env() {
+        Ok(Some(plan)) if solver_test_plan::supports_scratch_reproducer(&plan) => plan,
+        Ok(Some(_)) => {
+            return "[TASK_REPRODUCER] UNAVAILABLE reason=solver_runner_does_not_support_external_path_scope\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n".to_string();
+        }
+        Ok(None) => {
+            return "[TASK_REPRODUCER] UNAVAILABLE reason=solver_safe_test_plan_missing\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n".to_string();
+        }
+        Err(err) => {
+            return format!(
+                "[TASK_REPRODUCER] UNAVAILABLE reason=solver_safe_test_plan_invalid error={}\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n",
+                err
+            );
+        }
+    };
+    let root = match task_reproducer_root(workdir) {
+        Ok(root) => root,
+        Err(err) => {
+            return format!(
+                "[TASK_REPRODUCER] UNAVAILABLE reason=scratch_root_invalid error={}\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n",
+                err
+            );
+        }
+    };
+    let source_path = match task_reproducer::write_scratch(&root, name, source) {
+        Ok(path) => path,
+        Err(err) => return format!("[TASK_REPRODUCER] REJECTED reason={err}\n"),
+    };
+    let issue = TASK_REPRODUCER_ISSUE
+        .lock()
+        .map(|issue| issue.clone())
+        .unwrap_or_default();
+    let issue_anchors = task_reproducer::issue_anchors_from_task(&issue);
+    let started = Instant::now();
+    let baseline_output = match validate_task_reproducer(&source_path, false) {
+        Ok(output) => output,
+        Err(err) => {
+            return format!(
+                "[TASK_REPRODUCER] UNAVAILABLE reason=validation_sandbox error={}\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n",
+                err
+            );
+        }
+    };
+    let elapsed = started.elapsed();
+    let virtual_path = format!(".statewright-reproducer/{name}");
+    validation_oracle::record_task_reproducer_execution(
+        validation_oracle::TestPhase::Baseline,
+        vec![virtual_path.clone()],
+        &baseline_output,
+        elapsed,
+    );
+    let qualification = task_reproducer::qualify(
+        &virtual_path,
+        source,
+        &issue_anchors,
+        &baseline_output,
+    );
+    let task_reproducer::ReproducerQualification::Qualified(qualified) = qualification else {
+        let task_reproducer::ReproducerQualification::Rejected { reason } = qualification else {
+            unreachable!();
+        };
+        return format!(
+            "[TASK_REPRODUCER] REJECTED reason={}\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n",
+            reason
+        );
+    };
+    let baseline_observation = validation_oracle::observation_from_output(&baseline_output, elapsed);
+    let active = ActiveTaskReproducer {
+        source_path,
+        qualified: qualified.clone(),
+        baseline_output,
+        baseline_observation,
+    };
+    if let Ok(mut slot) = ACTIVE_TASK_REPRODUCER.lock() {
+        *slot = Some(active.clone());
+    } else {
+        return "[TASK_REPRODUCER] UNAVAILABLE reason=reproducer_state_lock\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n".to_string();
+    }
+    persist_task_reproducer(&root, &active, plan.schema_version);
+    format!(
+        "[TASK_REPRODUCER] QUALIFIED path={} anchors={} baseline_kind={} baseline_fingerprint={}\nSW_TASK_REPRODUCER_STATUS=qualified\nUse run_task_reproducer after each production edit. It runs only in the isolated validation worktree.\n",
+        qualified.path,
+        if qualified.issue_anchors.is_empty() { "none".to_string() } else { qualified.issue_anchors.join(",") },
+        active.baseline_observation.kind,
+        active.baseline_observation.fingerprint,
+    )
+}
+
+fn run_task_reproducer(workdir: &str) -> String {
+    let active = match ACTIVE_TASK_REPRODUCER.lock() {
+        Ok(slot) => slot.clone(),
+        Err(_) => return "[TASK_REPRODUCER] UNAVAILABLE reason=reproducer_state_lock\n".to_string(),
+    };
+    let Some(active) = active else {
+        return "[TASK_REPRODUCER] UNAVAILABLE reason=no_qualified_reproducer\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n".to_string();
+    };
+    let started = Instant::now();
+    let candidate_output = match validate_task_reproducer(&active.source_path, true) {
+        Ok(output) => output,
+        Err(err) => return format!("[TASK_REPRODUCER] UNAVAILABLE reason=validation_sandbox error={err}\n"),
+    };
+    let elapsed = started.elapsed();
+    validation_oracle::record_task_reproducer_execution(
+        validation_oracle::TestPhase::Candidate,
+        vec![active.qualified.path.clone()],
+        &candidate_output,
+        elapsed,
+    );
+    let candidate = validation_oracle::observation_from_output(&candidate_output, elapsed);
+    let baseline_kind = crate::repair_feedback::classify_output(&active.baseline_output);
+    let candidate_kind = crate::repair_feedback::classify_output(&candidate_output);
+    let delta = validation_oracle::delta_for_observations(
+        validation_oracle::EvidenceProvenance::TaskReproducer,
+        baseline_kind,
+        candidate_kind,
+        &active.baseline_observation.fingerprint,
+        &candidate.fingerprint,
+    );
+    let evidence = validation_oracle::TestEvidence {
+        evidence_id: format!("task-reproducer-{}", patch_fingerprint(workdir)),
+        provenance: validation_oracle::EvidenceProvenance::TaskReproducer,
+        scope: vec![active.qualified.path.clone()],
+        baseline: active.baseline_observation.clone(),
+        candidate: candidate.clone(),
+        delta,
+        runtime_fingerprint: "solver-safe-test-plan".to_string(),
+        patch_hash: patch_fingerprint(workdir),
+    };
+    validation_oracle::record_test_evidence(&evidence);
+    format!(
+        "[TASK_REPRODUCER] CANDIDATE delta={} baseline_kind={} candidate_kind={} fingerprint={}\nSW_TASK_REPRODUCER_DELTA={}\n{}",
+        evidence.delta.as_str(),
+        evidence.baseline.kind,
+        evidence.candidate.kind,
+        evidence.candidate.fingerprint,
+        evidence.delta.as_str(),
+        candidate_output
+    )
+}
+
+fn validate_task_reproducer(source_path: &Path, apply_candidate_patch: bool) -> Result<String, String> {
+    let slot = VALIDATION_SANDBOX
+        .lock()
+        .map_err(|_| "validation sandbox lock poisoned".to_string())?;
+    let sandbox = slot
+        .as_ref()
+        .ok_or_else(|| "validation sandbox is not enabled".to_string())?;
+    sandbox.validate_reproducer(source_path, apply_candidate_patch)
+}
+
+fn task_reproducer_root(workdir: &str) -> Result<PathBuf, String> {
+    let root = std::env::var("SW_TASK_REPRODUCER_DIR")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("SW_ARTIFACT_DIR")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+                .map(|path| PathBuf::from(path).join("task-reproducers"))
+        })
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("statewright-task-reproducers-{}", std::process::id()))
+        });
+    if !root.is_absolute() {
+        return Err("scratch reproducer root must be absolute".to_string());
+    }
+    std::fs::create_dir_all(&root)
+        .map_err(|err| format!("create scratch reproducer root {}: {err}", root.display()))?;
+    let canonical_root = std::fs::canonicalize(&root)
+        .map_err(|err| format!("canonicalize scratch reproducer root {}: {err}", root.display()))?;
+    let canonical_workdir = std::fs::canonicalize(workdir)
+        .map_err(|err| format!("canonicalize model workdir {workdir}: {err}"))?;
+    if canonical_root.starts_with(&canonical_workdir) {
+        return Err("scratch reproducer root may not be inside the model worktree".to_string());
+    }
+    Ok(canonical_root)
+}
+
+pub fn patch_fingerprint(workdir: &str) -> String {
+    let bytes = Command::new("git")
+        .args(["diff", "--binary"])
+        .current_dir(workdir)
+        .output()
+        .map(|output| output.stdout)
+        .unwrap_or_default();
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64-{hash:016x}")
+}
+
+fn persist_task_reproducer(root: &Path, active: &ActiveTaskReproducer, plan_schema_version: u32) {
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "artifact": "statewright.task_reproducer",
+        "qualified": task_reproducer::stored(&active.qualified),
+        "baseline": active.baseline_observation,
+        "solver_test_plan_schema_version": plan_schema_version,
+    });
+    let path = root.join("task-reproducer.json");
+    if let Err(err) = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
+    ) {
+        eprintln!("[TASK_REPRODUCER] persist failed path={} error={err}", path.display());
     }
 }
 
@@ -512,6 +863,14 @@ fn read_file(args: &Value, workdir: &str) -> String {
 
     match std::fs::read_to_string(&canonical) {
         Ok(content) => {
+            // Clear edit locus gate — reading the file re-grounds the model
+            if let Ok(mut blocked) = EDIT_BLOCKED.lock() {
+                blocked.remove(path);
+            }
+            if let Ok(mut counts) = EDIT_FAIL_COUNT.lock() {
+                counts.remove(path);
+            }
+
             let lines: Vec<&str> = content.lines().collect();
             let total = lines.len();
 
@@ -564,6 +923,72 @@ fn read_file(args: &Value, workdir: &str) -> String {
         }
         Err(e) => format!("error reading '{}': {}", path, e),
     }
+}
+
+fn normalize_edit_match_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn line_similarity(a: &str, b: &str) -> f64 {
+    let a = normalize_edit_match_line(a);
+    let b = normalize_edit_match_line(b);
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+    let a_chars: Vec<char> = a.chars().take(240).collect();
+    let b_chars: Vec<char> = b.chars().take(240).collect();
+    let mut prev = vec![0usize; b_chars.len() + 1];
+    let mut curr = vec![0usize; b_chars.len() + 1];
+    for a_ch in &a_chars {
+        for (j, b_ch) in b_chars.iter().enumerate() {
+            curr[j + 1] = if a_ch == b_ch {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.fill(0);
+    }
+    let lcs = prev[b_chars.len()] as f64;
+    (2.0 * lcs) / ((a_chars.len() + b_chars.len()) as f64)
+}
+
+fn best_fuzzy_line_match(lines: &[&str], old: &str, hint_line: Option<usize>) -> Option<usize> {
+    let old_norm = normalize_edit_match_line(old);
+    if old_norm.len() < 12 {
+        return None;
+    }
+
+    let candidate_range: Box<dyn Iterator<Item = usize>> = if let Some(hint) = hint_line {
+        let start = hint.saturating_sub(4);
+        let end = (hint + 3).min(lines.len());
+        Box::new(start..end)
+    } else {
+        Box::new(0..lines.len())
+    };
+
+    let mut scored: Vec<(usize, f64)> = candidate_range
+        .filter_map(|idx| {
+            let line = lines.get(idx)?;
+            let line_norm = normalize_edit_match_line(line);
+            if line_norm.len() < 8 {
+                return None;
+            }
+            let score = line_similarity(&old_norm, &line_norm);
+            (score >= 0.90).then_some((idx, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let (best_idx, best_score) = *scored.first()?;
+    if hint_line.is_some() {
+        return Some(best_idx);
+    }
+    let second = scored.get(1).map(|(_, score)| *score).unwrap_or(0.0);
+    (best_score >= 0.94 && best_score - second >= 0.04).then_some(best_idx)
 }
 
 fn write_file(args: &Value, workdir: &str) -> String {
@@ -658,17 +1083,437 @@ fn list_directory(args: &Value, workdir: &str) -> String {
     }
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+fn django_runtests_target(target: &str) -> String {
+    let trimmed = target.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return target.to_string();
+    }
+
+    let (path_part, node_part) = trimmed
+        .split_once("::")
+        .map(|(path, node)| (path, Some(node)))
+        .unwrap_or((trimmed, None));
+    let path_part = path_part
+        .rsplit_once(':')
+        .filter(|(_, suffix)| suffix.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|(path, _)| path)
+        .unwrap_or(path_part);
+    let mut normalized = path_part.replace('\\', "/");
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+
+    if !normalized.starts_with("tests/") {
+        return target.to_string();
+    }
+
+    let mut label = normalized
+        .trim_start_matches("tests/")
+        .trim_end_matches(".py")
+        .replace('/', ".");
+    if let Some(node) = node_part {
+        for part in node.split("::") {
+            let clean = part.trim();
+            if !clean.is_empty()
+                && clean
+                    .chars()
+                    .all(|ch| ch == '_' || ch == '.' || ch.is_ascii_alphanumeric())
+            {
+                label.push('.');
+                label.push_str(clean);
+            }
+        }
+    }
+    label
+}
+
+fn test_failure_stream_signal(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("FAIL: ")
+        || trimmed.starts_with("ERROR: ")
+        || trimmed.starts_with("FAILED ")
+        || trimmed.contains(" FAILED ")
+        || trimmed.contains("FAILED (")
+        || trimmed.contains("Traceback (most recent call last)")
+        || trimmed.contains("AssertionError")
+        || trimmed.contains("ImportError")
+        || trimmed.contains("ModuleNotFoundError")
+        || trimmed.contains("NameError")
+        || trimmed.contains("ValueError")
+        || trimmed.contains("TypeError")
+        || trimmed.contains("SyntaxError")
+        || trimmed.contains("IndentationError")
+        || trimmed.starts_with("E   ")
+}
+
+fn format_test_command_output(
+    _lang: &str,
+    run_cmd: &str,
+    run_args: &[String],
+    combined: &str,
+    exit_code: i32,
+    timed_out: bool,
+    early_stopped: bool,
+    unscoped_probe: bool,
+    elapsed_ms: u128,
+) -> String {
+    let requested_can_complete =
+        std::env::var("SW_TEST_CAN_COMPLETE").unwrap_or_else(|_| "1".to_string());
+    let scope_authority = test_scope_authority(unscoped_probe, &requested_can_complete);
+    let scope_trusted = if scope_authority == "trusted" {
+        "1"
+    } else {
+        "0"
+    };
+    let can_complete = if scope_authority == "trusted" {
+        requested_can_complete.as_str()
+    } else {
+        "0"
+    };
+    let patch_status =
+        std::env::var("SW_TEST_PATCH_STATUS").unwrap_or_else(|_| "unknown".to_string());
+    let header = format!(
+        "SW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_SCOPE_AUTHORITY={}\nSW_TEST_SCOPE_TRUSTED={}\nSW_TEST_CAN_COMPLETE={}\nSW_TEST_PATCH_STATUS={}\nSW_TEST_COMMAND={} {:?}\nSW_TEST_TIMED_OUT={}\nSW_TEST_EARLY_STOPPED={}\nSW_TEST_ELAPSED_MS={}\n---\n",
+        exit_code,
+        scope_authority,
+        scope_trusted,
+        can_complete,
+        patch_status,
+        run_cmd,
+        run_args,
+        if timed_out { 1 } else { 0 },
+        if early_stopped { 1 } else { 0 },
+        elapsed_ms
+    );
+
+    let env_miss = [
+        "No module named pytest",
+        "No module named 'pytest'",
+        "pytest: command not found",
+        "command not found: pytest",
+        "No module named unittest",
+        "No module named 'unittest'",
+    ];
+    if env_miss.iter().any(|p| combined.contains(p)) {
+        return format!(
+            "TEST_ENV_UNAVAILABLE: {}\nSW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=1\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\n",
+            &combined[..combined.len().min(500)],
+            exit_code
+        );
+    }
+
+    if combined.len() > 8000 {
+        let truncated = &combined[..4000];
+        let tail = &combined[combined.len() - 3000..];
+        format!(
+            "{}{}...\n[truncated {} bytes]\n...{}",
+            header,
+            truncated,
+            combined.len() - 7000,
+            tail
+        )
+    } else {
+        format!("{}{}", header, combined)
+    }
+}
+
+fn test_scope_authority(unscoped_probe: bool, requested_can_complete: &str) -> String {
+    if unscoped_probe {
+        return "untrusted".to_string();
+    }
+    if requested_can_complete.trim() == "0" {
+        return "feedback".to_string();
+    }
+    if let Ok(authority) = std::env::var("SW_TEST_SCOPE_AUTHORITY") {
+        match authority.trim() {
+            "trusted" | "feedback" | "untrusted" => return authority.trim().to_string(),
+            _ => return "untrusted".to_string(),
+        }
+    }
+    if let Ok(trusted) = std::env::var("SW_TEST_SCOPE_TRUSTED") {
+        return if trusted.trim() == "0" {
+            "untrusted".to_string()
+        } else {
+            "trusted".to_string()
+        };
+    }
+    if std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1") {
+        "untrusted".to_string()
+    } else {
+        "trusted".to_string()
+    }
+}
+
+fn format_test_runner_unavailable(
+    lang: &str,
+    err: &std::io::Error,
+    run_cmd: &str,
+    run_args: &[String],
+) -> String {
+    format!(
+        "TEST_ENV_UNAVAILABLE: error running tests ({lang}): {err} -- cmd: {run_cmd} {run_args:?}\n\
+SW_TEST_EXIT_CODE=-1\n\
+SW_TEST_ENV_UNAVAILABLE=1\n\
+SW_TEST_SCOPE_AUTHORITY=untrusted\n\
+SW_TEST_SCOPE_TRUSTED=0\n\
+SW_TEST_CAN_COMPLETE=0\n\
+SW_TEST_COMMAND={run_cmd} {run_args:?}\n\
+SW_TEST_TIMED_OUT=0\n\
+SW_TEST_EARLY_STOPPED=0\n"
+    )
+}
+
+fn format_test_setup_unavailable(message: &str, run_cmd: &str, run_args: &[String]) -> String {
+    format!(
+        "TEST_ENV_UNAVAILABLE: {message}\n\
+SW_TEST_EXIT_CODE=-1\n\
+SW_TEST_ENV_UNAVAILABLE=1\n\
+SW_TEST_SCOPE_AUTHORITY=untrusted\n\
+SW_TEST_SCOPE_TRUSTED=0\n\
+SW_TEST_CAN_COMPLETE=0\n\
+SW_TEST_COMMAND={run_cmd} {run_args:?}\n\
+SW_TEST_TIMED_OUT=0\n\
+SW_TEST_EARLY_STOPPED=0\n"
+    )
+}
+
+fn terminate_child_group(child: &mut Child) {
+    unsafe {
+        if libc::killpg(child.id() as i32, libc::SIGKILL) != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("[RUN_TEST] process group kill failed: {err}");
+            }
+        }
+    }
+    if let Err(err) = child.kill() {
+        if err.kind() != std::io::ErrorKind::InvalidInput {
+            eprintln!("[RUN_TEST] child kill failed: {err}");
+        }
+    }
+    if let Err(err) = child.wait() {
+        eprintln!("[RUN_TEST] child wait failed: {err}");
+    }
+}
+
+fn run_command_with_limits(
+    mut command: Command,
+    lang: &str,
+    run_cmd: &str,
+    run_args: &[String],
+    timeout: Option<Duration>,
+    stop_on_failure: bool,
+    unscoped_probe: bool,
+) -> String {
+    if timeout.is_none() && !stop_on_failure {
+        let start = Instant::now();
+        return match command.output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let combined = format!("{}\n{}", stdout, stderr);
+                let exit_code = out.status.code().unwrap_or(-1);
+                format_test_command_output(
+                    lang,
+                    run_cmd,
+                    run_args,
+                    &combined,
+                    exit_code,
+                    false,
+                    false,
+                    unscoped_probe,
+                    start.elapsed().as_millis(),
+                )
+            }
+            Err(e) => format_test_runner_unavailable(lang, &e, run_cmd, run_args),
+        };
+    }
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.process_group(0);
+    let start = Instant::now();
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return format_test_runner_unavailable(lang, &e, run_cmd, run_args);
+        }
+    };
+
+    let (tx, rx) = mpsc::channel::<(bool, String)>();
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send((false, line)).is_err() {
+                    eprintln!("[RUN_TEST] stdout receiver closed while reading command output");
+                    break;
+                }
+            }
+        }));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if tx.send((true, line)).is_err() {
+                    eprintln!("[RUN_TEST] stderr receiver closed while reading command output");
+                    break;
+                }
+            }
+        }));
+    }
+    drop(tx);
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut timed_out = false;
+    let mut early_stopped = false;
+    let mut failure_seen_at: Option<Instant> = None;
+    let mut lines_after_failure = 0usize;
+    let mut exit_code = -1;
+    let failure_context = std::env::var("SW_TEST_FAILURE_CONTEXT_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(5));
+
+    loop {
+        while let Ok((is_stderr, line)) = rx.try_recv() {
+            if failure_seen_at.is_some() {
+                lines_after_failure += 1;
+            } else if stop_on_failure && test_failure_stream_signal(&line) {
+                failure_seen_at = Some(Instant::now());
+            }
+            if is_stderr {
+                stderr.push_str(&line);
+                stderr.push('\n');
+            } else {
+                stdout.push_str(&line);
+                stdout.push('\n');
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code().unwrap_or(-1);
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+
+        if timeout.is_some_and(|limit| start.elapsed() >= limit) {
+            timed_out = true;
+            terminate_child_group(&mut child);
+            break;
+        }
+
+        if let Some(seen_at) = failure_seen_at {
+            if seen_at.elapsed() >= failure_context || lines_after_failure >= 80 {
+                early_stopped = true;
+                terminate_child_group(&mut child);
+                break;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    while let Ok((is_stderr, line)) = rx.try_recv() {
+        if is_stderr {
+            stderr.push_str(&line);
+            stderr.push('\n');
+        } else {
+            stdout.push_str(&line);
+            stdout.push('\n');
+        }
+    }
+    for reader in readers {
+        if reader.join().is_err() {
+            eprintln!("[RUN_TEST] output reader thread panicked");
+        }
+    }
+
+    let combined = format!("{}\n{}", stdout, stderr);
+    format_test_command_output(
+        lang,
+        run_cmd,
+        run_args,
+        &combined,
+        exit_code,
+        timed_out,
+        early_stopped,
+        unscoped_probe,
+        start.elapsed().as_millis(),
+    )
+}
+
 fn run_test_with_args(args: &Value, workdir: &str) -> String {
     if std::env::var("SW_TEST_PREFLIGHT_UNAVAILABLE")
         .ok()
         .as_deref()
         == Some("1")
     {
-        return "TEST_ENV_UNAVAILABLE: test runner preflight failed\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=1\n".into();
+        return "TEST_ENV_UNAVAILABLE: test runner preflight failed\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=1\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\n".into();
+    }
+
+    // Reject unrecognized 'command' argument — fail fast rather than silently ignoring
+    if args.get("command").is_some() {
+        return "ERROR: run_test does not accept a 'command' argument.\n\
+                Use run_test({\"path\": \"tests/foo.py\"}) to run specific tests.\n\
+                Available args: path, test_file, file, label, args."
+            .into();
     }
 
     let test_path = args.get("path").and_then(|p| p.as_str());
-    let test_file = args.get("test_file").and_then(|p| p.as_str());
+    let explicit_test_file = args.get("test_file").and_then(|p| p.as_str());
+    let file_alias = args.get("file").and_then(|p| p.as_str());
+    let test_file = explicit_test_file.or(file_alias);
+    if explicit_test_file.is_none() {
+        if let Some(path) = file_alias {
+            if let Err(message) = validate_existing_repo_file(path, workdir) {
+                return format!(
+                    "ERROR: run_test 'file' must name an existing repository file. {message}\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\n"
+                );
+            }
+        }
+    }
+    let test_label = args
+        .get("label")
+        .and_then(|p| p.as_str())
+        .filter(|label| !label.trim().is_empty());
+    let env_test_label = std::env::var("SW_TEST_LABEL")
+        .ok()
+        .filter(|label| !label.trim().is_empty());
+    let has_label_scope = test_label.is_some() || env_test_label.is_some();
+    let unscoped = test_path.is_none() && test_file.is_none() && !has_label_scope;
+    let unscoped_probe = env_flag("SW_TEST_UNSCOPED_PROBE");
+
+    if std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1") && unscoped {
+        if !unscoped_probe {
+            return "ERROR: unscoped eval-image run_test is disabled. Provide a validated scoped path/test_file or let the harness run its single bounded discovery probe.\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\nSW_TEST_UNSCOPED_BLOCKED=1\n".into();
+        }
+        match UNSCOPED_TEST_PROBE_USED.lock() {
+            Ok(mut used) => {
+                if *used {
+                    return "ERROR: unscoped eval-image discovery probe was already used; refusing repeated full-suite probe.\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\nSW_TEST_UNSCOPED_BLOCKED=1\n".into();
+                }
+                *used = true;
+            }
+            Err(_) => {
+                return "ERROR: could not acquire unscoped probe guard.\nSW_TEST_EXIT_CODE=-1\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_SCOPE_AUTHORITY=untrusted\nSW_TEST_SCOPE_TRUSTED=0\nSW_TEST_CAN_COMPLETE=0\nSW_TEST_UNSCOPED_BLOCKED=1\n".into();
+            }
+        }
+    }
+
     let extra_args: Vec<String> = args
         .get("args")
         .and_then(|a| a.as_array())
@@ -681,8 +1526,30 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
 
     let lang = detect_language(workdir);
     let eval_test_cmd = std::env::var("SW_TEST_CMD").ok();
+    let plan_scope_args = plan_scope_args(
+        test_path,
+        test_file,
+        test_label.or(env_test_label.as_deref()),
+        &extra_args,
+    );
+    let plan_script = match solver_test_plan::load_from_env() {
+        Ok(Some(plan)) => Some(solver_test_plan::shell_script_for_scope(
+            &plan,
+            &solver_test_plan::adapt_scope_args(&plan, &plan_scope_args),
+        )),
+        Ok(None) => None,
+        Err(err) => {
+            return format_test_setup_unavailable(
+                &format!("solver test plan unavailable: {err}"),
+                "solver-test-plan",
+                &[],
+            );
+        }
+    };
 
-    let (cmd, cmd_args) = match lang {
+    let (cmd, cmd_args, command_env) = if let Some(script) = plan_script {
+        ("/bin/bash".to_string(), vec!["-lc".to_string(), script], Vec::new())
+    } else { match lang {
         "go" => {
             let mut a = vec!["test".to_string(), "-v".to_string(), "-count=1".to_string()];
             if let Some(p) = test_path {
@@ -699,7 +1566,7 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                 a.push("./...".to_string());
             }
             a.extend(extra_args);
-            ("go".to_string(), a)
+            ("go".to_string(), a, Vec::new())
         }
         "rust" => {
             let mut a = vec!["test".to_string()];
@@ -708,7 +1575,7 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                 a.push(p.to_string());
             }
             a.extend(extra_args);
-            ("cargo".to_string(), a)
+            ("cargo".to_string(), a, Vec::new())
         }
         "typescript" | "javascript" => {
             let (runner, mut runner_args) = detect_js_test_runner(workdir);
@@ -718,7 +1585,7 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                 runner_args.push(f.to_string());
             }
             runner_args.extend(extra_args);
-            (runner, runner_args)
+            (runner, runner_args, Vec::new())
         }
         _ => {
             // Python: detect Django vs pytest
@@ -741,8 +1608,8 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                         .unwrap_or(false);
 
             if let Some(test_cmd) = eval_test_cmd.as_ref() {
-                let mut parts: Vec<String> =
-                    test_cmd.split_whitespace().map(|s| s.to_string()).collect();
+                let mut parts = split_shell_words(test_cmd);
+                let command_env = extract_leading_env_assignments(&mut parts);
                 if parts.is_empty() {
                     parts = vec!["python3".into(), "-m".into(), "pytest".into()];
                 }
@@ -754,46 +1621,38 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                 if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
                     // Keep Django module-style directive handling when the repo runner is used.
                     if let Some(tp) = test_path {
-                        let module = tp
-                            .trim_start_matches("tests/")
-                            .trim_end_matches(".py")
-                            .replace('/', ".");
-                        push_unique(&mut parts, module);
+                        push_unique(&mut parts, django_runtests_target(tp));
                     } else if let Some(f) = test_file {
-                        let module = f
-                            .trim_start_matches("tests/")
-                            .trim_end_matches(".py")
-                            .replace('/', ".");
-                        push_unique(&mut parts, module);
-                    } else if let Ok(module) = std::env::var("SW_TEST_LABEL") {
-                        push_unique(&mut parts, module);
+                        push_unique(&mut parts, django_runtests_target(f));
+                    } else if let Some(module) = test_label.or(env_test_label.as_deref()) {
+                        push_unique(&mut parts, module.to_string());
+                    }
+                    for arg in &extra_args {
+                        push_unique(&mut parts, django_runtests_target(arg));
                     }
                 } else if let Some(tp) = test_path {
                     push_unique(&mut parts, tp.to_string());
                 } else if let Some(f) = test_file {
                     push_unique(&mut parts, f.to_string());
+                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                    push_unique(&mut parts, label.to_string());
                 }
-                parts.extend(extra_args);
-                (parts[0].clone(), parts[1..].to_vec())
+                if !(is_django && !has_pytest_support && p.join("tests/runtests.py").exists()) {
+                    parts.extend(extra_args);
+                }
+                (parts[0].clone(), parts[1..].to_vec(), command_env)
             } else if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
                 // Django test suite without pytest support: use the repo's own runner.
                 let mut a: Vec<String> = vec!["tests/runtests.py".into(), "--verbosity=1".into()];
                 if let Some(tp) = test_path {
-                    // Convert path like "tests/forms_tests/tests/test_forms.py" to module
-                    let module = tp
-                        .trim_start_matches("tests/")
-                        .trim_end_matches(".py")
-                        .replace('/', ".");
-                    a.push(module);
+                    a.push(django_runtests_target(tp));
                 } else if let Some(f) = test_file {
-                    let module = f
-                        .trim_start_matches("tests/")
-                        .trim_end_matches(".py")
-                        .replace('/', ".");
-                    a.push(module);
+                    a.push(django_runtests_target(f));
+                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                    a.push(label.to_string());
                 }
-                a.extend(extra_args);
-                ("python3".to_string(), a)
+                a.extend(extra_args.iter().map(|arg| django_runtests_target(arg)));
+                ("python3".to_string(), a, Vec::new())
             } else {
                 let mut a: Vec<String> = vec![
                     "-m".into(),
@@ -811,12 +1670,14 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
                     a.push(tp.to_string());
                 } else if let Some(f) = test_file {
                     a.push(f.to_string());
+                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                    a.push(label.to_string());
                 }
                 a.extend(extra_args);
-                ("python3".to_string(), a)
+                ("python3".to_string(), a, Vec::new())
             }
         }
-    };
+    }};
 
     // Install deps if needed (JS/TS only, first run)
     if matches!(lang, "typescript" | "javascript") {
@@ -829,15 +1690,39 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
             } else {
                 "npm"
             };
-            let _ = Command::new(pkg_mgr)
+            let install_args = vec!["install".to_string()];
+            match Command::new(pkg_mgr)
                 .arg("install")
                 .current_dir(workdir)
-                .output();
+                .output()
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let detail = format!(
+                        "dependency install failed ({pkg_mgr} install) status={} stderr={} stdout={}",
+                        output.status,
+                        stderr.trim(),
+                        stdout.trim()
+                    );
+                    return format_test_setup_unavailable(&detail, pkg_mgr, &install_args);
+                }
+                Err(err) => {
+                    let detail = format!("dependency install failed ({pkg_mgr} install): {err}");
+                    return format_test_setup_unavailable(&detail, pkg_mgr, &install_args);
+                }
+            }
         }
     }
 
+    let cmd_name = Path::new(&cmd)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(cmd.as_str());
+    let python_command = matches!(cmd_name, "python" | "python3" | "pytest" | "py.test");
     let use_eval_conda = std::env::var("SW_EVAL_IMAGE").ok().as_deref() == Some("1")
-        && cmd == "python3"
+        && lang == "python"
         && command_exists("conda");
     let conda_env = std::env::var("SW_TEST_CONDA_ENV").unwrap_or_else(|_| "testbed".to_string());
 
@@ -860,8 +1745,11 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
         .args(&run_args)
         .current_dir(workdir)
         .env("PYTHONDONTWRITEBYTECODE", "1");
+    for (name, value) in &command_env {
+        command.env(name, value);
+    }
 
-    if cmd == "python3" {
+    if lang == "python" || python_command {
         let pythonpath = match std::env::var("PYTHONPATH") {
             Ok(existing) if !existing.is_empty() => format!("{}:{}", workdir, existing),
             _ => workdir.to_string(),
@@ -869,54 +1757,131 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
         command.env("PYTHONPATH", pythonpath);
     }
 
-    let output = command.output();
+    let timeout = std::env::var("SW_TEST_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .or_else(|| unscoped_probe.then_some(Duration::from_secs(300)));
+    let stop_on_failure = env_flag("SW_TEST_STOP_ON_FAILURE") || unscoped_probe;
+    run_command_with_limits(
+        command,
+        lang,
+        &run_cmd,
+        &run_args,
+        timeout,
+        stop_on_failure,
+        unscoped_probe,
+    )
+}
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let combined = format!("{}\n{}", stdout, stderr);
-            let exit_code = out.status.code().unwrap_or(-1);
-            let header = format!(
-                "SW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=0\nSW_TEST_COMMAND={} {:?}\n---\n",
-                exit_code, run_cmd, run_args
+pub(crate) fn run_test_direct_with_args(args: &Value, workdir: &str) -> String {
+    run_test_with_args(args, workdir)
+}
+
+fn run_test_with_sandbox(args: &Value, workdir: &str) -> String {
+    let mut slot = match VALIDATION_SANDBOX.lock() {
+        Ok(slot) => slot,
+        Err(_) => {
+            return format_test_setup_unavailable(
+                "validation sandbox lock poisoned",
+                "validation-sandbox",
+                &[],
             );
-            // Detect missing test runner before classifying as pass/fail
-            let env_miss = [
-                "No module named pytest",
-                "No module named 'pytest'",
-                "pytest: command not found",
-                "command not found: pytest",
-                "No module named unittest",
-                "No module named 'unittest'",
-            ];
-            if env_miss.iter().any(|p| combined.contains(p)) {
-                return format!(
-                    "TEST_ENV_UNAVAILABLE: {}\nSW_TEST_EXIT_CODE={}\nSW_TEST_ENV_UNAVAILABLE=1\n",
-                    &combined[..combined.len().min(500)],
-                    exit_code
-                );
-            }
-            // Truncate to prevent context blowup on huge test output
-            if combined.len() > 8000 {
-                let truncated = &combined[..4000];
-                let tail = &combined[combined.len() - 3000..];
-                format!(
-                    "{}{}...\n[truncated {} bytes]\n...{}",
-                    header,
-                    truncated,
-                    combined.len() - 7000,
-                    tail
-                )
-            } else {
-                format!("{}{}", header, combined)
-            }
         }
-        Err(e) => format!(
-            "error running tests ({}): {} — cmd: {} {:?}",
-            lang, e, run_cmd, run_args
-        ),
+    };
+    let Some(sandbox) = slot.as_mut() else {
+        return run_test_with_args(args, workdir);
+    };
+    match sandbox.validate(args) {
+        Ok(output) => output,
+        Err(err) => format_test_setup_unavailable(&err, "validation-sandbox", &[]),
     }
+}
+
+fn plan_scope_args(
+    test_path: Option<&str>,
+    test_file: Option<&str>,
+    test_label: Option<&str>,
+    extra_args: &[String],
+) -> Vec<String> {
+    let mut result = Vec::new();
+    if let Some(path) = test_path.or(test_file).or(test_label) {
+        if !path.trim().is_empty() {
+            result.push(path.to_string());
+        }
+    }
+    result.extend(extra_args.iter().filter(|arg| !arg.trim().is_empty()).cloned());
+    result
+}
+
+fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = input.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('\''), c) => current.push(c),
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn extract_leading_env_assignments(parts: &mut Vec<String>) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if parts.first().is_some_and(|part| part == "env") {
+        parts.remove(0);
+    }
+    while parts
+        .first()
+        .is_some_and(|part| parse_env_assignment(part).is_some())
+    {
+        let part = parts.remove(0);
+        if let Some(pair) = parse_env_assignment(&part) {
+            env.push(pair);
+        }
+    }
+    env
+}
+
+fn parse_env_assignment(part: &str) -> Option<(String, String)> {
+    let (name, value) = part.split_once('=')?;
+    if !valid_env_name(name) {
+        return None;
+    }
+    Some((name.to_string(), value.to_string()))
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn grep(args: &Value, workdir: &str) -> String {
@@ -957,8 +1922,10 @@ fn diff(args: &Value, workdir: &str) -> String {
         None => return "error: missing 'path' argument".into(),
     };
 
-    let snaps = SNAPSHOTS.lock().unwrap();
-    let original = match snaps.files.get(path) {
+    let Some(snapshot) = stored_snapshot(&SNAPSHOTS, workdir) else {
+        return format!("error: no snapshot for repository '{}'", workdir);
+    };
+    let original = match snapshot.files.get(path) {
         Some(s) => s.clone(),
         None => {
             return format!(
@@ -967,9 +1934,7 @@ fn diff(args: &Value, workdir: &str) -> String {
             );
         }
     };
-    drop(snaps);
-
-    let current = match std::fs::read_to_string(Path::new(workdir).join(path)) {
+    let current = match std::fs::read(Path::new(workdir).join(path)) {
         Ok(c) => c,
         Err(e) => return format!("error reading current '{}': {}", path, e),
     };
@@ -979,6 +1944,8 @@ fn diff(args: &Value, workdir: &str) -> String {
     }
 
     // Line-by-line diff
+    let original = String::from_utf8_lossy(&original);
+    let current = String::from_utf8_lossy(&current);
     let orig_lines: Vec<&str> = original.lines().collect();
     let curr_lines: Vec<&str> = current.lines().collect();
     let mut output = String::new();
@@ -1011,8 +1978,19 @@ fn diff(args: &Value, workdir: &str) -> String {
 fn edit_line(args: &Value, workdir: &str) -> String {
     let path = match args.get("path").and_then(|p| p.as_str()) {
         Some(p) => p,
-        None => return "error: edit_line requires a 'path' argument. Example: edit_line({\"path\": \"django/db/models/enums.py\", \"old\": \"class Choices:\", \"new\": \"class Choices:\\n    do_not_call_in_templates = True\"})".into(),
+        None => return "error: edit_line requires a 'path' argument. Choose an existing repository-relative file path from read_file/find_files/list_directory output, then provide exact 'old' text and replacement 'new' text.".into(),
     };
+
+    // Edit locus gate: block edits on files with 3+ consecutive failures until read_file
+    if let Ok(blocked) = EDIT_BLOCKED.lock() {
+        if blocked.contains(path) {
+            return format!(
+                "EDIT_BLOCKED: You must call read_file on '{}' before editing it again.\n\
+                 Use read_file with start_line/end_line to see the current content.",
+                path
+            );
+        }
+    }
     let old = args.get("old").and_then(|o| o.as_str());
     let new_content = match args.get("new").and_then(|n| n.as_str()) {
         Some(n) => n,
@@ -1096,6 +2074,17 @@ fn edit_line(args: &Value, workdir: &str) -> String {
         .map(|(i, _)| i)
         .collect();
 
+    let mut fuzzy_matched = false;
+    let old_normalized = normalize_edit_match_line(old_trimmed);
+    if matches.is_empty() && old_normalized.len() >= 8 {
+        matches = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| normalize_edit_match_line(line.trim()) == old_normalized)
+            .map(|(i, _)| i)
+            .collect();
+    }
+
     // Fallback: substring match if exact trimmed match fails
     if matches.is_empty() {
         matches = lines
@@ -1104,6 +2093,13 @@ fn edit_line(args: &Value, workdir: &str) -> String {
             .filter(|(_, line)| line.contains(old_trimmed))
             .map(|(i, _)| i)
             .collect();
+    }
+
+    if matches.is_empty() {
+        if let Some(idx) = best_fuzzy_line_match(&lines, old_trimmed, hint_line) {
+            matches = vec![idx];
+            fuzzy_matched = true;
+        }
     }
 
     if matches.is_empty() {
@@ -1157,6 +2153,24 @@ fn edit_line(args: &Value, workdir: &str) -> String {
             context_hint = "\nUse read_file with start_line/end_line to see the actual content before editing.".to_string();
         }
 
+        // Track consecutive edit failures for locus gate
+        if let Ok(mut counts) = EDIT_FAIL_COUNT.lock() {
+            let count = counts.entry(path.to_string()).or_insert(0);
+            *count += 1;
+            if *count >= 3 {
+                if let Ok(mut blocked) = EDIT_BLOCKED.lock() {
+                    blocked.insert(path.to_string());
+                }
+                return format!(
+                    "error: '{}' not found in {}.{}\n\n\
+                     [LOCUS RESET] {} consecutive edit failures on this file.\n\
+                     Your previous edits changed the file and your anchor text no longer matches.\n\
+                     EDIT_BLOCKED: You must call read_file on '{}' before editing it again.",
+                    old_trimmed, path, context_hint, count, path
+                );
+            }
+        }
+
         return format!(
             "error: '{}' not found in {}.{}",
             old_trimmed, path, context_hint
@@ -1187,13 +2201,18 @@ fn edit_line(args: &Value, workdir: &str) -> String {
         }
         let new_file = new_lines.join("\n") + "\n";
         return match std::fs::write(&full_path, &new_file) {
-            Ok(()) => format!(
-                "{} changed ({}): '{}' -> '{}'",
-                changed.len(),
-                changed.join(", "),
-                old_trimmed,
-                new_content.trim()
-            ),
+            Ok(()) => {
+                if let Ok(mut counts) = EDIT_FAIL_COUNT.lock() {
+                    counts.remove(path);
+                }
+                format!(
+                    "{} changed ({}): '{}' -> '{}'",
+                    changed.len(),
+                    changed.join(", "),
+                    old_trimmed,
+                    new_content.trim()
+                )
+            }
             Err(e) => format!("error writing '{}': {}", path, e),
         };
     };
@@ -1213,12 +2232,20 @@ fn edit_line(args: &Value, workdir: &str) -> String {
     let new_file = new_lines.join("\n") + "\n";
 
     match std::fs::write(&full_path, &new_file) {
-        Ok(()) => format!(
-            "L{} changed: '{}' -> '{}'",
-            target_idx + 1,
-            old_trimmed,
-            new_content.trim()
-        ),
+        Ok(()) => {
+            // Reset edit failure tracking on success
+            if let Ok(mut counts) = EDIT_FAIL_COUNT.lock() {
+                counts.remove(path);
+            }
+            let method = if fuzzy_matched { " fuzzy" } else { "" };
+            format!(
+                "L{}{} changed: '{}' -> '{}'",
+                target_idx + 1,
+                method,
+                old_trimmed,
+                new_content.trim()
+            )
+        }
         Err(e) => format!("error writing '{}': {}", path, e),
     }
 }
@@ -1309,7 +2336,10 @@ fn edit_block(args: &Value, workdir: &str) -> String {
         }
         let mut matches = true;
         for (j, old_line) in old_lines.iter().enumerate() {
-            if file_lines[i + j].trim() != *old_line {
+            if file_lines[i + j].trim() != *old_line
+                && normalize_edit_match_line(file_lines[i + j])
+                    != normalize_edit_match_line(old_line)
+            {
                 matches = false;
                 break;
             }
@@ -1325,15 +2355,21 @@ fn edit_block(args: &Value, workdir: &str) -> String {
     if match_start.is_none() && old_lines.len() >= 2 {
         let first = old_lines[0];
         let last = old_lines[old_lines.len() - 1];
+        let first_norm = normalize_edit_match_line(first);
+        let last_norm = normalize_edit_match_line(last);
         for i in 0..file_lines.len() {
             if file_lines.len() - i < old_lines.len() {
                 break;
             }
-            if file_lines[i].trim() == first {
+            if file_lines[i].trim() == first
+                || normalize_edit_match_line(file_lines[i]) == first_norm
+            {
                 // Check if last line matches within a reasonable window
                 let search_end = (i + old_lines.len() + 5).min(file_lines.len());
                 for end in i + 1..search_end {
-                    if file_lines[end].trim() == last {
+                    if file_lines[end].trim() == last
+                        || normalize_edit_match_line(file_lines[end]) == last_norm
+                    {
                         let span = end - i + 1;
                         // Accept if span is within 3 lines of expected
                         if span.abs_diff(old_lines.len()) <= 3 {
@@ -1499,7 +2535,7 @@ fn apply_patch(args: &Value, workdir: &str) -> String {
                 .trim_start_matches("*** Update File:")
                 .trim_start_matches("--- a/")
                 .trim();
-            current_file = Some(resolve_path(name, workdir));
+            current_file = Some(name.to_string());
         } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
             removals.push(trimmed[1..].trim().to_string());
         } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
@@ -1515,23 +2551,11 @@ fn apply_patch(args: &Value, workdir: &str) -> String {
         }
     }
 
-    // If no file markers found, try to apply as raw -/+ against all .py files
+    // Raw +/- patches are ambiguous. Never guess which repository file to mutate.
     if current_file.is_none() && (!removals.is_empty() || !additions.is_empty()) {
-        // Find .py files
-        if let Ok(entries) = std::fs::read_dir(workdir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with(".py") && !name.starts_with("test_") {
-                    match apply_diff_to_file(&name, &removals, &additions, workdir) {
-                        Ok(n) => {
-                            applied += n;
-                            break;
-                        }
-                        Err(_) => {}
-                    }
-                }
-            }
-        }
+        errors.push(
+            "ambiguous patch: include an exact '*** Update File:' or '--- a/' path".to_string(),
+        );
     }
 
     if applied > 0 {
@@ -1749,23 +2773,27 @@ fn patch_file(args: &Value, workdir: &str) -> String {
 /// Count how many lines changed between snapshot and current file.
 /// Returns (lines_changed, total_lines_original).
 pub fn diff_stats(path: &str, workdir: &str) -> (usize, usize) {
-    let snaps = SNAPSHOTS.lock().unwrap();
-    let original = match snaps.files.get(path) {
+    let Some(snapshot) = stored_snapshot(&SNAPSHOTS, workdir) else {
+        return (0, 0);
+    };
+    let original = match snapshot.files.get(path) {
         Some(s) => s.clone(),
         None => return (0, 0),
     };
-    drop(snaps);
 
-    let current = match std::fs::read_to_string(Path::new(workdir).join(path)) {
+    let original = String::from_utf8_lossy(&original);
+    let orig_lines: Vec<&str> = original.lines().collect();
+
+    let current = match std::fs::read(Path::new(workdir).join(path)) {
         Ok(c) => c,
-        Err(_) => return (0, 0),
+        Err(_) => return (orig_lines.len().max(1), orig_lines.len()),
     };
 
-    let orig_lines: Vec<&str> = original.lines().collect();
+    let current = String::from_utf8_lossy(&current);
 
     // Use LCS-based diff to count only actually changed/inserted/deleted lines,
     // not positional shifts from insertions.
-    let diff = similar::TextDiff::from_lines(&original, &current);
+    let diff = similar::TextDiff::from_lines(original.as_ref(), current.as_ref());
     let mut changed = 0;
     for change in diff.iter_all_changes() {
         match change.tag() {
@@ -1781,9 +2809,9 @@ pub fn diff_stats(path: &str, workdir: &str) -> (usize, usize) {
 
 /// Get diff stats for ALL snapshotted files. Returns vec of (filename, changed, total).
 pub fn all_diff_stats(workdir: &str) -> Vec<(String, usize, usize)> {
-    let snaps = SNAPSHOTS.lock().unwrap();
-    let files: Vec<String> = snaps.files.keys().cloned().collect();
-    drop(snaps);
+    let files: Vec<String> = stored_snapshot(&SNAPSHOTS, workdir)
+        .map(|snapshot| snapshot.files.keys().cloned().collect())
+        .unwrap_or_default();
 
     let mut results: Vec<(String, usize, usize)> = files
         .into_iter()
@@ -2150,8 +3178,9 @@ pub fn extract_file_block_errors(response: &str, workdir: &str) -> Vec<String> {
 
 /// Restore all snapshotted files to their original content.
 pub fn restore_snapshot(workdir: &str) {
-    let snapshot = SNAPSHOTS.lock().unwrap().clone();
-    restore_snapshot_inner(workdir, &snapshot);
+    if let Some(snapshot) = stored_snapshot(&SNAPSHOTS, workdir) {
+        restore_snapshot_inner(workdir, &snapshot);
+    }
 }
 
 /// Detect project language from manifest files and file extensions.
@@ -2289,9 +3318,173 @@ fn detect_js_test_runner(workdir: &str) -> (String, Vec<String>) {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{LazyLock, Mutex};
+
+    static SNAPSHOT_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn tmp_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("failed to create temp dir")
+    }
+
+    fn restore_test_env(name: &str, previous: Option<String>) {
+        unsafe {
+            if let Some(value) = previous {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    fn write_executable(path: &Path, content: &str) {
+        fs::write(path, content).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[test]
+    fn django_runtests_target_converts_extra_file_args_to_labels() {
+        assert_eq!(
+            django_runtests_target("tests/model_fields/test_imagefield.py"),
+            "model_fields.test_imagefield"
+        );
+        assert_eq!(
+            django_runtests_target(
+                "./tests/forms_tests/tests/test_forms.py::FormsTest::test_clean"
+            ),
+            "forms_tests.tests.test_forms.FormsTest.test_clean"
+        );
+        assert_eq!(django_runtests_target("--verbosity=1"), "--verbosity=1");
+    }
+
+    #[test]
+    fn run_test_converts_django_scope_args_to_labels() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("tests/model_fields")).unwrap();
+        fs::create_dir_all(dir.path().join("tests/queries")).unwrap();
+        fs::create_dir_all(dir.path().join("django")).unwrap();
+        fs::write(
+            dir.path().join("tests/runtests.py"),
+            "import sys\nprint('ARGV=' + '|'.join(sys.argv[1:]))\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("tests/model_fields/test_imagefield.py"), "").unwrap();
+        fs::write(dir.path().join("tests/queries/tests.py"), "").unwrap();
+
+        let previous = [
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+        ];
+        unsafe {
+            std::env::set_var("SW_TEST_CMD", "python3 tests/runtests.py --verbosity=1");
+            std::env::remove_var("SW_EVAL_IMAGE");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({
+                "path": "tests/model_fields/test_imagefield.py",
+                "args": ["tests/queries/tests.py"]
+            }),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(
+            output.contains("ARGV=--verbosity=1|model_fields.test_imagefield|queries.tests"),
+            "{}",
+            output
+        );
+        assert!(!output.contains("|tests/queries/tests.py"), "{}", output);
+    }
+
+    #[test]
+    fn run_test_uses_solver_plan_without_losing_shell_step_boundaries() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        fs::write(dir.path().join("setup.py"), "from setuptools import setup\n").unwrap();
+        let plan_path = dir.path().join("solver-test-plan.json");
+        fs::write(
+            &plan_path,
+            r#"{
+                "schema_version": 1,
+                "runner": {"steps": [
+                    {"shell": "export MODE=fast", "scope_position": "none"},
+                    {"shell": "test \"$MODE\" = fast && printf 'SCOPE:%s\\n'", "scope_position": "append"}
+                ]}
+            }"#,
+        )
+        .unwrap();
+        let previous = [
+            ("SW_SOLVER_TEST_PLAN", std::env::var("SW_SOLVER_TEST_PLAN").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+        ];
+        unsafe {
+            std::env::set_var("SW_SOLVER_TEST_PLAN", &plan_path);
+            std::env::remove_var("SW_TEST_CMD");
+            std::env::remove_var("SW_EVAL_IMAGE");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"path": "tests/test value.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.contains("SCOPE:tests/test value.py"), "{}", output);
+        assert!(output.contains("SW_TEST_EXIT_CODE=0"), "{}", output);
+    }
+
+    #[test]
+    fn run_test_normalizes_existing_file_alias_to_scoped_test_file() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("tests")).unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("tests/test_probe.py"),
+            "def test_probe(): pass\n",
+        )
+        .unwrap();
+        write_executable(
+            &dir.path().join("probe.sh"),
+            "#!/bin/sh\necho \"ARGV=$*\"\n",
+        );
+        let previous = [
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+        ];
+        unsafe {
+            std::env::set_var("SW_TEST_CMD", "./probe.sh");
+            std::env::remove_var("SW_EVAL_IMAGE");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"file": "tests/test_probe.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.contains("ARGV=tests/test_probe.py"), "{}", output);
+        assert!(output.contains("SW_TEST_EXIT_CODE=0"), "{}", output);
     }
 
     #[test]
@@ -2354,6 +3547,475 @@ mod tests {
         let dir = tmp_dir();
         fs::write(dir.path().join("README.md"), "# Hello").unwrap();
         assert_eq!(detect_language(dir.path().to_str().unwrap()), "unknown");
+    }
+
+    #[test]
+    fn format_test_output_keeps_sklearn_check_build_import_miss_as_feedback() {
+        let output = format_test_command_output(
+            "python",
+            "python3",
+            &[
+                "-m".to_string(),
+                "pytest".to_string(),
+                "sklearn/cluster/tests/test_affinity_propagation.py".to_string(),
+            ],
+            "ModuleNotFoundError: No module named 'sklearn.__check_build._check_build'\n",
+            4,
+            false,
+            false,
+            false,
+            120,
+        );
+
+        assert!(!output.starts_with("TEST_ENV_UNAVAILABLE:"));
+        assert!(output.contains("SW_TEST_ENV_UNAVAILABLE=0"));
+        assert!(output.contains("sklearn.__check_build"));
+    }
+
+    #[test]
+    fn run_test_missing_runner_reports_typed_env_unavailable() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        let previous = [
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+        ];
+        unsafe {
+            std::env::set_var("SW_TEST_CMD", "./definitely-missing-test-runner");
+            std::env::remove_var("SW_EVAL_IMAGE");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"path": "tests/test_missing.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+
+        assert!(output.starts_with("TEST_ENV_UNAVAILABLE:"), "{}", output);
+        assert!(output.contains("SW_TEST_EXIT_CODE=-1"), "{}", output);
+        assert!(output.contains("SW_TEST_ENV_UNAVAILABLE=1"), "{}", output);
+        assert!(
+            output.contains("SW_TEST_SCOPE_AUTHORITY=untrusted"),
+            "{}",
+            output
+        );
+        assert!(output.contains("SW_TEST_SCOPE_TRUSTED=0"), "{}", output);
+        assert!(output.contains("SW_TEST_CAN_COMPLETE=0"), "{}", output);
+        assert!(output.contains("SW_TEST_COMMAND="), "{}", output);
+    }
+
+    #[test]
+    fn run_test_preflight_unavailable_reports_typed_markers() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let previous = std::env::var("SW_TEST_PREFLIGHT_UNAVAILABLE").ok();
+        unsafe {
+            std::env::set_var("SW_TEST_PREFLIGHT_UNAVAILABLE", "1");
+        }
+
+        let output = run_test_with_args(&serde_json::json!({}), dir.path().to_str().unwrap());
+
+        restore_test_env("SW_TEST_PREFLIGHT_UNAVAILABLE", previous);
+        assert!(output.starts_with("TEST_ENV_UNAVAILABLE:"), "{}", output);
+        assert!(output.contains("SW_TEST_EXIT_CODE=-1"), "{}", output);
+        assert!(output.contains("SW_TEST_ENV_UNAVAILABLE=1"), "{}", output);
+        assert!(
+            output.contains("SW_TEST_SCOPE_AUTHORITY=untrusted"),
+            "{}",
+            output
+        );
+        assert!(output.contains("SW_TEST_SCOPE_TRUSTED=0"), "{}", output);
+        assert!(output.contains("SW_TEST_CAN_COMPLETE=0"), "{}", output);
+    }
+
+    #[test]
+    fn run_test_js_install_failure_reports_typed_env_unavailable() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"test":"jest"}}"#,
+        )
+        .unwrap();
+        write_executable(
+            &bin_dir.join("npm"),
+            "#!/bin/sh\necho install failed >&2\nexit 42\n",
+        );
+        let previous = [
+            ("PATH", std::env::var("PATH").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+        ];
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::remove_var("SW_TEST_CMD");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"path": "tests/example.test.js"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.starts_with("TEST_ENV_UNAVAILABLE:"), "{}", output);
+        assert!(output.contains("dependency install failed"), "{}", output);
+        assert!(
+            output.contains("SW_TEST_SCOPE_AUTHORITY=untrusted"),
+            "{}",
+            output
+        );
+        assert!(output.contains("SW_TEST_CAN_COMPLETE=0"), "{}", output);
+        assert!(
+            output.contains("SW_TEST_COMMAND=npm [\"install\"]"),
+            "{}",
+            output
+        );
+    }
+
+    #[test]
+    fn edit_line_missing_path_error_does_not_seed_repo_paths() {
+        let dir = tmp_dir();
+        let output = edit_line(
+            &serde_json::json!({"old": "x", "new": "y"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(output.contains("requires a 'path' argument"));
+        assert!(output.contains("existing repository-relative file path"));
+        assert!(!output.contains("django/"));
+        assert!(!output.contains("class Choices"));
+    }
+
+    #[test]
+    fn edit_line_matches_whitespace_normalized_current_line() {
+        let dir = tmp_dir();
+        fs::write(
+            dir.path().join("module.py"),
+            "def f():\n    result = call(1, 2)\n",
+        )
+        .unwrap();
+
+        let output = edit_line(
+            &serde_json::json!({
+                "path": "module.py",
+                "old": "result    =    call(1,    2)",
+                "new": "result = call(2, 3)"
+            }),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(output.contains("changed"));
+        let content = fs::read_to_string(dir.path().join("module.py")).unwrap();
+        assert!(content.contains("    result = call(2, 3)"));
+    }
+
+    #[test]
+    fn edit_line_uses_hint_local_fuzzy_match_for_small_drift() {
+        let dir = tmp_dir();
+        fs::write(
+            dir.path().join("module.py"),
+            "def f():\n    return resolver(request.get_full_path(), urlconf)\n",
+        )
+        .unwrap();
+
+        let output = edit_line(
+            &serde_json::json!({
+                "path": "module.py",
+                "line": 2,
+                "old": "return resolve(request.get_full_path(), urlconf)",
+                "new": "return resolver(request.get_full_path() + '/', urlconf)"
+            }),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(output.contains("fuzzy changed"), "{}", output);
+        let content = fs::read_to_string(dir.path().join("module.py")).unwrap();
+        assert!(content.contains("return resolver(request.get_full_path() + '/', urlconf)"));
+    }
+
+    #[test]
+    fn run_test_blocks_unscoped_eval_image_without_probe_mode() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        *UNSCOPED_TEST_PROBE_USED.lock().unwrap() = false;
+        let dir = tmp_dir();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        write_executable(
+            &dir.path().join("probe.sh"),
+            "#!/bin/sh\necho 'SHOULD_NOT_RUN'\n",
+        );
+
+        let previous = [
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            (
+                "SW_TEST_UNSCOPED_PROBE",
+                std::env::var("SW_TEST_UNSCOPED_PROBE").ok(),
+            ),
+        ];
+        unsafe {
+            std::env::set_var("SW_EVAL_IMAGE", "1");
+            std::env::set_var("SW_TEST_CMD", "./probe.sh");
+            std::env::remove_var("SW_TEST_UNSCOPED_PROBE");
+        }
+
+        let output = run_test_with_args(&serde_json::json!({}), dir.path().to_str().unwrap());
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.contains("unscoped eval-image run_test is disabled"));
+        assert!(output.contains("SW_TEST_UNSCOPED_BLOCKED=1"));
+        assert!(!output.contains("SHOULD_NOT_RUN"));
+    }
+
+    #[test]
+    fn run_test_wraps_eval_image_python_repo_commands_with_conda() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        write_executable(
+            &bin_dir.join("conda"),
+            "#!/bin/sh\necho \"CONDA_ARGS=$*\"\n",
+        );
+        write_executable(
+            &dir.path().join("probe.sh"),
+            "#!/bin/sh\necho SHOULD_NOT_RUN_DIRECTLY\n",
+        );
+
+        let previous = [
+            ("PATH", std::env::var("PATH").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_TEST_CONDA_ENV", std::env::var("SW_TEST_CONDA_ENV").ok()),
+        ];
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("SW_EVAL_IMAGE", "1");
+            std::env::set_var("SW_TEST_CMD", "./probe.sh");
+            std::env::set_var("SW_TEST_CONDA_ENV", "testbed");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"path": "tests/test_probe.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.contains("SW_TEST_COMMAND=conda"), "{}", output);
+        assert!(output.contains("SW_TEST_SCOPE_TRUSTED=0"), "{}", output);
+        assert!(
+            output.contains(
+                "CONDA_ARGS=run -n testbed --no-capture-output ./probe.sh tests/test_probe.py"
+            ),
+            "{}",
+            output
+        );
+        assert!(!output.contains("SHOULD_NOT_RUN_DIRECTLY"), "{}", output);
+    }
+
+    #[test]
+    fn format_test_command_output_marks_feedback_scope() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let previous = [
+            (
+                "SW_TEST_CAN_COMPLETE",
+                std::env::var("SW_TEST_CAN_COMPLETE").ok(),
+            ),
+            (
+                "SW_TEST_SCOPE_AUTHORITY",
+                std::env::var("SW_TEST_SCOPE_AUTHORITY").ok(),
+            ),
+            (
+                "SW_TEST_SCOPE_TRUSTED",
+                std::env::var("SW_TEST_SCOPE_TRUSTED").ok(),
+            ),
+        ];
+        unsafe {
+            std::env::set_var("SW_TEST_CAN_COMPLETE", "0");
+            std::env::remove_var("SW_TEST_SCOPE_AUTHORITY");
+            std::env::set_var("SW_TEST_SCOPE_TRUSTED", "1");
+        }
+
+        let output = format_test_command_output(
+            "python",
+            "pytest",
+            &["tests/test_example.py".to_string()],
+            "1 passed\n",
+            0,
+            false,
+            false,
+            false,
+            42,
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+
+        assert!(output.contains("SW_TEST_SCOPE_AUTHORITY=feedback"));
+        assert!(output.contains("SW_TEST_SCOPE_TRUSTED=0"));
+        assert!(output.contains("SW_TEST_CAN_COMPLETE=0"));
+    }
+
+    #[test]
+    fn run_test_extracts_eval_command_env_assignments_before_conda_wrap() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        write_executable(
+            &bin_dir.join("conda"),
+            "#!/bin/sh\necho \"CONDA_ARGS=$*\"\necho \"PYTHONWARNINGS=$PYTHONWARNINGS\"\n",
+        );
+        write_executable(
+            &dir.path().join("probe.sh"),
+            "#!/bin/sh\necho SHOULD_NOT_RUN_DIRECTLY\n",
+        );
+
+        let previous = [
+            ("PATH", std::env::var("PATH").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            ("SW_TEST_CONDA_ENV", std::env::var("SW_TEST_CONDA_ENV").ok()),
+        ];
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("SW_EVAL_IMAGE", "1");
+            std::env::set_var(
+                "SW_TEST_CMD",
+                "PYTHONWARNINGS='ignore::UserWarning,ignore::SyntaxWarning' ./probe.sh",
+            );
+            std::env::set_var("SW_TEST_CONDA_ENV", "testbed");
+        }
+
+        let output = run_test_with_args(
+            &serde_json::json!({"path": "sympy/printing/tests/test_pycode.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(output.contains("SW_TEST_COMMAND=conda"), "{}", output);
+        assert!(
+            output.contains(
+                "CONDA_ARGS=run -n testbed --no-capture-output ./probe.sh sympy/printing/tests/test_pycode.py"
+            ),
+            "{}",
+            output
+        );
+        assert!(
+            output.contains("PYTHONWARNINGS=ignore::UserWarning,ignore::SyntaxWarning"),
+            "{}",
+            output
+        );
+        assert!(
+            !output.contains("CONDA_ARGS=run -n testbed --no-capture-output PYTHONWARNINGS="),
+            "{}",
+            output
+        );
+        assert!(!output.contains("SHOULD_NOT_RUN_DIRECTLY"), "{}", output);
+    }
+
+    #[test]
+    fn unscoped_probe_stops_after_streamed_failure_signal() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        *UNSCOPED_TEST_PROBE_USED.lock().unwrap() = false;
+        let dir = tmp_dir();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
+        write_executable(
+            &dir.path().join("probe.sh"),
+            "#!/bin/sh\necho 'FAIL: test_streamed_failure (tests.test_probe.ProbeCase)'\nsleep 10\necho 'TOO_LATE'\n",
+        );
+
+        let previous = [
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+            ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
+            (
+                "SW_TEST_UNSCOPED_PROBE",
+                std::env::var("SW_TEST_UNSCOPED_PROBE").ok(),
+            ),
+            (
+                "SW_TEST_TIMEOUT_SECONDS",
+                std::env::var("SW_TEST_TIMEOUT_SECONDS").ok(),
+            ),
+            (
+                "SW_TEST_STOP_ON_FAILURE",
+                std::env::var("SW_TEST_STOP_ON_FAILURE").ok(),
+            ),
+            (
+                "SW_TEST_FAILURE_CONTEXT_SECONDS",
+                std::env::var("SW_TEST_FAILURE_CONTEXT_SECONDS").ok(),
+            ),
+        ];
+        unsafe {
+            std::env::set_var("SW_EVAL_IMAGE", "1");
+            std::env::set_var("SW_TEST_CMD", "./probe.sh");
+            std::env::set_var("SW_TEST_UNSCOPED_PROBE", "1");
+            std::env::set_var("SW_TEST_TIMEOUT_SECONDS", "30");
+            std::env::set_var("SW_TEST_STOP_ON_FAILURE", "1");
+            std::env::set_var("SW_TEST_FAILURE_CONTEXT_SECONDS", "1");
+        }
+
+        let started = Instant::now();
+        let output = run_test_with_args(&serde_json::json!({}), dir.path().to_str().unwrap());
+        let elapsed = started.elapsed();
+
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
+        assert!(elapsed < Duration::from_secs(5), "elapsed: {:?}", elapsed);
+        assert!(output.contains("FAIL: test_streamed_failure"));
+        assert!(output.contains("SW_TEST_EARLY_STOPPED=1"));
+        assert!(output.contains("SW_TEST_SCOPE_TRUSTED=0"));
+        assert!(!output.contains("TOO_LATE"));
     }
 
     #[test]
@@ -2432,6 +4094,87 @@ mod tests {
     }
 
     #[test]
+    fn eval_image_restore_preserves_manifest_setup_artifacts() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap();
+        let _lock = SNAPSHOT_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let workdir = dir.path();
+        fs::create_dir_all(workdir.join("sklearn/__check_build")).unwrap();
+        fs::write(workdir.join(".gitignore"), "*.so\n").unwrap();
+        fs::write(workdir.join("sklearn/base.py"), "value = 1\n").unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", ".gitignore", "sklearn/base.py"])
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ])
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let artifact = "sklearn/__check_build/_check_build.so";
+        fs::write(workdir.join(artifact), b"compiled extension").unwrap();
+        let manifest = workdir.join("solver-validation-manifest.json");
+        fs::write(
+            &manifest,
+            format!(
+                "{{\"protected_setup_artifacts\":[\"{}\"],\"baseline_runnable_scopes\":[]}}\n",
+                artifact
+            ),
+        )
+        .unwrap();
+
+        let previous_eval = std::env::var("SW_EVAL_IMAGE").ok();
+        let previous_manifest = std::env::var("SW_VALIDATION_MANIFEST").ok();
+        unsafe {
+            std::env::set_var("SW_EVAL_IMAGE", "1");
+            std::env::set_var(
+                "SW_VALIDATION_MANIFEST",
+                manifest.to_string_lossy().to_string(),
+            );
+        }
+
+        let snapshot = snapshot_all(workdir.to_str().unwrap());
+        fs::write(workdir.join("sklearn/base.py"), "value = 2\n").unwrap();
+        fs::write(workdir.join("scratch.py"), "temporary = True\n").unwrap();
+
+        restore_from_snapshot(workdir.to_str().unwrap(), &snapshot);
+
+        restore_test_env("SW_EVAL_IMAGE", previous_eval);
+        restore_test_env("SW_VALIDATION_MANIFEST", previous_manifest);
+
+        assert_eq!(
+            fs::read_to_string(workdir.join("sklearn/base.py")).unwrap(),
+            "value = 1\n"
+        );
+        assert!(workdir.join(artifact).exists());
+        assert!(!workdir.join("scratch.py").exists());
+    }
+
+    #[test]
     fn snapshot_restore_recreates_deleted_file() {
         let dir = tmp_dir();
         fs::create_dir_all(dir.path().join("nested")).unwrap();
@@ -2444,6 +4187,129 @@ mod tests {
 
         let restored = fs::read_to_string(dir.path().join("nested/file.txt")).unwrap();
         assert_eq!(restored, "original\n");
+    }
+
+    #[test]
+    fn snapshot_restore_preserves_tracked_unicode_paths() {
+        let _lock = SNAPSHOT_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        let workdir = dir.path();
+        let unicode_path = workdir.join("tests/staticfiles_tests/apps/test/static/test/⊗.txt");
+        fs::create_dir_all(unicode_path.parent().unwrap()).unwrap();
+        fs::write(&unicode_path, "⊗ in the app dir\n").unwrap();
+        fs::write(workdir.join("source.py"), "value = 1\n").unwrap();
+
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "user.name=Test",
+                    "commit",
+                    "-m",
+                    "baseline",
+                ])
+                .current_dir(workdir)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let snapshot = snapshot_all(workdir.to_str().unwrap());
+        assert_eq!(snapshot.len(), 2);
+        fs::write(workdir.join("source.py"), "value = 2\n").unwrap();
+
+        restore_from_snapshot(workdir.to_str().unwrap(), &snapshot);
+
+        assert_eq!(
+            fs::read_to_string(&unicode_path).unwrap(),
+            "⊗ in the app dir\n"
+        );
+        let output = Command::new("git")
+            .args(["diff", "--name-status"])
+            .current_dir(workdir)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+            "restore should leave no tracked diff, got {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn diff_stats_counts_deleted_snapshotted_file() {
+        let _lock = SNAPSHOT_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("pkg")).unwrap();
+        fs::write(dir.path().join("pkg/deleted.py"), "one\ntwo\n").unwrap();
+
+        snapshot_files(dir.path().to_str().unwrap());
+        fs::remove_file(dir.path().join("pkg/deleted.py")).unwrap();
+
+        let (changed, total) = diff_stats("pkg/deleted.py", dir.path().to_str().unwrap());
+        assert_eq!(changed, 2);
+        assert_eq!(total, 2);
+        assert_eq!(
+            all_diff_stats(dir.path().to_str().unwrap()),
+            vec![("pkg/deleted.py".to_string(), 2, 2)]
+        );
+    }
+
+    #[test]
+    fn snapshots_are_isolated_by_workdir() {
+        let first = tmp_dir();
+        let second = tmp_dir();
+        fs::write(first.path().join("first.py"), "value = 1\n").unwrap();
+        fs::write(second.path().join("second.py"), "value = 2\n").unwrap();
+
+        snapshot_files(first.path().to_str().unwrap());
+        snapshot_files(second.path().to_str().unwrap());
+        fs::write(first.path().join("first.py"), "value = 3\n").unwrap();
+        fs::write(second.path().join("second.py"), "value = 4\n").unwrap();
+
+        assert_eq!(
+            all_diff_stats(first.path().to_str().unwrap()),
+            vec![("first.py".to_string(), 2, 1)]
+        );
+        assert_eq!(
+            all_diff_stats(second.path().to_str().unwrap()),
+            vec![("second.py".to_string(), 2, 1)]
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_preserves_binary_files() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("locale")).unwrap();
+        let binary_path = dir.path().join("locale/messages.mo");
+        let original = vec![0x00, 0x9f, 0xff, 0x10, 0x80];
+        fs::write(&binary_path, &original).unwrap();
+
+        let snapshot = snapshot_all(dir.path().to_str().unwrap());
+        fs::remove_file(&binary_path).unwrap();
+
+        restore_from_snapshot(dir.path().to_str().unwrap(), &snapshot);
+
+        let restored = fs::read(&binary_path).unwrap();
+        assert_eq!(restored, original);
     }
 
     // --- create_file tests ---
@@ -2566,6 +4432,70 @@ mod tests {
         let message = write_blocked_message("/missing/abc.py", dir.path().to_str().unwrap());
         assert!(message.contains("Closest leaf matches"));
         assert!(message.contains("src/pkg/abc.py"));
+    }
+
+    #[test]
+    fn mutating_tool_does_not_redirect_a_missing_path_to_unique_basename() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("src/pkg")).unwrap();
+        let real = dir.path().join("src/pkg/abc.py");
+        fs::write(&real, "x = 1\n").unwrap();
+
+        let result = execute_tool(
+            "edit_line",
+            &serde_json::json!({"path": "wrong/pkg/abc.py", "old": "x = 1", "new": "x = 2"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(result.contains("not an existing file"));
+        assert_eq!(fs::read_to_string(real).unwrap(), "x = 1\n");
+    }
+
+    #[test]
+    fn read_tool_can_follow_a_unique_existing_path_suggestion() {
+        let dir = tmp_dir();
+        fs::create_dir_all(dir.path().join("src/pkg")).unwrap();
+        fs::write(dir.path().join("src/pkg/abc.py"), "x = 1\n").unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let result = execute_tool(
+            "read_file",
+            &serde_json::json!({"path": "wrong/pkg/abc.py"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(result.contains("x = 1"));
+    }
+
+    #[test]
+    fn raw_patch_without_exact_file_marker_is_rejected() {
+        let dir = tmp_dir();
+        let real = dir.path().join("module.py");
+        fs::write(&real, "x = 1\n").unwrap();
+
+        let result = execute_tool(
+            "apply_patch",
+            &serde_json::json!({"patch": "-x = 1\n+x = 2\n"}),
+            dir.path().to_str().unwrap(),
+        );
+
+        assert!(result.contains("ambiguous patch"));
+        assert_eq!(fs::read_to_string(real).unwrap(), "x = 1\n");
     }
 
     #[test]
@@ -2709,5 +4639,78 @@ class Foo:
             "content was: {:?}",
             content
         );
+    }
+
+    #[test]
+    fn task_reproducer_rejects_unbound_pytest_before_runner_lookup() {
+        let output = write_task_reproducer(
+            &serde_json::json!({
+                "name": "test_bug.py",
+                "source": "def test_bug():\n    with pytest.raises(IndexError):\n        identify_format()\n"
+            }),
+            ".",
+        );
+        assert!(output.contains("uses `pytest.` without importing `pytest`"));
+        assert!(output.contains("SW_TASK_REPRODUCER_STATUS=no_causal_oracle"));
+        assert!(!output.contains("solver_safe_test_plan_missing"));
+    }
+
+    #[test]
+    fn task_reproducer_tool_qualifies_baseline_and_records_candidate_delta() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        let repo = tmp_dir();
+        let artifacts = tmp_dir();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "user.name", "Test"]);
+        fs::write(repo.path().join("source.py"), "VALUE = 1\n").unwrap();
+        git(&["add", "source.py"]);
+        git(&["commit", "-m", "baseline"]);
+        fs::write(repo.path().join("source.py"), "VALUE = 2\n").unwrap();
+        let plan = artifacts.path().join("solver-test-plan.json");
+        fs::write(
+            &plan,
+            r#"{"schema_version":1,"runner":{"steps":[{"shell":"python","scope_position":"append"}]}}"#,
+        )
+        .unwrap();
+        let previous = [
+            ("SW_SOLVER_TEST_PLAN", std::env::var("SW_SOLVER_TEST_PLAN").ok()),
+            ("SW_ARTIFACT_DIR", std::env::var("SW_ARTIFACT_DIR").ok()),
+            ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
+        ];
+        unsafe {
+            std::env::set_var("SW_SOLVER_TEST_PLAN", &plan);
+            std::env::set_var("SW_ARTIFACT_DIR", artifacts.path());
+            std::env::remove_var("SW_EVAL_IMAGE");
+        }
+        set_task_reproducer_issue("Fix VALUE behavior");
+        let guard = enable_validation_sandbox(repo.path().to_str().unwrap(), artifacts.path()).unwrap();
+        let qualified = execute_tool(
+            "write_task_reproducer",
+            &serde_json::json!({
+                "name": "test_task_reproducer.py",
+                "source": "import source\nassert source.VALUE == 2\n"
+            }),
+            repo.path().to_str().unwrap(),
+        );
+        assert!(qualified.contains("QUALIFIED"), "{qualified}");
+        let candidate = execute_tool(
+            "run_task_reproducer",
+            &serde_json::json!({}),
+            repo.path().to_str().unwrap(),
+        );
+        assert!(candidate.contains("SW_TASK_REPRODUCER_DELTA=fixed"), "{candidate}");
+        assert!(!repo.path().join(".statewright-reproducer").exists());
+        assert!(artifacts.path().join("task-reproducers/test_task_reproducer.py").is_file());
+        assert!(artifacts.path().join("test-evidence.jsonl").is_file());
+        drop(guard);
+        *ACTIVE_TASK_REPRODUCER.lock().unwrap() = None;
+        for (name, value) in previous {
+            restore_test_env(name, value);
+        }
     }
 }

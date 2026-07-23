@@ -1,21 +1,35 @@
-use statewright_engine::{MachineDefinition, DangerLevel, StateType};
+use statewright_engine::{DangerLevel, MachineDefinition, StateType};
 use std::collections::{BTreeSet, VecDeque};
 
 /// Tool categories for escalation detection.
 const READ_ONLY_TOOLS: &[&str] = &[
-    "read_file", "search_files", "list_directory", "grep",
-    "git_status", "git_log", "git_diff",
+    "read_file",
+    "search_files",
+    "list_directory",
+    "grep",
+    "git_status",
+    "git_log",
+    "git_diff",
 ];
 
-const WRITE_TOOLS: &[&str] = &[
-    "write_file", "edit_file", "create_file", "delete_file",
-];
+const WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "create_file", "delete_file"];
 
 const EXECUTE_TOOLS: &[&str] = &["run_command", "run_test", "run_build"];
 
-const GIT_MUTATE_TOOLS: &[&str] = &["git_add", "git_commit", "git_push", "git_checkout", "git_branch"];
+const GIT_MUTATE_TOOLS: &[&str] = &[
+    "git_add",
+    "git_commit",
+    "git_push",
+    "git_checkout",
+    "git_branch",
+];
 
-const EXTERNAL_TOOLS: &[&str] = &["http_request", "deploy", "database_query", "database_mutate"];
+const EXTERNAL_TOOLS: &[&str] = &[
+    "http_request",
+    "deploy",
+    "database_query",
+    "database_mutate",
+];
 
 /// Validate an LLM-generated machine definition for agent safety.
 /// This extends the engine's structural validation with agent-specific checks.
@@ -26,7 +40,10 @@ pub fn validate_agent_machine(definition: &MachineDefinition) -> Result<(), Agen
         .meta
         .as_ref()
         .and_then(|m| m.danger_level.as_ref());
-    let is_dangerous = matches!(danger, Some(DangerLevel::Dangerous) | Some(DangerLevel::Moderate));
+    let is_dangerous = matches!(
+        danger,
+        Some(DangerLevel::Dangerous) | Some(DangerLevel::Moderate)
+    );
 
     // 1. Run engine-level structural validation first
     if let Err(e) = statewright_engine::validate_definition(definition) {
@@ -81,9 +98,10 @@ pub fn validate_agent_machine(definition: &MachineDefinition) -> Result<(), Agen
 
     // 5. Dangerous/moderate machines must have at least one approval gate
     if is_dangerous {
-        let has_approval = definition.states.values().any(|state_def| {
-            state_def.on.values().any(|t| t.requires_approval())
-        });
+        let has_approval = definition
+            .states
+            .values()
+            .any(|state_def| state_def.on.values().any(|t| t.requires_approval()));
 
         if !has_approval {
             errors.push(
@@ -127,7 +145,12 @@ pub fn validate_agent_machine(definition: &MachineDefinition) -> Result<(), Agen
 
 fn max_tool_privilege(tools: Option<&[String]>) -> u8 {
     tools
-        .map(|ts| ts.iter().map(|t| tool_privilege_level(t)).max().unwrap_or(0))
+        .map(|ts| {
+            ts.iter()
+                .map(|t| tool_privilege_level(t))
+                .max()
+                .unwrap_or(0)
+        })
         .unwrap_or(0)
 }
 
@@ -289,8 +312,11 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("failed")),
-            "expected error about missing 'failed' state, got: {:?}", err.errors);
+        assert!(
+            err.errors.iter().any(|e| e.contains("failed")),
+            "expected error about missing 'failed' state, got: {:?}",
+            err.errors
+        );
     }
 
     #[test]
@@ -316,8 +342,11 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("approval")),
-            "expected error about missing approval gate, got: {:?}", err.errors);
+        assert!(
+            err.errors.iter().any(|e| e.contains("approval")),
+            "expected error about missing approval gate, got: {:?}",
+            err.errors
+        );
     }
 
     #[test]
@@ -339,8 +368,13 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("initial state") || e.contains("write")),
-            "expected error about write tools in initial state, got: {:?}", err.errors);
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("initial state") || e.contains("write")),
+            "expected error about write tools in initial state, got: {:?}",
+            err.errors
+        );
     }
 
     #[test]
@@ -367,8 +401,13 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("escalation") || e.contains("approval")),
-            "expected error about tool escalation without approval, got: {:?}", err.errors);
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("escalation") || e.contains("approval")),
+            "expected error about tool escalation without approval, got: {:?}",
+            err.errors
+        );
     }
 
     #[test]
@@ -393,8 +432,13 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("failed") || e.contains("FAIL")),
-            "expected error about missing path to failed, got: {:?}", err.errors);
+        assert!(
+            err.errors
+                .iter()
+                .any(|e| e.contains("failed") || e.contains("FAIL")),
+            "expected error about missing path to failed, got: {:?}",
+            err.errors
+        );
     }
 
     #[test]
@@ -414,7 +458,10 @@ mod tests {
         .unwrap();
 
         let err = validate_agent_machine(&def).unwrap_err();
-        assert!(err.errors.iter().any(|e| e.contains("initial state")),
-            "expected engine-level validation error, got: {:?}", err.errors);
+        assert!(
+            err.errors.iter().any(|e| e.contains("initial state")),
+            "expected engine-level validation error, got: {:?}",
+            err.errors
+        );
     }
 }

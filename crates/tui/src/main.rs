@@ -13,7 +13,10 @@ use events::{StateInfo, TuiEvent};
 use ui::App;
 
 #[derive(Parser)]
-#[command(name = "statewright", about = "Watch a small LLM fix bugs within state machine guardrails")]
+#[command(
+    name = "statewright",
+    about = "Watch a small LLM fix bugs within state machine guardrails"
+)]
 struct Args {
     /// Task description
     #[arg(short, long, default_value = "Fix the failing test")]
@@ -82,11 +85,31 @@ struct DemoChoice {
 /// Embedded fixture files for demo mode
 fn get_demo_fixtures() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("buggy-calc", "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py", "crates/cli/fixtures/buggy-calc"),
-        ("sympy-22914", include_str!("../../cli/fixtures/sympy-22914/ISSUE.md"), "crates/cli/fixtures/sympy-22914"),
-        ("requests-1963", include_str!("../../cli/fixtures/requests-1963/ISSUE.md"), "crates/cli/fixtures/requests-1963"),
-        ("pytest-5262", include_str!("../../cli/fixtures/pytest-5262/ISSUE.md"), "crates/cli/fixtures/pytest-5262"),
-        ("sympy-21847", include_str!("../../cli/fixtures/sympy-21847/ISSUE.md"), "crates/cli/fixtures/sympy-21847"),
+        (
+            "buggy-calc",
+            "Fix the failing test in test_calc.py by finding and fixing the bug in calc.py",
+            "crates/cli/fixtures/buggy-calc",
+        ),
+        (
+            "sympy-22914",
+            include_str!("../../cli/fixtures/sympy-22914/ISSUE.md"),
+            "crates/cli/fixtures/sympy-22914",
+        ),
+        (
+            "requests-1963",
+            include_str!("../../cli/fixtures/requests-1963/ISSUE.md"),
+            "crates/cli/fixtures/requests-1963",
+        ),
+        (
+            "pytest-5262",
+            include_str!("../../cli/fixtures/pytest-5262/ISSUE.md"),
+            "crates/cli/fixtures/pytest-5262",
+        ),
+        (
+            "sympy-21847",
+            include_str!("../../cli/fixtures/sympy-21847/ISSUE.md"),
+            "crates/cli/fixtures/sympy-21847",
+        ),
     ]
 }
 
@@ -104,11 +127,21 @@ async fn run_demo_menu(args: &Args) -> anyhow::Result<Option<DemoChoice>> {
                     ratatui::restore();
                     return Ok(None);
                 }
-                KeyCode::Up | KeyCode::Char('k') => { if selected > 0 { selected -= 1; } }
-                KeyCode::Down | KeyCode::Char('j') => { if selected < max_idx { selected += 1; } }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if selected > 0 {
+                        selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if selected < max_idx {
+                        selected += 1;
+                    }
+                }
                 KeyCode::Char(c) if c.is_ascii_digit() => {
                     let idx = (c as usize) - ('1' as usize);
-                    if idx <= max_idx { selected = idx; }
+                    if idx <= max_idx {
+                        selected = idx;
+                    }
                 }
                 KeyCode::Enter => {
                     ratatui::restore();
@@ -192,12 +225,18 @@ async fn main() -> anyhow::Result<()> {
             cmd.arg("--use-hardcoded-machine");
         }
         cmd.args([
-            "--task", &task,
-            "--workdir", &workdir,
-            "--ollama-url", &ollama_url,
-            "--model", &model,
-            "--tool-mode", &tool_mode,
-            "--max-steps", &max_steps.to_string(),
+            "--task",
+            &task,
+            "--workdir",
+            &workdir,
+            "--ollama-url",
+            &ollama_url,
+            "--model",
+            &model,
+            "--tool-mode",
+            &tool_mode,
+            "--max-steps",
+            &max_steps.to_string(),
             "--log",
         ]);
         cmd.stdout(Stdio::piped());
@@ -207,7 +246,10 @@ async fn main() -> anyhow::Result<()> {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = engine_tx.send(AppEvent::EngineLine(format!("[ERROR] Failed to spawn sw-agent: {}", e)));
+                let _ = engine_tx.send(AppEvent::EngineLine(format!(
+                    "[ERROR] Failed to spawn sw-agent: {}",
+                    e
+                )));
                 let _ = engine_tx.send(AppEvent::EngineDone);
                 return;
             }
@@ -223,10 +265,14 @@ async fn main() -> anyhow::Result<()> {
             while let Ok(Some(line)) = reader.next_line().await {
                 // Skip compiler warnings
                 let trimmed = line.trim();
-                if trimmed.starts_with("warning:") || trimmed.starts_with("Compiling")
-                    || trimmed.starts_with("Finished") || trimmed.starts_with("Running")
-                    || trimmed.is_empty() || trimmed.starts_with("-->")
-                    || trimmed.starts_with("|") || trimmed.starts_with("=")
+                if trimmed.starts_with("warning:")
+                    || trimmed.starts_with("Compiling")
+                    || trimmed.starts_with("Finished")
+                    || trimmed.starts_with("Running")
+                    || trimmed.is_empty()
+                    || trimmed.starts_with("-->")
+                    || trimmed.starts_with("|")
+                    || trimmed.starts_with("=")
                 {
                     continue;
                 }
@@ -244,14 +290,13 @@ async fn main() -> anyhow::Result<()> {
 
         match child.wait().await {
             Ok(status) => {
-                let _ = engine_tx.send(AppEvent::EngineLine(
-                    format!("[ENGINE] process exited with: {}", status)
-                ));
+                let _ = engine_tx.send(AppEvent::EngineLine(format!(
+                    "[ENGINE] process exited with: {}",
+                    status
+                )));
             }
             Err(e) => {
-                let _ = engine_tx.send(AppEvent::EngineLine(
-                    format!("[ENGINE] wait error: {}", e)
-                ));
+                let _ = engine_tx.send(AppEvent::EngineLine(format!("[ENGINE] wait error: {}", e)));
             }
         }
         let _ = engine_tx.send(AppEvent::EngineDone);
@@ -275,18 +320,16 @@ async fn main() -> anyhow::Result<()> {
         };
 
         match event {
-            Some(AppEvent::Input(CEvent::Key(k))) => {
-                match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
-                    KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
-                    KeyCode::PageUp => app.page_up(),
-                    KeyCode::PageDown => app.page_down(),
-                    KeyCode::Home | KeyCode::Char('g') => app.scroll_top(),
-                    KeyCode::End | KeyCode::Char('G') => app.scroll_bottom(),
-                    _ => {}
-                }
-            }
+            Some(AppEvent::Input(CEvent::Key(k))) => match k.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
+                KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
+                KeyCode::PageUp => app.page_up(),
+                KeyCode::PageDown => app.page_down(),
+                KeyCode::Home | KeyCode::Char('g') => app.scroll_top(),
+                KeyCode::End | KeyCode::Char('G') => app.scroll_bottom(),
+                _ => {}
+            },
             Some(AppEvent::EngineLine(line)) => {
                 let trimmed = line.trim().to_string();
 
@@ -382,12 +425,18 @@ async fn run_plain(args: &Args) -> anyhow::Result<()> {
         cmd.arg("--use-hardcoded-machine");
     }
     cmd.args([
-        "--task", &args.task,
-        "--workdir", &args.workdir,
-        "--ollama-url", &args.ollama_url,
-        "--model", &args.model,
-        "--tool-mode", &args.tool_mode,
-        "--max-steps", &args.max_steps.to_string(),
+        "--task",
+        &args.task,
+        "--workdir",
+        &args.workdir,
+        "--ollama-url",
+        &args.ollama_url,
+        "--model",
+        &args.model,
+        "--tool-mode",
+        &args.tool_mode,
+        "--max-steps",
+        &args.max_steps.to_string(),
     ]);
     let status = cmd.status()?;
     std::process::exit(status.code().unwrap_or(1));
@@ -409,13 +458,17 @@ fn parse_machine_block(lines: &[String]) -> Vec<StateInfo> {
             // State definition line
             let name = trimmed.split_whitespace().next().unwrap_or("?").to_string();
             let max_iterations = if trimmed.contains("(max ") {
-                trimmed.split("(max ").nth(1)
+                trimmed
+                    .split("(max ")
+                    .nth(1)
                     .and_then(|s| s.split(')').next())
                     .and_then(|s| s.parse().ok())
             } else {
                 None
             };
-            let tools_str = trimmed.split("[tools: ").nth(1)
+            let tools_str = trimmed
+                .split("[tools: ")
+                .nth(1)
                 .and_then(|s| s.strip_suffix(']'))
                 .unwrap_or("");
             let tools: Vec<String> = if tools_str == "(none)" || tools_str.is_empty() {
@@ -423,8 +476,8 @@ fn parse_machine_block(lines: &[String]) -> Vec<StateInfo> {
             } else {
                 tools_str.split(", ").map(|s| s.to_string()).collect()
             };
-            let is_final = tools.is_empty() && max_iterations.is_none()
-                && !trimmed.contains("localizing");
+            let is_final =
+                tools.is_empty() && max_iterations.is_none() && !trimmed.contains("localizing");
 
             states.push(StateInfo {
                 name,
@@ -437,7 +490,9 @@ fn parse_machine_block(lines: &[String]) -> Vec<StateInfo> {
             // Transition line
             if let Some(state) = states.last_mut() {
                 if let Some((event, target)) = trimmed.split_once(" -> ") {
-                    state.transitions.push((event.trim().to_string(), target.trim().to_string()));
+                    state
+                        .transitions
+                        .push((event.trim().to_string(), target.trim().to_string()));
                 }
             }
         }
@@ -452,23 +507,42 @@ fn parse_engine_line(line: &str) -> TuiEvent {
 
     // [Setup] Snapshotted N file(s)
     if let Some(rest) = strip_tag(trimmed, "[Setup]") {
-        if let Some(n) = rest.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
-            return TuiEvent::Setup { files_snapshotted: n };
+        if let Some(n) = rest
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            return TuiEvent::Setup {
+                files_snapshotted: n,
+            };
         }
     }
 
     // [Phase N] ...
     if let Some(rest) = strip_tag(trimmed, "[Phase 1]") {
-        return TuiEvent::LlmResponse { preview: format!("Phase 1: {}", rest) };
+        return TuiEvent::LlmResponse {
+            preview: format!("Phase 1: {}", rest),
+        };
     }
     if let Some(rest) = strip_tag(trimmed, "[Phase 2]") {
-        return TuiEvent::LlmResponse { preview: format!("Phase 2: {}", rest) };
+        return TuiEvent::LlmResponse {
+            preview: format!("Phase 2: {}", rest),
+        };
     }
 
     // [Step N] HARD LIMIT — forcing X -> Y
     if trimmed.contains("HARD LIMIT") {
-        if let Some((from, to)) = trimmed.split("forcing ").nth(1).and_then(|s| s.split_once(" -> ")) {
-            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string(), trigger: None, rationale: None };
+        if let Some((from, to)) = trimmed
+            .split("forcing ")
+            .nth(1)
+            .and_then(|s| s.split_once(" -> "))
+        {
+            return TuiEvent::Transition {
+                from: from.trim().to_string(),
+                to: to.trim().to_string(),
+                trigger: None,
+                rationale: None,
+            };
         }
     }
 
@@ -480,13 +554,25 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     // [LOCALIZE] ...
     if let Some(rest) = strip_tag(trimmed, "[LOCALIZE]") {
         if rest.starts_with("Extracted") {
-            let lines = rest.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            return TuiEvent::Localized { files: vec![], test_failures: String::new(), excerpt_lines: lines };
+            let lines = rest
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            return TuiEvent::Localized {
+                files: vec![],
+                test_failures: String::new(),
+                excerpt_lines: lines,
+            };
         }
         if rest.starts_with("Test failures:") || rest.starts_with("Files:") {
-            return TuiEvent::LlmResponse { preview: format!("LOCALIZE: {}", rest) };
+            return TuiEvent::LlmResponse {
+                preview: format!("LOCALIZE: {}", rest),
+            };
         }
-        return TuiEvent::LlmResponse { preview: format!("LOCALIZE: {}", rest) };
+        return TuiEvent::LlmResponse {
+            preview: format!("LOCALIZE: {}", rest),
+        };
     }
 
     // [TOOL] name(args) -> result
@@ -495,16 +581,25 @@ fn parse_engine_line(line: &str) -> TuiEvent {
             let name = call.split('(').next().unwrap_or("?").to_string();
             // Unescape \n back to real newlines for diff parsing
             let result_unescaped = result.replace("\\n", "\n");
-            return TuiEvent::ToolResult { name, result_preview: result_unescaped };
+            return TuiEvent::ToolResult {
+                name,
+                result_preview: result_unescaped,
+            };
         }
         let name = rest.split('(').next().unwrap_or("?").to_string();
-        return TuiEvent::ToolCall { name, args_preview: rest.to_string() };
+        return TuiEvent::ToolCall {
+            name,
+            args_preview: rest.to_string(),
+        };
     }
 
     // [NATIVE] name(args)
     if let Some(rest) = strip_tag(trimmed, "[NATIVE]") {
         let name = rest.split('(').next().unwrap_or("?").to_string();
-        return TuiEvent::ToolCall { name, args_preview: rest.to_string() };
+        return TuiEvent::ToolCall {
+            name,
+            args_preview: rest.to_string(),
+        };
     }
 
     // [GUARD] BLOCKED
@@ -519,22 +614,39 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     // [TRANSITION] old -> new
     if let Some(rest) = strip_tag(trimmed, "[TRANSITION]") {
         if let Some((from, to)) = rest.split_once(" -> ") {
-            return TuiEvent::Transition { from: from.trim().to_string(), to: to.trim().to_string(), trigger: None, rationale: None };
+            return TuiEvent::Transition {
+                from: from.trim().to_string(),
+                to: to.trim().to_string(),
+                trigger: None,
+                rationale: None,
+            };
         }
     }
 
     // [NAV] ...
     if let Some(rest) = strip_tag(trimmed, "[NAV]") {
-        return TuiEvent::NavAction { action: rest.to_string() };
+        return TuiEvent::NavAction {
+            action: rest.to_string(),
+        };
     }
 
     // [AUTO-TEST]
     if let Some(rest) = strip_tag(trimmed, "[AUTO-TEST]") {
         if rest.contains("ALL PASSED") {
-            return TuiEvent::AutoTest { passed: true, fail_count: 0 };
+            return TuiEvent::AutoTest {
+                passed: true,
+                fail_count: 0,
+            };
         }
-        let count = rest.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(1);
-        return TuiEvent::AutoTest { passed: false, fail_count: count };
+        let count = rest
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        return TuiEvent::AutoTest {
+            passed: false,
+            fail_count: count,
+        };
     }
 
     // [DIFF]
@@ -542,11 +654,16 @@ fn parse_engine_line(line: &str) -> TuiEvent {
         let parts: Vec<&str> = rest.splitn(2, " — ").collect();
         if parts.len() == 2 {
             let file = parts[0].trim().to_string();
-            let nums: Vec<usize> = parts[1].split('/').filter_map(|s| {
-                s.split_whitespace().next().and_then(|n| n.parse().ok())
-            }).collect();
+            let nums: Vec<usize> = parts[1]
+                .split('/')
+                .filter_map(|s| s.split_whitespace().next().and_then(|n| n.parse().ok()))
+                .collect();
             if nums.len() >= 2 {
-                return TuiEvent::DiffStats { file, changed: nums[0], total: nums[1] };
+                return TuiEvent::DiffStats {
+                    file,
+                    changed: nums[0],
+                    total: nums[1],
+                };
             }
         }
     }
@@ -555,8 +672,16 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     if let Some(rest) = strip_tag(trimmed, "[MINIMIZER]") {
         if rest.starts_with("REJECTED") {
             let file = rest.split_whitespace().nth(2).unwrap_or("?").to_string();
-            let changed = rest.split_whitespace().nth(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            return TuiEvent::MinimizerRejected { file, changed, max: 5 };
+            let changed = rest
+                .split_whitespace()
+                .nth(4)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            return TuiEvent::MinimizerRejected {
+                file,
+                changed,
+                max: 5,
+            };
         }
     }
 
@@ -565,11 +690,15 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     }
 
     if let Some(rest) = strip_tag(trimmed, "[PARSE FAIL]") {
-        return TuiEvent::ParseFail { preview: rest.to_string() };
+        return TuiEvent::ParseFail {
+            preview: rest.to_string(),
+        };
     }
 
     if let Some(rest) = strip_tag(trimmed, "[LLM]") {
-        return TuiEvent::LlmResponse { preview: rest.to_string() };
+        return TuiEvent::LlmResponse {
+            preview: rest.to_string(),
+        };
     }
 
     if trimmed.contains("[SNAPSHOT]") {
@@ -577,80 +706,140 @@ fn parse_engine_line(line: &str) -> TuiEvent {
     }
 
     if let Some(rest) = strip_tag(trimmed, "[APPROVAL GATE]") {
-        return TuiEvent::ApprovalGate { message: rest.to_string() };
+        return TuiEvent::ApprovalGate {
+            message: rest.to_string(),
+        };
     }
 
     if trimmed.contains("[HUMAN]") {
         // "[HUMAN] APPROVED -> completed" — treat as a transition
         if let Some(target) = trimmed.split("-> ").nth(1) {
-            return TuiEvent::Transition { from: "review".to_string(), to: target.trim().to_string(), trigger: None, rationale: None };
+            return TuiEvent::Transition {
+                from: "review".to_string(),
+                to: target.trim().to_string(),
+                trigger: None,
+                rationale: None,
+            };
         }
-        return TuiEvent::NavAction { action: trimmed.to_string() };
+        return TuiEvent::NavAction {
+            action: trimmed.to_string(),
+        };
     }
 
     if let Some(rest) = strip_tag(trimmed, "[FAIL]") {
-        return TuiEvent::AgentFailed { error: Some(rest.to_string()) };
+        return TuiEvent::AgentFailed {
+            error: Some(rest.to_string()),
+        };
     }
 
     // "=== COMPLETED in 8 steps ===" — word 3 (0-indexed) is the number
     if trimmed.starts_with("=== COMPLETED") {
-        let steps = trimmed.split_whitespace().nth(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-        return TuiEvent::Completed { steps, success: true };
+        let steps = trimmed
+            .split_whitespace()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        return TuiEvent::Completed {
+            steps,
+            success: true,
+        };
     }
     // "=== FAILED (failed) after 18 steps ==="
     if trimmed.starts_with("=== FAILED") {
-        let steps = trimmed.split_whitespace()
-            .filter_map(|s| s.parse::<u32>().ok()).next().unwrap_or(0);
-        return TuiEvent::Completed { steps, success: false };
+        let steps = trimmed
+            .split_whitespace()
+            .filter_map(|s| s.parse::<u32>().ok())
+            .next()
+            .unwrap_or(0);
+        return TuiEvent::Completed {
+            steps,
+            success: false,
+        };
     }
 
     if trimmed.contains("[SUCCESS]") {
         // Skip — the "=== COMPLETED ===" line already emits Completed with step count
-        return TuiEvent::LlmResponse { preview: "all tests pass".to_string() };
+        return TuiEvent::LlmResponse {
+            preview: "all tests pass".to_string(),
+        };
     }
 
     if let Some(rest) = strip_tag(trimmed, "[ABORT]") {
-        let max = rest.split('(').nth(1).and_then(|s| s.split(')').next()).and_then(|s| s.parse().ok()).unwrap_or(25);
+        let max = rest
+            .split('(')
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(25);
         return TuiEvent::Aborted { max_steps: max };
     }
 
     // Fallback
-    TuiEvent::LlmResponse { preview: trimmed.to_string() }
+    TuiEvent::LlmResponse {
+        preview: trimmed.to_string(),
+    }
 }
 
 fn parse_step_line(line: &str) -> TuiEvent {
     let is_checkpoint = line.contains("CHECKPOINT");
-    let step = line.split(']').next()
+    let step = line
+        .split(']')
+        .next()
         .and_then(|s| s.split_whitespace().last())
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
     if is_checkpoint {
         let state = line.split('\'').nth(1).unwrap_or("?").to_string();
-        let iteration = line.split("iteration ").nth(1)
+        let iteration = line
+            .split("iteration ")
+            .nth(1)
             .and_then(|s| s.split('/').next())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let max = line.split("iteration ").nth(1)
+        let max = line
+            .split("iteration ")
+            .nth(1)
             .and_then(|s| s.split('/').nth(1))
             .and_then(|s| s.split(')').next())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        TuiEvent::StepStarted { step, state, iteration, max_iterations: max, tools: vec![], is_checkpoint: true }
+        TuiEvent::StepStarted {
+            step,
+            state,
+            iteration,
+            max_iterations: max,
+            tools: vec![],
+            is_checkpoint: true,
+        }
     } else {
-        let state = line.split("State: ").nth(1)
+        let state = line
+            .split("State: ")
+            .nth(1)
             .and_then(|s| s.split_whitespace().next())
-            .unwrap_or("?").to_string();
-        let iteration = line.split('(').nth(1)
+            .unwrap_or("?")
+            .to_string();
+        let iteration = line
+            .split('(')
+            .nth(1)
             .and_then(|s| s.split('/').next())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let max = line.split('(').nth(1)
+        let max = line
+            .split('(')
+            .nth(1)
             .and_then(|s| s.split('/').nth(1))
             .and_then(|s| s.split(')').next())
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        TuiEvent::StepStarted { step, state, iteration, max_iterations: max, tools: vec![], is_checkpoint: false }
+        TuiEvent::StepStarted {
+            step,
+            state,
+            iteration,
+            max_iterations: max,
+            tools: vec![],
+            is_checkpoint: false,
+        }
     }
 }
 
@@ -673,7 +862,10 @@ fn is_pytest_noise(line: &str) -> bool {
         return true;
     }
     // Summary lines: "1 failed, 6 passed in 0.02s"
-    if (line.contains("passed") || line.contains("failed")) && line.contains(" in ") && line.contains('s') {
+    if (line.contains("passed") || line.contains("failed"))
+        && line.contains(" in ")
+        && line.contains('s')
+    {
         return true;
     }
     // Test location lines: "test_calc.py:24: in test_divide"
@@ -685,11 +877,17 @@ fn is_pytest_noise(line: &str) -> bool {
         return true;
     }
     // Pytest infrastructure
-    if line.starts_with("platform ") || line.starts_with("rootdir:") || line.starts_with("plugins:")
-        || line.starts_with("cachedir:") || line.starts_with("collecting")
-        || line.starts_with("collected") || line.starts_with("-- Docs:")
+    if line.starts_with("platform ")
+        || line.starts_with("rootdir:")
+        || line.starts_with("plugins:")
+        || line.starts_with("cachedir:")
+        || line.starts_with("collecting")
+        || line.starts_with("collected")
+        || line.starts_with("-- Docs:")
         || line.starts_with("--- Final Verification ---")
-        || line.starts_with("assert ") || line.starts_with("Obtained:") || line.starts_with("Expected:")
+        || line.starts_with("assert ")
+        || line.starts_with("Obtained:")
+        || line.starts_with("Expected:")
         || line.starts_with("comparison failed")
     {
         return true;

@@ -1,6 +1,6 @@
 use crate::ollama_client::{OllamaClient, OllamaError};
 use crate::prompt_templates;
-use crate::validator::{validate_agent_machine, AgentValidationError};
+use crate::validator::{AgentValidationError, validate_agent_machine};
 use statewright_engine::MachineDefinition;
 
 /// Result of generating a state machine from a task description.
@@ -15,10 +15,7 @@ pub struct GenerationResult {
 pub enum GenerationError {
     Ollama(OllamaError),
     Validation(AgentValidationError),
-    MaxRetriesExceeded {
-        attempts: u32,
-        last_error: String,
-    },
+    MaxRetriesExceeded { attempts: u32, last_error: String },
 }
 
 impl std::fmt::Display for GenerationError {
@@ -26,7 +23,10 @@ impl std::fmt::Display for GenerationError {
         match self {
             GenerationError::Ollama(e) => write!(f, "ollama error: {}", e),
             GenerationError::Validation(e) => write!(f, "validation error: {}", e),
-            GenerationError::MaxRetriesExceeded { attempts, last_error } => {
+            GenerationError::MaxRetriesExceeded {
+                attempts,
+                last_error,
+            } => {
                 write!(f, "failed after {} attempts: {}", attempts, last_error)
             }
         }
@@ -97,7 +97,9 @@ mod tests {
 
     /// A minimal mock Ollama server for testing.
     /// Returns canned JSON responses based on fixture data.
-    async fn start_mock_ollama(response_json: serde_json::Value) -> (String, tokio::task::JoinHandle<()>) {
+    async fn start_mock_ollama(
+        response_json: serde_json::Value,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{}", addr);
@@ -192,7 +194,9 @@ mod tests {
         };
         let client = OllamaClient::new(config);
 
-        let result = generate_machine(&client, "Fix the login bug", 3).await.unwrap();
+        let result = generate_machine(&client, "Fix the login bug", 3)
+            .await
+            .unwrap();
         assert_eq!(result.attempts, 1);
         assert_eq!(result.definition.id, "fix-login-bug");
         assert_eq!(result.definition.initial, "planning");
@@ -227,9 +231,16 @@ mod tests {
         let result = generate_machine(&client, "Do something", 2).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            GenerationError::MaxRetriesExceeded { attempts, last_error } => {
+            GenerationError::MaxRetriesExceeded {
+                attempts,
+                last_error,
+            } => {
                 assert_eq!(attempts, 2);
-                assert!(last_error.contains("failed"), "error should mention missing failed state: {}", last_error);
+                assert!(
+                    last_error.contains("failed"),
+                    "error should mention missing failed state: {}",
+                    last_error
+                );
             }
             other => panic!("expected MaxRetriesExceeded, got: {:?}", other),
         }

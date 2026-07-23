@@ -105,7 +105,9 @@ pub fn check_against_allowed(command: &str, allowed_tools: &[String]) -> Result<
 
         // Check if ANY of the required tools is in allowed_tools
         let has_required = required.iter().any(|req| {
-            allowed_tools.iter().any(|allowed| allowed.eq_ignore_ascii_case(req))
+            allowed_tools
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(req))
         });
 
         if !has_required {
@@ -189,7 +191,9 @@ fn classify_segment(segment: &str) -> OpClass {
     }
 
     // Skip leading env var assignments (FOO=bar command ...)
-    let cmd_idx = tokens.iter().position(|t| !t.contains('=') || t.starts_with('-'));
+    let cmd_idx = tokens
+        .iter()
+        .position(|t| !t.contains('=') || t.starts_with('-'));
     let base_cmd = match cmd_idx {
         Some(idx) => tokens[idx],
         None => return OpClass::Passthrough,
@@ -220,14 +224,20 @@ fn classify_segment(segment: &str) -> OpClass {
             }
         }
         "awk" | "gawk" => {
-            if tokens.iter().any(|t| *t == "-i" && tokens.iter().any(|t2| *t2 == "inplace")) {
+            if tokens
+                .iter()
+                .any(|t| *t == "-i" && tokens.iter().any(|t2| *t2 == "inplace"))
+            {
                 OpClass::FileModify
             } else {
                 OpClass::Passthrough
             }
         }
         "perl" => {
-            if tokens.iter().any(|t| *t == "-pi" || *t == "-p" || *t == "-i") {
+            if tokens
+                .iter()
+                .any(|t| *t == "-pi" || *t == "-p" || *t == "-i")
+            {
                 OpClass::FileModify
             } else {
                 OpClass::Passthrough

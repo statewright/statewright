@@ -72,12 +72,10 @@ cd "$REPO_DIR"
 git checkout --quiet "$COMMIT"
 echo "  Checked out $REPO @ ${COMMIT:0:12}"
 
-# Step 3: Apply test patch (so tests exist for the harness to run)
+# Step 3: Preserve solver/grade separation.
 echo ""
-echo "[3/5] Applying test patch..."
-TEST_PATCH=$(python3 -c "import json; d=json.load(open('$WORKDIR/instance.json')); print(d['test_patch'])")
-echo "$TEST_PATCH" | git apply --allow-empty 2>/dev/null || echo "  Warning: test patch had issues"
-echo "  Test patch applied"
+echo "[3/5] Preserving solver/evaluation separation..."
+echo "  Evaluation-only patch applied to solver worktree: false"
 
 # Step 4: Run sw-agent
 echo ""

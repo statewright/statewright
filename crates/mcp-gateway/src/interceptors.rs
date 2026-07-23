@@ -45,11 +45,15 @@ pub fn pre_call_check(
         let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
         if tool_name.eq_ignore_ascii_case(bash_tool) {
             if let Some(command) = extract_command(arguments) {
-                let allowed = allowed_cmds.iter().any(|prefix| command.starts_with(prefix));
+                let allowed = allowed_cmds
+                    .iter()
+                    .any(|prefix| command.starts_with(prefix));
                 if !allowed {
                     return PreCallDecision::Block(format!(
                         "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
-                        command, session.current_state, allowed_cmds.join(", ")
+                        command,
+                        session.current_state,
+                        allowed_cmds.join(", ")
                     ));
                 }
             }
@@ -64,7 +68,9 @@ pub fn pre_call_check(
         if tool_name.eq_ignore_ascii_case(bash_tool) {
             if let Some(ref allowed_tools) = state_def.allowed_tools {
                 if let Some(command) = extract_command(arguments) {
-                    if let Err(reason) = bash_classifier::check_against_allowed(&command, allowed_tools) {
+                    if let Err(reason) =
+                        bash_classifier::check_against_allowed(&command, allowed_tools)
+                    {
                         return PreCallDecision::Block(format!(
                             "Bash command blocked in state '{}': {}",
                             session.current_state, reason
@@ -83,7 +89,9 @@ pub fn pre_call_check(
                 if !already_edited && session.files_edited.len() as u32 >= max_files {
                     return PreCallDecision::Block(format!(
                         "Edit rejected: already edited {} files in state '{}' (limit: {}). Transition to next state or reduce scope. Files edited: {}",
-                        session.files_edited.len(), session.current_state, max_files,
+                        session.files_edited.len(),
+                        session.current_state,
+                        max_files,
                         session.files_edited.join(", ")
                     ));
                 }
@@ -147,9 +155,7 @@ pub fn post_call_annotations(
     }
 
     // Track result size for context budget
-    let result_bytes: u64 = result.content.iter()
-        .map(|c| c.text.len() as u64)
-        .sum();
+    let result_bytes: u64 = result.content.iter().map(|c| c.text.len() as u64).sum();
     update.result_bytes = result_bytes;
 
     update
@@ -166,8 +172,12 @@ pub struct PostCallUpdate {
 
 fn is_edit_tool(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower == "edit" || lower == "write" || lower == "edit_file" || lower == "write_file"
-        || lower == "multiedit" || lower == "create_or_update_file"
+    lower == "edit"
+        || lower == "write"
+        || lower == "edit_file"
+        || lower == "write_file"
+        || lower == "multiedit"
+        || lower == "create_or_update_file"
 }
 
 fn is_read_tool(name: &str) -> bool {
@@ -178,10 +188,17 @@ fn is_read_tool(name: &str) -> bool {
 fn estimate_edit_lines(arguments: &serde_json::Value) -> Option<u32> {
     // Check for old_string/new_string pattern (Edit tool)
     if let Some(new_str) = arguments.get("new_string").and_then(|v| v.as_str()) {
-        let old_str = arguments.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+        let old_str = arguments
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let old_lines = old_str.lines().count();
         let new_lines = new_str.lines().count();
-        let diff = if new_lines > old_lines { new_lines - old_lines } else { old_lines - new_lines };
+        let diff = if new_lines > old_lines {
+            new_lines - old_lines
+        } else {
+            old_lines - new_lines
+        };
         return Some(diff.max(new_lines) as u32);
     }
     // Check for content pattern (Write tool)
@@ -192,13 +209,15 @@ fn estimate_edit_lines(arguments: &serde_json::Value) -> Option<u32> {
 }
 
 fn extract_command(arguments: &serde_json::Value) -> Option<String> {
-    arguments.get("command")
+    arguments
+        .get("command")
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
 }
 
 fn extract_file_path(arguments: &serde_json::Value) -> Option<String> {
-    arguments.get("file_path")
+    arguments
+        .get("file_path")
         .or_else(|| arguments.get("path"))
         .or_else(|| arguments.get("file"))
         .and_then(|v| v.as_str())
@@ -253,7 +272,10 @@ mod tests {
     #[test]
     fn edit_guard_blocks_large_edits() {
         let s = session();
-        let big_content = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let big_content = (0..20)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let args = json!({ "file_path": "test.py", "old_string": "a", "new_string": big_content });
         match pre_call_check(&s, "Edit", &args) {
             PreCallDecision::Block(msg) => assert!(msg.contains("exceeds limit")),
@@ -335,15 +357,20 @@ mod tests {
                 "end": { "type": "final" }
             },
             "guards": {}
-        })).unwrap();
+        }))
+        .unwrap();
         let s = GatewaySession::new("test".into(), def);
-        let args = json!({ "command": "rm -rf /", "file_path": "x.py", "content": "lots\nof\nlines" });
+        let args =
+            json!({ "command": "rm -rf /", "file_path": "x.py", "content": "lots\nof\nlines" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Allow => {}
-            other => panic!("should allow when no guards configured: {:?}", match other {
-                PreCallDecision::Block(m) | PreCallDecision::Warn(m) => m,
-                _ => "unknown".into(),
-            }),
+            other => panic!(
+                "should allow when no guards configured: {:?}",
+                match other {
+                    PreCallDecision::Block(m) | PreCallDecision::Warn(m) => m,
+                    _ => "unknown".into(),
+                }
+            ),
         }
     }
 
@@ -365,7 +392,8 @@ mod tests {
                 "completed": { "type": "final" }
             },
             "guards": {}
-        })).unwrap();
+        }))
+        .unwrap();
         GatewaySession::new("test".into(), def)
     }
 
@@ -375,7 +403,11 @@ mod tests {
         let args = json!({ "command": "cat > file.rs << 'EOF'\nfn main() {}\nEOF" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Block(msg) => {
-                assert!(msg.contains("FileWrite"), "should mention FileWrite: {}", msg);
+                assert!(
+                    msg.contains("FileWrite"),
+                    "should mention FileWrite: {}",
+                    msg
+                );
             }
             _ => panic!("should block cat redirect when Write not in allowed_tools"),
         }
@@ -407,7 +439,11 @@ mod tests {
         let args = json!({ "command": "sed -i 's/old/new/' file.rs" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Block(msg) => {
-                assert!(msg.contains("FileModify"), "should mention FileModify: {}", msg);
+                assert!(
+                    msg.contains("FileModify"),
+                    "should mention FileModify: {}",
+                    msg
+                );
             }
             _ => panic!("should block sed -i when Edit not in allowed_tools"),
         }
@@ -419,7 +455,11 @@ mod tests {
         let args = json!({ "command": "rm -rf target/" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Block(msg) => {
-                assert!(msg.contains("Destructive"), "should mention Destructive: {}", msg);
+                assert!(
+                    msg.contains("Destructive"),
+                    "should mention Destructive: {}",
+                    msg
+                );
             }
             _ => panic!("should block rm in restricted state"),
         }
@@ -439,7 +479,7 @@ mod tests {
     fn bash_classifier_skipped_when_allowed_commands_set() {
         // When allowed_commands is set, the prefix whitelist takes precedence
         // and the classifier does NOT run (to avoid double-blocking)
-        let s = session();  // has allowed_commands: ["pytest", "cargo test"]
+        let s = session(); // has allowed_commands: ["pytest", "cargo test"]
         let args = json!({ "command": "pytest -x tests/" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Allow | PreCallDecision::Warn(_) => {}
@@ -458,15 +498,19 @@ mod tests {
                 "end": { "type": "final" }
             },
             "guards": {}
-        })).unwrap();
+        }))
+        .unwrap();
         let s = GatewaySession::new("test".into(), def);
         let args = json!({ "command": "cat > file.rs << 'EOF'\ncontent\nEOF" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Allow => {}
-            other => panic!("should allow when no allowed_tools: {:?}", match other {
-                PreCallDecision::Block(m) | PreCallDecision::Warn(m) => m,
-                _ => "unknown".into(),
-            }),
+            other => panic!(
+                "should allow when no allowed_tools: {:?}",
+                match other {
+                    PreCallDecision::Block(m) | PreCallDecision::Warn(m) => m,
+                    _ => "unknown".into(),
+                }
+            ),
         }
     }
 }

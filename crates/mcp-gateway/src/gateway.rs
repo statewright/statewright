@@ -60,17 +60,23 @@ impl Gateway {
 
     /// Set the API key fingerprint for session ownership verification.
     pub fn set_api_key_fingerprint(&mut self, api_key: &str) {
-        self.api_key_fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes()).to_string();
+        self.api_key_fingerprint =
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes()).to_string();
     }
 
     /// Verify that the provided API key matches this session's owner.
     pub fn verify_owner_key(&self, api_key: &str) -> bool {
-        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes()).to_string();
+        let fingerprint =
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes()).to_string();
         fingerprint == self.api_key_fingerprint
     }
 
     /// Create a workflow run record. Returns the generated run_id.
-    async fn record_run_start(&mut self, workflow_name: &str, initial_state: &str) -> Option<String> {
+    async fn record_run_start(
+        &mut self,
+        workflow_name: &str,
+        initial_state: &str,
+    ) -> Option<String> {
         #[cfg(feature = "metering")]
         {
             let pool = self.db_pool.as_ref()?;
@@ -123,7 +129,7 @@ impl Gateway {
                      SET transitions = (transitions::jsonb || $1::jsonb)::json, \
                          transition_count = transition_count + 1, \
                          updated = $2 \
-                     WHERE id = $3"
+                     WHERE id = $3",
                 )
                 .bind(serde_json::to_string(&transition).unwrap())
                 .bind(&now)
@@ -152,7 +158,7 @@ impl Gateway {
                 let _ = sqlx::query(
                     "UPDATE workflow_runs \
                      SET status = $1, final_state = $2, completed_at = $3, updated = $3 \
-                     WHERE id = $4"
+                     WHERE id = $4",
                 )
                 .bind(&stat)
                 .bind(&state)
@@ -273,7 +279,10 @@ impl Gateway {
         tools.extend(custom_tools::custom_tool_definitions());
 
         // Conditionally add debug tools
-        let debug = session.definition.meta.as_ref()
+        let debug = session
+            .definition
+            .meta
+            .as_ref()
             .and_then(|m| m.extra.get("debug"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -293,11 +302,7 @@ impl Gateway {
             Some(p) => match serde_json::from_value(p) {
                 Ok(p) => p,
                 Err(e) => {
-                    return JsonRpcResponse::error(
-                        id,
-                        -32602,
-                        format!("Invalid params: {}", e),
-                    );
+                    return JsonRpcResponse::error(id, -32602, format!("Invalid params: {}", e));
                 }
             },
             None => {
@@ -307,16 +312,21 @@ impl Gateway {
 
         // Handle custom tools locally (always available, even when deactivated)
         if custom_tools::is_custom_tool(&params.name) {
-            return self.handle_custom_tool_call(id, &params.name, params.arguments).await;
+            return self
+                .handle_custom_tool_call(id, &params.name, params.arguments)
+                .await;
         }
 
         // When deactivated, pass all tool calls through without enforcement
         if self.active_workflow.is_none() {
-            return match self.upstream.call_tool(&params.name, params.arguments).await {
-                Ok(result) => JsonRpcResponse::success(
-                    id,
-                    serde_json::to_value(result).unwrap_or(json!({})),
-                ),
+            return match self
+                .upstream
+                .call_tool(&params.name, params.arguments)
+                .await
+            {
+                Ok(result) => {
+                    JsonRpcResponse::success(id, serde_json::to_value(result).unwrap_or(json!({})))
+                }
                 Err(e) => JsonRpcResponse::error(id, -32603, e),
             };
         }
@@ -332,43 +342,61 @@ impl Gateway {
         match enforcement::enforce_tool_call(&session, &params.name) {
             EnforcementDecision::Allow => {
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
-                let pre_warning = match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
-                    PreCallDecision::Block(reason) => {
-                        return JsonRpcResponse::success(
-                            id,
-                            serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
-                        );
-                    }
-                    PreCallDecision::Warn(msg) => Some(msg),
-                    PreCallDecision::Allow => None,
-                };
+                let pre_warning =
+                    match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
+                        PreCallDecision::Block(reason) => {
+                            return JsonRpcResponse::success(
+                                id,
+                                serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                    reason,
+                                ))
+                                .unwrap(),
+                            );
+                        }
+                        PreCallDecision::Warn(msg) => Some(msg),
+                        PreCallDecision::Allow => None,
+                    };
 
                 // Forward to upstream
                 self.session_manager.increment_iteration(&self.session_id);
-                match self.upstream.call_tool(&params.name, params.arguments.clone()).await {
+                match self
+                    .upstream
+                    .call_tool(&params.name, params.arguments.clone())
+                    .await
+                {
                     Ok(mut result) => {
                         // Post-call tracking
-                        let update = interceptors::post_call_annotations(&params.name, &params.arguments, &result);
+                        let update = interceptors::post_call_annotations(
+                            &params.name,
+                            &params.arguments,
+                            &result,
+                        );
                         let edited_path = update.file_edited.clone();
                         if let Some(ref path) = edited_path {
-                            self.session_manager.record_file_edit(&self.session_id, path);
+                            self.session_manager
+                                .record_file_edit(&self.session_id, path);
                         }
                         if let Some(path) = update.file_read {
-                            self.session_manager.record_file_read(&self.session_id, &path);
+                            self.session_manager
+                                .record_file_read(&self.session_id, &path);
                         }
                         if update.result_bytes > 0 {
-                            self.session_manager.add_context_bytes(&self.session_id, update.result_bytes);
+                            self.session_manager
+                                .add_context_bytes(&self.session_id, update.result_bytes);
                         }
 
                         // Check interrupt triggers on file edits (History State pattern)
                         if let Some(ref path) = edited_path {
                             if !session.definition.interrupts.is_empty() {
                                 // Skip if already in an interrupt handler (re-entrancy prevention)
-                                let already_in_interrupt = session.context
-                                    .get("_interrupt_return").is_some();
+                                let already_in_interrupt =
+                                    session.context.get("_interrupt_return").is_some();
 
                                 if !already_in_interrupt {
-                                    let matches = statewright_engine::match_interrupts(path, &session.definition);
+                                    let matches = statewright_engine::match_interrupts(
+                                        path,
+                                        &session.definition,
+                                    );
                                     if let Some((name, interrupt_def)) = matches.first() {
                                         // Auto-transition: set return state in context, move to handler
                                         let prev_state = session.current_state.clone();
@@ -389,8 +417,10 @@ impl Gateway {
                                         );
                                         self.record_step();
                                         self.record_run_transition(
-                                            &prev_state, &target,
-                                            &format!("INTERRUPT:{}", name), &json!({"trigger_file": path}),
+                                            &prev_state,
+                                            &target,
+                                            &format!("INTERRUPT:{}", name),
+                                            &json!({"trigger_file": path}),
                                         );
 
                                         result.content.push(crate::protocol::ToolResultContent {
@@ -459,7 +489,11 @@ impl Gateway {
 
                 // Now forward the tool call (it's allowed in the new state)
                 self.session_manager.increment_iteration(&self.session_id);
-                match self.upstream.call_tool(&params.name, params.arguments).await {
+                match self
+                    .upstream
+                    .call_tool(&params.name, params.arguments)
+                    .await
+                {
                     Ok(result) => JsonRpcResponse::success(
                         id,
                         serde_json::to_value(result).unwrap_or(json!({})),
@@ -470,7 +504,11 @@ impl Gateway {
             EnforcementDecision::CheckpointReached { iteration, max } => {
                 // Allow the tool but signal checkpoint in the result
                 self.session_manager.increment_iteration(&self.session_id);
-                match self.upstream.call_tool(&params.name, params.arguments).await {
+                match self
+                    .upstream
+                    .call_tool(&params.name, params.arguments)
+                    .await
+                {
                     Ok(mut result) => {
                         // Append checkpoint notice to the result
                         result.content.push(crate::protocol::ToolResultContent {
@@ -504,10 +542,7 @@ impl Gateway {
                     .get("event")
                     .and_then(|e| e.as_str())
                     .unwrap_or("");
-                let mut event_data = arguments
-                    .get("data")
-                    .cloned()
-                    .unwrap_or(json!({}));
+                let mut event_data = arguments.get("data").cloned().unwrap_or(json!({}));
                 // Strip internal context fields from user-provided data (prevent injection)
                 if let Some(obj) = event_data.as_object_mut() {
                     obj.remove("_interrupt_return");
@@ -551,7 +586,8 @@ impl Gateway {
                         );
                         self.record_step();
                         self.record_run_transition(
-                            &prev_state, &target,
+                            &prev_state,
+                            &target,
                             &format!("INTERRUPT:{}", interrupt_name),
                             &event_data,
                         );
@@ -572,15 +608,18 @@ impl Gateway {
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                serde_json::to_string_pretty(&result).unwrap()
-                            )).unwrap(),
+                                serde_json::to_string_pretty(&result).unwrap(),
+                            ))
+                            .unwrap(),
                         );
                     } else {
                         return JsonRpcResponse::success(
                             id,
-                            serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                format!("Unknown interrupt '{}'", interrupt_name)
-                            )).unwrap(),
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                "Unknown interrupt '{}'",
+                                interrupt_name
+                            )))
+                            .unwrap(),
                         );
                     }
                 }
@@ -603,8 +642,9 @@ impl Gateway {
                             return JsonRpcResponse::success(
                                 id,
                                 serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                    format!("Unknown branch '{}'", branch_name)
-                                )).unwrap(),
+                                    format!("Unknown branch '{}'", branch_name),
+                                ))
+                                .unwrap(),
                             );
                         }
 
@@ -615,10 +655,12 @@ impl Gateway {
                         // Check join condition
                         let join = fork["join"].as_str().unwrap_or("all");
                         let new_branches = new_fork["branches"].as_object().unwrap();
-                        let completed_count = new_branches.values()
+                        let completed_count = new_branches
+                            .values()
                             .filter(|b| b["status"].as_str() == Some("completed"))
                             .count();
-                        let failed_count = new_branches.values()
+                        let failed_count = new_branches
+                            .values()
                             .filter(|b| b["status"].as_str() == Some("failed"))
                             .count();
                         let total = new_branches.len();
@@ -635,7 +677,8 @@ impl Gateway {
 
                         if join_met {
                             // Auto-transition parent to on_complete
-                            let on_complete = fork["on_complete"].as_str().unwrap_or("").to_string();
+                            let on_complete =
+                                fork["on_complete"].as_str().unwrap_or("").to_string();
                             let mut parent_ctx = session.context.clone();
                             if let Some(obj) = parent_ctx.as_object_mut() {
                                 obj.remove("_fork");
@@ -647,8 +690,10 @@ impl Gateway {
                             );
                             self.record_step();
                             self.record_run_transition(
-                                &session.current_state, &on_complete,
-                                "FORK_JOIN", &json!({"completed_branches": completed_count}),
+                                &session.current_state,
+                                &on_complete,
+                                "FORK_JOIN",
+                                &json!({"completed_branches": completed_count}),
                             );
 
                             // Clean up branch sessions
@@ -674,8 +719,9 @@ impl Gateway {
                             return JsonRpcResponse::success(
                                 id,
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                    serde_json::to_string_pretty(&result).unwrap()
-                                )).unwrap(),
+                                    serde_json::to_string_pretty(&result).unwrap(),
+                                ))
+                                .unwrap(),
                             );
                         } else if join_failed {
                             // Join failed — transition to on_fail
@@ -699,14 +745,16 @@ impl Gateway {
                             return JsonRpcResponse::success(
                                 id,
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                    serde_json::to_string_pretty(&result).unwrap()
-                                )).unwrap(),
+                                    serde_json::to_string_pretty(&result).unwrap(),
+                                ))
+                                .unwrap(),
                             );
                         } else {
                             // More branches to go — update context, advance to next branch (sequential)
                             let mut parent_ctx = session.context.clone();
                             // Find next pending branch
-                            let next_branch = new_branches.iter()
+                            let next_branch = new_branches
+                                .iter()
                                 .find(|(_, b)| b["status"].as_str() == Some("pending"))
                                 .map(|(name, _)| name.clone());
 
@@ -739,16 +787,18 @@ impl Gateway {
                             return JsonRpcResponse::success(
                                 id,
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                    serde_json::to_string_pretty(&result).unwrap()
-                                )).unwrap(),
+                                    serde_json::to_string_pretty(&result).unwrap(),
+                                ))
+                                .unwrap(),
                             );
                         }
                     } else {
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                "No active fork. Cannot complete branch.".to_string()
-                            )).unwrap(),
+                                "No active fork. Cannot complete branch.".to_string(),
+                            ))
+                            .unwrap(),
                         );
                     }
                 }
@@ -763,16 +813,19 @@ impl Gateway {
                     );
                 }
 
-
                 // Evaluate transition against ORIGINAL context (client data must not bypass guards)
                 let prev_state = session.current_state.clone();
                 match custom_tools::handle_transition(&mut session, event) {
                     Ok(result) => {
                         let new_state = session.current_state.clone();
-                        let requires_approval = result["requires_approval"].as_bool().unwrap_or(false);
+                        let requires_approval =
+                            result["requires_approval"].as_bool().unwrap_or(false);
 
                         // Check if this transition should be parked for UI approval
-                        let approval_mode = session.definition.meta.as_ref()
+                        let approval_mode = session
+                            .definition
+                            .meta
+                            .as_ref()
                             .and_then(|m| m.extra.get("approval_mode"))
                             .and_then(|v| v.as_str())
                             // A review-marked transition should never silently advance.
@@ -781,14 +834,18 @@ impl Gateway {
 
                         if requires_approval && approval_mode == "ui" {
                             // PARK: do not apply the transition
-                            let approval_message = result["approval_message"]
-                                .as_str()
-                                .map(|s| s.to_string());
+                            let approval_message =
+                                result["approval_message"].as_str().map(|s| s.to_string());
 
                             // Merge event data into context for the snapshot
                             let mut snapshot_context = session.context.clone();
-                            if event_data.is_object() && event_data.as_object().map_or(false, |o| !o.is_empty()) {
-                                snapshot_context = statewright_engine::apply_context_patch(&snapshot_context, &event_data);
+                            if event_data.is_object()
+                                && event_data.as_object().map_or(false, |o| !o.is_empty())
+                            {
+                                snapshot_context = statewright_engine::apply_context_patch(
+                                    &snapshot_context,
+                                    &event_data,
+                                );
                             }
 
                             // Generate approval ID (use run_id + timestamp for uniqueness)
@@ -803,7 +860,8 @@ impl Gateway {
                                 message: approval_message.clone(),
                             };
 
-                            self.session_manager.set_pending_approval(&self.session_id, pending);
+                            self.session_manager
+                                .set_pending_approval(&self.session_id, pending);
 
                             let response = json!({
                                 "status": "pending_approval",
@@ -815,11 +873,10 @@ impl Gateway {
 
                             return JsonRpcResponse::success(
                                 id,
-                                serde_json::to_value(
-                                    crate::protocol::ToolCallResult::text(
-                                        serde_json::to_string_pretty(&response).unwrap()
-                                    )
-                                ).unwrap(),
+                                serde_json::to_value(crate::protocol::ToolCallResult::text(
+                                    serde_json::to_string_pretty(&response).unwrap(),
+                                ))
+                                .unwrap(),
                             );
                         }
 
@@ -828,7 +885,8 @@ impl Gateway {
                             let fork_info = &result["fork"];
                             let branches = fork_info["branches"].as_object().unwrap();
                             let join = fork_info["join"].as_str().unwrap_or("all").to_string();
-                            let on_complete = fork_info["on_complete"].as_str().unwrap_or("").to_string();
+                            let on_complete =
+                                fork_info["on_complete"].as_str().unwrap_or("").to_string();
                             let on_fail = fork_info["on_fail"].as_str().map(|s| s.to_string());
 
                             // Create branch sessions
@@ -846,10 +904,9 @@ impl Gateway {
                                 let terminal = def["terminal"].as_str().unwrap_or("").to_string();
 
                                 // Create a branch session with the same definition, starting at branch.initial
-                                let branch_session = self.session_manager.create(
-                                    branch_session_key.clone(),
-                                    session.definition.clone(),
-                                );
+                                let branch_session = self
+                                    .session_manager
+                                    .create(branch_session_key.clone(), session.definition.clone());
                                 self.session_manager.update_state(
                                     &branch_session_key,
                                     initial.clone(),
@@ -857,10 +914,15 @@ impl Gateway {
                                 );
                                 // Preserve plan limit on branch sessions
                                 if let Some(limit) = session.plan_limit {
-                                    self.session_manager.set_plan_limit(&branch_session_key, limit);
+                                    self.session_manager
+                                        .set_plan_limit(&branch_session_key, limit);
                                 }
 
-                                let status = if first_branch.is_empty() { "running" } else { "pending" };
+                                let status = if first_branch.is_empty() {
+                                    "running"
+                                } else {
+                                    "pending"
+                                };
                                 if first_branch.is_empty() {
                                     first_branch = name.clone();
                                 }
@@ -878,10 +940,15 @@ impl Gateway {
                             let mut parent_ctx = if session.context.is_object() {
                                 session.context.clone()
                             } else {
-                                json!({})  // ensure context is an object, not null
+                                json!({}) // ensure context is an object, not null
                             };
-                            if event_data.is_object() && event_data.as_object().map_or(false, |o| !o.is_empty()) {
-                                parent_ctx = statewright_engine::apply_context_patch(&parent_ctx, &event_data);
+                            if event_data.is_object()
+                                && event_data.as_object().map_or(false, |o| !o.is_empty())
+                            {
+                                parent_ctx = statewright_engine::apply_context_patch(
+                                    &parent_ctx,
+                                    &event_data,
+                                );
                             }
                             if let Some(obj) = parent_ctx.as_object_mut() {
                                 obj.insert("_fork".to_string(), fork_ctx.clone());
@@ -895,7 +962,12 @@ impl Gateway {
                                 parent_ctx,
                             );
                             self.record_step();
-                            self.record_run_transition(&prev_state, &format!("FORK:{}", first_branch), event, &event_data);
+                            self.record_run_transition(
+                                &prev_state,
+                                &format!("FORK:{}", first_branch),
+                                event,
+                                &event_data,
+                            );
 
                             tracing::info!(
                                 branches = branches.len(),
@@ -914,15 +986,21 @@ impl Gateway {
                             return JsonRpcResponse::success(
                                 id,
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                    serde_json::to_string_pretty(&response).unwrap()
-                                )).unwrap(),
+                                    serde_json::to_string_pretty(&response).unwrap(),
+                                ))
+                                .unwrap(),
                             );
                         }
 
                         // Normal path: apply the transition
                         let mut final_context = session.context.clone();
-                        if event_data.is_object() && event_data.as_object().map_or(false, |o| !o.is_empty()) {
-                            final_context = statewright_engine::apply_context_patch(&final_context, &event_data);
+                        if event_data.is_object()
+                            && event_data.as_object().map_or(false, |o| !o.is_empty())
+                        {
+                            final_context = statewright_engine::apply_context_patch(
+                                &final_context,
+                                &event_data,
+                            );
                         }
                         self.session_manager.update_state(
                             &self.session_id,
@@ -936,11 +1014,10 @@ impl Gateway {
                         }
                         JsonRpcResponse::success(
                             id,
-                            serde_json::to_value(
-                                crate::protocol::ToolCallResult::text(
-                                    serde_json::to_string_pretty(&result).unwrap()
-                                )
-                            ).unwrap(),
+                            serde_json::to_value(crate::protocol::ToolCallResult::text(
+                                serde_json::to_string_pretty(&result).unwrap(),
+                            ))
+                            .unwrap(),
                         )
                     }
                     Err(e) => JsonRpcResponse::success(
@@ -961,17 +1038,25 @@ impl Gateway {
                 if let Some(fork) = session.context.get("_fork") {
                     let current_branch = fork["current_branch"].as_str().unwrap_or("");
                     let branch_key = fork["branches"][current_branch]["session_key"]
-                        .as_str().unwrap_or("");
+                        .as_str()
+                        .unwrap_or("");
 
-                    let branches_status: serde_json::Value = fork["branches"].as_object()
+                    let branches_status: serde_json::Value = fork["branches"]
+                        .as_object()
                         .map(|bs| {
-                            bs.iter().map(|(name, b)| {
-                                (name.clone(), json!({
-                                    "status": b["status"],
-                                    "initial": b["initial"],
-                                    "terminal": b["terminal"],
-                                }))
-                            }).collect::<serde_json::Map<String, serde_json::Value>>().into()
+                            bs.iter()
+                                .map(|(name, b)| {
+                                    (
+                                        name.clone(),
+                                        json!({
+                                            "status": b["status"],
+                                            "initial": b["initial"],
+                                            "terminal": b["terminal"],
+                                        }),
+                                    )
+                                })
+                                .collect::<serde_json::Map<String, serde_json::Value>>()
+                                .into()
                         })
                         .unwrap_or(json!({}));
 
@@ -995,7 +1080,11 @@ impl Gateway {
                     } else {
                         // Branch session not found — return parent state WITH fork info
                         // so the plugin knows a fork is active but degraded
-                        tracing::warn!(branch = current_branch, key = branch_key, "Fork branch session not found");
+                        tracing::warn!(
+                            branch = current_branch,
+                            key = branch_key,
+                            "Fork branch session not found"
+                        );
                         let mut state = custom_tools::handle_get_state(&session);
                         state["fork"] = fork_info;
                         return JsonRpcResponse::success(
@@ -1012,7 +1101,10 @@ impl Gateway {
                 if let Some(ref run_id) = self.current_run_id {
                     state["run_id"] = json!(run_id);
                 }
-                let capture = session.definition.meta.as_ref()
+                let capture = session
+                    .definition
+                    .meta
+                    .as_ref()
                     .and_then(|m| m.capture_output)
                     .unwrap_or(false);
                 state["capture_output"] = json!(capture);
@@ -1030,10 +1122,7 @@ impl Gateway {
                     .get("state")
                     .and_then(|s| s.as_str())
                     .unwrap_or("");
-                let context_patch = arguments
-                    .get("context")
-                    .cloned()
-                    .unwrap_or(json!({}));
+                let context_patch = arguments.get("context").cloned().unwrap_or(json!({}));
 
                 let session = match self.session_manager.get(&self.session_id) {
                     Some(s) => s,
@@ -1043,7 +1132,10 @@ impl Gateway {
                 };
 
                 // Check debug mode
-                let debug = session.definition.meta.as_ref()
+                let debug = session
+                    .definition
+                    .meta
+                    .as_ref()
                     .and_then(|m| m.extra.get("debug"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
@@ -1052,8 +1144,10 @@ impl Gateway {
                     return JsonRpcResponse::success(
                         id,
                         serde_json::to_value(crate::protocol::ToolCallResult::error(
-                            "statewright_force_state is only available when meta.debug is true.".to_string()
-                        )).unwrap(),
+                            "statewright_force_state is only available when meta.debug is true."
+                                .to_string(),
+                        ))
+                        .unwrap(),
                     );
                 }
 
@@ -1061,20 +1155,26 @@ impl Gateway {
                 if !session.definition.states.contains_key(target_state) {
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(
-                            format!("State '{}' does not exist in the workflow.", target_state)
-                        )).unwrap(),
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                            "State '{}' does not exist in the workflow.",
+                            target_state
+                        )))
+                        .unwrap(),
                     );
                 }
 
                 let prev_state = session.current_state.clone();
                 let mut new_context = session.context.clone();
-                if context_patch.is_object() && context_patch.as_object().map_or(false, |o| !o.is_empty()) {
-                    new_context = statewright_engine::apply_context_patch(&new_context, &context_patch);
+                if context_patch.is_object()
+                    && context_patch.as_object().map_or(false, |o| !o.is_empty())
+                {
+                    new_context =
+                        statewright_engine::apply_context_patch(&new_context, &context_patch);
                 }
 
                 // Clear any pending approval
-                self.session_manager.clear_pending_approval(&self.session_id);
+                self.session_manager
+                    .clear_pending_approval(&self.session_id);
 
                 // Force the state
                 self.session_manager.update_state(
@@ -1086,7 +1186,10 @@ impl Gateway {
                 // Record in run history for auditability
                 self.record_step();
                 self.record_run_transition(
-                    &prev_state, target_state, "FORCE_STATE", &context_patch,
+                    &prev_state,
+                    target_state,
+                    "FORCE_STATE",
+                    &context_patch,
                 );
 
                 let result = json!({
@@ -1099,7 +1202,8 @@ impl Gateway {
                     id,
                     serde_json::to_value(crate::protocol::ToolCallResult::text(
                         serde_json::to_string_pretty(&result).unwrap(),
-                    )).unwrap(),
+                    ))
+                    .unwrap(),
                 )
             }
             "statewright_list_workflows" => {
@@ -1117,10 +1221,7 @@ impl Gateway {
                 )
             }
             "statewright_load_workflow" => {
-                let workflow_name = arguments
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("");
+                let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
                 // Accept session_id from client for per-session scoping
                 if let Some(sid) = arguments.get("session_id").and_then(|s| s.as_str()) {
@@ -1142,7 +1243,9 @@ impl Gateway {
                     let parent_session = self.session_manager.get(&self.session_id);
                     if let Some(ps) = parent_session {
                         if let Some(fork) = ps.context.get("_fork") {
-                            if let Some(branch_key) = fork["branches"][branch_name]["session_key"].as_str() {
+                            if let Some(branch_key) =
+                                fork["branches"][branch_name]["session_key"].as_str()
+                            {
                                 if let Some(branch_session) = self.session_manager.get(branch_key) {
                                     // Switch to the branch session
                                     let branch_state = branch_session.current_state.clone();
@@ -1158,9 +1261,12 @@ impl Gateway {
                                     self.session_id = branch_key.to_string();
                                     return JsonRpcResponse::success(
                                         id,
-                                        serde_json::to_value(crate::protocol::ToolCallResult::text(
-                                            serde_json::to_string_pretty(&result).unwrap(),
-                                        )).unwrap(),
+                                        serde_json::to_value(
+                                            crate::protocol::ToolCallResult::text(
+                                                serde_json::to_string_pretty(&result).unwrap(),
+                                            ),
+                                        )
+                                        .unwrap(),
                                     );
                                 }
                             }
@@ -1168,9 +1274,11 @@ impl Gateway {
                     }
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(
-                            format!("Branch '{}' not found. Is a fork active?", branch_name)
-                        )).unwrap(),
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                            "Branch '{}' not found. Is a fork active?",
+                            branch_name
+                        )))
+                        .unwrap(),
                     );
                 }
 
@@ -1195,9 +1303,10 @@ impl Gateway {
                 if let Err(e) = statewright_engine::validate_definition(&definition) {
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(
-                            format!("Invalid workflow '{}': {}", workflow_name, e),
-                        ))
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                            "Invalid workflow '{}': {}",
+                            workflow_name, e
+                        )))
                         .unwrap(),
                     );
                 }
@@ -1213,7 +1322,9 @@ impl Gateway {
                 }
 
                 // Preserve plan_limit across workflow swaps
-                let old_limit = self.session_manager.get(&self.session_id)
+                let old_limit = self
+                    .session_manager
+                    .get(&self.session_id)
                     .and_then(|s| s.plan_limit);
                 self.session_manager
                     .create(self.session_id.clone(), definition.clone());
@@ -1222,8 +1333,13 @@ impl Gateway {
                 }
                 self.active_workflow = Some(workflow_name.to_string());
 
-                let resume = arguments.get("resume").and_then(|r| r.as_bool()).unwrap_or(false);
-                let capture_output = definition.meta.as_ref()
+                let resume = arguments
+                    .get("resume")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false);
+                let capture_output = definition
+                    .meta
+                    .as_ref()
                     .and_then(|m| m.capture_output)
                     .unwrap_or(false);
 
@@ -1232,10 +1348,13 @@ impl Gateway {
                     #[cfg(feature = "metering")]
                     {
                         if let Some(pool) = &self.db_pool {
-                            let row = sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>)>(
+                            let row = sqlx::query_as::<
+                                _,
+                                (String, Option<String>, Option<serde_json::Value>),
+                            >(
                                 "SELECT id, final_state, context_snapshot FROM workflow_runs \
                                  WHERE owner = $1 AND workflow_name = $2 AND status = 'paused' \
-                                 ORDER BY updated DESC LIMIT 1"
+                                 ORDER BY updated DESC LIMIT 1",
                             )
                             .bind(&self.owner_id)
                             .bind(workflow_name)
@@ -1266,21 +1385,29 @@ impl Gateway {
                                 self.current_run_id = Some(rid.clone());
                                 (Some(rid), Some(state))
                             } else {
-                                let rid = self.record_run_start(workflow_name, &definition.initial).await;
+                                let rid = self
+                                    .record_run_start(workflow_name, &definition.initial)
+                                    .await;
                                 (rid, None)
                             }
                         } else {
-                            let rid = self.record_run_start(workflow_name, &definition.initial).await;
+                            let rid = self
+                                .record_run_start(workflow_name, &definition.initial)
+                                .await;
                             (rid, None)
                         }
                     }
                     #[cfg(not(feature = "metering"))]
                     {
-                        let rid = self.record_run_start(workflow_name, &definition.initial).await;
+                        let rid = self
+                            .record_run_start(workflow_name, &definition.initial)
+                            .await;
                         (rid, None::<String>)
                     }
                 } else {
-                    let rid = self.record_run_start(workflow_name, &definition.initial).await;
+                    let rid = self
+                        .record_run_start(workflow_name, &definition.initial)
+                        .await;
                     (rid, None)
                 };
 
@@ -1314,14 +1441,22 @@ impl Gateway {
                     let mut traits = registry.get("defaults").cloned().unwrap_or(json!({}));
                     if let Some(entry) = registry.get("models").and_then(|m| m.get(family)) {
                         if let Some(fd) = entry.get("family_defaults") {
-                            if let (Some(base), Some(overlay)) = (traits.as_object_mut(), fd.as_object()) {
-                                for (k, v) in overlay { base.insert(k.clone(), v.clone()); }
+                            if let (Some(base), Some(overlay)) =
+                                (traits.as_object_mut(), fd.as_object())
+                            {
+                                for (k, v) in overlay {
+                                    base.insert(k.clone(), v.clone());
+                                }
                             }
                         }
                         if !size.is_empty() {
                             if let Some(sv) = entry.get("sizes").and_then(|s| s.get(size)) {
-                                if let (Some(base), Some(overlay)) = (traits.as_object_mut(), sv.as_object()) {
-                                    for (k, v) in overlay { base.insert(k.clone(), v.clone()); }
+                                if let (Some(base), Some(overlay)) =
+                                    (traits.as_object_mut(), sv.as_object())
+                                {
+                                    for (k, v) in overlay {
+                                        base.insert(k.clone(), v.clone());
+                                    }
                                 }
                             }
                         }
@@ -1455,15 +1590,25 @@ impl Gateway {
             "statewright_create_workflow" => {
                 let wf_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let definition = arguments.get("definition").cloned().unwrap_or(json!({}));
-                let overwrite = arguments.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+                let overwrite = arguments
+                    .get("overwrite")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 if wf_name.is_empty() {
-                    return JsonRpcResponse::success(id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error("Workflow name is required")).unwrap());
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "Workflow name is required",
+                        ))
+                        .unwrap(),
+                    );
                 }
 
                 // Validate + parse the definition upfront — reuse for in-memory insert
-                let parsed_def = match serde_json::from_value::<statewright_engine::MachineDefinition>(definition.clone()) {
+                let parsed_def = match serde_json::from_value::<statewright_engine::MachineDefinition>(
+                    definition.clone(),
+                ) {
                     Err(e) => {
                         return JsonRpcResponse::success(id,
                             serde_json::to_value(crate::protocol::ToolCallResult::error(
@@ -1505,7 +1650,11 @@ impl Gateway {
 
                     match result {
                         Ok(_) => {
-                            let verb = if overwrite && self.workflows.contains_key(&name) { "updated" } else { "created" };
+                            let verb = if overwrite && self.workflows.contains_key(&name) {
+                                "updated"
+                            } else {
+                                "created"
+                            };
                             self.workflows.insert(name.clone(), parsed_def.clone());
                             Some(JsonRpcResponse::success(id.clone(),
                                 serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -1520,10 +1669,13 @@ impl Gateway {
                                         format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
                                     )).unwrap()))
                             } else {
-                                Some(JsonRpcResponse::success(id.clone(),
+                                Some(JsonRpcResponse::success(
+                                    id.clone(),
                                     serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                        format!("Failed to save workflow: {}", msg)
-                                    )).unwrap()))
+                                        format!("Failed to save workflow: {}", msg),
+                                    ))
+                                    .unwrap(),
+                                ))
                             }
                         }
                     }
@@ -1539,12 +1691,20 @@ impl Gateway {
                     // In-memory only (no database)
                     let name = wf_name.to_string();
                     if !overwrite && self.workflows.contains_key(&name) {
-                        JsonRpcResponse::success(id,
-                            serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
-                            )).unwrap())
+                        JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                "Workflow '{}' already exists. Use overwrite=true to replace it.",
+                                name
+                            )))
+                            .unwrap(),
+                        )
                     } else {
-                        let verb = if self.workflows.contains_key(&name) { "updated" } else { "created" };
+                        let verb = if self.workflows.contains_key(&name) {
+                            "updated"
+                        } else {
+                            "created"
+                        };
                         self.workflows.insert(name.clone(), parsed_def);
                         JsonRpcResponse::success(id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -1554,15 +1714,31 @@ impl Gateway {
                 }
             }
             "statewright_run_agent" => {
-                let task = arguments.get("task").and_then(|t| t.as_str()).unwrap_or("Fix the failing tests");
-                let model = arguments.get("model").and_then(|m| m.as_str()).unwrap_or("gemma4:31b");
-                let agent_workdir = arguments.get("workdir").and_then(|w| w.as_str()).unwrap_or(".");
+                let task = arguments
+                    .get("task")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Fix the failing tests");
+                let model = arguments
+                    .get("model")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("gemma4:31b");
+                let agent_workdir = arguments
+                    .get("workdir")
+                    .and_then(|w| w.as_str())
+                    .unwrap_or(".");
 
                 // Resolve active session for workflow definition and current state.
                 // This is the path for TUIs (Claude Code, Hermes) that cannot spawn sw-agent
                 // locally — the gateway runs it server-side using the loaded workflow.
-                let (workflow_json, current_state) = self.session_manager.get(&self.session_id)
-                    .map(|s| (serde_json::to_value(&s.definition).ok(), Some(s.current_state.clone())))
+                let (workflow_json, current_state) = self
+                    .session_manager
+                    .get(&self.session_id)
+                    .map(|s| {
+                        (
+                            serde_json::to_value(&s.definition).ok(),
+                            Some(s.current_state.clone()),
+                        )
+                    })
                     .unwrap_or((None, None));
 
                 // Build config for the agent — include the active workflow so sw-agent
@@ -1581,13 +1757,22 @@ impl Gateway {
                 }
 
                 // Write config to temp file
-                let config_path = format!("/tmp/sw-agent-config-{}.json", std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                let config_path = format!(
+                    "/tmp/sw-agent-config-{}.json",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                );
                 if let Err(e) = std::fs::write(&config_path, config.to_string()) {
-                    return JsonRpcResponse::success(id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(
-                            format!("Failed to write agent config: {}", e)
-                        )).unwrap());
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                            "Failed to write agent config: {}",
+                            e
+                        )))
+                        .unwrap(),
+                    );
                 }
 
                 // Build spawn args — target the current state if known (single-state execution),
@@ -1615,10 +1800,14 @@ impl Gateway {
                     Ok(o) => o,
                     Err(e) => {
                         let _ = std::fs::remove_file(&config_path);
-                        return JsonRpcResponse::success(id,
-                            serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                format!("Failed to spawn sw-agent: {}. Is it in PATH?", e)
-                            )).unwrap());
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                "Failed to spawn sw-agent: {}. Is it in PATH?",
+                                e
+                            )))
+                            .unwrap(),
+                        );
                     }
                 };
 
@@ -1633,18 +1822,29 @@ impl Gateway {
                     if let Ok(event) = serde_json::from_str::<serde_json::Value>(line) {
                         match event.get("event").and_then(|e| e.as_str()) {
                             Some("transition") => {
-                                let from = event.get("from").and_then(|f| f.as_str()).unwrap_or("?");
+                                let from =
+                                    event.get("from").and_then(|f| f.as_str()).unwrap_or("?");
                                 let to = event.get("to").and_then(|t| t.as_str()).unwrap_or("?");
                                 summary_lines.push(format!("⚡ {} → {}", from, to));
                             }
                             Some("tool_call") => {
-                                let name = event.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                                let args = event.get("args_preview").and_then(|a| a.as_str()).unwrap_or("");
+                                let name =
+                                    event.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                                let args = event
+                                    .get("args_preview")
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("");
                                 summary_lines.push(format!("→ {} {}", name, args));
                             }
                             Some("auto_test") => {
-                                let passed = event.get("passed").and_then(|p| p.as_bool()).unwrap_or(false);
-                                let fc = event.get("fail_count").and_then(|f| f.as_u64()).unwrap_or(0);
+                                let passed = event
+                                    .get("passed")
+                                    .and_then(|p| p.as_bool())
+                                    .unwrap_or(false);
+                                let fc = event
+                                    .get("fail_count")
+                                    .and_then(|f| f.as_u64())
+                                    .unwrap_or(0);
                                 if passed {
                                     summary_lines.push("✓ Tests passed".into());
                                 } else {
@@ -1652,8 +1852,12 @@ impl Gateway {
                                 }
                             }
                             Some("completed") => {
-                                let steps = event.get("steps").and_then(|s| s.as_u64()).unwrap_or(0);
-                                let success = event.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+                                let steps =
+                                    event.get("steps").and_then(|s| s.as_u64()).unwrap_or(0);
+                                let success = event
+                                    .get("success")
+                                    .and_then(|s| s.as_bool())
+                                    .unwrap_or(false);
                                 if success {
                                     summary_lines.push(format!("✓ Completed in {} steps", steps));
                                 } else {
@@ -1666,15 +1870,20 @@ impl Gateway {
                 }
 
                 let result_text = if summary_lines.is_empty() {
-                    format!("Agent finished (exit code: {:?})\n\nstdout:\n{}\n\nstderr:\n{}",
-                        output.status.code(), &stdout[..stdout.len().min(2000)], &stderr[..stderr.len().min(500)])
+                    format!(
+                        "Agent finished (exit code: {:?})\n\nstdout:\n{}\n\nstderr:\n{}",
+                        output.status.code(),
+                        &stdout[..stdout.len().min(2000)],
+                        &stderr[..stderr.len().min(500)]
+                    )
                 } else {
                     summary_lines.join("\n")
                 };
 
                 JsonRpcResponse::success(
                     id,
-                    serde_json::to_value(crate::protocol::ToolCallResult::text(result_text)).unwrap(),
+                    serde_json::to_value(crate::protocol::ToolCallResult::text(result_text))
+                        .unwrap(),
                 )
             }
 
@@ -1756,7 +1965,10 @@ mod tests {
         };
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().into()).collect();
+        let names: Vec<String> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().into())
+            .collect();
         assert!(names.contains(&"statewright_transition".to_string()));
         assert!(names.contains(&"statewright_get_state".to_string()));
     }
@@ -1789,7 +2001,10 @@ mod tests {
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
         assert_eq!(tools.len(), 10);
-        let names: Vec<String> = tools.iter().map(|t| t["name"].as_str().unwrap().into()).collect();
+        let names: Vec<String> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().into())
+            .collect();
         assert!(names.contains(&"statewright_transition".to_string()));
         assert!(names.contains(&"statewright_get_state".to_string()));
     }
@@ -1850,7 +2065,8 @@ mod tests {
                 "completed": { "type": "final" }
             },
             "guards": {}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let mgr = SessionManager::new();
         mgr.create("invoke-session".into(), def.clone());
@@ -1878,21 +2094,29 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         assert!(resp.error.is_none());
 
-        let text = resp.result.unwrap()["content"][0]["text"].as_str().unwrap().to_string();
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let result: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         // Response must indicate the invoke and the eventual destination
         assert_eq!(result["transitioned"], true);
         assert_eq!(result["from"], "planning");
-        assert_eq!(result["to"], "testing");         // on_complete — eventual destination
-        assert!(result.get("invoke").is_some(), "response must carry invoke key");
+        assert_eq!(result["to"], "testing"); // on_complete — eventual destination
+        assert!(
+            result.get("invoke").is_some(),
+            "response must carry invoke key"
+        );
         assert_eq!(result["invoke"]["machine"], "debug_machine");
         assert_eq!(result["invoke"]["on_complete"], "testing");
 
         // Parent session must NOT have advanced — stays in "planning" until sub-machine completes
         let session = gw.session_manager.get("invoke-session").unwrap();
-        assert_eq!(session.current_state, "planning",
-            "parent state must not advance to on_complete before sub-machine runs");
+        assert_eq!(
+            session.current_state, "planning",
+            "parent state must not advance to on_complete before sub-machine runs"
+        );
     }
 
     #[tokio::test]
@@ -2153,7 +2377,8 @@ mod tests {
         let mut gw = interrupt_gateway();
         // Simulate being in interrupt handler (auto-transition already happened)
         let ctx = json!({"_interrupt_return": "implementing"});
-        gw.session_manager.update_state("int-session", "pb_validating".into(), ctx);
+        gw.session_manager
+            .update_state("int-session", "pb_validating".into(), ctx);
 
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -2178,7 +2403,8 @@ mod tests {
         let mut gw = interrupt_gateway();
         // Simulate being in interrupt handler
         let ctx = json!({"_interrupt_return": "implementing"});
-        gw.session_manager.update_state("int-session", "pb_validating".into(), ctx);
+        gw.session_manager
+            .update_state("int-session", "pb_validating".into(), ctx);
 
         // Transition with VALIDATED — should resolve $return to "implementing"
         let req = JsonRpcRequest {
@@ -2242,7 +2468,10 @@ mod tests {
         // _interrupt_return should NOT be in context (stripped)
         assert!(session.context.get("_interrupt_return").is_none());
         // real_field should be present (not stripped)
-        assert_eq!(session.context.get("real_field").and_then(|v| v.as_str()), Some("kept"));
+        assert_eq!(
+            session.context.get("real_field").and_then(|v| v.as_str()),
+            Some("kept")
+        );
     }
 
     // --- Interrupt trigger integration tests (mock upstream) ---
@@ -2317,12 +2546,18 @@ mod tests {
         assert_eq!(result["isError"], false);
 
         // Response should contain the interrupt notice
-        let texts: Vec<String> = result["content"].as_array().unwrap()
+        let texts: Vec<String> = result["content"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|c| c["text"].as_str().unwrap().to_string())
             .collect();
         let combined = texts.join("\n");
-        assert!(combined.contains("STATEWRIGHT INTERRUPT"), "Expected interrupt notice, got: {}", combined);
+        assert!(
+            combined.contains("STATEWRIGHT INTERRUPT"),
+            "Expected interrupt notice, got: {}",
+            combined
+        );
         assert!(combined.contains("pb_check"), "Expected interrupt name");
         assert!(combined.contains("pb_validating"), "Expected target state");
 
@@ -2332,7 +2567,10 @@ mod tests {
 
         // Context should have _interrupt_return set
         assert_eq!(
-            session.context.get("_interrupt_return").and_then(|v| v.as_str()),
+            session
+                .context
+                .get("_interrupt_return")
+                .and_then(|v| v.as_str()),
             Some("implementing"),
             "Expected _interrupt_return = implementing"
         );
@@ -2427,7 +2665,10 @@ mod tests {
             id: Some(json!(1)),
         };
         gw.handle_message(req).await.unwrap();
-        assert_eq!(gw.session_manager.get("int-mock").unwrap().current_state, "pb_validating");
+        assert_eq!(
+            gw.session_manager.get("int-mock").unwrap().current_state,
+            "pb_validating"
+        );
 
         // Step 2: Edit ANOTHER PB hook file while already in handler
         let req2 = JsonRpcRequest {
@@ -2445,21 +2686,28 @@ mod tests {
         };
         let resp2 = gw.handle_message(req2).await.unwrap();
         let result = resp2.result.unwrap();
-        let texts: Vec<String> = result["content"].as_array().unwrap()
+        let texts: Vec<String> = result["content"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|c| c["text"].as_str().unwrap().to_string())
             .collect();
         let combined = texts.join("\n");
 
         // Should NOT trigger a second interrupt
-        assert!(!combined.contains("STATEWRIGHT INTERRUPT"),
-            "Should not re-trigger interrupt while already in handler");
+        assert!(
+            !combined.contains("STATEWRIGHT INTERRUPT"),
+            "Should not re-trigger interrupt while already in handler"
+        );
 
         // Still in pb_validating (not double-transitioned)
         let session = gw.session_manager.get("int-mock").unwrap();
         assert_eq!(session.current_state, "pb_validating");
         assert_eq!(
-            session.context.get("_interrupt_return").and_then(|v| v.as_str()),
+            session
+                .context
+                .get("_interrupt_return")
+                .and_then(|v| v.as_str()),
             Some("implementing"),
             "_interrupt_return should still point to implementing"
         );
@@ -2493,15 +2741,27 @@ mod tests {
         workflows.insert("implicit-test".into(), def);
 
         let mock_edit = (
-            ToolInfo { name: "Edit".into(), description: None, input_schema: json!({"type": "object"}) },
+            ToolInfo {
+                name: "Edit".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            },
             crate::protocol::ToolCallResult::text("edited"),
         );
         let mock_read = (
-            ToolInfo { name: "Read".into(), description: None, input_schema: json!({"type": "object"}) },
+            ToolInfo {
+                name: "Read".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            },
             crate::protocol::ToolCallResult::text("file contents"),
         );
         let mock_grep = (
-            ToolInfo { name: "Grep".into(), description: None, input_schema: json!({"type": "object"}) },
+            ToolInfo {
+                name: "Grep".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            },
             crate::protocol::ToolCallResult::text("match"),
         );
 
@@ -2592,13 +2852,22 @@ mod tests {
         assert_eq!(result["isError"], false);
 
         // Should have checkpoint notice appended
-        let texts: Vec<String> = result["content"].as_array().unwrap()
+        let texts: Vec<String> = result["content"]
+            .as_array()
+            .unwrap()
             .iter()
             .map(|c| c["text"].as_str().unwrap().to_string())
             .collect();
         let combined = texts.join("\n");
-        assert!(combined.contains("STATEWRIGHT CHECKPOINT"), "Expected checkpoint notice, got: {}", combined);
-        assert!(combined.contains("planning"), "Checkpoint should mention current state");
+        assert!(
+            combined.contains("STATEWRIGHT CHECKPOINT"),
+            "Expected checkpoint notice, got: {}",
+            combined
+        );
+        assert!(
+            combined.contains("planning"),
+            "Checkpoint should mention current state"
+        );
     }
 
     #[tokio::test]
@@ -2606,7 +2875,11 @@ mod tests {
         // Gateway with no active workflow — tools pass through without enforcement
         let mgr = SessionManager::new();
         let mock_deploy = (
-            ToolInfo { name: "deploy".into(), description: None, input_schema: json!({"type": "object"}) },
+            ToolInfo {
+                name: "deploy".into(),
+                description: None,
+                input_schema: json!({"type": "object"}),
+            },
             crate::protocol::ToolCallResult::text("deployed"),
         );
         let mut gw = Gateway::new(
@@ -2705,7 +2978,10 @@ mod tests {
         let session = gw.session_manager.get("int-mock").unwrap();
         assert_eq!(session.current_state, "pb_validating");
         assert_eq!(
-            session.context.get("_interrupt_return").and_then(|v| v.as_str()),
+            session
+                .context
+                .get("_interrupt_return")
+                .and_then(|v| v.as_str()),
             Some("implementing")
         );
     }
@@ -2780,7 +3056,10 @@ mod tests {
             id: Some(json!(1)),
         };
         gw.handle_message(req).await.unwrap();
-        assert_eq!(gw.session_manager.get("int-mock").unwrap().current_state, "pb_validating");
+        assert_eq!(
+            gw.session_manager.get("int-mock").unwrap().current_state,
+            "pb_validating"
+        );
 
         // Step 2: Agent validates, transitions VALIDATED ($return)
         let req2 = JsonRpcRequest {
@@ -3083,8 +3362,11 @@ mod tests {
         };
         let resp2 = gw.handle_message(req2).await.unwrap();
         let state2 = serde_json::from_str::<serde_json::Value>(
-            resp2.result.unwrap()["content"][0]["text"].as_str().unwrap()
-        ).unwrap();
+            resp2.result.unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(state2["state"], "lint_run");
 
         // 3. Complete first branch
@@ -3108,8 +3390,11 @@ mod tests {
         };
         let resp4 = gw.handle_message(req4).await.unwrap();
         let state4 = serde_json::from_str::<serde_json::Value>(
-            resp4.result.unwrap()["content"][0]["text"].as_str().unwrap()
-        ).unwrap();
+            resp4.result.unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(state4["state"], "types_run");
 
         // 5. Complete second branch — triggers join
@@ -3133,8 +3418,11 @@ mod tests {
         };
         let resp6 = gw.handle_message(req6).await.unwrap();
         let state6 = serde_json::from_str::<serde_json::Value>(
-            resp6.result.unwrap()["content"][0]["text"].as_str().unwrap()
-        ).unwrap();
+            resp6.result.unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(state6["state"], "deploying");
         // Fork should be cleaned up
         assert!(state6.get("fork").is_none() || state6["fork"].is_null());

@@ -97,7 +97,10 @@ mod tests {
             op: GuardOp::Exists,
             value: json!(null),
         };
-        assert!(evaluate_guard(&guard, &json!({"payment_method": "card_4242"})));
+        assert!(evaluate_guard(
+            &guard,
+            &json!({"payment_method": "card_4242"})
+        ));
     }
 
     #[test]
@@ -167,7 +170,10 @@ mod tests {
             op: GuardOp::Contains,
             value: json!("timeout"),
         };
-        assert!(evaluate_guard(&guard, &json!({"error": "connection timeout occurred"})));
+        assert!(evaluate_guard(
+            &guard,
+            &json!({"error": "connection timeout occurred"})
+        ));
     }
 
     #[test]

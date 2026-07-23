@@ -5,9 +5,7 @@ pub enum TuiEvent {
     Setup { files_snapshotted: usize },
 
     /// State machine loaded
-    MachineLoaded {
-        states: Vec<StateInfo>,
-    },
+    MachineLoaded { states: Vec<StateInfo> },
 
     /// New step started
     StepStarted {
@@ -27,10 +25,7 @@ pub enum TuiEvent {
     },
 
     /// LLM called a tool
-    ToolCall {
-        name: String,
-        args_preview: String,
-    },
+    ToolCall { name: String, args_preview: String },
 
     /// Tool returned a result
     ToolResult {
@@ -39,10 +34,7 @@ pub enum TuiEvent {
     },
 
     /// Tool was blocked by guard
-    GuardBlocked {
-        tool: String,
-        state: String,
-    },
+    GuardBlocked { tool: String, state: String },
 
     /// State transition
     Transition {
@@ -53,10 +45,7 @@ pub enum TuiEvent {
     },
 
     /// Auto-test ran
-    AutoTest {
-        passed: bool,
-        fail_count: usize,
-    },
+    AutoTest { passed: bool, fail_count: usize },
 
     /// Diff stats
     DiffStats {

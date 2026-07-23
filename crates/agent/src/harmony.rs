@@ -8,8 +8,9 @@
 
 #[cfg(feature = "harmony")]
 use openai_harmony::{
+    HarmonyEncodingName,
     chat::{Content, Message, Role},
-    load_harmony_encoding, HarmonyEncodingName,
+    load_harmony_encoding,
 };
 
 /// Try to parse a raw response string as Harmony format.

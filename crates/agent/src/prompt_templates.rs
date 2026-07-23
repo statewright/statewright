@@ -226,7 +226,10 @@ mod tests {
             "planning",
             Some("Analyze the bug"),
             &["read_file".into(), "grep".into()],
-            &[("PLAN_READY".into(), "implementing".into()), ("FAIL".into(), "failed".into())],
+            &[
+                ("PLAN_READY".into(), "implementing".into()),
+                ("FAIL".into(), "failed".into()),
+            ],
             "No progress yet",
         );
         assert_eq!(messages.len(), 2);

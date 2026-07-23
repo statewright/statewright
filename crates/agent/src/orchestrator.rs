@@ -1,7 +1,7 @@
 use crate::executor::{ExecutionState, ExecutionStatus, MachineRegistry};
 use crate::ollama_client::OllamaClient;
-use statewright_engine::MachineDefinition;
 use serde_json::Value;
+use statewright_engine::MachineDefinition;
 
 /// Orchestrates execution of state machines with sub-machine invocation.
 /// When a parent machine hits an invoke transition, the orchestrator
@@ -45,93 +45,98 @@ impl Orchestrator {
         depth: u32,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ExecutionResult> + Send + 'a>> {
         Box::pin(async move {
-        if depth > self.max_depth {
-            return ExecutionResult {
-                success: false,
-                final_state: "failed".into(),
-                context: Value::Null,
-                total_steps: 0,
-                invocations: 0,
-                error: Some(format!("max invoke depth ({}) exceeded", self.max_depth)),
-            };
-        }
-
-        let machine_id = definition.id.clone();
-        let mut exec = ExecutionState::new(definition);
-        let mut total_steps = 0u32;
-        let mut invocations = 0u32;
-
-        loop {
-            if total_steps >= max_steps {
+            if depth > self.max_depth {
                 return ExecutionResult {
                     success: false,
-                    final_state: exec.current_state.clone(),
-                    context: exec.context.clone(),
-                    total_steps,
-                    invocations,
-                    error: Some(format!("max steps ({}) exceeded in '{}'", max_steps, machine_id)),
+                    final_state: "failed".into(),
+                    context: Value::Null,
+                    total_steps: 0,
+                    invocations: 0,
+                    error: Some(format!("max invoke depth ({}) exceeded", self.max_depth)),
                 };
             }
 
-            match &exec.status {
-                ExecutionStatus::Completed => {
-                    return ExecutionResult {
-                        success: true,
-                        final_state: exec.current_state.clone(),
-                        context: exec.context.clone(),
-                        total_steps,
-                        invocations,
-                        error: None,
-                    };
-                }
-                ExecutionStatus::Failed { error } => {
+            let machine_id = definition.id.clone();
+            let mut exec = ExecutionState::new(definition);
+            let mut total_steps = 0u32;
+            let mut invocations = 0u32;
+
+            loop {
+                if total_steps >= max_steps {
                     return ExecutionResult {
                         success: false,
                         final_state: exec.current_state.clone(),
                         context: exec.context.clone(),
                         total_steps,
                         invocations,
-                        error: Some(error.clone()),
+                        error: Some(format!(
+                            "max steps ({}) exceeded in '{}'",
+                            max_steps, machine_id
+                        )),
                     };
                 }
-                ExecutionStatus::AwaitingApproval { .. } => {
-                    // Auto-approve in orchestrator mode
-                    let _ = exec.approve();
-                }
-                ExecutionStatus::AwaitingInvoke { machine, on_complete, on_fail, input } => {
-                    invocations += 1;
-                    let child_machine_name = machine.clone();
 
-                    let child_def = match self.registry.get(&child_machine_name) {
-                        Some(def) => def.clone(),
-                        None => {
-                            let _ = exec.fail_invoke(&format!(
-                                "sub-machine '{}' not found in registry", child_machine_name
-                            ));
-                            continue;
-                        }
-                    };
-
-                    // Run the child machine recursively
-                    let child_result = self.run_at_depth(
-                        child_def,
-                        client,
-                        self.max_child_steps,
-                        depth + 1,
-                    ).await;
-
-                    total_steps += child_result.total_steps;
-                    invocations += child_result.invocations;
-
-                    if child_result.success {
-                        let _ = exec.complete_invoke(Some(child_result.context));
-                    } else {
-                        let error = child_result.error.unwrap_or_else(|| "child failed".into());
-                        let _ = exec.fail_invoke(&error);
+                match &exec.status {
+                    ExecutionStatus::Completed => {
+                        return ExecutionResult {
+                            success: true,
+                            final_state: exec.current_state.clone(),
+                            context: exec.context.clone(),
+                            total_steps,
+                            invocations,
+                            error: None,
+                        };
                     }
-                }
-                ExecutionStatus::Running => {
-                    match exec.step(client).await {
+                    ExecutionStatus::Failed { error } => {
+                        return ExecutionResult {
+                            success: false,
+                            final_state: exec.current_state.clone(),
+                            context: exec.context.clone(),
+                            total_steps,
+                            invocations,
+                            error: Some(error.clone()),
+                        };
+                    }
+                    ExecutionStatus::AwaitingApproval { .. } => {
+                        // Auto-approve in orchestrator mode
+                        let _ = exec.approve();
+                    }
+                    ExecutionStatus::AwaitingInvoke {
+                        machine,
+                        on_complete,
+                        on_fail,
+                        input,
+                    } => {
+                        invocations += 1;
+                        let child_machine_name = machine.clone();
+
+                        let child_def = match self.registry.get(&child_machine_name) {
+                            Some(def) => def.clone(),
+                            None => {
+                                let _ = exec.fail_invoke(&format!(
+                                    "sub-machine '{}' not found in registry",
+                                    child_machine_name
+                                ));
+                                continue;
+                            }
+                        };
+
+                        // Run the child machine recursively
+                        let child_result = self
+                            .run_at_depth(child_def, client, self.max_child_steps, depth + 1)
+                            .await;
+
+                        total_steps += child_result.total_steps;
+                        invocations += child_result.invocations;
+
+                        if child_result.success {
+                            let _ = exec.complete_invoke(Some(child_result.context));
+                        } else {
+                            let error = child_result.error.unwrap_or_else(|| "child failed".into());
+                            let _ = exec.fail_invoke(&error);
+                        }
+                    }
+                    ExecutionStatus::Running => match exec.step(client).await {
                         Ok(_record) => {
                             total_steps += 1;
                         }
@@ -145,10 +150,9 @@ impl Orchestrator {
                                 error: Some(e.to_string()),
                             };
                         }
-                    }
+                    },
                 }
             }
-        }
         }) // Box::pin
     }
 }
@@ -184,7 +188,8 @@ mod tests {
                 };
                 let next = {
                     let mut iter = responses.lock().unwrap();
-                    iter.next().unwrap_or_else(|| r#"{"transition": "FAIL"}"#.into())
+                    iter.next()
+                        .unwrap_or_else(|| r#"{"transition": "FAIL"}"#.into())
                 };
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -197,7 +202,8 @@ mod tests {
                     let body_str = serde_json::to_string(&body).unwrap();
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body_str.len(), body_str
+                        body_str.len(),
+                        body_str
                     );
                     let _ = stream.write_all(resp.as_bytes()).await;
                 });
@@ -325,9 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_sub_machine_fails_invoke() {
-        let responses = vec![
-            r#"{"transition": "NEED_HELP"}"#.into(),
-        ];
+        let responses = vec![r#"{"transition": "NEED_HELP"}"#.into()];
         let (url, handle) = start_sequenced_mock(responses).await;
         let client = mock_client(&url);
 
@@ -364,7 +368,9 @@ mod tests {
         }))
         .unwrap();
 
-        let responses: Vec<String> = (0..10).map(|_| r#"{"transition": "RECURSE"}"#.into()).collect();
+        let responses: Vec<String> = (0..10)
+            .map(|_| r#"{"transition": "RECURSE"}"#.into())
+            .collect();
         let (url, handle) = start_sequenced_mock(responses).await;
         let client = mock_client(&url);
 

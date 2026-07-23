@@ -1,20 +1,20 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 
 use crate::events::{StateInfo, TuiEvent};
 
 // Jurassic Park power grid palette
-const BORDER_ACTIVE: Color = Color::Rgb(0, 255, 136);   // neon green
-const BORDER_INACTIVE: Color = Color::Rgb(60, 60, 70);  // dark steel
-const BORDER_DANGER: Color = Color::Rgb(255, 60, 60);   // alarm red
-const BORDER_WARN: Color = Color::Rgb(255, 180, 0);     // amber
-const BORDER_INFO: Color = Color::Rgb(0, 180, 255);     // cyan
-const BG_PANEL: Color = Color::Rgb(15, 15, 20);         // near-black
+const BORDER_ACTIVE: Color = Color::Rgb(0, 255, 136); // neon green
+const BORDER_INACTIVE: Color = Color::Rgb(60, 60, 70); // dark steel
+const BORDER_DANGER: Color = Color::Rgb(255, 60, 60); // alarm red
+const BORDER_WARN: Color = Color::Rgb(255, 180, 0); // amber
+const BORDER_INFO: Color = Color::Rgb(0, 180, 255); // cyan
+const BG_PANEL: Color = Color::Rgb(15, 15, 20); // near-black
 const FG_DIM: Color = Color::Rgb(90, 90, 100);
 const FG_BRIGHT: Color = Color::Rgb(220, 220, 230);
 const DIFF_ADD: Color = Color::Rgb(80, 255, 80);
@@ -85,25 +85,63 @@ impl App {
     pub fn apply(&mut self, event: TuiEvent) {
         match event {
             TuiEvent::Setup { files_snapshotted } => {
-                self.push_log("SETUP", &format!("snapshotted {} file(s)", files_snapshotted), FG_DIM, LogStyle::Normal);
+                self.push_log(
+                    "SETUP",
+                    &format!("snapshotted {} file(s)", files_snapshotted),
+                    FG_DIM,
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::MachineLoaded { states } => {
                 self.states = states;
-                self.push_log("LOADED", "state machine online", BORDER_INFO, LogStyle::Boxed { border_color: BORDER_INFO });
+                self.push_log(
+                    "LOADED",
+                    "state machine online",
+                    BORDER_INFO,
+                    LogStyle::Boxed {
+                        border_color: BORDER_INFO,
+                    },
+                );
             }
-            TuiEvent::StepStarted { step, state, iteration, max_iterations, is_checkpoint, .. } => {
+            TuiEvent::StepStarted {
+                step,
+                state,
+                iteration,
+                max_iterations,
+                is_checkpoint,
+                ..
+            } => {
                 self.step = step;
                 self.current_state = state.clone();
                 if is_checkpoint {
-                    self.push_log("CHKPT", &format!("[{}] {} iter {}/{}", step, state, iteration, max_iterations), BORDER_WARN,
-                        LogStyle::Boxed { border_color: BORDER_WARN });
+                    self.push_log(
+                        "CHKPT",
+                        &format!("[{}] {} iter {}/{}", step, state, iteration, max_iterations),
+                        BORDER_WARN,
+                        LogStyle::Boxed {
+                            border_color: BORDER_WARN,
+                        },
+                    );
                 } else {
-                    self.push_log("STEP", &format!("[{}] {} ({}/{})", step, state, iteration, max_iterations), BORDER_INFO, LogStyle::Normal);
+                    self.push_log(
+                        "STEP",
+                        &format!("[{}] {} ({}/{})", step, state, iteration, max_iterations),
+                        BORDER_INFO,
+                        LogStyle::Normal,
+                    );
                 }
-                self.status = format!("step {} | {} ({}/{})", step, state, iteration, max_iterations);
+                self.status = format!(
+                    "step {} | {} ({}/{})",
+                    step, state, iteration, max_iterations
+                );
             }
             TuiEvent::Localized { excerpt_lines, .. } => {
-                self.push_log("SCAN", &format!("{} lines extracted", excerpt_lines), Color::Magenta, LogStyle::Normal);
+                self.push_log(
+                    "SCAN",
+                    &format!("{} lines extracted", excerpt_lines),
+                    Color::Magenta,
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::ToolCall { name, args_preview } => {
                 self.last_tool = self.current_tool.take();
@@ -116,21 +154,37 @@ impl App {
                 };
                 self.push_log("EXEC", &display, FG_BRIGHT, LogStyle::Normal);
             }
-            TuiEvent::ToolResult { name, result_preview } => {
+            TuiEvent::ToolResult {
+                name,
+                result_preview,
+            } => {
                 self.last_tool = Some(name.clone());
                 self.current_tool = None;
                 // Unified diff output
-                if name == "diff" || result_preview.contains("+++ ") || result_preview.contains("--- ") {
+                if name == "diff"
+                    || result_preview.contains("+++ ")
+                    || result_preview.contains("--- ")
+                {
                     let diff_lines = parse_diff_lines(&result_preview);
                     if !diff_lines.is_empty() {
-                        self.push_log("DIFF", &name, BORDER_WARN, LogStyle::Diff { lines: diff_lines });
+                        self.push_log(
+                            "DIFF",
+                            &name,
+                            BORDER_WARN,
+                            LogStyle::Diff { lines: diff_lines },
+                        );
                         return;
                     }
                 }
                 // edit_line: "L19 changed: 'return a // b' -> 'return a / b'"
                 if result_preview.contains("changed:") && result_preview.contains(" -> ") {
                     if let Some(diff) = parse_edit_result(&result_preview) {
-                        self.push_log("EDIT", &diff.header, DIFF_ADD, LogStyle::Diff { lines: diff.lines });
+                        self.push_log(
+                            "EDIT",
+                            &diff.header,
+                            DIFF_ADD,
+                            LogStyle::Diff { lines: diff.lines },
+                        );
                         return;
                     }
                 }
@@ -138,10 +192,24 @@ impl App {
                 if result_preview.contains("replaced") && result_preview.contains("lines") {
                     let diff_lines = parse_diff_lines(&result_preview);
                     if diff_lines.len() > 1 {
-                        let header = result_preview.lines().next().unwrap_or(&result_preview).to_string();
-                        self.push_log("EDIT", &header, DIFF_ADD, LogStyle::Diff { lines: diff_lines });
+                        let header = result_preview
+                            .lines()
+                            .next()
+                            .unwrap_or(&result_preview)
+                            .to_string();
+                        self.push_log(
+                            "EDIT",
+                            &header,
+                            DIFF_ADD,
+                            LogStyle::Diff { lines: diff_lines },
+                        );
                     } else {
-                        self.push_log("EDIT", &truncate(&result_preview, 70), DIFF_ADD, LogStyle::Normal);
+                        self.push_log(
+                            "EDIT",
+                            &truncate(&result_preview, 70),
+                            DIFF_ADD,
+                            LogStyle::Normal,
+                        );
                     }
                     return;
                 }
@@ -149,14 +217,33 @@ impl App {
                 if result_preview.contains("patch(es) applied") {
                     let diff_lines = parse_diff_lines(&result_preview);
                     if diff_lines.len() > 1 {
-                        let header = result_preview.lines().next().unwrap_or(&result_preview).to_string();
-                        self.push_log("PATCH", &header, DIFF_ADD, LogStyle::Diff { lines: diff_lines });
+                        let header = result_preview
+                            .lines()
+                            .next()
+                            .unwrap_or(&result_preview)
+                            .to_string();
+                        self.push_log(
+                            "PATCH",
+                            &header,
+                            DIFF_ADD,
+                            LogStyle::Diff { lines: diff_lines },
+                        );
                     } else {
-                        self.push_log("PATCH", &truncate(&result_preview, 70), DIFF_ADD, LogStyle::Normal);
+                        self.push_log(
+                            "PATCH",
+                            &truncate(&result_preview, 70),
+                            DIFF_ADD,
+                            LogStyle::Normal,
+                        );
                     }
                     return;
                 }
-                self.push_log("RECV", &format!("{} -> {}", name, truncate(&result_preview, 65)), FG_DIM, LogStyle::Normal);
+                self.push_log(
+                    "RECV",
+                    &format!("{} -> {}", name, truncate(&result_preview, 65)),
+                    FG_DIM,
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::GuardBlocked { tool, state } => {
                 // If the last log entry was an EXEC for this tool, replace it
@@ -166,61 +253,138 @@ impl App {
                         self.log.pop();
                     }
                 }
-                self.push_log("BLOCK", &format!("{} not available in {} state", tool, state), BORDER_DANGER,
-                    LogStyle::Boxed { border_color: BORDER_DANGER });
+                self.push_log(
+                    "BLOCK",
+                    &format!("{} not available in {} state", tool, state),
+                    BORDER_DANGER,
+                    LogStyle::Boxed {
+                        border_color: BORDER_DANGER,
+                    },
+                );
             }
             TuiEvent::Transition { from, to, .. } => {
                 self.current_state = to.clone();
-                self.push_log("STATE", &format!("{} -> {}", from, to), Color::Rgb(180, 80, 255),
-                    LogStyle::Boxed { border_color: Color::Rgb(180, 80, 255) });
+                self.push_log(
+                    "STATE",
+                    &format!("{} -> {}", from, to),
+                    Color::Rgb(180, 80, 255),
+                    LogStyle::Boxed {
+                        border_color: Color::Rgb(180, 80, 255),
+                    },
+                );
             }
             TuiEvent::AutoTest { passed, fail_count } => {
                 if passed {
-                    self.push_log("PASS", "all tests pass", BORDER_ACTIVE,
-                        LogStyle::Boxed { border_color: BORDER_ACTIVE });
+                    self.push_log(
+                        "PASS",
+                        "all tests pass",
+                        BORDER_ACTIVE,
+                        LogStyle::Boxed {
+                            border_color: BORDER_ACTIVE,
+                        },
+                    );
                 } else {
-                    self.push_log("FAIL", &format!("{} test(s) failing", fail_count), BORDER_DANGER,
-                        LogStyle::Boxed { border_color: BORDER_DANGER });
+                    self.push_log(
+                        "FAIL",
+                        &format!("{} test(s) failing", fail_count),
+                        BORDER_DANGER,
+                        LogStyle::Boxed {
+                            border_color: BORDER_DANGER,
+                        },
+                    );
                 }
             }
-            TuiEvent::DiffStats { file, changed, total } => {
+            TuiEvent::DiffStats {
+                file,
+                changed,
+                total,
+            } => {
                 let color = if changed <= 5 { DIFF_ADD } else { BORDER_WARN };
-                self.push_log("DIFF", &format!("{} | {}/{} lines", file, changed, total), color, LogStyle::Normal);
+                self.push_log(
+                    "DIFF",
+                    &format!("{} | {}/{} lines", file, changed, total),
+                    color,
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::MinimizerRejected { file, changed, max } => {
-                self.push_log("REJECT", &format!("{} changed {} lines (max {})", file, changed, max), BORDER_DANGER,
-                    LogStyle::Boxed { border_color: BORDER_DANGER });
+                self.push_log(
+                    "REJECT",
+                    &format!("{} changed {} lines (max {})", file, changed, max),
+                    BORDER_DANGER,
+                    LogStyle::Boxed {
+                        border_color: BORDER_DANGER,
+                    },
+                );
             }
             TuiEvent::EditGateBlocked => {
-                self.push_log("GATE", "no changes detected -- edit required", BORDER_DANGER,
-                    LogStyle::Boxed { border_color: BORDER_DANGER });
+                self.push_log(
+                    "GATE",
+                    "no changes detected -- edit required",
+                    BORDER_DANGER,
+                    LogStyle::Boxed {
+                        border_color: BORDER_DANGER,
+                    },
+                );
             }
             TuiEvent::ParseFail { preview } => {
-                self.push_log("PARSE", &truncate(&preview, 55), BORDER_DANGER, LogStyle::Normal);
+                self.push_log(
+                    "PARSE",
+                    &truncate(&preview, 55),
+                    BORDER_DANGER,
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::LlmResponse { preview } => {
                 let trimmed = preview.trim();
-                if trimmed.is_empty() { return; }
+                if trimmed.is_empty() {
+                    return;
+                }
                 // Skip JSON — tool calls, transitions, etc. The structured events cover these.
-                if trimmed.starts_with('{') || trimmed.starts_with('[')
-                    || trimmed.contains("\"tool_calls\"") || trimmed.contains("\"id\":\"call_")
-                    || trimmed.contains("\"function\":{") || trimmed.contains("\"event\":") { return; }
+                if trimmed.starts_with('{')
+                    || trimmed.starts_with('[')
+                    || trimmed.contains("\"tool_calls\"")
+                    || trimmed.contains("\"id\":\"call_")
+                    || trimmed.contains("\"function\":{")
+                    || trimmed.contains("\"event\":")
+                {
+                    return;
+                }
                 // Skip engine/infrastructure noise
-                if trimmed.starts_with("Phase ") || trimmed.starts_with("[ENGINE]")
-                    || trimmed.starts_with("[STDERR]") || trimmed.starts_with("LOCALIZE:")
+                if trimmed.starts_with("Phase ")
+                    || trimmed.starts_with("[ENGINE]")
+                    || trimmed.starts_with("[STDERR]")
+                    || trimmed.starts_with("LOCALIZE:")
                     || trimmed.starts_with("all tests pass")
-                    || trimmed.starts_with("```") || trimmed.contains("process exited") { return; }
+                    || trimmed.starts_with("```")
+                    || trimmed.contains("process exited")
+                {
+                    return;
+                }
                 // Skip very short fragments (single words, stray chars)
-                if trimmed.len() < 10 { return; }
+                if trimmed.len() < 10 {
+                    return;
+                }
                 // What's left is reasoning — show in italics
-                self.push_log("    ", &truncate(trimmed, 80), Color::Rgb(130, 130, 160), LogStyle::Normal);
+                self.push_log(
+                    "    ",
+                    &truncate(trimmed, 80),
+                    Color::Rgb(130, 130, 160),
+                    LogStyle::Normal,
+                );
             }
             TuiEvent::NavAction { action } => {
                 self.push_log("NAV", &action, BORDER_INFO, LogStyle::Normal);
             }
             TuiEvent::ApprovalGate { message } => {
-                self.push_log("GATE", &message, BORDER_WARN,
-                    LogStyle::Boxed { border_color: BORDER_WARN });
+                self.push_log(
+                    "GATE",
+                    &message,
+                    BORDER_WARN,
+                    LogStyle::Boxed {
+                        border_color: BORDER_WARN,
+                    },
+                );
             }
             TuiEvent::Snapshot => {
                 self.push_log("SNAP", "checkpoint saved", FG_DIM, LogStyle::Normal);
@@ -229,22 +393,46 @@ impl App {
                 self.finished = true;
                 self.success = Some(success);
                 if success {
-                    self.push_log("DONE", &format!("completed in {} steps -- all tests pass", steps), BORDER_ACTIVE,
-                        LogStyle::Boxed { border_color: BORDER_ACTIVE });
+                    self.push_log(
+                        "DONE",
+                        &format!("completed in {} steps -- all tests pass", steps),
+                        BORDER_ACTIVE,
+                        LogStyle::Boxed {
+                            border_color: BORDER_ACTIVE,
+                        },
+                    );
                     self.status = format!("complete | {} steps | all tests pass", steps);
                 } else {
-                    self.push_log("DONE", &format!("failed after {} steps", steps), BORDER_DANGER,
-                        LogStyle::Boxed { border_color: BORDER_DANGER });
+                    self.push_log(
+                        "DONE",
+                        &format!("failed after {} steps", steps),
+                        BORDER_DANGER,
+                        LogStyle::Boxed {
+                            border_color: BORDER_DANGER,
+                        },
+                    );
                     self.status = format!("failed | {} steps", steps);
                 }
             }
             TuiEvent::AgentFailed { error } => {
-                self.push_log("FAULT", &error.unwrap_or_else(|| "agent failure".into()), BORDER_DANGER,
-                    LogStyle::Boxed { border_color: BORDER_DANGER });
+                self.push_log(
+                    "FAULT",
+                    &error.unwrap_or_else(|| "agent failure".into()),
+                    BORDER_DANGER,
+                    LogStyle::Boxed {
+                        border_color: BORDER_DANGER,
+                    },
+                );
             }
             TuiEvent::Aborted { max_steps } => {
-                self.push_log("ABORT", &format!("step limit ({}) exceeded", max_steps), BORDER_DANGER,
-                    LogStyle::Boxed { border_color: BORDER_DANGER });
+                self.push_log(
+                    "ABORT",
+                    &format!("step limit ({}) exceeded", max_steps),
+                    BORDER_DANGER,
+                    LogStyle::Boxed {
+                        border_color: BORDER_DANGER,
+                    },
+                );
                 self.status = format!("aborted | {} steps | limit exceeded", max_steps);
             }
         }
@@ -258,16 +446,48 @@ impl App {
             style,
         });
         if self.auto_scroll {
-            self.log_state.select(Some(self.log.len().saturating_sub(1)));
+            self.log_state
+                .select(Some(self.log.len().saturating_sub(1)));
         }
     }
 
-    pub fn scroll_up(&mut self) { self.auto_scroll = false; let i = self.log_state.selected().unwrap_or(0); self.log_state.select(Some(i.saturating_sub(1))); }
-    pub fn scroll_down(&mut self) { let i = self.log_state.selected().unwrap_or(0); let max = self.log.len().saturating_sub(1); let n = (i+1).min(max); self.log_state.select(Some(n)); if n == max { self.auto_scroll = true; } }
-    pub fn page_up(&mut self) { self.auto_scroll = false; let i = self.log_state.selected().unwrap_or(0); self.log_state.select(Some(i.saturating_sub(20))); }
-    pub fn page_down(&mut self) { let i = self.log_state.selected().unwrap_or(0); let max = self.log.len().saturating_sub(1); let n = (i+20).min(max); self.log_state.select(Some(n)); if n == max { self.auto_scroll = true; } }
-    pub fn scroll_top(&mut self) { self.auto_scroll = false; self.log_state.select(Some(0)); }
-    pub fn scroll_bottom(&mut self) { self.auto_scroll = true; self.log_state.select(Some(self.log.len().saturating_sub(1))); }
+    pub fn scroll_up(&mut self) {
+        self.auto_scroll = false;
+        let i = self.log_state.selected().unwrap_or(0);
+        self.log_state.select(Some(i.saturating_sub(1)));
+    }
+    pub fn scroll_down(&mut self) {
+        let i = self.log_state.selected().unwrap_or(0);
+        let max = self.log.len().saturating_sub(1);
+        let n = (i + 1).min(max);
+        self.log_state.select(Some(n));
+        if n == max {
+            self.auto_scroll = true;
+        }
+    }
+    pub fn page_up(&mut self) {
+        self.auto_scroll = false;
+        let i = self.log_state.selected().unwrap_or(0);
+        self.log_state.select(Some(i.saturating_sub(20)));
+    }
+    pub fn page_down(&mut self) {
+        let i = self.log_state.selected().unwrap_or(0);
+        let max = self.log.len().saturating_sub(1);
+        let n = (i + 20).min(max);
+        self.log_state.select(Some(n));
+        if n == max {
+            self.auto_scroll = true;
+        }
+    }
+    pub fn scroll_top(&mut self) {
+        self.auto_scroll = false;
+        self.log_state.select(Some(0));
+    }
+    pub fn scroll_bottom(&mut self) {
+        self.auto_scroll = true;
+        self.log_state
+            .select(Some(self.log.len().saturating_sub(1)));
+    }
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -279,14 +499,18 @@ pub fn render(frame: &mut Frame, app: &App) {
         Constraint::Length(3),
         Constraint::Fill(1),
         Constraint::Length(3),
-    ]).split(frame.area());
+    ])
+    .split(frame.area());
 
     // Title bar
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("statewright", Style::default().fg(BORDER_ACTIVE).bold()),
             Span::styled(" | ", Style::default().fg(BORDER_INACTIVE)),
-            Span::styled("state machine guardrails for LLM agents", Style::default().fg(FG_DIM)),
+            Span::styled(
+                "state machine guardrails for LLM agents",
+                Style::default().fg(FG_DIM),
+            ),
         ]))
         .alignment(ratatui::layout::Alignment::Center)
         .block(
@@ -299,10 +523,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         vert[0],
     );
 
-    let horiz = Layout::horizontal([
-        Constraint::Percentage(28),
-        Constraint::Percentage(72),
-    ]).split(vert[1]);
+    let horiz =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).split(vert[1]);
 
     render_state_machine(frame, app, horiz[0]);
     render_event_log(frame, app, horiz[1]);
@@ -315,39 +537,53 @@ fn render_state_machine(frame: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(BORDER_INFO))
         .style(Style::default().bg(BG_PANEL))
-        .title(Span::styled(" systems ", Style::default().fg(BORDER_INFO).bold()));
+        .title(Span::styled(
+            " systems ",
+            Style::default().fg(BORDER_INFO).bold(),
+        ));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    if app.states.is_empty() { return; }
+    if app.states.is_empty() {
+        return;
+    }
 
     // Calculate height per state
-    let state_heights: Vec<u16> = app.states.iter().map(|s| {
-        let mut h: u16 = 3; // border top + name + border bottom
-        if !s.tools.is_empty() && !s.is_final { h += 1; }
-        h += s.transitions.len() as u16;
-        h
-    }).collect();
+    let state_heights: Vec<u16> = app
+        .states
+        .iter()
+        .map(|s| {
+            let mut h: u16 = 3; // border top + name + border bottom
+            if !s.tools.is_empty() && !s.is_final {
+                h += 1;
+            }
+            h += s.transitions.len() as u16;
+            h
+        })
+        .collect();
 
-    let constraints: Vec<Constraint> = state_heights.iter()
+    let constraints: Vec<Constraint> = state_heights
+        .iter()
         .map(|h| Constraint::Length(*h))
         .chain(std::iter::once(Constraint::Fill(1)))
         .collect();
     let chunks = Layout::vertical(constraints).split(inner);
 
     for (i, state) in app.states.iter().enumerate() {
-        if i >= chunks.len() { break; }
+        if i >= chunks.len() {
+            break;
+        }
         let is_current = state.name == app.current_state;
 
         // Per-state colors
         let state_color = match state.name.as_str() {
-            "localizing" => Color::Rgb(0, 180, 255),    // cyan — scanning
-            "planning"   => Color::Rgb(100, 140, 255),   // blue — reading
-            "implementing" => Color::Rgb(255, 180, 0),   // amber — writing
-            "testing"    => Color::Rgb(180, 80, 255),     // purple — verifying
-            "review"     => Color::Rgb(0, 200, 140),      // teal — approval
-            "completed"  => BORDER_ACTIVE,                // green — success
-            "failed"     => BORDER_DANGER,                // red — failure
+            "localizing" => Color::Rgb(0, 180, 255),   // cyan — scanning
+            "planning" => Color::Rgb(100, 140, 255),   // blue — reading
+            "implementing" => Color::Rgb(255, 180, 0), // amber — writing
+            "testing" => Color::Rgb(180, 80, 255),     // purple — verifying
+            "review" => Color::Rgb(0, 200, 140),       // teal — approval
+            "completed" => BORDER_ACTIVE,              // green — success
+            "failed" => BORDER_DANGER,                 // red — failure
             _ => FG_BRIGHT,
         };
 
@@ -370,7 +606,10 @@ fn render_state_machine(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(FG_BRIGHT)
         };
 
-        let max_str = state.max_iterations.map(|m| format!(" [max:{}]", m)).unwrap_or_default();
+        let max_str = state
+            .max_iterations
+            .map(|m| format!(" [max:{}]", m))
+            .unwrap_or_default();
         let title = format!(" {}{} ", state.name.to_uppercase(), max_str);
 
         let state_block = Block::default()
@@ -388,7 +627,9 @@ fn render_state_machine(frame: &mut Frame, app: &App, area: Rect) {
             // Render each tool with highlighting
             let mut tool_spans: Vec<Span> = Vec::new();
             for (ti, tool) in state.tools.iter().enumerate() {
-                if ti > 0 { tool_spans.push(Span::styled(", ", Style::default().fg(FG_DIM))); }
+                if ti > 0 {
+                    tool_spans.push(Span::styled(", ", Style::default().fg(FG_DIM)));
+                }
                 let style = if is_current && app.current_tool.as_deref() == Some(tool.as_str()) {
                     Style::default().fg(FG_BRIGHT).bold()
                 } else if is_current && app.last_tool.as_deref() == Some(tool.as_str()) {
@@ -446,7 +687,10 @@ fn render_log_entry(entry: &LogEntry, width: usize) -> ListItem<'static> {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(padded, Style::default().fg(entry.color).bold()),
-                Span::styled(if is_reasoning { "   " } else { " | " }, Style::default().fg(BORDER_INACTIVE)),
+                Span::styled(
+                    if is_reasoning { "   " } else { " | " },
+                    Style::default().fg(BORDER_INACTIVE),
+                ),
                 Span::styled(entry.message.clone(), msg_style),
             ]))
         }
@@ -480,20 +724,18 @@ fn render_log_entry(entry: &LogEntry, width: usize) -> ListItem<'static> {
             let diff_w = width.saturating_sub(tag_w + 4).min(80);
             let pad = format!("{:>w$}", "", w = tag_w);
 
-            let mut result = vec![
-                Line::from(vec![
-                    Span::styled(padded.clone(), Style::default().fg(entry.color).bold()),
-                    Span::styled(" │ ", Style::default().fg(BORDER_WARN)),
-                    Span::styled(entry.message.clone(), Style::default().fg(BORDER_WARN)),
-                ]),
-            ];
+            let mut result = vec![Line::from(vec![
+                Span::styled(padded.clone(), Style::default().fg(entry.color).bold()),
+                Span::styled(" │ ", Style::default().fg(BORDER_WARN)),
+                Span::styled(entry.message.clone(), Style::default().fg(BORDER_WARN)),
+            ])];
 
             for dl in lines {
                 let (prefix, fg, bg) = match dl.kind {
-                    DiffKind::Add =>    ("+ ", DIFF_ADD, Color::Rgb(0, 35, 0)),
+                    DiffKind::Add => ("+ ", DIFF_ADD, Color::Rgb(0, 35, 0)),
                     DiffKind::Remove => ("- ", DIFF_DEL, Color::Rgb(50, 0, 0)),
                     DiffKind::Context => ("  ", FG_DIM, BG_PANEL),
-                    DiffKind::Header =>  ("@@ ", DIFF_HDR, Color::Rgb(0, 20, 35)),
+                    DiffKind::Header => ("@@ ", DIFF_HDR, Color::Rgb(0, 20, 35)),
                 };
                 let text = truncate(&dl.text, diff_w.saturating_sub(4));
                 let line_content = format!("{}{}", prefix, text);
@@ -561,13 +803,22 @@ fn parse_edit_result(text: &str) -> Option<EditDiff> {
     let new_raw = new_raw.strip_suffix('\'').unwrap_or(new_raw);
 
     let mut lines = Vec::new();
-    lines.push(DiffLine { kind: DiffKind::Header, text: header.clone() });
+    lines.push(DiffLine {
+        kind: DiffKind::Header,
+        text: header.clone(),
+    });
 
     for line in old_raw.split("\\n") {
-        lines.push(DiffLine { kind: DiffKind::Remove, text: line.to_string() });
+        lines.push(DiffLine {
+            kind: DiffKind::Remove,
+            text: line.to_string(),
+        });
     }
     for line in new_raw.split("\\n") {
-        lines.push(DiffLine { kind: DiffKind::Add, text: line.to_string() });
+        lines.push(DiffLine {
+            kind: DiffKind::Add,
+            text: line.to_string(),
+        });
     }
 
     Some(EditDiff { header, lines })
@@ -586,7 +837,10 @@ fn parse_diff_lines(text: &str) -> Vec<DiffLine> {
             } else {
                 DiffKind::Context
             };
-            DiffLine { kind, text: trimmed.to_string() }
+            DiffLine {
+                kind,
+                text: trimmed.to_string(),
+            }
         })
         .collect()
 }
@@ -599,22 +853,44 @@ pub fn render_menu(frame: &mut Frame, selected: usize) {
         Constraint::Fill(1),
         Constraint::Length(32),
         Constraint::Fill(1),
-    ]).split(frame.area());
+    ])
+    .split(frame.area());
 
     let horiz = Layout::horizontal([
         Constraint::Fill(1),
         Constraint::Length(76),
         Constraint::Fill(1),
-    ]).split(vert[1]);
+    ])
+    .split(vert[1]);
 
     let area = horiz[1];
 
     let choices = [
         ("1", "buggy-calc", "26 lines, division bug — warmup", "~30s"),
-        ("2", "sympy-22914", "640 lines — add Min/Max to printer", "~2m"),
-        ("3", "requests-1963", "571 lines — redirect chain bug", "~2m"),
-        ("4", "pytest-5262", "844 lines — EncodedFile mode property", "~3m"),
-        ("5", "sympy-21847", "636 lines — monomial degree (may not converge)", "~3m"),
+        (
+            "2",
+            "sympy-22914",
+            "640 lines — add Min/Max to printer",
+            "~2m",
+        ),
+        (
+            "3",
+            "requests-1963",
+            "571 lines — redirect chain bug",
+            "~2m",
+        ),
+        (
+            "4",
+            "pytest-5262",
+            "844 lines — EncodedFile mode property",
+            "~3m",
+        ),
+        (
+            "5",
+            "sympy-21847",
+            "636 lines — monomial degree (may not converge)",
+            "~3m",
+        ),
     ];
 
     let soft = Color::Rgb(160, 165, 180);
@@ -626,24 +902,39 @@ pub fn render_menu(frame: &mut Frame, selected: usize) {
             Span::styled(" demo", Style::default().fg(soft)),
         ]),
         Line::raw(""),
-        Line::from(Span::styled("  The state machine doesn't make the model smarter.", Style::default().fg(soft))),
-        Line::from(Span::styled("  It prevents the failure modes that make smart models unreliable.", Style::default().fg(soft))),
+        Line::from(Span::styled(
+            "  The state machine doesn't make the model smarter.",
+            Style::default().fg(soft),
+        )),
+        Line::from(Span::styled(
+            "  It prevents the failure modes that make smart models unreliable.",
+            Style::default().fg(soft),
+        )),
         Line::raw(""),
-        Line::from(vec![
-            Span::styled("  Without guardrails, small models enter read-loop death spirals —", Style::default().fg(soft)),
-        ]),
-        Line::from(vec![
-            Span::styled("  reading the same file repeatedly without ever editing it.", Style::default().fg(soft)),
-        ]),
-        Line::from(vec![
-            Span::styled("  Phase transitions, tool restriction, and programmatic localization", Style::default().fg(soft)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Without guardrails, small models enter read-loop death spirals —",
+            Style::default().fg(soft),
+        )]),
+        Line::from(vec![Span::styled(
+            "  reading the same file repeatedly without ever editing it.",
+            Style::default().fg(soft),
+        )]),
+        Line::from(vec![Span::styled(
+            "  Phase transitions, tool restriction, and programmatic localization",
+            Style::default().fg(soft),
+        )]),
         Line::from(vec![
             Span::styled("  break these loops. ", Style::default().fg(soft)),
-            Span::styled("14/15 with guardrails. 3/15 without.", Style::default().fg(BORDER_ACTIVE)),
+            Span::styled(
+                "14/15 with guardrails. 3/15 without.",
+                Style::default().fg(BORDER_ACTIVE),
+            ),
         ]),
         Line::raw(""),
-        Line::from(Span::styled("  choose a task:", Style::default().fg(Color::Rgb(200, 205, 215)))),
+        Line::from(Span::styled(
+            "  choose a task:",
+            Style::default().fg(Color::Rgb(200, 205, 215)),
+        )),
         Line::raw(""),
     ];
 
@@ -667,13 +958,19 @@ pub fn render_menu(frame: &mut Frame, selected: usize) {
         ]));
         lines.push(Line::from(vec![
             Span::raw("      "),
-            Span::styled(*desc, Style::default().fg(if is_unstable { BORDER_WARN } else { FG_DIM })),
+            Span::styled(
+                *desc,
+                Style::default().fg(if is_unstable { BORDER_WARN } else { FG_DIM }),
+            ),
             Span::styled(format!("  {}", time), Style::default().fg(FG_DIM).italic()),
         ]));
         lines.push(Line::raw(""));
     }
 
-    lines.push(Line::from(Span::styled("  enter to start, q to quit", Style::default().fg(FG_DIM))));
+    lines.push(Line::from(Span::styled(
+        "  enter to start, q to quit",
+        Style::default().fg(FG_DIM),
+    )));
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -688,7 +985,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let end = s.char_indices()
+        let end = s
+            .char_indices()
             .take_while(|(i, _)| *i <= max)
             .last()
             .map(|(i, _)| i)

@@ -3,14 +3,14 @@ use std::sync::Arc;
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::sse::{Event, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use tokio::sync::{mpsc, RwLock};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use statewright_engine::MachineDefinition;
 
@@ -63,9 +63,7 @@ pub struct RemoteConfig {
 }
 
 /// Start the remote MCP transport server (HTTP+SSE).
-pub async fn start_remote_server(
-    config: RemoteConfig,
-) -> Result<std::net::SocketAddr, String> {
+pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::SocketAddr, String> {
     // Connect to Postgres for step metering if DATABASE_URL provided
     #[cfg(feature = "metering")]
     let db_pool: crate::DbPool = if let Some(ref db_url) = config.database_url {
@@ -79,7 +77,9 @@ pub async fn start_remote_server(
                 Some(pool)
             }
             Err(e) => {
-                tracing::warn!("Step metering: failed to connect to Postgres: {e}. Metering disabled.");
+                tracing::warn!(
+                    "Step metering: failed to connect to Postgres: {e}. Metering disabled."
+                );
                 None
             }
         }
@@ -126,8 +126,10 @@ pub async fn start_remote_server(
 async fn handle_sse(
     State(state): State<Arc<RemoteState>>,
     headers: HeaderMap,
-) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode>
-{
+) -> Result<
+    Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    StatusCode,
+> {
     // Extract API key from Authorization header
     let api_key = headers
         .get("authorization")
@@ -136,10 +138,12 @@ async fn handle_sse(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Fetch workflows from PocketBase
-    let result = fetch_workflows(&state.pb_url, &api_key).await.map_err(|e| {
-        tracing::warn!(error = %e, "Failed to fetch workflows");
-        StatusCode::UNAUTHORIZED
-    })?;
+    let result = fetch_workflows(&state.pb_url, &api_key)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Failed to fetch workflows");
+            StatusCode::UNAUTHORIZED
+        })?;
 
     if result.workflows.is_empty() {
         tracing::warn!("No workflows found for API key");
@@ -151,7 +155,8 @@ async fn handle_sse(
     let session_manager = state.get_session_manager(&api_key_hash.to_string()).await;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let default_def = result.workflows
+    let default_def = result
+        .workflows
         .get(&result.default)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -177,7 +182,8 @@ async fn handle_sse(
     let (tx, rx) = mpsc::channel::<String>(32);
 
     // Send the endpoint URL as the first SSE event (MCP spec)
-    let endpoint_msg = serde_json::json!({"endpoint": std::format!("/message?session_id={}", session_id)});
+    let endpoint_msg =
+        serde_json::json!({"endpoint": std::format!("/message?session_id={}", session_id)});
     tx.send(endpoint_msg.to_string()).await.ok();
 
     // Store the session
@@ -190,9 +196,7 @@ async fn handle_sse(
     tracing::info!(session_id = session_id, "SSE session established");
 
     // Convert receiver to SSE stream
-    let stream = ReceiverStream::new(rx).map(|msg| {
-        Ok(Event::default().event("message").data(msg))
-    });
+    let stream = ReceiverStream::new(rx).map(|msg| Ok(Event::default().event("message").data(msg)));
 
     Ok(Sse::new(stream))
 }
@@ -263,7 +267,8 @@ async fn handle_streamable_http(
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to fetch workflows");
-                return (StatusCode::UNAUTHORIZED, "Invalid API key or no workflows").into_response();
+                return (StatusCode::UNAUTHORIZED, "Invalid API key or no workflows")
+                    .into_response();
             }
         };
 
@@ -274,7 +279,13 @@ async fn handle_streamable_http(
         let session_id = session_key.clone();
         let default_def = match result.workflows.get(&result.default) {
             Some(d) => d.clone(),
-            None => return (StatusCode::INTERNAL_SERVER_ERROR, "Default workflow not found").into_response(),
+            None => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Default workflow not found",
+                )
+                    .into_response();
+            }
         };
 
         // Check if this session key already exists in the shared SessionManager
@@ -384,10 +395,7 @@ struct FetchResult {
     plan_limit: Option<u64>,
 }
 
-async fn fetch_workflows(
-    pb_url: &str,
-    api_key: &str,
-) -> Result<FetchResult, String> {
+async fn fetch_workflows(pb_url: &str, api_key: &str) -> Result<FetchResult, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/gateway/workflows", pb_url);
 
@@ -472,10 +480,12 @@ async fn handle_approval_callback(
 
     // Find the session that has this approval_id pending
     let session_entry = sessions.iter().find(|(_, rs)| {
-        rs.gateway.session_manager
+        rs.gateway
+            .session_manager
             .get(&rs.gateway.session_id())
             .map_or(false, |s| {
-                s.pending_approval.as_ref()
+                s.pending_approval
+                    .as_ref()
                     .map_or(false, |p| p.approval_id == body.approval_id)
             })
     });
@@ -483,16 +493,22 @@ async fn handle_approval_callback(
     let (session_id, remote_session) = match session_entry {
         Some((sid, rs)) => (sid.clone(), rs),
         None => {
-            return (StatusCode::NOT_FOUND, "No session with this pending approval").into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                "No session with this pending approval",
+            )
+                .into_response();
         }
     };
 
     match body.status.as_str() {
         "approved" => {
             // Get the parked transition details
-            if let Some(pending) = remote_session.gateway.session_manager.clear_pending_approval(
-                &remote_session.gateway.session_id()
-            ) {
+            if let Some(pending) = remote_session
+                .gateway
+                .session_manager
+                .clear_pending_approval(&remote_session.gateway.session_id())
+            {
                 // Apply edited context if provided, otherwise use the original
                 let final_context = if let Some(edited) = body.edited_context {
                     statewright_engine::apply_context_patch(&pending.new_context, &edited)
@@ -516,15 +532,18 @@ async fn handle_approval_callback(
             (StatusCode::OK, "approved").into_response()
         }
         "rejected" => {
-            remote_session.gateway.session_manager.clear_pending_approval(
-                &remote_session.gateway.session_id()
-            );
+            remote_session
+                .gateway
+                .session_manager
+                .clear_pending_approval(&remote_session.gateway.session_id());
             tracing::info!(session = %session_id, "Approval rejected, transition cancelled");
             (StatusCode::OK, "rejected").into_response()
         }
-        _ => {
-            (StatusCode::BAD_REQUEST, "Invalid status (expected approved or rejected)").into_response()
-        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            "Invalid status (expected approved or rejected)",
+        )
+            .into_response(),
     }
 }
 
@@ -533,8 +552,8 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use tower::ServiceExt; // for oneshot()
     use serde_json::json;
+    use tower::ServiceExt; // for oneshot()
 
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
@@ -589,10 +608,11 @@ mod tests {
         gateway.set_api_key_fingerprint(api_key);
 
         let (tx, _rx) = mpsc::channel::<String>(1);
-        state.sessions.write().await.insert(
-            session_id.into(),
-            RemoteSession { gateway, tx },
-        );
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session_id.into(), RemoteSession { gateway, tx });
 
         state
     }
@@ -618,7 +638,9 @@ mod tests {
             .oneshot(
                 Request::post("/mcp")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -647,7 +669,9 @@ mod tests {
             .oneshot(
                 Request::post("/message?session_id=test")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -663,7 +687,9 @@ mod tests {
                 Request::post("/message?session_id=nonexistent")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer sw_test_testkey123")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -680,7 +706,9 @@ mod tests {
                 Request::post("/message?session_id=sess1")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer sw_test_wrong_key")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -698,10 +726,13 @@ mod tests {
                 Request::post("/api/approval-callback")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer wrong_secret")
-                    .body(Body::from(json!({
-                        "approval_id": "apr_test",
-                        "status": "approved"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "approval_id": "apr_test",
+                            "status": "approved"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -718,10 +749,13 @@ mod tests {
             .oneshot(
                 Request::post("/api/approval-callback")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({
-                        "approval_id": "apr_nonexistent",
-                        "status": "approved"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "approval_id": "apr_nonexistent",
+                            "status": "approved"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -731,7 +765,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_callback_invalid_status() {
-
         // Set up a session with a pending approval
         let state = test_state_with_session("sess2", "key2").await;
         {
@@ -755,10 +788,13 @@ mod tests {
             .oneshot(
                 Request::post("/api/approval-callback")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({
-                        "approval_id": "apr_test2",
-                        "status": "maybe"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "approval_id": "apr_test2",
+                            "status": "maybe"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -768,7 +804,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_callback_approved_applies_transition() {
-
         let state = test_state_with_session("sess3", "key3").await;
         {
             let mut sessions = state.sessions.write().await;
@@ -791,10 +826,13 @@ mod tests {
             .oneshot(
                 Request::post("/api/approval-callback")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({
-                        "approval_id": "apr_approve",
-                        "status": "approved"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "approval_id": "apr_approve",
+                            "status": "approved"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -811,7 +849,6 @@ mod tests {
 
     #[tokio::test]
     async fn approval_callback_rejected_clears_without_transition() {
-
         let state = test_state_with_session("sess4", "key4").await;
         {
             let mut sessions = state.sessions.write().await;
@@ -834,10 +871,13 @@ mod tests {
             .oneshot(
                 Request::post("/api/approval-callback")
                     .header("content-type", "application/json")
-                    .body(Body::from(json!({
-                        "approval_id": "apr_reject",
-                        "status": "rejected"
-                    }).to_string()))
+                    .body(Body::from(
+                        json!({
+                            "approval_id": "apr_reject",
+                            "status": "rejected"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -852,4 +892,3 @@ mod tests {
         assert!(session.pending_approval.is_none());
     }
 }
-

@@ -111,9 +111,7 @@ pub enum TransitionDef {
     /// Guarded: array of conditional transitions — first matching guard wins.
     Guarded(Vec<GuardedTransition>),
     /// Fork: spawn parallel branches, join when complete.
-    Fork {
-        fork: ForkDef,
-    },
+    Fork { fork: ForkDef },
     /// Invoke: delegate to a sub-machine, then resume at on_complete.
     Invoke {
         /// Reference to the sub-machine definition to invoke.
@@ -144,7 +142,9 @@ impl TransitionDef {
         match self {
             TransitionDef::Simple(t) => t,
             TransitionDef::Full { target, .. } => target,
-            TransitionDef::Guarded(branches) => branches.first().map(|b| b.target.as_str()).unwrap_or(""),
+            TransitionDef::Guarded(branches) => {
+                branches.first().map(|b| b.target.as_str()).unwrap_or("")
+            }
             TransitionDef::Fork { fork } => &fork.on_complete,
             TransitionDef::Invoke { on_complete, .. } => on_complete,
         }
@@ -156,11 +156,19 @@ impl TransitionDef {
         match self {
             TransitionDef::Simple(t) => vec![t],
             TransitionDef::Full { target, .. } => vec![target],
-            TransitionDef::Guarded(branches) => branches.iter().map(|b| b.target.as_str()).collect(),
+            TransitionDef::Guarded(branches) => {
+                branches.iter().map(|b| b.target.as_str()).collect()
+            }
             TransitionDef::Fork { fork } => vec![&fork.on_complete],
-            TransitionDef::Invoke { on_complete, on_fail, .. } => {
+            TransitionDef::Invoke {
+                on_complete,
+                on_fail,
+                ..
+            } => {
                 let mut v = vec![on_complete.as_str()];
-                if let Some(f) = on_fail { v.push(f.as_str()); }
+                if let Some(f) = on_fail {
+                    v.push(f.as_str());
+                }
                 v
             }
         }
@@ -168,7 +176,10 @@ impl TransitionDef {
 
     pub fn guard_names(&self) -> Vec<&str> {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Fork { .. } | TransitionDef::Guarded(_) => vec![],
+            TransitionDef::Simple(_)
+            | TransitionDef::Invoke { .. }
+            | TransitionDef::Fork { .. }
+            | TransitionDef::Guarded(_) => vec![],
             TransitionDef::Full { guard, guards, .. } => {
                 let mut names = Vec::new();
                 if let Some(g) = guard {
@@ -186,8 +197,13 @@ impl TransitionDef {
 
     pub fn requires_approval(&self) -> bool {
         match self {
-            TransitionDef::Simple(_) | TransitionDef::Invoke { .. } | TransitionDef::Fork { .. } | TransitionDef::Guarded(_) => false,
-            TransitionDef::Full { requires_approval, .. } => requires_approval.unwrap_or(false),
+            TransitionDef::Simple(_)
+            | TransitionDef::Invoke { .. }
+            | TransitionDef::Fork { .. }
+            | TransitionDef::Guarded(_) => false,
+            TransitionDef::Full {
+                requires_approval, ..
+            } => requires_approval.unwrap_or(false),
         }
     }
 
@@ -199,7 +215,12 @@ impl TransitionDef {
     /// Get the invoke details, if this is an invoke transition.
     pub fn invoke_ref(&self) -> Option<InvokeRef<'_>> {
         match self {
-            TransitionDef::Invoke { invoke, on_complete, on_fail, input } => Some(InvokeRef {
+            TransitionDef::Invoke {
+                invoke,
+                on_complete,
+                on_fail,
+                input,
+            } => Some(InvokeRef {
                 machine: invoke,
                 on_complete,
                 on_fail: on_fail.as_deref(),
@@ -373,7 +394,11 @@ impl std::fmt::Display for TransitionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TransitionError::NoMatchingTransition { state, event } => {
-                write!(f, "no transition for event '{}' in state '{}'", event, state)
+                write!(
+                    f,
+                    "no transition for event '{}' in state '{}'",
+                    event, state
+                )
             }
             TransitionError::GuardFailed { guard } => {
                 write!(f, "guard '{}' failed", guard)
@@ -429,7 +454,8 @@ mod tests {
                 },
                 "completed": { "type": "final" }
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         assert_eq!(
             def.states["diagnose"].model.as_deref(),
@@ -455,7 +481,8 @@ mod tests {
                 },
                 "done": { "type": "final" }
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         assert_eq!(def.states["working"].model, None);
     }
@@ -480,14 +507,21 @@ mod tests {
                 },
                 "done": { "type": "final" }
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
         let meta = def.meta.unwrap();
-        assert_eq!(meta.default_model.as_deref(), Some("anthropic/claude-opus-4-6"));
+        assert_eq!(
+            meta.default_model.as_deref(),
+            Some("anthropic/claude-opus-4-6")
+        );
         // planning inherits default (no explicit model)
         assert_eq!(def.states["planning"].model, None);
         // implementing overrides
-        assert_eq!(def.states["implementing"].model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(
+            def.states["implementing"].model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
     }
 
     #[test]
@@ -508,9 +542,13 @@ mod tests {
                 },
                 "done": { "type": "final" }
             }
-        })).unwrap();
+        }))
+        .unwrap();
 
-        assert_eq!(def.states["planning"].thinking_level.as_deref(), Some("high"));
+        assert_eq!(
+            def.states["planning"].thinking_level.as_deref(),
+            Some("high")
+        );
         assert_eq!(def.states["testing"].thinking_level.as_deref(), Some("off"));
         assert_eq!(def.states["done"].thinking_level, None);
     }

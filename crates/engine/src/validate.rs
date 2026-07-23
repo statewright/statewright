@@ -15,9 +15,10 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
     }
 
     // 2. Must have at least one final state
-    let has_final = definition.states.values().any(|s| {
-        matches!(s.state_type, Some(StateType::Final))
-    });
+    let has_final = definition
+        .states
+        .values()
+        .any(|s| matches!(s.state_type, Some(StateType::Final)));
     if !has_final {
         errors.push("no final state defined; at least one state must have type: final".into());
     }
@@ -94,7 +95,9 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
 
         // Interrupt target states are reachable via interrupt trigger
         for int_def in definition.interrupts.values() {
-            if definition.states.contains_key(&int_def.target) && visited.insert(int_def.target.as_str()) {
+            if definition.states.contains_key(&int_def.target)
+                && visited.insert(int_def.target.as_str())
+            {
                 queue.push_back(int_def.target.as_str());
             }
         }
@@ -104,15 +107,21 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
             for transition in state_def.on.values() {
                 if let Some(fork) = transition.fork_ref() {
                     for branch in fork.branches.values() {
-                        if definition.states.contains_key(&branch.initial) && visited.insert(branch.initial.as_str()) {
+                        if definition.states.contains_key(&branch.initial)
+                            && visited.insert(branch.initial.as_str())
+                        {
                             queue.push_back(branch.initial.as_str());
                         }
-                        if definition.states.contains_key(&branch.terminal) && visited.insert(branch.terminal.as_str()) {
+                        if definition.states.contains_key(&branch.terminal)
+                            && visited.insert(branch.terminal.as_str())
+                        {
                             queue.push_back(branch.terminal.as_str());
                         }
                     }
                     if let Some(ref on_fail) = fork.on_fail {
-                        if definition.states.contains_key(on_fail) && visited.insert(on_fail.as_str()) {
+                        if definition.states.contains_key(on_fail)
+                            && visited.insert(on_fail.as_str())
+                        {
                             queue.push_back(on_fail.as_str());
                         }
                     }
@@ -124,7 +133,10 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
             if let Some(state_def) = definition.states.get(state_name) {
                 for transition in state_def.on.values() {
                     for target in transition.all_targets() {
-                        if target != "$return" && definition.states.contains_key(target) && visited.insert(target) {
+                        if target != "$return"
+                            && definition.states.contains_key(target)
+                            && visited.insert(target)
+                        {
                             queue.push_back(target);
                         }
                     }
@@ -134,7 +146,10 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
 
         for state_name in definition.states.keys() {
             if !visited.contains(state_name.as_str()) {
-                errors.push(format!("state '{}' is unreachable from initial state", state_name));
+                errors.push(format!(
+                    "state '{}' is unreachable from initial state",
+                    state_name
+                ));
             }
         }
     }

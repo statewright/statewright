@@ -169,7 +169,10 @@ async fn handle_pre_tool(
                  using statewright_transition.",
                 iteration, max, session.current_state
             )),
-            status_message: Some(format!("{} CHECKPOINT {}/{}", session.current_state, iteration, max)),
+            status_message: Some(format!(
+                "{} CHECKPOINT {}/{}",
+                session.current_state, iteration, max
+            )),
         }),
     }
 }
@@ -201,9 +204,10 @@ async fn handle_post_tool(
 
     // Detect if a transition happened since the last post-tool call
     // (e.g., via MCP statewright_transition or implicit transition in pre-tool)
-    let transition = session.previous_state.as_ref().map(|prev| {
-        format!("{} => {}", prev, session.current_state)
-    });
+    let transition = session
+        .previous_state
+        .as_ref()
+        .map(|prev| format!("{} => {}", prev, session.current_state));
 
     let completed = if session.is_final() { Some(true) } else { None };
 
@@ -214,9 +218,7 @@ async fn handle_post_tool(
     })
 }
 
-async fn handle_state(
-    State(state): State<Arc<RwLock<HookState>>>,
-) -> Json<StateResponse> {
+async fn handle_state(State(state): State<Arc<RwLock<HookState>>>) -> Json<StateResponse> {
     let state = state.read().await;
     let session = match state.session_manager.get(&state.session_id) {
         Some(s) => s,
@@ -266,9 +268,7 @@ async fn handle_state(
     })
 }
 
-async fn handle_stop(
-    State(state): State<Arc<RwLock<HookState>>>,
-) -> Json<StopResponse> {
+async fn handle_stop(State(state): State<Arc<RwLock<HookState>>>) -> Json<StopResponse> {
     let state = state.read().await;
     let session = match state.session_manager.get(&state.session_id) {
         Some(s) => s,

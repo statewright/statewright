@@ -15,7 +15,6 @@ pub struct PendingApproval {
     pub message: Option<String>,
 }
 
-
 /// Active gateway session tracking state machine progression.
 #[derive(Debug, Clone)]
 pub struct GatewaySession {
@@ -66,7 +65,11 @@ impl GatewaySession {
     /// Usage info for metering. Returns (used, limit, percentage).
     pub fn usage(&self) -> (u64, Option<u64>, Option<f64>) {
         let pct = self.plan_limit.map(|limit| {
-            if limit == 0 { 100.0 } else { (self.transition_count as f64 / limit as f64) * 100.0 }
+            if limit == 0 {
+                100.0
+            } else {
+                (self.transition_count as f64 / limit as f64) * 100.0
+            }
         });
         (self.transition_count, self.plan_limit, pct)
     }
@@ -75,12 +78,14 @@ impl GatewaySession {
     pub fn usage_warning(&self) -> Option<String> {
         let (used, limit, pct) = self.usage();
         match (limit, pct) {
-            (Some(l), Some(p)) if p >= 100.0 => {
-                Some(format!("Plan limit reached ({}/{}). Upgrade to continue.", used, l))
-            }
-            (Some(l), Some(p)) if p >= 95.0 => {
-                Some(format!("Warning: 95% of plan limit ({}/{}). Consider upgrading.", used, l))
-            }
+            (Some(l), Some(p)) if p >= 100.0 => Some(format!(
+                "Plan limit reached ({}/{}). Upgrade to continue.",
+                used, l
+            )),
+            (Some(l), Some(p)) if p >= 95.0 => Some(format!(
+                "Warning: 95% of plan limit ({}/{}). Consider upgrading.",
+                used, l
+            )),
             (Some(l), Some(p)) if p >= 90.0 => {
                 Some(format!("Notice: 90% of plan limit ({}/{}).", used, l))
             }
@@ -140,11 +145,18 @@ impl SessionManager {
     }
 
     pub fn get(&self, instance_id: &str) -> Option<GatewaySession> {
-        self.sessions.read().unwrap_or_else(|p| p.into_inner()).get(instance_id).cloned()
+        self.sessions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(instance_id)
+            .cloned()
     }
 
     pub fn exists(&self, instance_id: &str) -> bool {
-        self.sessions.read().unwrap_or_else(|p| p.into_inner()).contains_key(instance_id)
+        self.sessions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(instance_id)
     }
 
     pub fn update_state(
@@ -153,7 +165,12 @@ impl SessionManager {
         new_state: String,
         new_context: serde_json::Value,
     ) -> bool {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.previous_state = Some(session.current_state.clone());
             session.current_state = new_state;
             session.context = new_context;
@@ -169,7 +186,12 @@ impl SessionManager {
     }
 
     pub fn record_file_edit(&self, instance_id: &str, file_path: &str) {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             if !session.files_edited.contains(&file_path.to_string()) {
                 session.files_edited.push(file_path.to_string());
             }
@@ -177,7 +199,12 @@ impl SessionManager {
     }
 
     pub fn record_file_read(&self, instance_id: &str, file_path: &str) -> u32 {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             let count = session.files_read.entry(file_path.to_string()).or_insert(0);
             *count += 1;
             *count
@@ -187,7 +214,12 @@ impl SessionManager {
     }
 
     pub fn add_context_bytes(&self, instance_id: &str, bytes: u64) -> u64 {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.context_bytes += bytes;
             session.context_bytes
         } else {
@@ -196,13 +228,23 @@ impl SessionManager {
     }
 
     pub fn set_plan_limit(&self, instance_id: &str, limit: u64) {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.plan_limit = Some(limit);
         }
     }
 
     pub fn increment_iteration(&self, instance_id: &str) -> Option<u32> {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.iteration_count += 1;
             Some(session.iteration_count)
         } else {
@@ -211,13 +253,23 @@ impl SessionManager {
     }
 
     pub fn set_pending_approval(&self, instance_id: &str, pending: PendingApproval) {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.pending_approval = Some(pending);
         }
     }
 
     pub fn clear_pending_approval(&self, instance_id: &str) -> Option<PendingApproval> {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
             session.pending_approval.take()
         } else {
             None
@@ -225,11 +277,12 @@ impl SessionManager {
     }
 
     pub fn has_pending_approval(&self, instance_id: &str) -> bool {
-        self.sessions.read().unwrap_or_else(|p| p.into_inner())
+        self.sessions
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
             .get(instance_id)
             .is_some_and(|s| s.pending_approval.is_some())
     }
-
 }
 
 #[cfg(test)]
@@ -406,15 +459,17 @@ mod tests {
         let mgr = SessionManager::new();
         mgr.create("s1".into(), test_definition());
         assert!(!mgr.has_pending_approval("s1"));
-        mgr.set_pending_approval("s1", PendingApproval {
-            approval_id: "apr_789".into(),
-            event: "DEPLOY".into(),
-            from_state: "testing".into(),
-            to_state: "deploying".into(),
-            new_context: json!({}),
-            message: None,
-        });
+        mgr.set_pending_approval(
+            "s1",
+            PendingApproval {
+                approval_id: "apr_789".into(),
+                event: "DEPLOY".into(),
+                from_state: "testing".into(),
+                to_state: "deploying".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
         assert!(mgr.has_pending_approval("s1"));
     }
-
 }

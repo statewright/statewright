@@ -41,6 +41,14 @@ pub enum ToolMode {
     Auto,
 }
 
+pub fn use_native_tool_calling(requested_mode: &str, profile_mode: ToolMode) -> bool {
+    match requested_mode {
+        "native" => true,
+        "raw" => false,
+        _ => !matches!(profile_mode, ToolMode::Raw),
+    }
+}
+
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseField {
@@ -137,4 +145,22 @@ fn merge_traits(base: &mut ModelTraits, from: &ModelTraits) {
     merge!(read_only_tests);
     merge!(small_model_edit_tools);
     merge!(enforce_localized_edit_locus);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_profile_uses_native_tool_calling() {
+        assert!(use_native_tool_calling("auto", ToolMode::Auto));
+        assert!(use_native_tool_calling("auto", ToolMode::Native));
+        assert!(!use_native_tool_calling("auto", ToolMode::Raw));
+    }
+
+    #[test]
+    fn explicit_tool_mode_overrides_profile() {
+        assert!(use_native_tool_calling("native", ToolMode::Raw));
+        assert!(!use_native_tool_calling("raw", ToolMode::Native));
+    }
 }

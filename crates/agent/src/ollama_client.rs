@@ -1,4 +1,7 @@
 use crate::prompt_templates::ChatMessage;
+use crate::tool_protocol::{
+    ToolProtocolMessage, fold_reasoning_into_content, rescue_text_tool_calls,
+};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for connecting to an Ollama instance.
@@ -36,13 +39,15 @@ pub struct OllamaClient {
 // ─── Request types ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct ChatRequest {
+struct ChatRequest<M> {
     model: String,
-    messages: Vec<ChatMessage>,
+    messages: Vec<M>,
     temperature: f32,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<String>,
     /// Ollama-specific: set context window size. Default 2048 is too small
     /// for tool definitions + code context. Required for gpt-oss/reasoning models.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,7 +103,7 @@ struct ResponseMessage {
     /// Reasoning content from reasoning models (gpt-oss, deepseek-r1).
     /// Contains the model's chain-of-thought — invisible in content but
     /// can be injected back into conversation for multi-turn reasoning.
-    #[serde(default)]
+    #[serde(default, alias = "reasoning_content", alias = "thinking")]
     reasoning: Option<String>,
 }
 
@@ -131,6 +136,10 @@ pub struct ChatResult {
     /// Reasoning chain from reasoning models (gpt-oss, deepseek-r1).
     /// Inject back into conversation to enable multi-turn reasoning.
     pub reasoning: Option<String>,
+    /// Transparent protocol-correction turns that must be retained in history.
+    pub protocol_trace: Vec<ToolProtocolMessage>,
+    pub protocol_corrections: u32,
+    pub rescued_tool_call: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,6 +173,26 @@ impl From<reqwest::Error> for OllamaError {
     fn from(e: reqwest::Error) -> Self {
         OllamaError::Http(e)
     }
+}
+
+fn retry_jitter_secs(max_inclusive: u64) -> u64 {
+    if max_inclusive == 0 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    (nanos ^ u64::from(std::process::id())) % (max_inclusive + 1)
+}
+
+fn request_retry_base_delay_secs(attempt: u32) -> u64 {
+    2u64.saturating_pow(attempt).min(32)
+}
+
+fn request_retry_delay_secs(attempt: u32) -> u64 {
+    let base = request_retry_base_delay_secs(attempt);
+    base + retry_jitter_secs((base / 2).max(1))
 }
 
 // ─── Thinking-level helpers ──────────────────────────────────────────────
@@ -207,7 +236,10 @@ impl OllamaClient {
         let url = format!("{}/chat/completions", self.config.api_url);
 
         let reasoning_effort = if !is_ollama_endpoint(&self.config.api_url) {
-            self.config.thinking_level.as_deref().and_then(map_thinking_level)
+            self.config
+                .thinking_level
+                .as_deref()
+                .and_then(map_thinking_level)
         } else {
             None
         };
@@ -218,27 +250,43 @@ impl OllamaClient {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             tools: None,
-            options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
+            tool_choice: None,
+            options: Some(OllamaOptions {
+                num_ctx: 16384,
+                num_predict: if self.config.max_tokens > 4096 {
+                    Some(self.config.max_tokens)
+                } else {
+                    None
+                },
+            }),
             reasoning_effort,
         };
 
         let mut last_err: OllamaError = OllamaError::NoResponse;
-        for attempt in 0u32..3 {
+        for attempt in 0u32..5 {
             let send_result = self.http.post(&url).json(&request).send().await;
             match send_result {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => {
                         let body: ChatResponse = resp.json().await?;
-                        let choice = body.choices.into_iter().next().ok_or(OllamaError::NoResponse)?;
+                        let choice = body
+                            .choices
+                            .into_iter()
+                            .next()
+                            .ok_or(OllamaError::NoResponse)?;
                         let content = choice.message.content.unwrap_or_default();
                         if content.is_empty() {
                             if let Some(reasoning) = &choice.message.reasoning {
-                                if reasoning.contains("tool_calls") || reasoning.contains("transition")
-                                    || reasoning.contains("tool_call") || reasoning.contains("{")
+                                if reasoning.contains("tool_calls")
+                                    || reasoning.contains("transition")
+                                    || reasoning.contains("tool_call")
+                                    || reasoning.contains("{")
                                 {
                                     return Ok(reasoning.clone());
                                 }
-                                if let Some(tool_call) = crate::harmony::try_parse_harmony(reasoning) {
+                                if let Some(tool_call) =
+                                    crate::harmony::try_parse_harmony(reasoning)
+                                {
                                     return Ok(tool_call);
                                 }
                                 if let Some(tool_call) = extract_harmony_tool_call(reasoning) {
@@ -252,9 +300,15 @@ impl OllamaClient {
                 },
                 Err(e) => last_err = e.into(),
             }
-            if attempt < 2 {
-                eprintln!("  [HTTP] attempt {} failed, retrying in {}s: {}", attempt + 1, 5 * (attempt + 1), last_err);
-                tokio::time::sleep(std::time::Duration::from_secs(5 * (attempt as u64 + 1))).await;
+            if attempt < 4 {
+                let delay = request_retry_delay_secs(attempt);
+                eprintln!(
+                    "  [HTTP] attempt {} failed, retrying in {}s: {}",
+                    attempt + 1,
+                    delay,
+                    last_err
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             }
         }
         Err(last_err)
@@ -267,10 +321,85 @@ impl OllamaClient {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ChatResult, OllamaError> {
+        self.send_tool_request(messages, tools, None).await
+    }
+
+    /// Require an explicit tool action and correct Qwen text-mode slips in the
+    /// same logical turn. Statewright always exposes `transition`, so a tool is
+    /// a complete action vocabulary rather than a forced repository mutation.
+    pub async fn chat_with_required_tools(
+        &self,
+        messages: Vec<ToolProtocolMessage>,
+        tools: Vec<ToolDefinition>,
+        max_protocol_retries: u32,
+    ) -> Result<ChatResult, OllamaError> {
+        let available_tools: Vec<String> = tools
+            .iter()
+            .map(|tool| tool.function.name.clone())
+            .collect();
+        let mut request_messages = messages;
+        let mut protocol_trace = Vec::new();
+
+        for attempt in 0..=max_protocol_retries {
+            let mut result = self
+                .send_tool_request(
+                    request_messages.clone(),
+                    tools.clone(),
+                    Some("required".into()),
+                )
+                .await?;
+
+            let mut rescued_tool_call = false;
+            if result.tool_calls.is_empty() {
+                result.tool_calls = rescue_text_tool_calls(&result.content, &available_tools);
+                if result.tool_calls.is_empty() {
+                    result.tool_calls = rescue_text_tool_calls(
+                        result.reasoning.as_deref().unwrap_or_default(),
+                        &available_tools,
+                    );
+                }
+                rescued_tool_call = !result.tool_calls.is_empty();
+            }
+            if !result.tool_calls.is_empty() || attempt == max_protocol_retries {
+                result.protocol_trace = protocol_trace;
+                result.protocol_corrections = attempt;
+                result.rescued_tool_call = rescued_tool_call;
+                return Ok(result);
+            }
+
+            let assistant = ToolProtocolMessage::plain(
+                "assistant",
+                fold_reasoning_into_content(result.content, result.reasoning.as_deref()),
+            );
+            let correction = ToolProtocolMessage::plain(
+                "user",
+                format!(
+                    "Your response did not contain a valid tool call. Call at least one available tool now. To finish or change state, call transition. Available tools: {}. Do not answer in prose.",
+                    available_tools.join(", ")
+                ),
+            );
+            request_messages.push(assistant.clone());
+            request_messages.push(correction.clone());
+            protocol_trace.push(assistant);
+            protocol_trace.push(correction);
+        }
+
+        unreachable!("bounded protocol retry loop always returns")
+    }
+
+    async fn send_tool_request<M: Serialize>(
+        &self,
+        messages: Vec<M>,
+        tools: Vec<ToolDefinition>,
+        tool_choice: Option<String>,
+    ) -> Result<ChatResult, OllamaError> {
         let url = format!("{}/chat/completions", self.config.api_url);
 
         let reasoning_effort = if !is_ollama_endpoint(&self.config.api_url) {
-            self.config.thinking_level.as_deref().and_then(map_thinking_level)
+            self.config
+                .thinking_level
+                .as_deref()
+                .and_then(map_thinking_level)
         } else {
             None
         };
@@ -281,30 +410,56 @@ impl OllamaClient {
             temperature: self.config.temperature,
             max_tokens: self.config.max_tokens,
             tools: Some(tools),
-            options: Some(OllamaOptions { num_ctx: 16384, num_predict: if self.config.max_tokens > 4096 { Some(self.config.max_tokens) } else { None } }),
+            tool_choice,
+            options: Some(OllamaOptions {
+                num_ctx: 16384,
+                num_predict: if self.config.max_tokens > 4096 {
+                    Some(self.config.max_tokens)
+                } else {
+                    None
+                },
+            }),
             reasoning_effort,
         };
 
         let mut last_err: OllamaError = OllamaError::NoResponse;
-        for attempt in 0u32..3 {
+        for attempt in 0u32..5 {
             let send_result = self.http.post(&url).json(&request).send().await;
             match send_result {
                 Ok(resp) => match resp.error_for_status() {
                     Ok(resp) => {
                         let body: ChatResponse = resp.json().await?;
-                        let choice = body.choices.into_iter().next().ok_or(OllamaError::NoResponse)?;
+                        let choice = body
+                            .choices
+                            .into_iter()
+                            .next()
+                            .ok_or(OllamaError::NoResponse)?;
                         let tool_calls = choice.message.tool_calls.unwrap_or_default();
                         let content = choice.message.content.unwrap_or_default();
                         let reasoning = choice.message.reasoning;
-                        return Ok(ChatResult { content, tool_calls, mode: ResponseMode::NativeToolCalling, reasoning });
+                        return Ok(ChatResult {
+                            content,
+                            tool_calls,
+                            mode: ResponseMode::NativeToolCalling,
+                            reasoning,
+                            protocol_trace: Vec::new(),
+                            protocol_corrections: 0,
+                            rescued_tool_call: false,
+                        });
                     }
                     Err(e) => last_err = e.into(),
                 },
                 Err(e) => last_err = e.into(),
             }
-            if attempt < 2 {
-                eprintln!("  [HTTP] attempt {} failed, retrying in {}s: {}", attempt + 1, 5 * (attempt + 1), last_err);
-                tokio::time::sleep(std::time::Duration::from_secs(5 * (attempt as u64 + 1))).await;
+            if attempt < 4 {
+                let delay = request_retry_delay_secs(attempt);
+                eprintln!(
+                    "  [HTTP] attempt {} failed, retrying in {}s: {}",
+                    attempt + 1,
+                    delay,
+                    last_err
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             }
         }
         Err(last_err)
@@ -390,6 +545,29 @@ pub fn build_tool_definitions(tool_names: &[String]) -> Vec<ToolDefinition> {
                         "properties": {},
                         "required": []
                     }),
+                },
+            }),
+            "write_task_reproducer" => Some(ToolDefinition {
+                tool_type: "function".into(),
+                function: FunctionDefinition {
+                    name: "write_task_reproducer".into(),
+                    description: "Write a behavioral Python scratch reproducer outside the repository patch, then qualify it against the untouched baseline in the isolated validation worktree. Import every helper used and assert desired post-fix behavior rather than the reported bug or exception. Use only issue and repository facts; never write an unconditional failing or skipped test.".into(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "Plain Python filename such as test_task_reproducer.py" },
+                            "source": { "type": "string", "description": "Complete Python scratch test source exercising the issue behavior" }
+                        },
+                        "required": ["source"]
+                    }),
+                },
+            }),
+            "run_task_reproducer" => Some(ToolDefinition {
+                tool_type: "function".into(),
+                function: FunctionDefinition {
+                    name: "run_task_reproducer".into(),
+                    description: "Run the previously qualified scratch reproducer against the current production patch in the isolated validation worktree. Returns a typed baseline-to-candidate delta.".into(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}, "required": []}),
                 },
             }),
             "diff" => Some(ToolDefinition {
@@ -510,13 +688,17 @@ pub fn build_tool_definitions_with_nav(
 ) -> Vec<ToolDefinition> {
     let mut tools = build_tool_definitions(tool_names);
 
-    let event_names: Vec<&str> = available_transitions.iter().map(|(e, _)| e.as_str()).collect();
+    let event_names: Vec<&str> = available_transitions
+        .iter()
+        .map(|(e, _)| e.as_str())
+        .collect();
 
     tools.push(ToolDefinition {
         tool_type: "function".into(),
         function: FunctionDefinition {
             name: "transition".into(),
-            description: "Signal that you are done with the current state and want to move on.".into(),
+            description: "Signal that you are done with the current state and want to move on."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -565,7 +747,7 @@ pub fn nav_tools_prompt_section(
         .collect();
 
     format!(
-r#"To move to the next state, respond:
+        r#"To move to the next state, respond:
 {{"tool_calls": [{{"name": "transition", "args": {{"event": "EVENT_NAME"}}}}]}}
 
 To check what you can do, respond:
@@ -575,7 +757,9 @@ Available transitions:
 {}
 Iterations remaining: {}"#,
         transitions_desc.join("\n"),
-        iterations_remaining.map(|r| r.to_string()).unwrap_or_else(|| "unlimited".into()),
+        iterations_remaining
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "unlimited".into()),
     )
 }
 
@@ -587,7 +771,8 @@ fn extract_harmony_tool_call(reasoning: &str) -> Option<String> {
     if let Some(idx) = reasoning.find(func_prefix) {
         let after = &reasoning[idx + func_prefix.len()..];
         // Extract function name (ends at space, newline, or special token)
-        let name_end = after.find(|c: char| c.is_whitespace() || c == '<' || c == '|')
+        let name_end = after
+            .find(|c: char| c.is_whitespace() || c == '<' || c == '|')
             .unwrap_or(after.len());
         let func_name = &after[..name_end];
 
@@ -604,7 +789,10 @@ fn extract_harmony_tool_call(reasoning: &str) -> Option<String> {
             let mut in_string = false;
             let mut escape = false;
             for (i, b) in json_part.bytes().enumerate() {
-                if escape { escape = false; continue; }
+                if escape {
+                    escape = false;
+                    continue;
+                }
                 match b {
                     b'\\' if in_string => escape = true,
                     b'"' => in_string = !in_string,
@@ -649,6 +837,66 @@ fn strip_code_fences(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn start_tool_mock(
+        responses: Vec<serde_json::Value>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + 4 + content_length {
+                        let body = &request[header_end + 4..header_end + 4 + content_length];
+                        captured
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(body).unwrap());
+                        break;
+                    }
+                }
+
+                let body = serde_json::to_string(&response).unwrap();
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{address}"), requests, handle)
+    }
 
     #[test]
     fn strip_code_fences_passes_through_plain_json() {
@@ -687,7 +935,9 @@ mod tests {
     fn is_ollama_endpoint_detects_local() {
         assert!(is_ollama_endpoint("http://localhost:11434/v1"));
         assert!(is_ollama_endpoint("http://127.0.0.1:11434/v1"));
-        assert!(is_ollama_endpoint("https://qwen3-8b.ollama.casa.enhasa.cloud/v1"));
+        assert!(is_ollama_endpoint(
+            "https://qwen3-8b.ollama.casa.enhasa.cloud/v1"
+        ));
     }
 
     #[test]
@@ -695,6 +945,21 @@ mod tests {
         assert!(!is_ollama_endpoint("https://api.openai.com/v1"));
         assert!(!is_ollama_endpoint("https://openrouter.ai/api/v1"));
         assert!(!is_ollama_endpoint("https://api.anthropic.com/v1"));
+    }
+
+    #[test]
+    fn request_retry_delay_uses_exponential_backoff_with_jitter() {
+        assert_eq!(request_retry_base_delay_secs(0), 1);
+        assert_eq!(request_retry_base_delay_secs(1), 2);
+        assert_eq!(request_retry_base_delay_secs(2), 4);
+        assert_eq!(request_retry_base_delay_secs(5), 32);
+
+        let delay = request_retry_delay_secs(3);
+        assert!(
+            (8..=12).contains(&delay),
+            "delay should be base 8s plus bounded jitter, got {}",
+            delay
+        );
     }
 
     #[test]
@@ -717,11 +982,8 @@ mod tests {
 
     #[test]
     fn build_tool_definitions_for_known_tools() {
-        let tools = build_tool_definitions(&[
-            "read_file".into(),
-            "write_file".into(),
-            "run_test".into(),
-        ]);
+        let tools =
+            build_tool_definitions(&["read_file".into(), "write_file".into(), "run_test".into()]);
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[0].function.name, "read_file");
         assert_eq!(tools[1].function.name, "write_file");
@@ -732,5 +994,150 @@ mod tests {
     fn build_tool_definitions_skips_unknown() {
         let tools = build_tool_definitions(&["read_file".into(), "unknown_tool".into()]);
         assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn required_tool_request_serializes_openai_protocol_fields() {
+        let request = ChatRequest {
+            model: "qwen3:8b".into(),
+            messages: vec![ToolProtocolMessage::plain("user", "inspect the repository")],
+            temperature: 0.3,
+            max_tokens: 4096,
+            tools: Some(build_tool_definitions_with_nav(
+                &["read_file".into()],
+                &[("DONE".into(), "completed".into())],
+            )),
+            tool_choice: Some("required".into()),
+            options: None,
+            reasoning_effort: None,
+        };
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(wire["tool_choice"], "required");
+        assert_eq!(wire["messages"][0]["role"], "user");
+        assert!(
+            wire["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["function"]["name"] == "transition")
+        );
+    }
+
+    #[test]
+    fn response_accepts_qwen_and_ollama_reasoning_field_names() {
+        for (field, expected) in [
+            ("reasoning", "standard"),
+            ("reasoning_content", "qwen"),
+            ("thinking", "ollama"),
+        ] {
+            let mut message = serde_json::Map::new();
+            message.insert(field.into(), serde_json::Value::String(expected.into()));
+            let response: ChatResponse = serde_json::from_value(serde_json::json!({
+                "choices": [{"message": message}]
+            }))
+            .unwrap();
+            assert_eq!(
+                response.choices[0].message.reasoning.as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_tool_loop_corrects_text_and_preserves_the_retry_turn() {
+        let responses = vec![
+            serde_json::json!({
+                "choices": [{"message": {"content": "I should inspect first."}}]
+            }),
+            serde_json::json!({
+                "choices": [{"message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                }}]
+            }),
+        ];
+        let (url, requests, handle) = start_tool_mock(responses).await;
+        let client = OllamaClient::new(OllamaConfig {
+            api_url: url,
+            model: "qwen3:8b".into(),
+            temperature: 0.3,
+            max_tokens: 4096,
+            thinking_level: None,
+        });
+        let result = client
+            .chat_with_required_tools(
+                vec![ToolProtocolMessage::plain("user", "inspect")],
+                build_tool_definitions_with_nav(
+                    &["read_file".into()],
+                    &[("DONE".into(), "completed".into())],
+                ),
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].function.name, "read_file");
+        assert_eq!(result.protocol_corrections, 1);
+        assert_eq!(result.protocol_trace.len(), 2);
+        handle.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["tool_choice"], "required");
+        let retry_messages = requests[1]["messages"].as_array().unwrap();
+        assert_eq!(
+            retry_messages[retry_messages.len() - 2]["role"],
+            "assistant"
+        );
+        assert_eq!(retry_messages[retry_messages.len() - 1]["role"], "user");
+        assert!(
+            retry_messages[retry_messages.len() - 1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("call transition")
+        );
+    }
+
+    #[tokio::test]
+    async fn required_tool_loop_rescues_embedded_tool_json_without_retry() {
+        let responses = vec![serde_json::json!({
+            "choices": [{"message": {
+                "content": "I will inspect: {\"tool\":\"read_file\",\"args\":{\"path\":\"src/lib.rs\"}}"
+            }}]
+        })];
+        let (url, requests, handle) = start_tool_mock(responses).await;
+        let client = OllamaClient::new(OllamaConfig {
+            api_url: url,
+            model: "qwen3:8b".into(),
+            temperature: 0.3,
+            max_tokens: 4096,
+            thinking_level: None,
+        });
+        let result = client
+            .chat_with_required_tools(
+                vec![ToolProtocolMessage::plain("user", "inspect")],
+                build_tool_definitions_with_nav(
+                    &["read_file".into()],
+                    &[("DONE".into(), "completed".into())],
+                ),
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].function.name, "read_file");
+        assert!(result.rescued_tool_call);
+        assert_eq!(result.protocol_corrections, 0);
+        handle.await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 }

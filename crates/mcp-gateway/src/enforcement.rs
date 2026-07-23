@@ -15,15 +15,9 @@ pub enum EnforcementDecision {
     },
     /// Tool is blocked in current state but available in an adjacent state.
     /// The implicit transition was evaluated and guards passed.
-    ImplicitTransition {
-        event: String,
-        new_state: String,
-    },
+    ImplicitTransition { event: String, new_state: String },
     /// Tool is allowed but the iteration limit has been reached.
-    CheckpointReached {
-        iteration: u32,
-        max: u32,
-    },
+    CheckpointReached { iteration: u32, max: u32 },
 }
 
 /// Evaluate whether a tool call should be permitted, blocked, or trigger an implicit transition.
@@ -153,7 +147,9 @@ mod tests {
     fn block_tool_not_in_current_state() {
         let session = session_at("planning");
         match enforce_tool_call(&session, "deploy") {
-            EnforcementDecision::Block { available_tools, .. } => {
+            EnforcementDecision::Block {
+                available_tools, ..
+            } => {
                 assert!(available_tools.contains(&"read_file".to_string()));
                 assert!(available_tools.contains(&"grep".to_string()));
                 assert!(!available_tools.contains(&"deploy".to_string()));
@@ -198,7 +194,9 @@ mod tests {
     fn final_state_blocks_all_tools() {
         let session = session_at("completed");
         match enforce_tool_call(&session, "read_file") {
-            EnforcementDecision::Block { available_tools, .. } => {
+            EnforcementDecision::Block {
+                available_tools, ..
+            } => {
                 assert!(available_tools.is_empty());
             }
             other => panic!("Expected Block, got {:?}", other),

@@ -84,12 +84,17 @@ pub fn handle_transition(
 
             // Include fork info if this transition forks
             if let Some(ref fork) = result.fork {
-                let branches: serde_json::Value = fork.branches.iter()
+                let branches: serde_json::Value = fork
+                    .branches
+                    .iter()
                     .map(|(name, def)| {
-                        (name.clone(), json!({
-                            "initial": def.initial,
-                            "terminal": def.terminal,
-                        }))
+                        (
+                            name.clone(),
+                            json!({
+                                "initial": def.initial,
+                                "terminal": def.terminal,
+                            }),
+                        )
                     })
                     .collect::<serde_json::Map<String, serde_json::Value>>()
                     .into();
@@ -135,8 +140,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
 
     let transitions: Vec<serde_json::Value> = state_def
         .map(|s| {
-            s.on
-                .iter()
+            s.on.iter()
                 .map(|(event, def)| {
                     json!({
                         "event": event,
@@ -160,26 +164,41 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
     // Include guard definitions for transitions that use them
     let guard_info: serde_json::Value = state_def
         .and_then(|s| {
-            let guard_names: Vec<String> = s.on.values()
-                .flat_map(|t| match t {
-                    statewright_engine::TransitionDef::Guarded(branches) => {
-                        branches.iter().filter_map(|b| b.guard.clone()).collect::<Vec<_>>()
-                    }
-                    _ => t.guard_names().iter().map(|s| s.to_string()).collect(),
-                })
-                .collect();
-            if guard_names.is_empty() { return None; }
-            let guards: serde_json::Map<String, serde_json::Value> = guard_names.iter()
+            let guard_names: Vec<String> =
+                s.on.values()
+                    .flat_map(|t| match t {
+                        statewright_engine::TransitionDef::Guarded(branches) => branches
+                            .iter()
+                            .filter_map(|b| b.guard.clone())
+                            .collect::<Vec<_>>(),
+                        _ => t.guard_names().iter().map(|s| s.to_string()).collect(),
+                    })
+                    .collect();
+            if guard_names.is_empty() {
+                return None;
+            }
+            let guards: serde_json::Map<String, serde_json::Value> = guard_names
+                .iter()
                 .filter_map(|name| {
-                    session.definition.guards.get(name.as_str())
+                    session
+                        .definition
+                        .guards
+                        .get(name.as_str())
                         .map(|g| (name.clone(), serde_json::to_value(g).unwrap_or_default()))
                 })
                 .collect();
-            if guards.is_empty() { None } else { Some(serde_json::Value::Object(guards)) }
+            if guards.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(guards))
+            }
         })
         .unwrap_or(serde_json::Value::Null);
 
-    let default_model = session.definition.meta.as_ref()
+    let default_model = session
+        .definition
+        .meta
+        .as_ref()
         .and_then(|m| m.default_model.as_ref());
     let state_model = state_def.and_then(|s| s.model.as_ref());
     let model = state_model.or(default_model).cloned();
@@ -209,12 +228,18 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
 
     // Include interrupt definitions for client-side detection (built-in tools)
     if !session.definition.interrupts.is_empty() {
-        let interrupts: serde_json::Value = session.definition.interrupts.iter()
+        let interrupts: serde_json::Value = session
+            .definition
+            .interrupts
+            .iter()
             .map(|(name, def)| {
-                (name.clone(), json!({
-                    "file_pattern": def.trigger.file_pattern,
-                    "target": def.target,
-                }))
+                (
+                    name.clone(),
+                    json!({
+                        "file_pattern": def.trigger.file_pattern,
+                        "target": def.target,
+                    }),
+                )
             })
             .collect::<serde_json::Map<String, serde_json::Value>>()
             .into();
@@ -231,7 +256,11 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         });
     }
 
-    if let Some(return_state) = session.context.get("_interrupt_return").and_then(|v| v.as_str()) {
+    if let Some(return_state) = session
+        .context
+        .get("_interrupt_return")
+        .and_then(|v| v.as_str())
+    {
         response["interrupt_handler"] = json!({
             "return_state": return_state,
             "message": "You are in an interrupt handler. Complete validation and transition to return.",
@@ -586,7 +615,11 @@ mod tests {
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_status"));
         assert!(tools.iter().any(|t| t.name == "statewright_run_agent"));
-        assert!(tools.iter().any(|t| t.name == "statewright_get_model_traits"));
+        assert!(
+            tools
+                .iter()
+                .any(|t| t.name == "statewright_get_model_traits")
+        );
     }
 
     #[test]

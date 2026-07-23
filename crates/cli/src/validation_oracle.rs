@@ -576,13 +576,7 @@ pub fn record_baseline_scope_outcome(
     output: &str,
     relation: BaselineScopeRelation,
 ) {
-    record_baseline_scope_outcome_timed(
-        files,
-        kind,
-        output,
-        relation,
-        std::time::Duration::ZERO,
-    );
+    record_baseline_scope_outcome_timed(files, kind, output, relation, std::time::Duration::ZERO);
 }
 
 pub fn record_baseline_scope_outcome_timed(

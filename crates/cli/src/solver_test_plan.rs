@@ -95,10 +95,7 @@ pub fn shell_script_for_scope(plan: &SolverTestPlan, scope_args: &[String]) -> S
 pub fn adapt_scope_args(plan: &SolverTestPlan, scope_args: &[String]) -> Vec<String> {
     match plan.runner.scope_adapter {
         ScopeAdapter::Raw => scope_args.to_vec(),
-        ScopeAdapter::DjangoLabel => scope_args
-            .iter()
-            .map(|scope| django_label(scope))
-            .collect(),
+        ScopeAdapter::DjangoLabel => scope_args.iter().map(|scope| django_label(scope)).collect(),
     }
 }
 
@@ -163,7 +160,10 @@ mod tests {
 
     #[test]
     fn quote_prevents_scope_shell_injection() {
-        assert_eq!(shell_quote("tests/a.py; rm -rf /"), "'tests/a.py; rm -rf /'");
+        assert_eq!(
+            shell_quote("tests/a.py; rm -rf /"),
+            "'tests/a.py; rm -rf /'"
+        );
     }
 
     #[test]
@@ -173,7 +173,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            adapt_scope_args(&plan, &["tests/model_fields/test_imagefield.py".to_string()]),
+            adapt_scope_args(
+                &plan,
+                &["tests/model_fields/test_imagefield.py".to_string()]
+            ),
             vec!["model_fields.test_imagefield".to_string()]
         );
     }
@@ -196,11 +199,7 @@ mod tests {
     #[test]
     fn rejects_empty_steps() {
         let path = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            path.path(),
-            r#"{"schema_version":1,"runner":{"steps":[]}}"#,
-        )
-        .unwrap();
+        std::fs::write(path.path(), r#"{"schema_version":1,"runner":{"steps":[]}}"#).unwrap();
         assert!(load_from_path(path.path()).is_err());
     }
 }

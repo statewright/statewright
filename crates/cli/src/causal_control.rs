@@ -432,12 +432,7 @@ mod tests {
         let before = vec![("src/lib.py".to_string(), 2, 40)];
         let reordered = vec![("src/lib.py".to_string(), 2, 40)];
         assert!(!candidate_state_changed(
-            "same",
-            &before,
-            "targets",
-            "same",
-            &reordered,
-            "targets",
+            "same", &before, "targets", "same", &reordered, "targets",
         ));
         assert!(candidate_state_changed(
             "same",
@@ -451,12 +446,7 @@ mod tests {
             "targets",
         ));
         assert!(candidate_state_changed(
-            "before",
-            &before,
-            "targets",
-            "after",
-            &before,
-            "targets",
+            "before", &before, "targets", "after", &before, "targets",
         ));
         assert!(candidate_state_changed(
             "same",

@@ -266,18 +266,12 @@ async fn handle_streamable_http(
     // `X-Statewright-Client-Id` is stable for one Codex/Claude/etc. host
     // session. `Mcp-Session-Id` is either the canonical key echoed from a
     // prior response or a branch subprocess ID.
-    let client_id = headers
-        .get(CLIENT_ID_HEADER)
-        .and_then(|v| v.to_str().ok());
+    let client_id = headers.get(CLIENT_ID_HEADER).and_then(|v| v.to_str().ok());
     let mcp_session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .filter(|value| !value.is_empty());
-    let session_key = streamable_session_key(
-        &api_key_fingerprint,
-        client_id,
-        mcp_session_id,
-    );
+    let session_key = streamable_session_key(&api_key_fingerprint, client_id, mcp_session_id);
 
     // Use shared SessionManager for this API key (parent + branches share state)
     let session_manager = state.get_session_manager(&api_key_fingerprint).await;
@@ -664,20 +658,13 @@ mod tests {
     fn branch_ids_are_scoped_under_the_client_root() {
         let fingerprint = "account-fingerprint";
         let root = streamable_session_key(fingerprint, Some("codex-thread-a"), None);
-        let branch = streamable_session_key(
-            fingerprint,
-            Some("codex-thread-a"),
-            Some("br_validation"),
-        );
+        let branch =
+            streamable_session_key(fingerprint, Some("codex-thread-a"), Some("br_validation"));
 
         assert_eq!(branch, format!("{}_br_validation", root));
         assert_ne!(
             branch,
-            streamable_session_key(
-                fingerprint,
-                Some("codex-thread-b"),
-                Some("br_validation"),
-            )
+            streamable_session_key(fingerprint, Some("codex-thread-b"), Some("br_validation"),)
         );
     }
 

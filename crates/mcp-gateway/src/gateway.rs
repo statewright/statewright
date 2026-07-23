@@ -200,8 +200,7 @@ impl Gateway {
             // PocketBase relation columns are NOT NULL and encode an unset
             // optional relation as the empty string rather than SQL NULL.
             let stitch_id = pocketbase_relation_id(self.stitch_id.as_deref()).to_string();
-            let parent_run_id =
-                pocketbase_relation_id(self.parent_run_id.as_deref()).to_string();
+            let parent_run_id = pocketbase_relation_id(self.parent_run_id.as_deref()).to_string();
             let result = sqlx::query_scalar::<_, String>(
                 "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, stitch_id, parent_run_id, created, updated) \
                  VALUES (gen_random_uuid()::text, $1, $2, 'running', $3, '[]'::jsonb, 0, $4, $5, $6, $7, $3, $3) RETURNING id"

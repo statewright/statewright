@@ -1,4 +1,6 @@
-use crate::{solver_test_plan, task_reproducer, test_runtime::GitValidationSandbox, validation_oracle};
+use crate::{
+    solver_test_plan, task_reproducer, test_runtime::GitValidationSandbox, validation_oracle,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -577,7 +579,12 @@ pub fn execute_tool(name: &str, args: &Value, workdir: &str) -> String {
         "run_test" => {
             let started = std::time::Instant::now();
             let output = run_test_with_sandbox(args, workdir);
-            crate::validation_oracle::record_test_execution(args, workdir, &output, started.elapsed());
+            crate::validation_oracle::record_test_execution(
+                args,
+                workdir,
+                &output,
+                started.elapsed(),
+            );
             output
         }
         "write_task_reproducer" => write_task_reproducer(args, workdir),
@@ -662,12 +669,8 @@ fn write_task_reproducer(args: &Value, workdir: &str) -> String {
         &baseline_output,
         elapsed,
     );
-    let qualification = task_reproducer::qualify(
-        &virtual_path,
-        source,
-        &issue_anchors,
-        &baseline_output,
-    );
+    let qualification =
+        task_reproducer::qualify(&virtual_path, source, &issue_anchors, &baseline_output);
     let task_reproducer::ReproducerQualification::Qualified(qualified) = qualification else {
         let task_reproducer::ReproducerQualification::Rejected { reason } = qualification else {
             unreachable!();
@@ -677,7 +680,8 @@ fn write_task_reproducer(args: &Value, workdir: &str) -> String {
             reason
         );
     };
-    let baseline_observation = validation_oracle::observation_from_output(&baseline_output, elapsed);
+    let baseline_observation =
+        validation_oracle::observation_from_output(&baseline_output, elapsed);
     let active = ActiveTaskReproducer {
         source_path,
         qualified: qualified.clone(),
@@ -693,7 +697,11 @@ fn write_task_reproducer(args: &Value, workdir: &str) -> String {
     format!(
         "[TASK_REPRODUCER] QUALIFIED path={} anchors={} baseline_kind={} baseline_fingerprint={}\nSW_TASK_REPRODUCER_STATUS=qualified\nUse run_task_reproducer after each production edit. It runs only in the isolated validation worktree.\n",
         qualified.path,
-        if qualified.issue_anchors.is_empty() { "none".to_string() } else { qualified.issue_anchors.join(",") },
+        if qualified.issue_anchors.is_empty() {
+            "none".to_string()
+        } else {
+            qualified.issue_anchors.join(",")
+        },
         active.baseline_observation.kind,
         active.baseline_observation.fingerprint,
     )
@@ -702,7 +710,9 @@ fn write_task_reproducer(args: &Value, workdir: &str) -> String {
 fn run_task_reproducer(workdir: &str) -> String {
     let active = match ACTIVE_TASK_REPRODUCER.lock() {
         Ok(slot) => slot.clone(),
-        Err(_) => return "[TASK_REPRODUCER] UNAVAILABLE reason=reproducer_state_lock\n".to_string(),
+        Err(_) => {
+            return "[TASK_REPRODUCER] UNAVAILABLE reason=reproducer_state_lock\n".to_string();
+        }
     };
     let Some(active) = active else {
         return "[TASK_REPRODUCER] UNAVAILABLE reason=no_qualified_reproducer\nSW_TASK_REPRODUCER_STATUS=no_causal_oracle\n".to_string();
@@ -710,7 +720,11 @@ fn run_task_reproducer(workdir: &str) -> String {
     let started = Instant::now();
     let candidate_output = match validate_task_reproducer(&active.source_path, true) {
         Ok(output) => output,
-        Err(err) => return format!("[TASK_REPRODUCER] UNAVAILABLE reason=validation_sandbox error={err}\n"),
+        Err(err) => {
+            return format!(
+                "[TASK_REPRODUCER] UNAVAILABLE reason=validation_sandbox error={err}\n"
+            );
+        }
     };
     let elapsed = started.elapsed();
     validation_oracle::record_task_reproducer_execution(
@@ -751,7 +765,10 @@ fn run_task_reproducer(workdir: &str) -> String {
     )
 }
 
-fn validate_task_reproducer(source_path: &Path, apply_candidate_patch: bool) -> Result<String, String> {
+fn validate_task_reproducer(
+    source_path: &Path,
+    apply_candidate_patch: bool,
+) -> Result<String, String> {
     let slot = VALIDATION_SANDBOX
         .lock()
         .map_err(|_| "validation sandbox lock poisoned".to_string())?;
@@ -773,15 +790,22 @@ fn task_reproducer_root(workdir: &str) -> Result<PathBuf, String> {
                 .map(|path| PathBuf::from(path).join("task-reproducers"))
         })
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("statewright-task-reproducers-{}", std::process::id()))
+            std::env::temp_dir().join(format!(
+                "statewright-task-reproducers-{}",
+                std::process::id()
+            ))
         });
     if !root.is_absolute() {
         return Err("scratch reproducer root must be absolute".to_string());
     }
     std::fs::create_dir_all(&root)
         .map_err(|err| format!("create scratch reproducer root {}: {err}", root.display()))?;
-    let canonical_root = std::fs::canonicalize(&root)
-        .map_err(|err| format!("canonicalize scratch reproducer root {}: {err}", root.display()))?;
+    let canonical_root = std::fs::canonicalize(&root).map_err(|err| {
+        format!(
+            "canonicalize scratch reproducer root {}: {err}",
+            root.display()
+        )
+    })?;
     let canonical_workdir = std::fs::canonicalize(workdir)
         .map_err(|err| format!("canonicalize model workdir {workdir}: {err}"))?;
     if canonical_root.starts_with(&canonical_workdir) {
@@ -818,7 +842,10 @@ fn persist_task_reproducer(root: &Path, active: &ActiveTaskReproducer, plan_sche
         &path,
         serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()),
     ) {
-        eprintln!("[TASK_REPRODUCER] persist failed path={} error={err}", path.display());
+        eprintln!(
+            "[TASK_REPRODUCER] persist failed path={} error={err}",
+            path.display()
+        );
     }
 }
 
@@ -1548,136 +1575,145 @@ fn run_test_with_args(args: &Value, workdir: &str) -> String {
     };
 
     let (cmd, cmd_args, command_env) = if let Some(script) = plan_script {
-        ("/bin/bash".to_string(), vec!["-lc".to_string(), script], Vec::new())
-    } else { match lang {
-        "go" => {
-            let mut a = vec!["test".to_string(), "-v".to_string(), "-count=1".to_string()];
-            if let Some(p) = test_path {
-                a.push(format!("./{}/...", p));
-            } else if let Some(f) = test_file {
-                a.push(format!(
-                    "./{}",
-                    std::path::Path::new(f)
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| ".".into())
-                ));
-            } else {
-                a.push("./...".to_string());
-            }
-            a.extend(extra_args);
-            ("go".to_string(), a, Vec::new())
-        }
-        "rust" => {
-            let mut a = vec!["test".to_string()];
-            if let Some(p) = test_path {
-                a.push("--".to_string());
-                a.push(p.to_string());
-            }
-            a.extend(extra_args);
-            ("cargo".to_string(), a, Vec::new())
-        }
-        "typescript" | "javascript" => {
-            let (runner, mut runner_args) = detect_js_test_runner(workdir);
-            if let Some(p) = test_path {
-                runner_args.push(p.to_string());
-            } else if let Some(f) = test_file {
-                runner_args.push(f.to_string());
-            }
-            runner_args.extend(extra_args);
-            (runner, runner_args, Vec::new())
-        }
-        _ => {
-            // Python: detect Django vs pytest
-            let p = Path::new(workdir);
-            let is_django = p.join("manage.py").exists()
-                || p.join("django").is_dir()
-                || p.join("setup.cfg").exists()
-                    && std::fs::read_to_string(p.join("setup.cfg"))
-                        .map(|c| c.contains("[metadata]") && c.contains("django"))
-                        .unwrap_or(false);
-            let has_pytest_support = p.join("pytest.ini").exists()
-                || p.join("conftest.py").exists()
-                || p.join("pyproject.toml").exists()
-                    && std::fs::read_to_string(p.join("pyproject.toml"))
-                        .map(|c| c.contains("[tool.pytest.ini_options]") || c.contains("pytest"))
-                        .unwrap_or(false)
-                || p.join("tox.ini").exists()
-                    && std::fs::read_to_string(p.join("tox.ini"))
-                        .map(|c| c.contains("[pytest]"))
-                        .unwrap_or(false);
-
-            if let Some(test_cmd) = eval_test_cmd.as_ref() {
-                let mut parts = split_shell_words(test_cmd);
-                let command_env = extract_leading_env_assignments(&mut parts);
-                if parts.is_empty() {
-                    parts = vec!["python3".into(), "-m".into(), "pytest".into()];
-                }
-                let push_unique = |parts: &mut Vec<String>, value: String| {
-                    if !value.is_empty() && !parts.iter().any(|part| part == &value) {
-                        parts.push(value);
-                    }
-                };
-                if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
-                    // Keep Django module-style directive handling when the repo runner is used.
-                    if let Some(tp) = test_path {
-                        push_unique(&mut parts, django_runtests_target(tp));
-                    } else if let Some(f) = test_file {
-                        push_unique(&mut parts, django_runtests_target(f));
-                    } else if let Some(module) = test_label.or(env_test_label.as_deref()) {
-                        push_unique(&mut parts, module.to_string());
-                    }
-                    for arg in &extra_args {
-                        push_unique(&mut parts, django_runtests_target(arg));
-                    }
-                } else if let Some(tp) = test_path {
-                    push_unique(&mut parts, tp.to_string());
+        (
+            "/bin/bash".to_string(),
+            vec!["-lc".to_string(), script],
+            Vec::new(),
+        )
+    } else {
+        match lang {
+            "go" => {
+                let mut a = vec!["test".to_string(), "-v".to_string(), "-count=1".to_string()];
+                if let Some(p) = test_path {
+                    a.push(format!("./{}/...", p));
                 } else if let Some(f) = test_file {
-                    push_unique(&mut parts, f.to_string());
-                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
-                    push_unique(&mut parts, label.to_string());
-                }
-                if !(is_django && !has_pytest_support && p.join("tests/runtests.py").exists()) {
-                    parts.extend(extra_args);
-                }
-                (parts[0].clone(), parts[1..].to_vec(), command_env)
-            } else if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
-                // Django test suite without pytest support: use the repo's own runner.
-                let mut a: Vec<String> = vec!["tests/runtests.py".into(), "--verbosity=1".into()];
-                if let Some(tp) = test_path {
-                    a.push(django_runtests_target(tp));
-                } else if let Some(f) = test_file {
-                    a.push(django_runtests_target(f));
-                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
-                    a.push(label.to_string());
-                }
-                a.extend(extra_args.iter().map(|arg| django_runtests_target(arg)));
-                ("python3".to_string(), a, Vec::new())
-            } else {
-                let mut a: Vec<String> = vec![
-                    "-m".into(),
-                    "pytest".into(),
-                    "-xvs".into(),
-                    "--tb=short".into(),
-                    "--no-header".into(),
-                    "-q".into(),
-                ];
-                if is_django {
-                    a.push("-m".into());
-                    a.push("django".into());
-                }
-                if let Some(tp) = test_path {
-                    a.push(tp.to_string());
-                } else if let Some(f) = test_file {
-                    a.push(f.to_string());
-                } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
-                    a.push(label.to_string());
+                    a.push(format!(
+                        "./{}",
+                        std::path::Path::new(f)
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| ".".into())
+                    ));
+                } else {
+                    a.push("./...".to_string());
                 }
                 a.extend(extra_args);
-                ("python3".to_string(), a, Vec::new())
+                ("go".to_string(), a, Vec::new())
+            }
+            "rust" => {
+                let mut a = vec!["test".to_string()];
+                if let Some(p) = test_path {
+                    a.push("--".to_string());
+                    a.push(p.to_string());
+                }
+                a.extend(extra_args);
+                ("cargo".to_string(), a, Vec::new())
+            }
+            "typescript" | "javascript" => {
+                let (runner, mut runner_args) = detect_js_test_runner(workdir);
+                if let Some(p) = test_path {
+                    runner_args.push(p.to_string());
+                } else if let Some(f) = test_file {
+                    runner_args.push(f.to_string());
+                }
+                runner_args.extend(extra_args);
+                (runner, runner_args, Vec::new())
+            }
+            _ => {
+                // Python: detect Django vs pytest
+                let p = Path::new(workdir);
+                let is_django = p.join("manage.py").exists()
+                    || p.join("django").is_dir()
+                    || p.join("setup.cfg").exists()
+                        && std::fs::read_to_string(p.join("setup.cfg"))
+                            .map(|c| c.contains("[metadata]") && c.contains("django"))
+                            .unwrap_or(false);
+                let has_pytest_support = p.join("pytest.ini").exists()
+                    || p.join("conftest.py").exists()
+                    || p.join("pyproject.toml").exists()
+                        && std::fs::read_to_string(p.join("pyproject.toml"))
+                            .map(|c| {
+                                c.contains("[tool.pytest.ini_options]") || c.contains("pytest")
+                            })
+                            .unwrap_or(false)
+                    || p.join("tox.ini").exists()
+                        && std::fs::read_to_string(p.join("tox.ini"))
+                            .map(|c| c.contains("[pytest]"))
+                            .unwrap_or(false);
+
+                if let Some(test_cmd) = eval_test_cmd.as_ref() {
+                    let mut parts = split_shell_words(test_cmd);
+                    let command_env = extract_leading_env_assignments(&mut parts);
+                    if parts.is_empty() {
+                        parts = vec!["python3".into(), "-m".into(), "pytest".into()];
+                    }
+                    let push_unique = |parts: &mut Vec<String>, value: String| {
+                        if !value.is_empty() && !parts.iter().any(|part| part == &value) {
+                            parts.push(value);
+                        }
+                    };
+                    if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
+                        // Keep Django module-style directive handling when the repo runner is used.
+                        if let Some(tp) = test_path {
+                            push_unique(&mut parts, django_runtests_target(tp));
+                        } else if let Some(f) = test_file {
+                            push_unique(&mut parts, django_runtests_target(f));
+                        } else if let Some(module) = test_label.or(env_test_label.as_deref()) {
+                            push_unique(&mut parts, module.to_string());
+                        }
+                        for arg in &extra_args {
+                            push_unique(&mut parts, django_runtests_target(arg));
+                        }
+                    } else if let Some(tp) = test_path {
+                        push_unique(&mut parts, tp.to_string());
+                    } else if let Some(f) = test_file {
+                        push_unique(&mut parts, f.to_string());
+                    } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                        push_unique(&mut parts, label.to_string());
+                    }
+                    if !(is_django && !has_pytest_support && p.join("tests/runtests.py").exists()) {
+                        parts.extend(extra_args);
+                    }
+                    (parts[0].clone(), parts[1..].to_vec(), command_env)
+                } else if is_django && !has_pytest_support && p.join("tests/runtests.py").exists() {
+                    // Django test suite without pytest support: use the repo's own runner.
+                    let mut a: Vec<String> =
+                        vec!["tests/runtests.py".into(), "--verbosity=1".into()];
+                    if let Some(tp) = test_path {
+                        a.push(django_runtests_target(tp));
+                    } else if let Some(f) = test_file {
+                        a.push(django_runtests_target(f));
+                    } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                        a.push(label.to_string());
+                    }
+                    a.extend(extra_args.iter().map(|arg| django_runtests_target(arg)));
+                    ("python3".to_string(), a, Vec::new())
+                } else {
+                    let mut a: Vec<String> = vec![
+                        "-m".into(),
+                        "pytest".into(),
+                        "-xvs".into(),
+                        "--tb=short".into(),
+                        "--no-header".into(),
+                        "-q".into(),
+                    ];
+                    if is_django {
+                        a.push("-m".into());
+                        a.push("django".into());
+                    }
+                    if let Some(tp) = test_path {
+                        a.push(tp.to_string());
+                    } else if let Some(f) = test_file {
+                        a.push(f.to_string());
+                    } else if let Some(label) = test_label.or(env_test_label.as_deref()) {
+                        a.push(label.to_string());
+                    }
+                    a.extend(extra_args);
+                    ("python3".to_string(), a, Vec::new())
+                }
             }
         }
-    }};
+    };
 
     // Install deps if needed (JS/TS only, first run)
     if matches!(lang, "typescript" | "javascript") {
@@ -1810,7 +1846,12 @@ fn plan_scope_args(
             result.push(path.to_string());
         }
     }
-    result.extend(extra_args.iter().filter(|arg| !arg.trim().is_empty()).cloned());
+    result.extend(
+        extra_args
+            .iter()
+            .filter(|arg| !arg.trim().is_empty())
+            .cloned(),
+    );
     result
 }
 
@@ -3411,7 +3452,11 @@ mod tests {
     fn run_test_uses_solver_plan_without_losing_shell_step_boundaries() {
         let _lock = ENV_TEST_LOCK.lock().unwrap();
         let dir = tmp_dir();
-        fs::write(dir.path().join("setup.py"), "from setuptools import setup\n").unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            "from setuptools import setup\n",
+        )
+        .unwrap();
         let plan_path = dir.path().join("solver-test-plan.json");
         fs::write(
             &plan_path,
@@ -3425,7 +3470,10 @@ mod tests {
         )
         .unwrap();
         let previous = [
-            ("SW_SOLVER_TEST_PLAN", std::env::var("SW_SOLVER_TEST_PLAN").ok()),
+            (
+                "SW_SOLVER_TEST_PLAN",
+                std::env::var("SW_SOLVER_TEST_PLAN").ok(),
+            ),
             ("SW_TEST_CMD", std::env::var("SW_TEST_CMD").ok()),
             ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
         ];
@@ -4661,8 +4709,16 @@ class Foo:
         let repo = tmp_dir();
         let artifacts = tmp_dir();
         let git = |args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
         git(&["init"]);
         git(&["config", "user.email", "test@example.invalid"]);
@@ -4678,7 +4734,10 @@ class Foo:
         )
         .unwrap();
         let previous = [
-            ("SW_SOLVER_TEST_PLAN", std::env::var("SW_SOLVER_TEST_PLAN").ok()),
+            (
+                "SW_SOLVER_TEST_PLAN",
+                std::env::var("SW_SOLVER_TEST_PLAN").ok(),
+            ),
             ("SW_ARTIFACT_DIR", std::env::var("SW_ARTIFACT_DIR").ok()),
             ("SW_EVAL_IMAGE", std::env::var("SW_EVAL_IMAGE").ok()),
         ];
@@ -4688,7 +4747,8 @@ class Foo:
             std::env::remove_var("SW_EVAL_IMAGE");
         }
         set_task_reproducer_issue("Fix VALUE behavior");
-        let guard = enable_validation_sandbox(repo.path().to_str().unwrap(), artifacts.path()).unwrap();
+        let guard =
+            enable_validation_sandbox(repo.path().to_str().unwrap(), artifacts.path()).unwrap();
         let qualified = execute_tool(
             "write_task_reproducer",
             &serde_json::json!({
@@ -4703,9 +4763,17 @@ class Foo:
             &serde_json::json!({}),
             repo.path().to_str().unwrap(),
         );
-        assert!(candidate.contains("SW_TASK_REPRODUCER_DELTA=fixed"), "{candidate}");
+        assert!(
+            candidate.contains("SW_TASK_REPRODUCER_DELTA=fixed"),
+            "{candidate}"
+        );
         assert!(!repo.path().join(".statewright-reproducer").exists());
-        assert!(artifacts.path().join("task-reproducers/test_task_reproducer.py").is_file());
+        assert!(
+            artifacts
+                .path()
+                .join("task-reproducers/test_task_reproducer.py")
+                .is_file()
+        );
         assert!(artifacts.path().join("test-evidence.jsonl").is_file());
         drop(guard);
         *ACTIVE_TASK_REPRODUCER.lock().unwrap() = None;

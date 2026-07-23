@@ -3156,7 +3156,10 @@ fn structured_machine_routes_through_triage_and_audit() {
     assert!(definition.states.contains_key("completion_audit"));
     let evidence_state = &definition.states["task_evidence_acquisition"];
     assert_eq!(evidence_state.max_iterations, Some(2));
-    assert_eq!(evidence_state.safe_next.as_deref(), Some("completion_audit"));
+    assert_eq!(
+        evidence_state.safe_next.as_deref(),
+        Some("completion_audit")
+    );
     let evidence_tools = evidence_state.allowed_tools.as_ref().unwrap();
     assert!(evidence_tools.contains(&"write_task_reproducer".to_string()));
     assert!(evidence_tools.contains(&"run_task_reproducer".to_string()));
@@ -3214,21 +3217,15 @@ fn post_patch_task_evidence_delta_routes_are_typed_and_bounded() {
         "TASK_EVIDENCE_FIXED"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_DELTA=changed_fail\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_DELTA=changed_fail\n"),
         "TASK_EVIDENCE_CHANGED"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_DELTA=unchanged_fail\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_DELTA=unchanged_fail\n"),
         "TASK_EVIDENCE_REPAIR"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_STATUS=no_causal_oracle\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_STATUS=no_causal_oracle\n"),
         "TASK_EVIDENCE_UNAVAILABLE"
     );
     assert!(!super::task_evidence_budget_exhausted(
@@ -3246,9 +3243,7 @@ fn post_patch_task_evidence_delta_routes_are_typed_and_bounded() {
         "FAIL"
     ));
     assert!(!super::task_evidence_fail_must_audit(
-        true,
-        "editing",
-        "FAIL"
+        true, "editing", "FAIL"
     ));
     assert!(!super::task_evidence_fail_must_audit(
         false,

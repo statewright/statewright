@@ -111,7 +111,8 @@ fn score_pair(
     issue_literals: &[String],
     task: &str,
 ) -> TestMapCandidate {
-    let source_content = std::fs::read_to_string(Path::new(workdir).join(source)).unwrap_or_default();
+    let source_content =
+        std::fs::read_to_string(Path::new(workdir).join(source)).unwrap_or_default();
     let test_content = std::fs::read_to_string(Path::new(workdir).join(test)).unwrap_or_default();
     let source_lower = source_content.to_ascii_lowercase();
     let test_lower = test_content.to_ascii_lowercase();
@@ -135,10 +136,14 @@ fn score_pair(
             || test_filename == format!("{source_stem}_tests"))
     {
         score += 120;
-        reasons.push(format!("exact source/test basename mapping for `{source_stem}`"));
+        reasons.push(format!(
+            "exact source/test basename mapping for `{source_stem}`"
+        ));
     } else if !source_stem.is_empty() && test_filename.contains(&source_stem) {
         score += 45;
-        reasons.push(format!("test filename contains source stem `{source_stem}`"));
+        reasons.push(format!(
+            "test filename contains source stem `{source_stem}`"
+        ));
     }
 
     let source_compound = source_compound(source);
@@ -187,7 +192,12 @@ fn score_pair(
         score += shared_parts.len().min(3) * 22;
         reasons.push(format!(
             "source/test package overlap `{}`",
-            shared_parts.iter().take(3).cloned().collect::<Vec<_>>().join("`, `")
+            shared_parts
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("`, `")
         ));
     }
 
@@ -196,7 +206,12 @@ fn score_pair(
         score += near_parts.len().min(2) * 30;
         reasons.push(format!(
             "source/test package-prefix overlap `{}`",
-            near_parts.iter().take(2).cloned().collect::<Vec<_>>().join("`, `")
+            near_parts
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("`, `")
         ));
     }
 
@@ -222,8 +237,7 @@ fn score_pair(
     let transitive_issue_hits: Vec<&String> = issue_tokens
         .iter()
         .filter(|token| {
-            test_lower.contains(token.as_str())
-                || test_parts.iter().any(|part| part == *token)
+            test_lower.contains(token.as_str()) || test_parts.iter().any(|part| part == *token)
         })
         .collect();
     let (issue_hits, issue_hit_score) = if !direct_issue_hits.is_empty() {
@@ -275,7 +289,10 @@ fn score_pair(
         ));
     }
 
-    let trust_tier = if reasons.iter().any(|reason| reason.contains("exact source/test")) {
+    let trust_tier = if reasons
+        .iter()
+        .any(|reason| reason.contains("exact source/test"))
+    {
         "source_exact"
     } else if reasons
         .iter()
@@ -294,9 +311,7 @@ fn score_pair(
 }
 
 fn normalize(path: &str) -> String {
-    path.trim()
-        .trim_start_matches("./")
-        .replace('\\', "/")
+    path.trim().trim_start_matches("./").replace('\\', "/")
 }
 
 fn is_source_path(path: &str) -> bool {
@@ -337,10 +352,22 @@ fn stem(path: &str) -> String {
 
 fn path_parts(path: &str) -> Vec<String> {
     path.split('/')
-        .flat_map(|part| part.trim_end_matches(".py").trim_end_matches(".pyx").split(['_', '-']))
-        .map(|part| part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric()).to_ascii_lowercase())
+        .flat_map(|part| {
+            part.trim_end_matches(".py")
+                .trim_end_matches(".pyx")
+                .split(['_', '-'])
+        })
+        .map(|part| {
+            part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
         .filter(|part| part.len() >= 3)
-        .filter(|part| !matches!(part.as_str(), "src" | "lib" | "test" | "tests" | "python" | "package"))
+        .filter(|part| {
+            !matches!(
+                part.as_str(),
+                "src" | "lib" | "test" | "tests" | "python" | "package"
+            )
+        })
         .collect()
 }
 
@@ -361,7 +388,8 @@ fn near_path_parts(source: &[String], test: &[String]) -> Vec<String> {
             part.len() >= 4
                 && test.iter().any(|candidate| {
                     candidate.len() >= 4
-                        && (candidate.starts_with(part.as_str()) || part.starts_with(candidate.as_str()))
+                        && (candidate.starts_with(part.as_str())
+                            || part.starts_with(candidate.as_str()))
                 })
         })
         .cloned()
@@ -407,9 +435,8 @@ fn issue_tokens(task: &str) -> Vec<String> {
         if raw.len() < 4 || generic_word(raw) {
             continue;
         }
-        let code_like = raw.contains('_')
-            || raw.chars().any(|ch| ch.is_ascii_uppercase())
-            || raw.len() >= 8;
+        let code_like =
+            raw.contains('_') || raw.chars().any(|ch| ch.is_ascii_uppercase()) || raw.len() >= 8;
         if !code_like {
             continue;
         }
@@ -426,9 +453,13 @@ fn issue_literals(task: &str) -> Vec<String> {
     let mut literals = Vec::new();
     for raw in task.split_whitespace() {
         let literal = raw.trim_matches(|ch: char| {
-            matches!(ch, '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']')
+            matches!(
+                ch,
+                '`' | '\'' | '"' | ',' | ';' | ':' | '(' | ')' | '[' | ']'
+            )
         });
-        if literal.len() < 3 || literal.len() > 64 || !literal.chars().any(|ch| ch.is_ascii_digit()) {
+        if literal.len() < 3 || literal.len() > 64 || !literal.chars().any(|ch| ch.is_ascii_digit())
+        {
             continue;
         }
         if !literals.iter().any(|existing| existing == literal) {
@@ -457,12 +488,45 @@ fn compact(value: &str) -> String {
 fn generic_word(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
-        "about" | "after" | "again" | "already" | "another" | "before" | "behavior"
-            | "behaviour" | "because" | "class" | "comment" | "comments" | "content"
-            | "current" | "description" | "different" | "error" | "example" | "expected"
-            | "failure" | "function" | "issue" | "method" | "object" | "objects" | "output"
-            | "possible" | "problem" | "should" | "solution" | "something" | "tests"
-            | "testing" | "using" | "value" | "values" | "version" | "warning" | "warnings"
+        "about"
+            | "after"
+            | "again"
+            | "already"
+            | "another"
+            | "before"
+            | "behavior"
+            | "behaviour"
+            | "because"
+            | "class"
+            | "comment"
+            | "comments"
+            | "content"
+            | "current"
+            | "description"
+            | "different"
+            | "error"
+            | "example"
+            | "expected"
+            | "failure"
+            | "function"
+            | "issue"
+            | "method"
+            | "object"
+            | "objects"
+            | "output"
+            | "possible"
+            | "problem"
+            | "should"
+            | "solution"
+            | "something"
+            | "tests"
+            | "testing"
+            | "using"
+            | "value"
+            | "values"
+            | "version"
+            | "warning"
+            | "warnings"
     )
 }
 
@@ -509,7 +573,10 @@ mod tests {
             "format_value should preserve compact output",
             4,
         );
-        assert_eq!(map.candidates[0].path, "package/parser/tests/test_format_value.py");
+        assert_eq!(
+            map.candidates[0].path,
+            "package/parser/tests/test_format_value.py"
+        );
         assert_eq!(map.candidates[0].trust_tier, "source_exact");
         assert!(map.baseline_observations.is_empty());
     }
@@ -519,8 +586,16 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         fs::create_dir_all(repo.path().join("framework/db/backends/sqlite3")).unwrap();
         fs::create_dir_all(repo.path().join("tests/backends/sqlite")).unwrap();
-        fs::write(repo.path().join("framework/db/backends/sqlite3/base.py"), "").unwrap();
-        fs::write(repo.path().join("tests/backends/sqlite/tests.py"), "class SchemaTests: pass\n").unwrap();
+        fs::write(
+            repo.path().join("framework/db/backends/sqlite3/base.py"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("tests/backends/sqlite/tests.py"),
+            "class SchemaTests: pass\n",
+        )
+        .unwrap();
         let map = build(
             repo.path().to_str().unwrap(),
             &["framework/db/backends/sqlite3/base.py".to_string()],
@@ -595,10 +670,7 @@ mod tests {
             usable_for_candidate_comparison: true,
         });
         let rendered = serde_json::to_value(&map).unwrap();
-        assert_eq!(
-            rendered["baseline_observations"][0]["signal"],
-            "passed"
-        );
+        assert_eq!(rendered["baseline_observations"][0]["signal"], "passed");
     }
 
     #[test]
@@ -617,7 +689,8 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            repo.path().join("lib/mpl_toolkits/axisartist/tests/test_axis_artist.py"),
+            repo.path()
+                .join("lib/mpl_toolkits/axisartist/tests/test_axis_artist.py"),
             "\n".to_string() + &"Axis axis axis axis axis axis axis axis\n".repeat(8),
         )
         .unwrap();

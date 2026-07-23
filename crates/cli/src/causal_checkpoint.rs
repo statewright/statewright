@@ -458,10 +458,13 @@ mod tests {
             fingerprint: stable_hash(patch.as_bytes()),
             patch: patch.as_bytes().to_vec(),
             evidence: CheckpointEvidence {
-                changed_lines: patch.lines().filter(|line| {
-                    (line.starts_with('+') && !line.starts_with("+++"))
-                        || (line.starts_with('-') && !line.starts_with("---"))
-                }).count(),
+                changed_lines: patch
+                    .lines()
+                    .filter(|line| {
+                        (line.starts_with('+') && !line.starts_with("+++"))
+                            || (line.starts_with('-') && !line.starts_with("---"))
+                    })
+                    .count(),
                 ..evidence
             },
         }

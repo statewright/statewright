@@ -42,7 +42,10 @@ pub fn qualify(
     baseline_output: &str,
 ) -> ReproducerQualification {
     let normalized_path = path.trim().replace('\\', "/");
-    if normalized_path.is_empty() || normalized_path.starts_with('/') || normalized_path.contains("../") {
+    if normalized_path.is_empty()
+        || normalized_path.starts_with('/')
+        || normalized_path.contains("../")
+    {
         return ReproducerQualification::Rejected {
             reason: "scratch reproducer path must be repository-relative".to_string(),
         };
@@ -56,17 +59,29 @@ pub fn qualify(
         return ReproducerQualification::Rejected { reason };
     }
     let lowered = source.to_ascii_lowercase();
-    if ["test_patch", "fail_to_pass", "pass_to_pass", "hints_text", "gold patch"]
-        .iter()
-        .any(|marker| lowered.contains(marker))
+    if [
+        "test_patch",
+        "fail_to_pass",
+        "pass_to_pass",
+        "hints_text",
+        "gold patch",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
     {
         return ReproducerQualification::Rejected {
             reason: "scratch reproducer referenced evaluation-only SWE-bench data".to_string(),
         };
     }
-    if ["assert false", "pytest.fail(", "raise assertionerror", "unittest.skip", "pytest.skip("]
-        .iter()
-        .any(|marker| lowered.contains(marker))
+    if [
+        "assert false",
+        "pytest.fail(",
+        "raise assertionerror",
+        "unittest.skip",
+        "pytest.skip(",
+    ]
+    .iter()
+    .any(|marker| lowered.contains(marker))
     {
         return ReproducerQualification::Rejected {
             reason: "scratch reproducer contains an unconditional failure or skip".to_string(),
@@ -74,7 +89,8 @@ pub fn qualify(
     }
     if !contains_assertion_or_expected_exception(&lowered) {
         return ReproducerQualification::Rejected {
-            reason: "scratch reproducer lacks a behavioral assertion or expected exception".to_string(),
+            reason: "scratch reproducer lacks a behavioral assertion or expected exception"
+                .to_string(),
         };
     }
     let anchors: Vec<String> = issue_anchors
@@ -141,11 +157,7 @@ pub fn issue_anchors_from_task(task: &str) -> Vec<String> {
     anchors
 }
 
-pub fn write_scratch(
-    root: &Path,
-    name: &str,
-    source: &str,
-) -> Result<PathBuf, String> {
+pub fn write_scratch(root: &Path, name: &str, source: &str) -> Result<PathBuf, String> {
     let name = validated_scratch_name(name)?;
     if source.trim().is_empty() {
         return Err("scratch reproducer source is empty".to_string());
@@ -191,12 +203,9 @@ fn contains_assertion_or_expected_exception(source: &str) -> bool {
 
 fn source_uses_module_api(source: &str, module: &str) -> bool {
     let marker = format!("{module}.");
-    source.lines().any(|line| {
-        line.split('#')
-            .next()
-            .unwrap_or_default()
-            .contains(&marker)
-    })
+    source
+        .lines()
+        .any(|line| line.split('#').next().unwrap_or_default().contains(&marker))
 }
 
 fn source_imports_module(source: &str, module: &str) -> bool {
@@ -283,7 +292,8 @@ mod tests {
 
     #[test]
     fn rejects_unbound_pytest_api_before_runtime_evidence() {
-        let source = "def test_bug():\n    with pytest.raises(IndexError):\n        identify_format()\n";
+        let source =
+            "def test_bug():\n    with pytest.raises(IndexError):\n        identify_format()\n";
         assert!(source_preflight_error(source).is_some());
         assert!(source_preflight_error(&format!("import pytest\n{source}")).is_none());
         assert!(source_preflight_error(&format!("import pytest as pt\n{source}")).is_some());

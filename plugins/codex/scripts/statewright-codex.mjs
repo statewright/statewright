@@ -61,6 +61,13 @@ export function buildAppServerArgs(transportSessionId) {
   ];
 }
 
+export function validateWorkflowName(workflow) {
+  if (!workflow) throw new Error("--workflow is required.");
+  if (workflow.length > 200 || /[\u0000-\u001f\u007f]/.test(workflow)) {
+    throw new Error("--workflow must be at most 200 printable characters.");
+  }
+}
+
 function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
@@ -130,10 +137,7 @@ async function readPrompt(parts) {
 }
 
 function validate(options, prompt) {
-  if (!options.workflow) throw new Error("--workflow is required.");
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(options.workflow)) {
-    throw new Error("--workflow contains unsupported characters.");
-  }
+  validateWorkflowName(options.workflow);
   if (!prompt) throw new Error("Provide the task after '--' or on stdin.");
   if (!Number.isInteger(options.maxIdleTurns) || options.maxIdleTurns < 0) {
     throw new Error("--max-idle-turns must be a non-negative integer.");

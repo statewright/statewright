@@ -33,7 +33,7 @@ From the Statewright checkout:
 
 ```bash
 plugins/codex/scripts/statewright-codex.mjs \
-  --workflow rugged-sdlc \
+  --workflow "[magent] desktop-android-pulse v1" \
   --cwd "$PWD" \
   -- "Implement the approved plan and continue until the workflow is final."
 ```

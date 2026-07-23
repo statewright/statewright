@@ -231,11 +231,11 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
   }
 
   bootstrapPrompt() {
-    const args = [`name='${this.workflow}'`, `session_id='${this.thread.id}'`];
-    if (this.resumeWorkflow) args.push("resume=true");
-    if (this.projectId) args.push(`project_id='${this.projectId}'`);
+    const args = { name: this.workflow, session_id: this.thread.id };
+    if (this.resumeWorkflow) args.resume = true;
+    if (this.projectId) args.project_id = this.projectId;
     return (
-      `Call statewright_load_workflow(${args.join(", ")}) exactly once. ` +
+      `Call statewright_load_workflow exactly once with these JSON arguments: ${JSON.stringify(args)}. ` +
       "Do not inspect the repository or begin the user's task. Stop immediately after the tool succeeds."
     );
   }

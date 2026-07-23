@@ -183,7 +183,10 @@ test("the adapter cuts turns at state transitions and applies each state route",
     "br_codex_test",
   );
   assert.equal(JSON.stringify(telemetry).includes("Implement the approved plan."), false);
-  assert.match(client.turns[0].input[0].text, /session_id='thread-1'/);
+  assert.match(
+    client.turns[0].input[0].text,
+    /"name":"rugged-sdlc","session_id":"thread-1"/,
+  );
   assert.match(stderr.value, /state=discover model=gpt-5.6-sol effort=max/);
   assert.match(stderr.value, /workflow complete in 'done'/);
 });

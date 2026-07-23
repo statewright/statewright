@@ -190,3 +190,18 @@ test("the adapter cuts turns at state transitions and applies each state route",
   assert.match(stderr.value, /state=discover model=gpt-5.6-sol effort=max/);
   assert.match(stderr.value, /workflow complete in 'done'/);
 });
+
+test("an explicit project scope replaces the legacy thread session argument", () => {
+  const orchestrator = new StatewrightCodexOrchestrator({
+    client: new FakeClient(),
+    workflow: "[magent] desktop-android-pulse v1",
+    prompt: "Continue.",
+    cwd: "/tmp/project",
+    projectId: "magent-project",
+  });
+  orchestrator.thread = { id: "thread-1" };
+
+  const prompt = orchestrator.bootstrapPrompt();
+  assert.match(prompt, /"project_id":"magent-project"/);
+  assert.doesNotMatch(prompt, /"session_id"/);
+});

@@ -7,6 +7,7 @@ import {
   resolveFallbackRoute,
   resolveStateRoute,
 } from "./model-routing.mjs";
+import { StateBudgetLedger } from "./token-budget.mjs";
 
 class NotificationQueue {
   constructor() {
@@ -84,6 +85,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.catalog = [];
     this.route = null;
     this.lastState = null;
+    this.budgetLedger = new StateBudgetLedger();
   }
 
   async run() {
@@ -129,6 +131,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
 
     let state = await this.getState();
     this.lastState = state;
+    await this.observeStateBudget(state);
     let gate = await this.stopAtGate(state);
     if (gate) return gate;
     this.route = await this.selectRoute(state);
@@ -148,6 +151,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
 
       const previousState = this.lastState?.state ?? null;
       this.lastState = state;
+      await this.observeStateBudget(state);
       this.route = await this.selectRoute(state);
 
       if (result.boundaryTool) {
@@ -297,6 +301,28 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     return null;
   }
 
+  async observeStateBudget(state) {
+    if (this.budgetLedger.state === (state?.state ?? null)) return;
+    const snapshot = this.budgetLedger.enterState(state);
+    await this.telemetry("state_budget_started", {
+      thread_id: this.thread.id,
+      state: state?.state ?? null,
+      state_budget: snapshot,
+    });
+  }
+
+  async emitBudgetThresholds(turnId, state) {
+    for (const [threshold, event] of [[90, "context_budget_warning"], [100, "context_budget_exceeded"]]) {
+      if (!this.budgetLedger.thresholdCrossed(state, threshold)) continue;
+      await this.telemetry(event, {
+        thread_id: this.thread.id,
+        turn_id: turnId,
+        state: state?.state ?? null,
+        state_budget: this.budgetLedger.snapshot(state),
+      });
+    }
+  }
+
   async runTurn({ prompt, route, purpose, suppressOutput = false }) {
     const response = await this.client.request("turn/start", {
       threadId: this.thread.id,
@@ -341,16 +367,30 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
           );
         }
       } else if (message.method === "thread/tokenUsage/updated") {
+        const observed = this.budgetLedger.observeTokenUsage(
+          turnId,
+          params.tokenUsage,
+          this.lastState,
+        );
         await this.telemetry("token_usage", {
           thread_id: this.thread.id,
           turn_id: turnId,
           state: this.lastState?.state ?? null,
-          token_usage: params.tokenUsage,
+          token_usage: observed.usage,
+          token_usage_delta: observed.delta,
+          state_budget: observed.ledger,
         });
-      } else if (
-        message.method === "item/completed" &&
-        isStateBoundaryItem(params.item, this.serverName)
-      ) {
+      } else if (message.method === "item/completed") {
+        const observed = this.budgetLedger.observeToolItem(params.item, this.lastState);
+        await this.telemetry("tool_output_observed", {
+          thread_id: this.thread.id,
+          turn_id: turnId,
+          state: this.lastState?.state ?? null,
+          tool: observed.tool,
+          state_budget: observed.ledger,
+        });
+        await this.emitBudgetThresholds(turnId, this.lastState);
+        if (!isStateBoundaryItem(params.item, this.serverName)) continue;
         boundaryTool = normalizeToolName(params.item.tool);
         await this.telemetry("state_boundary", {
           thread_id: this.thread.id,

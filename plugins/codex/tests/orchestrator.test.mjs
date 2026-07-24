@@ -111,6 +111,14 @@ class FakeClient extends EventEmitter {
       this.currentTurnId = turnId;
       this.turns.push(params);
       queueMicrotask(() => {
+        this.emit("notification", {
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: "thread-1",
+            turnId,
+            tokenUsage: { totalTokens: number * 10, inputTokens: number * 8, outputTokens: number * 2 },
+          },
+        });
         const tool = number === 1 ? "statewright_load_workflow" : "statewright_transition";
         this.stateIndex += 1;
         this.emit("notification", {
@@ -178,6 +186,10 @@ test("the adapter cuts turns at state transitions and applies each state route",
     ],
   );
   assert.equal(telemetry.filter((entry) => entry.event === "state_boundary").length, 3);
+  assert.equal(telemetry.filter((entry) => entry.event === "state_budget_started").length, 2);
+  const usage = telemetry.filter((entry) => entry.event === "token_usage");
+  assert.equal(usage.length, 3);
+  assert.equal(usage.at(-1).state_budget.session_token_usage.total_tokens, 60);
   assert.equal(
     telemetry.find((entry) => entry.event === "session_started")?.mcp_session_id,
     "br_codex_test",

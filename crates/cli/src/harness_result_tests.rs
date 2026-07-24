@@ -1,5 +1,5 @@
 use super::{
-    auto_test_failure_signature, baseline_prove_repair_scope, causal_post_edit_can_audit,
+    auto_test_failure_signature, baseline_prove_repair_scope, causal_candidate_gate_passed,
     compact_test_telemetry, enforce_causal_serial_env, extract_paths_from_malformed,
     inspect_class_locations,
     is_stagnation_diagnostic_tool, malformed_response_path_diagnostics, parse_response,
@@ -44,39 +44,51 @@ fn source_scope_validation_covers_near_tied_candidates_only() {
 }
 
 #[test]
-fn causal_audit_requires_task_efficacy_not_regression_safety_alone() {
+fn causal_candidate_gate_requires_task_efficacy_not_regression_safety_alone() {
     use super::causal_validation::CausalScopeSignal;
     use super::validation_oracle::TestDelta;
 
-    assert!(causal_post_edit_can_audit(
+    assert!(causal_candidate_gate_passed(
         true,
         Some(TestDelta::Fixed),
         CausalScopeSignal::RegressionPass,
+        false,
     ));
-    assert!(!causal_post_edit_can_audit(
+    assert!(!causal_candidate_gate_passed(
         true,
         Some(TestDelta::UnchangedFail),
         CausalScopeSignal::RegressionPass,
+        false,
     ));
-    assert!(!causal_post_edit_can_audit(
+    assert!(!causal_candidate_gate_passed(
         true,
         None,
         CausalScopeSignal::RegressionPass,
+        false,
     ));
-    assert!(!causal_post_edit_can_audit(
+    assert!(!causal_candidate_gate_passed(
         false,
         None,
         CausalScopeSignal::RegressionPass,
+        false,
     ));
-    assert!(causal_post_edit_can_audit(
+    assert!(causal_candidate_gate_passed(
         false,
         None,
         CausalScopeSignal::TaskScopeImproved,
+        false,
     ));
-    assert!(!causal_post_edit_can_audit(
+    assert!(!causal_candidate_gate_passed(
         false,
         None,
         CausalScopeSignal::RegressionFailure,
+        false,
+    ));
+    assert!(!causal_candidate_gate_passed(
+        true,
+        Some(TestDelta::Fixed),
+        CausalScopeSignal::RegressionPass,
+        true,
     ));
 }
 

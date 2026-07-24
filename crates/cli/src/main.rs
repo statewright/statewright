@@ -2775,13 +2775,49 @@ fn record_causal_structural_checkpoint(
     }
 }
 
-fn causal_post_edit_can_audit(
+fn causal_candidate_gate_passed(
     has_qualified_reproducer: bool,
     reproducer_delta: Option<validation_oracle::TestDelta>,
     scope_signal: causal_validation::CausalScopeSignal,
+    candidate_blocking: bool,
 ) -> bool {
-    causal_control::evidence_tier(has_qualified_reproducer, reproducer_delta, scope_signal)
-        == causal_control::EvidenceTier::Efficacy
+    causal_control::first_clean_candidate_gate(
+        has_qualified_reproducer,
+        reproducer_delta,
+        scope_signal,
+        candidate_blocking,
+    )
+}
+
+fn record_first_clean_candidate_acceptance(
+    controller: &mut Option<causal_repair::CausalRepairController>,
+    workdir: &str,
+    scope_desc: &str,
+    scope_signal: causal_validation::CausalScopeSignal,
+    reproducer_delta: Option<validation_oracle::TestDelta>,
+) -> String {
+    let fingerprint = tools::patch_fingerprint(workdir);
+    record_causal_event(
+        controller,
+        causal_repair::CausalEvent::Freeze {
+            reason: format!("first benchmark-clean candidate accepted fingerprint={fingerprint}"),
+        },
+    );
+    append_jsonl_artifact(
+        "candidate-acceptance.jsonl",
+        &json!({
+            "schema_version": 1,
+            "artifact": "statewright.candidate_acceptance",
+            "policy": "first_benchmark_clean_pass",
+            "fingerprint": fingerprint,
+            "scope": scope_desc,
+            "scope_signal": scope_signal.as_str(),
+            "reproducer_delta": reproducer_delta.map(|delta| delta.as_str()),
+            "changed_files": tools::all_diff_stats(workdir),
+            "scoring_note": "internal benchmark-clean acceptance only; the official SWE-bench verifier remains the sole benchmark outcome authority",
+        }),
+    );
+    fingerprint
 }
 
 /// The causal controller keeps repair serial, but it must not discard the
@@ -6582,7 +6618,7 @@ async fn main() {
     if causal_one_pass {
         enforce_causal_serial_env();
         println!(
-            "[CAUSAL_REPAIR] serial controller enabled; fanout, candidate bank, and patch tournament disabled"
+            "[CAUSAL_REPAIR] serial controller enabled; parallel fanout/scout disabled, serial hypotheses and checkpoint retention preserved"
         );
     }
     let causal_artifact_dir = artifact_dir_from_env();
@@ -7444,6 +7480,7 @@ async fn main() {
     };
     let mut causal_serial_policy = causal_one_pass
         .then(|| causal_control::SerialRepairPolicy::new(causal_safety_edit_budget()));
+    let mut accepted_clean_candidate_fingerprint: Option<String> = None;
     let mut consecutive_parse_failures: u32 = 0;
     let mut consecutive_llm_transport_failures: u32 = 0;
 
@@ -7471,7 +7508,7 @@ async fn main() {
     let parse_fail_reset_threshold = attempt_packet_parse_fail_threshold();
     let no_progress_reset_threshold = attempt_packet_no_progress_threshold();
     let mut candidate_bank = candidate_bank::CandidateBank::from_env();
-    if candidate_bank.is_enabled() {
+    if candidate_bank.is_enabled() && !causal_one_pass {
         println!("  [CANDIDATE-BANK] enabled");
     }
     if attempt_packet_reset {
@@ -12495,19 +12532,42 @@ async fn main() {
                         let reproducer_feedback = causal_reproducer_feedback_after_edit
                             .as_deref()
                             .unwrap_or("No qualified task reproducer telemetry was available.");
-                        let (target, trigger, rationale, model_message) = match route {
-                            causal_control::SerialRoute::AuditEfficacy => (
-                                trusted_pass_state_name(&definition),
-                                "CAUSAL_EFFICACY_AUDIT",
-                                "Task-efficacy evidence is ready for issue audit",
+                        if route == causal_control::SerialRoute::AcceptFirstClean {
+                            let fingerprint = record_first_clean_candidate_acceptance(
+                                &mut causal_repair_controller,
+                                &args.workdir,
+                                &repair.scope_desc,
+                                assessment.signal,
+                                causal_reproducer_delta_after_edit,
+                            );
+                            println!(
+                                "  [CAUSAL ACCEPT] first benchmark-clean candidate fingerprint={} scope_signal={} reproducer_delta={}",
+                                fingerprint,
+                                assessment.signal.as_str(),
+                                reproducer_summary
+                            );
+                            emit!(
+                                TuiEvent::Transition {
+                                    from: current_state.clone(),
+                                    to: "completed".into(),
+                                    trigger: Some("CAUSAL_FIRST_CLEAN_ACCEPT".into()),
+                                    rationale: Some(
+                                        "First candidate passed the benchmark-clean internal validation gate"
+                                            .into()
+                                    )
+                                },
                                 format!(
-                                    "Post-edit validation produced task-efficacy evidence. Qualified reproducer delta: {}. Source-derived signal: {}. Audit the minimal implementation against the issue before canonical evaluation; this internal evidence is not itself a SWE-bench solve.\n\n{}\n\n{}",
-                                    reproducer_summary,
-                                    assessment.signal.as_str(),
-                                    reproducer_feedback,
-                                    repair.feedback
-                                ),
-                            ),
+                                    "  [TRANSITION] {} -> completed (first clean candidate accepted)",
+                                    current_state
+                                )
+                            );
+                            accepted_clean_candidate_fingerprint = Some(fingerprint);
+                            break 'agent_loop;
+                        }
+                        let (target, trigger, rationale, model_message) = match route {
+                            causal_control::SerialRoute::AcceptFirstClean => {
+                                unreachable!("accepted clean candidates terminate above")
+                            }
                             causal_control::SerialRoute::AuditChangedFailure => (
                                 trusted_pass_state_name(&definition),
                                 "CAUSAL_CHANGED_FAILURE_AUDIT",
@@ -13232,12 +13292,47 @@ async fn main() {
                     } else {
                         "completed".into()
                     };
-                    let (target, trigger, rationale, model_message) = if all_pass
-                        && causal_post_edit_can_audit(
+                    if all_pass
+                        && causal_candidate_gate_passed(
                             causal_has_qualified_reproducer,
                             causal_reproducer_delta_after_edit,
                             assessment.signal,
-                        ) {
+                            assessment.validation.decision.candidate_blocking,
+                        )
+                    {
+                        let fingerprint = record_first_clean_candidate_acceptance(
+                            &mut causal_repair_controller,
+                            &args.workdir,
+                            &test_scope_desc,
+                            assessment.signal,
+                            causal_reproducer_delta_after_edit,
+                        );
+                        println!(
+                            "  [CAUSAL ACCEPT] first benchmark-clean candidate fingerprint={} scope_signal={}",
+                            fingerprint,
+                            assessment.signal.as_str()
+                        );
+                        emit!(
+                            TuiEvent::Transition {
+                                from: current_state.clone(),
+                                to: "completed".into(),
+                                trigger: Some("CAUSAL_FIRST_CLEAN_ACCEPT".into()),
+                                rationale: Some(
+                                    "First candidate passed the benchmark-clean internal validation gate"
+                                        .into()
+                                )
+                            },
+                            format!(
+                                "  [TRANSITION] {} -> completed (first clean candidate accepted)",
+                                current_state
+                            )
+                        );
+                        accepted_clean_candidate_fingerprint = Some(fingerprint);
+                        break 'agent_loop;
+                    }
+                    let (target, trigger, rationale, model_message) = if all_pass
+                        && assessment.signal.is_pass_like()
+                    {
                         let evidence = match assessment.signal {
                             causal_validation::CausalScopeSignal::RegressionPass => {
                                 "A baseline-green public regression scope remains green"
@@ -14426,7 +14521,19 @@ Localization context:
         }
     }
     if causal_one_pass {
-        if let Some(checkpoints) = causal_checkpoint_store.as_mut() {
+        if let Some(accepted) = accepted_clean_candidate_fingerprint.as_deref() {
+            let current = tools::patch_fingerprint(&args.workdir);
+            if current == accepted {
+                println!(
+                    "[CAUSAL ACCEPT] preserved first clean candidate fingerprint={accepted}"
+                );
+            } else {
+                eprintln!(
+                    "[CAUSAL ACCEPT] invariant violation: accepted fingerprint={} current={}; no alternate candidate will be substituted",
+                    accepted, current
+                );
+            }
+        } else if let Some(checkpoints) = causal_checkpoint_store.as_mut() {
             match checkpoints.restore_best_before_final(&args.workdir) {
                 causal_checkpoint::CheckpointRestore::Restored { fingerprint } => {
                     println!("[CAUSAL_CHECKPOINT] restored fingerprint={fingerprint}");
@@ -14451,12 +14558,14 @@ Localization context:
                 }
             }
         }
-        record_causal_event(
-            &mut causal_repair_controller,
-            causal_repair::CausalEvent::Freeze {
-                reason: "repair trajectory ended; current diff is submitted to the canonical evaluator without internal promotion".to_string(),
-            },
-        );
+        if accepted_clean_candidate_fingerprint.is_none() {
+            record_causal_event(
+                &mut causal_repair_controller,
+                causal_repair::CausalEvent::Freeze {
+                    reason: "repair trajectory ended; current diff is submitted to the canonical evaluator without internal promotion".to_string(),
+                },
+            );
+        }
         let git_diff_empty = std::process::Command::new("git")
             .args(["diff", "--quiet"])
             .current_dir(&args.workdir)
@@ -14469,9 +14578,15 @@ Localization context:
                 "[INTERNAL_VALIDATION] no candidate diff; canonical post-solve evaluator will record the unresolved outcome"
             );
         } else {
-            println!(
-                "[INTERNAL_VALIDATION] causal repair evidence is complete; canonical post-solve evaluator is the sole outcome authority"
-            );
+            if accepted_clean_candidate_fingerprint.is_some() {
+                println!(
+                    "[INTERNAL_VALIDATION] first benchmark-clean candidate accepted; canonical post-solve evaluator is the sole outcome authority"
+                );
+            } else {
+                println!(
+                    "[INTERNAL_VALIDATION] causal repair evidence is complete; canonical post-solve evaluator is the sole outcome authority"
+                );
+            }
         }
         return;
     }

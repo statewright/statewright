@@ -22,7 +22,7 @@ pub enum EvidenceTier {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SerialRoute {
-    AuditEfficacy,
+    AcceptFirstClean,
     AuditChangedFailure,
     AcquireTaskEvidence,
     AuditRegressionCandidate,
@@ -65,9 +65,14 @@ impl SerialRepairPolicy {
         has_checkpoint: bool,
     ) -> SerialRoute {
         let tier = evidence_tier(has_qualified_reproducer, reproducer_delta, scope_signal);
-        if tier == EvidenceTier::Efficacy && !candidate_blocking {
+        if first_clean_candidate_gate(
+            has_qualified_reproducer,
+            reproducer_delta,
+            scope_signal,
+            candidate_blocking,
+        ) {
             self.clear_failure();
-            return SerialRoute::AuditEfficacy;
+            return SerialRoute::AcceptFirstClean;
         }
 
         if reproducer_delta == Some(TestDelta::ChangedFail)
@@ -205,6 +210,17 @@ pub fn evidence_tier(
     }
 }
 
+pub fn first_clean_candidate_gate(
+    has_qualified_reproducer: bool,
+    reproducer_delta: Option<TestDelta>,
+    scope_signal: CausalScopeSignal,
+    candidate_blocking: bool,
+) -> bool {
+    !candidate_blocking
+        && evidence_tier(has_qualified_reproducer, reproducer_delta, scope_signal)
+            == EvidenceTier::Efficacy
+}
+
 pub fn patch_shape_violation(
     changed: &[(String, usize, usize)],
     max_diff_lines: usize,
@@ -256,6 +272,23 @@ mod tests {
                 CausalScopeSignal::RegressionPass,
             ),
             EvidenceTier::Efficacy
+        );
+    }
+
+    #[test]
+    fn first_clean_candidate_terminates_without_an_audit_turn() {
+        let mut policy = SerialRepairPolicy::new(6);
+        policy.record_valid_edit();
+        assert_eq!(
+            policy.decide(
+                true,
+                Some(TestDelta::Fixed),
+                CausalScopeSignal::RegressionPass,
+                false,
+                "scope=regression; reproducer=fixed",
+                true,
+            ),
+            SerialRoute::AcceptFirstClean
         );
     }
 

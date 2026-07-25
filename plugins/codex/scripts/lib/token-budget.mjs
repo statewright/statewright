@@ -25,17 +25,30 @@ function firstNumber(source, keys) {
   return 0;
 }
 
+// Codex app-server reports thread usage as { last, total }. The cumulative
+// total is the stable snapshot used for per-turn deltas; flat objects remain
+// supported for other adapters and unit tests.
+function usageSnapshot(usage = {}) {
+  return usage?.total && typeof usage.total === "object" ? usage.total : usage;
+}
+
+function isCumulativeThreadUsage(usage = {}) {
+  return Boolean(usage?.total && typeof usage.total === "object");
+}
+
 export function hasMeasuredTokenUsage(usage = {}) {
+  const snapshot = usageSnapshot(usage);
   return TOKEN_FIELDS.some((field) =>
     TOKEN_ALIASES[field].some((key) =>
-      typeof usage?.[key] === "number" && Number.isFinite(usage[key]) && usage[key] > 0,
+      typeof snapshot?.[key] === "number" && Number.isFinite(snapshot[key]) && snapshot[key] > 0,
     ),
   );
 }
 
 export function normalizeTokenUsage(usage = {}) {
+  const snapshot = usageSnapshot(usage);
   const normalized = Object.fromEntries(
-    TOKEN_FIELDS.map((field) => [field, firstNumber(usage, TOKEN_ALIASES[field])]),
+    TOKEN_FIELDS.map((field) => [field, firstNumber(snapshot, TOKEN_ALIASES[field])]),
   );
   if (normalized.total_tokens === 0) {
     normalized.total_tokens = normalized.input_tokens + normalized.output_tokens;
@@ -93,6 +106,7 @@ export class StateBudgetLedger {
     this.toolResultBytes = 0;
     this.toolResultCount = 0;
     this.estimatedToolOutputTokens = 0;
+    this.lastProviderUsage = null;
     this.lastUsageByTurn = new Map();
     this.emittedThresholds = new Set();
     this.hasProviderUsage = false;
@@ -123,8 +137,11 @@ export class StateBudgetLedger {
       };
     }
     const current = normalizeTokenUsage(usage);
-    const delta = tokenUsageDelta(this.lastUsageByTurn.get(turnId), current);
-    this.lastUsageByTurn.set(turnId, current);
+    const cumulative = isCumulativeThreadUsage(usage);
+    const previous = cumulative ? this.lastProviderUsage : this.lastUsageByTurn.get(turnId);
+    const delta = tokenUsageDelta(previous, current);
+    if (cumulative) this.lastProviderUsage = current;
+    else this.lastUsageByTurn.set(turnId, current);
     sumUsage(this.session, delta);
     sumUsage(this.stateUsage, delta);
     this.hasProviderUsage = true;

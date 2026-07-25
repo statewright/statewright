@@ -20,6 +20,41 @@ test("zero-only runtime usage is unavailable rather than exact", () => {
   assert.equal(observed.ledger.token_usage, null);
 });
 
+test("Codex thread usage reads the cumulative total snapshot", () => {
+  const ledger = new StateBudgetLedger();
+  const state = { state: "analyze" };
+  ledger.enterState(state);
+
+  const observed = ledger.observeTokenUsage("turn-1", {
+    last: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+    total: { inputTokens: 30, cachedInputTokens: 4, outputTokens: 20, reasoningOutputTokens: 6, totalTokens: 50 },
+  }, state);
+
+  assert.equal(observed.available, true);
+  assert.deepEqual(observed.usage, {
+    input_tokens: 30,
+    cached_input_tokens: 4,
+    output_tokens: 20,
+    reasoning_output_tokens: 6,
+    total_tokens: 50,
+  });
+});
+
+test("cumulative Codex thread usage does not double count across turns or states", () => {
+  const ledger = new StateBudgetLedger();
+  const analyze = { state: "analyze" };
+  const implement = { state: "implement" };
+  ledger.enterState(analyze);
+  ledger.observeTokenUsage("turn-1", { total: { inputTokens: 10, totalTokens: 10 } }, analyze);
+  ledger.observeTokenUsage("turn-2", { total: { inputTokens: 15, outputTokens: 5, totalTokens: 20 } }, analyze);
+  assert.equal(ledger.snapshot(analyze).token_usage.total_tokens, 20);
+
+  ledger.enterState(implement);
+  ledger.observeTokenUsage("turn-3", { total: { inputTokens: 20, outputTokens: 10, totalTokens: 30 } }, implement);
+  assert.equal(ledger.snapshot(implement).token_usage.total_tokens, 10);
+  assert.equal(ledger.snapshot(implement).session_token_usage.total_tokens, 30);
+});
+
 test("token usage is accumulated from snapshots without double counting", () => {
   assert.deepEqual(
     tokenUsageDelta({ totalTokens: 10, inputTokens: 8 }, { totalTokens: 15, inputTokens: 12, outputTokens: 3 }),

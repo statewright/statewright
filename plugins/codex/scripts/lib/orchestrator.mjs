@@ -430,12 +430,12 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
           provider: "codex",
           model: route.model ?? null,
           effort: route.effort ?? null,
-          precision: "exact",
+          precision: observed.available ? "exact" : "unavailable",
           token_usage: observed.usage,
           token_usage_delta: observed.delta,
           state_budget: observed.ledger,
         });
-        if (observed.ledger.state) {
+        if (observed.available && observed.ledger.state) {
           await this.reportRuntimeUsage("usage", {
             state: observed.ledger.state,
             state_epoch: observed.ledger.state_epoch,

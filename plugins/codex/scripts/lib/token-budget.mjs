@@ -25,6 +25,14 @@ function firstNumber(source, keys) {
   return 0;
 }
 
+export function hasMeasuredTokenUsage(usage = {}) {
+  return TOKEN_FIELDS.some((field) =>
+    TOKEN_ALIASES[field].some((key) =>
+      typeof usage?.[key] === "number" && Number.isFinite(usage[key]) && usage[key] > 0,
+    ),
+  );
+}
+
 export function normalizeTokenUsage(usage = {}) {
   const normalized = Object.fromEntries(
     TOKEN_FIELDS.map((field) => [field, firstNumber(usage, TOKEN_ALIASES[field])]),
@@ -87,6 +95,7 @@ export class StateBudgetLedger {
     this.estimatedToolOutputTokens = 0;
     this.lastUsageByTurn = new Map();
     this.emittedThresholds = new Set();
+    this.hasProviderUsage = false;
   }
 
   enterState(state) {
@@ -94,6 +103,7 @@ export class StateBudgetLedger {
     if (next === this.state) return this.snapshot();
     this.state = next;
     this.stateEpoch += 1;
+    this.hasProviderUsage = false;
     this.stateUsage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
     this.toolResultBytes = 0;
     this.toolResultCount = 0;
@@ -104,12 +114,21 @@ export class StateBudgetLedger {
   }
 
   observeTokenUsage(turnId, usage, state) {
+    if (!hasMeasuredTokenUsage(usage)) {
+      return {
+        available: false,
+        usage: null,
+        delta: null,
+        ledger: this.snapshot(state),
+      };
+    }
     const current = normalizeTokenUsage(usage);
     const delta = tokenUsageDelta(this.lastUsageByTurn.get(turnId), current);
     this.lastUsageByTurn.set(turnId, current);
     sumUsage(this.session, delta);
     sumUsage(this.stateUsage, delta);
-    return { usage: current, delta, ledger: this.snapshot(state) };
+    this.hasProviderUsage = true;
+    return { available: true, usage: current, delta, ledger: this.snapshot(state) };
   }
 
   observeToolItem(item, state) {
@@ -132,15 +151,20 @@ export class StateBudgetLedger {
       tool_result_count: this.toolResultCount,
       estimated_tool_output_tokens: this.estimatedToolOutputTokens,
       context_budget_percent: pct,
-      token_usage: { ...this.stateUsage },
-      session_token_usage: { ...this.session },
+      precision: this.hasProviderUsage ? "exact" : "unavailable",
+      token_usage: this.hasProviderUsage ? { ...this.stateUsage } : null,
+      session_token_usage: this.hasProviderUsage ? { ...this.session } : null,
       token_attribution: {
-        provider_total_tokens: totalTokens,
+        provider_total_tokens: this.hasProviderUsage ? totalTokens : null,
         estimated_tool_output_tokens: this.estimatedToolOutputTokens,
         // Residual includes prompts, model output, and any provider tokens that
         // cannot be causally assigned to one completed tool result.
-        non_tool_tokens: Math.max(0, totalTokens - this.estimatedToolOutputTokens),
-        reported_reasoning_output_tokens: this.stateUsage.reasoning_output_tokens,
+        non_tool_tokens: this.hasProviderUsage
+          ? Math.max(0, totalTokens - this.estimatedToolOutputTokens)
+          : null,
+        reported_reasoning_output_tokens: this.hasProviderUsage
+          ? this.stateUsage.reasoning_output_tokens
+          : null,
       },
     };
   }

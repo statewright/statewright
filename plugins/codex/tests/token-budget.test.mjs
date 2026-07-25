@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { StateBudgetLedger, tokenUsageDelta, toolItemSummary } from "../scripts/lib/token-budget.mjs";
+import {
+  StateBudgetLedger,
+  hasMeasuredTokenUsage,
+  tokenUsageDelta,
+  toolItemSummary,
+} from "../scripts/lib/token-budget.mjs";
+
+test("zero-only runtime usage is unavailable rather than exact", () => {
+  const ledger = new StateBudgetLedger();
+  const state = { state: "analyze", context_budget_bytes: 100 };
+  ledger.enterState(state);
+
+  assert.equal(hasMeasuredTokenUsage({ totalTokens: 0 }), false);
+  const observed = ledger.observeTokenUsage("turn-1", { totalTokens: 0 }, state);
+  assert.equal(observed.available, false);
+  assert.equal(observed.usage, null);
+  assert.equal(observed.ledger.precision, "unavailable");
+  assert.equal(observed.ledger.token_usage, null);
+});
 
 test("token usage is accumulated from snapshots without double counting", () => {
   assert.deepEqual(

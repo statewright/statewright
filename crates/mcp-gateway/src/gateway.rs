@@ -9,6 +9,7 @@ use crate::interceptors::{self, PreCallDecision};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolInfo};
 use crate::session::SessionManager;
 use crate::upstream::UpstreamManager;
+use crate::usage::{RuntimeToolReport, RuntimeUsageReport, UsageLedger};
 
 /// Core MCP gateway that dispatches messages.
 pub struct Gateway {
@@ -27,6 +28,10 @@ pub struct Gateway {
     current_run_id: Option<String>,
     /// Project ID (cwd hash from client, scopes runs per-project).
     project_id: Option<String>,
+    /// Per-state, provider-neutral token and tool accounting.
+    usage: UsageLedger,
+    /// Required for adapter-only reports. Never exposed in tools/list.
+    usage_control_token: Option<String>,
 }
 
 impl Gateway {
@@ -50,6 +55,8 @@ impl Gateway {
             db_pool,
             current_run_id: None,
             project_id: None,
+            usage: UsageLedger::default(),
+            usage_control_token: std::env::var("STATEWRIGHT_USAGE_CONTROL_TOKEN").ok(),
         }
     }
 
@@ -113,7 +120,18 @@ impl Gateway {
     }
 
     /// Fire-and-forget: append a transition to the current run (by run_id).
-    fn record_run_transition(&self, from: &str, to: &str, event: &str, data: &serde_json::Value) {
+    fn record_run_transition(&mut self, from: &str, to: &str, event: &str, data: &serde_json::Value) {
+        let decision_summary = data
+            .get("decision_summary")
+            .or_else(|| data.get("rationale"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.chars().take(2_000).collect::<String>());
+        let context_budget = self
+            .session_manager
+            .get(&self.session_id)
+            .and_then(|session| session.definition.states.get(to).and_then(|state| state.context_budget_bytes));
+        self.usage.transition(from, to, event, decision_summary, context_budget);
         let run_id = match &self.current_run_id {
             Some(id) => id.clone(),
             None => return,
@@ -140,6 +158,27 @@ impl Gateway {
         }
         #[cfg(not(feature = "metering"))]
         let _ = (from, to, event, data, run_id);
+    }
+
+    fn usage_control_allowed(&self, arguments: &serde_json::Value) -> bool {
+        let Some(expected) = self.usage_control_token.as_deref() else {
+            return false;
+        };
+        arguments
+            .get("control_token")
+            .and_then(|value| value.as_str())
+            .is_some_and(|actual| actual == expected)
+    }
+
+    fn usage_summary_response(&self) -> JsonRpcResponse {
+        JsonRpcResponse::success(
+            None,
+            serde_json::to_value(crate::protocol::ToolCallResult::text(
+                serde_json::to_string_pretty(&self.usage.summaries())
+                    .unwrap_or_else(|_| "[]".into()),
+            ))
+            .unwrap_or(json!({})),
+        )
     }
 
     /// Fire-and-forget: mark the current run as completed/stopped/failed.
@@ -384,6 +423,11 @@ impl Gateway {
                             self.session_manager
                                 .add_context_bytes(&self.session_id, update.result_bytes);
                         }
+                        self.usage.note_gateway_tool(
+                            &params.name,
+                            update.result_bytes,
+                            result.is_error,
+                        );
 
                         // Check interrupt triggers on file edits (History State pattern)
                         if let Some(ref path) = edited_path {
@@ -992,6 +1036,52 @@ impl Gateway {
                             );
                         }
 
+                        // Named child workflows are real subflows: suspend this parent
+                        // session and make the child definition active until it reaches a
+                        // final state. This is intentionally before the normal path.
+                        if let Some(invoke) = result.get("invoke") {
+                            let machine = invoke["machine"].as_str().unwrap_or("");
+                            let child_definition = self.workflows.get(machine).cloned().or_else(|| {
+                                if machine == "adr-record" {
+                                    serde_json::from_str(include_str!("../../../plugins/codex/workflows/adr-record.json")).ok()
+                                } else {
+                                    None
+                                }
+                            });
+                            let Some(child_definition) = child_definition else {
+                                return JsonRpcResponse::success(
+                                    id,
+                                    serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                        format!("Unknown subflow '{}'. Register it before invoking it.", machine)
+                                    )).unwrap(),
+                                );
+                            };
+                            let on_complete = invoke["on_complete"].as_str().unwrap_or("failed").to_string();
+                            let on_fail = invoke["on_fail"].as_str().map(|value| value.to_string());
+                            let input = invoke.get("input").cloned().unwrap_or(json!({}));
+                            self.session_manager.start_subflow(
+                                &self.session_id,
+                                machine.to_string(),
+                                child_definition,
+                                input,
+                                on_complete.clone(),
+                                on_fail,
+                            );
+                            self.record_step();
+                            self.record_run_transition(&prev_state, &format!("SUBFLOW:{}", machine), event, &event_data);
+                            let response = json!({
+                                "subflow_started": machine,
+                                "parent_state": prev_state,
+                                "on_complete": on_complete,
+                            });
+                            return JsonRpcResponse::success(
+                                id,
+                                serde_json::to_value(crate::protocol::ToolCallResult::text(
+                                    serde_json::to_string_pretty(&response).unwrap()
+                                )).unwrap(),
+                            );
+                        }
+
                         // Normal path: apply the transition
                         let mut final_context = session.context.clone();
                         if event_data.is_object()
@@ -1009,7 +1099,23 @@ impl Gateway {
                         );
                         self.record_step();
                         self.record_run_transition(&prev_state, &new_state, event, &event_data);
-                        if session.is_final() {
+                        if session.is_final() && session.subflow.is_some() {
+                            let succeeded = new_state != "failed";
+                            if let Some((child_final, parent_target)) = self.session_manager.complete_subflow(&self.session_id, succeeded) {
+                                self.record_run_transition(&child_final, &parent_target, "SUBFLOW_COMPLETE", &event_data);
+                                let response = json!({
+                                    "subflow_completed": true,
+                                    "child_final": child_final,
+                                    "resumed_parent_state": parent_target,
+                                });
+                                return JsonRpcResponse::success(
+                                    id,
+                                    serde_json::to_value(crate::protocol::ToolCallResult::text(
+                                        serde_json::to_string_pretty(&response).unwrap()
+                                    )).unwrap(),
+                                );
+                            }
+                        } else if session.is_final() {
                             self.record_run_end(&new_state, "completed");
                         }
                         JsonRpcResponse::success(
@@ -1206,6 +1312,43 @@ impl Gateway {
                     .unwrap(),
                 )
             }
+            "statewright_report_runtime_usage" => {
+                if !self.usage_control_allowed(&arguments) {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "Runtime usage reporting is controller-only.",
+                        ))
+                        .unwrap(),
+                    );
+                }
+                let kind = arguments.get("kind").and_then(|value| value.as_str()).unwrap_or("");
+                let report = arguments.get("report").cloned().unwrap_or(json!({}));
+                let result = match kind {
+                    "usage" => serde_json::from_value::<RuntimeUsageReport>(report)
+                        .map_err(|error| error.to_string())
+                        .and_then(|value| self.usage.report_usage(value)),
+                    "tool" => serde_json::from_value::<RuntimeToolReport>(report)
+                        .map_err(|error| error.to_string())
+                        .and_then(|value| self.usage.report_tool(value)),
+                    _ => Err("Unknown runtime usage report kind".to_string()),
+                };
+                match result {
+                    Ok(()) => JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::text("ok")).unwrap(),
+                    ),
+                    Err(error) => JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(error)).unwrap(),
+                    ),
+                }
+            }
+            "statewright_get_usage" => {
+                let mut response = self.usage_summary_response();
+                response.id = id;
+                response
+            }
             "statewright_list_workflows" => {
                 let workflow_names: Vec<&str> = self.workflows.keys().map(|k| k.as_str()).collect();
                 let result = json!({
@@ -1342,6 +1485,10 @@ impl Gateway {
                     .as_ref()
                     .and_then(|m| m.capture_output)
                     .unwrap_or(false);
+                let agent_decision_record = definition.meta.as_ref()
+                    .and_then(|m| m.extra.get("agent-decision-record"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
 
                 // Resume from paused run or start fresh
                 let (run_id, resumed_state) = if resume {
@@ -1411,7 +1558,42 @@ impl Gateway {
                     (rid, None)
                 };
 
-                let current_state = resumed_state.as_deref().unwrap_or(&definition.initial);
+                // The opt-in ADR feature starts a real child workflow before the
+                // parent enters its initial state. Resume preserves its saved state.
+                let adr_path = if agent_decision_record && resumed_state.is_none() {
+                    let run_suffix = run_id.as_deref().unwrap_or("local");
+                    let path = format!(".statewright/adr/{}-{}.md", workflow_name, run_suffix);
+                    let child: MachineDefinition = serde_json::from_str(
+                        include_str!("../../../plugins/codex/workflows/adr-record.json")
+                    ).expect("built-in adr-record workflow is valid JSON");
+                    self.session_manager.start_subflow(
+                        &self.session_id,
+                        "adr-record".to_string(),
+                        child,
+                        json!({"adr_path": path, "parent_workflow": workflow_name}),
+                        definition.initial.clone(),
+                        Some("failed".to_string()),
+                    );
+                    Some(path)
+                } else {
+                    None
+                };
+                let current_state = if adr_path.is_some() {
+                    "record"
+                } else {
+                    resumed_state.as_deref().unwrap_or(&definition.initial)
+                };
+                let context_budget = self
+                    .session_manager
+                    .get(&self.session_id)
+                    .and_then(|session| {
+                        session
+                            .definition
+                            .states
+                            .get(current_state)
+                            .and_then(|state| state.context_budget_bytes)
+                    });
+                self.usage.start(current_state, context_budget);
 
                 let result = json!({
                     "loaded": workflow_name,
@@ -1420,6 +1602,7 @@ impl Gateway {
                     "run_id": run_id,
                     "capture_output": capture_output,
                     "resumed": resumed_state.is_some(),
+                    "agent_decision_record": adr_path,
                 });
                 JsonRpcResponse::success(
                     id,
@@ -2000,13 +2183,14 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         let names: Vec<String> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap().into())
             .collect();
         assert!(names.contains(&"statewright_transition".to_string()));
         assert!(names.contains(&"statewright_get_state".to_string()));
+        assert!(names.contains(&"statewright_get_usage".to_string()));
     }
 
     #[tokio::test]
@@ -2047,6 +2231,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "superseded by invoke_transition_runs_child_then_resumes_parent"]
     async fn invoke_transition_does_not_advance_to_on_complete() {
         // Workflow with an invoke transition: planning --DEBUG--> {invoke: "debug_machine", on_complete: "testing"}
         // After firing DEBUG, parent must stay in "planning" (not jump to "testing").
@@ -2117,6 +2302,39 @@ mod tests {
             session.current_state, "planning",
             "parent state must not advance to on_complete before sub-machine runs"
         );
+    }
+
+    #[tokio::test]
+    async fn invoke_transition_runs_child_then_resumes_parent() {
+        let parent: MachineDefinition = serde_json::from_value(json!({
+            "id":"parent", "initial":"planning",
+            "states": {"planning":{"on":{"BEGIN":{"invoke":"child","on_complete":"testing"}}}, "testing":{}, "failed":{"type":"final"}},
+            "guards": {}
+        })).unwrap();
+        let child: MachineDefinition = serde_json::from_value(json!({
+            "id":"child", "initial":"record",
+            "states":{"record":{"on":{"DONE":"completed"}},"completed":{"type":"final"}}, "guards": {}
+        })).unwrap();
+        let mgr = SessionManager::new();
+        mgr.create("subflow-session".into(), parent.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("parent".into(), parent);
+        workflows.insert("child".into(), child);
+        let mut gw = Gateway::new(mgr, UpstreamManager::empty(), "subflow-session".into(), workflows, Some("parent".into()), String::new(), None);
+
+        let begin = JsonRpcRequest { jsonrpc:"2.0".into(), method:"tools/call".into(), params:Some(json!({"name":"statewright_transition","arguments":{"event":"BEGIN"}})), id:Some(json!(1)) };
+        let response = gw.handle_message(begin).await.unwrap();
+        let result_body = response.result.unwrap();
+        let text = result_body["content"][0]["text"].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(text).unwrap()["subflow_started"], "child");
+        assert_eq!(gw.session_manager.get("subflow-session").unwrap().current_state, "record");
+
+        let done = JsonRpcRequest { jsonrpc:"2.0".into(), method:"tools/call".into(), params:Some(json!({"name":"statewright_transition","arguments":{"event":"DONE"}})), id:Some(json!(2)) };
+        let response = gw.handle_message(done).await.unwrap();
+        let result_body = response.result.unwrap();
+        let text = result_body["content"][0]["text"].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(text).unwrap()["subflow_completed"], true);
+        assert_eq!(gw.session_manager.get("subflow-session").unwrap().current_state, "testing");
     }
 
     #[tokio::test]

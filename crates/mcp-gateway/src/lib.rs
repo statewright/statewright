@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod remote;
 pub mod session;
 pub mod upstream;
+pub mod usage;
 
 /// Database pool type for step metering.
 /// When the `metering` feature is enabled, this is a real Postgres connection pool.

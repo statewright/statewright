@@ -1,0 +1,13 @@
+{
+  "id": "adr-record",
+  "initial": "record",
+  "states": {
+    "record": {
+      "allowed_tools": ["Read", "Edit", "Write", "Bash"],
+      "instructions": "Create the project-local ADR at context.adr_path before any parent implementation. Include task, decision, scope, constraints, evidence, intended edits, verification, and an initially pending outcome. Do not edit product files.",
+      "on": { "ADR_WRITTEN": "completed", "FAIL": "failed" }
+    },
+    "completed": { "type": "final" },
+    "failed": { "type": "final" }
+  }
+}

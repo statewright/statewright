@@ -304,6 +304,16 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            name: "statewright_get_usage".into(),
+            description: Some(
+                "Get state-level provider token usage, tool-result estimates, and non-tool overhead. Values identify whether they are exact or estimated.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolInfo {
             name: "statewright_list_workflows".into(),
             description: Some(
                 "List all available named workflows and which one is currently active.".into(),
@@ -475,6 +485,8 @@ pub fn is_custom_tool(name: &str) -> bool {
         name,
         "statewright_transition"
             | "statewright_get_state"
+            | "statewright_get_usage"
+            | "statewright_report_runtime_usage"
             | "statewright_list_workflows"
             | "statewright_load_workflow"
             | "statewright_deactivate"
@@ -607,9 +619,10 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
+        assert!(tools.iter().any(|t| t.name == "statewright_get_usage"));
         assert!(tools.iter().any(|t| t.name == "statewright_list_workflows"));
         assert!(tools.iter().any(|t| t.name == "statewright_load_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));

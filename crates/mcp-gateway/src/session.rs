@@ -15,6 +15,17 @@ pub struct PendingApproval {
     pub message: Option<String>,
 }
 
+/// Parent snapshot retained while a named child workflow is executing.
+#[derive(Debug, Clone)]
+pub struct ActiveSubflow {
+    pub name: String,
+    pub parent_definition: MachineDefinition,
+    pub parent_state: String,
+    pub parent_context: serde_json::Value,
+    pub on_complete: String,
+    pub on_fail: Option<String>,
+}
+
 /// Active gateway session tracking state machine progression.
 #[derive(Debug, Clone)]
 pub struct GatewaySession {
@@ -35,6 +46,8 @@ pub struct GatewaySession {
     pub files_read: std::collections::HashMap<String, u32>,
     /// Pending approval gate — transition parked until human approves/rejects.
     pub pending_approval: Option<PendingApproval>,
+    /// Set while a named invoked workflow owns this session's current state.
+    pub subflow: Option<ActiveSubflow>,
 }
 
 impl GatewaySession {
@@ -59,6 +72,7 @@ impl GatewaySession {
             context_bytes: 0,
             files_read: std::collections::HashMap::new(),
             pending_approval: None,
+            subflow: None,
         }
     }
 
@@ -183,6 +197,66 @@ impl SessionManager {
         } else {
             false
         }
+    }
+
+    /// Suspend the current workflow and make a named child workflow active.
+    pub fn start_subflow(
+        &self,
+        instance_id: &str,
+        name: String,
+        definition: MachineDefinition,
+        input: serde_json::Value,
+        on_complete: String,
+        on_fail: Option<String>,
+    ) -> bool {
+        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
+            let mut context = if definition.context.is_object() { definition.context.clone() } else { serde_json::json!({}) };
+            if input.is_object() {
+                context = statewright_engine::apply_context_patch(&context, &input);
+            }
+            session.subflow = Some(ActiveSubflow {
+                name,
+                parent_definition: session.definition.clone(),
+                parent_state: session.current_state.clone(),
+                parent_context: session.context.clone(),
+                on_complete,
+                on_fail,
+            });
+            session.definition = definition.clone();
+            session.previous_state = None;
+            session.current_state = definition.initial.clone();
+            session.context = context;
+            session.iteration_count = 0;
+            session.files_edited.clear();
+            session.context_bytes = 0;
+            session.files_read.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Restore the suspended parent after its child reaches a final state.
+    pub fn complete_subflow(&self, instance_id: &str, succeeded: bool) -> Option<(String, String)> {
+        let mut sessions = self.sessions.write().unwrap_or_else(|p| p.into_inner());
+        let session = sessions.get_mut(instance_id)?;
+        let subflow = session.subflow.take()?;
+        let from = session.current_state.clone();
+        let target = if succeeded {
+            subflow.on_complete
+        } else {
+            subflow.on_fail.unwrap_or_else(|| "failed".to_string())
+        };
+        let context = statewright_engine::apply_context_patch(&subflow.parent_context, &session.context);
+        session.definition = subflow.parent_definition;
+        session.previous_state = Some(subflow.parent_state);
+        session.current_state = target.clone();
+        session.context = context;
+        session.iteration_count = 0;
+        session.files_edited.clear();
+        session.context_bytes = 0;
+        session.files_read.clear();
+        Some((from, target))
     }
 
     pub fn record_file_edit(&self, instance_id: &str, file_path: &str) {

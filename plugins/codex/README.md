@@ -44,6 +44,21 @@ statewright_load_workflow(name='bugfix')
 statewright_list_workflows()
 ```
 
+## Agent decision record
+
+Set `meta.agent-decision-record` to `true` to make the gateway invoke the
+built-in `adr-record` child before the parent workflow begins. The gateway
+derives `.statewright/adr/<workflow>-<run-id>.md`, passes it as `adr_path`, and
+resumes the parent only after the child records the decision. The child must
+capture scope, constraints, evidence, intended edits, verification, and the
+final outcome.
+
+```json
+"meta": {
+  "agent-decision-record": true
+}
+```
+
 ## Hook events
 
 - **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive

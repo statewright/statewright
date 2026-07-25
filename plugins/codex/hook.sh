@@ -22,6 +22,7 @@ STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
+PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tool-policy.sh
 source "${SCRIPT_DIR}/tool-policy.sh"
@@ -62,6 +63,118 @@ mcp_call() {
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
     -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+}
+
+# Emit sanitized native-hook telemetry for an already-authoritative workflow
+# state. Hooks do not receive provider token counts, so those remain explicitly
+# unavailable; tool-result byte and token estimates are kept separate.
+emit_native_telemetry() {
+  local event_type="$1"
+  local state_json="$2"
+  local run_id state epoch seq event_id timestamp model tool_bytes tool_count current_tool_bytes
+  local prior_bytes prior_count is_tool=false payload session_id
+
+  [ -z "$API_KEY" ] && return 0
+  [ -z "$state_json" ] && return 0
+  run_id=$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)
+  state=$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)
+  [ -z "$run_id" ] || [ -z "$state" ] && return 0
+
+  session_id="${HOOK_SESSION:-$SESSION_KEY}"
+  epoch=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "1")
+  case "$epoch" in ''|*[!0-9]*) epoch=1 ;; esac
+
+  prior_bytes=$(cat "$PROJECT_DIR/.telemetry_tool_bytes" 2>/dev/null || echo "0")
+  prior_count=$(cat "$PROJECT_DIR/.telemetry_tool_count" 2>/dev/null || echo "0")
+  case "$prior_bytes" in ''|*[!0-9]*) prior_bytes=0 ;; esac
+  case "$prior_count" in ''|*[!0-9]*) prior_count=0 ;; esac
+  tool_bytes="$prior_bytes"
+  tool_count="$prior_count"
+  current_tool_bytes=0
+
+  if [ "$event_type" = "tool_observed" ]; then
+    is_tool=true
+    current_tool_bytes=$(printf '%s' "$TOOL_RESULT" | wc -c | tr -d ' ')
+    tool_bytes=$((prior_bytes + current_tool_bytes))
+    tool_count=$((prior_count + 1))
+    echo "$tool_bytes" > "$PROJECT_DIR/.telemetry_tool_bytes"
+    echo "$tool_count" > "$PROJECT_DIR/.telemetry_tool_count"
+  fi
+
+  seq=$(cat "$PROJECT_DIR/.telemetry_seq" 2>/dev/null || echo "0")
+  case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+  seq=$((seq + 1))
+  echo "$seq" > "$PROJECT_DIR/.telemetry_seq"
+  event_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
+  [ -z "$event_id" ] && event_id=$(printf '%s' "${session_id}:${seq}:$(date -u +%s%N)" | shasum -a 256 | cut -c1-32)
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  model=$(echo "$HOOK_INPUT" | jq -r '.model // empty' 2>/dev/null || true)
+
+  payload=$(jq -n \
+    --arg event_id "$event_id" \
+    --arg run_id "$run_id" \
+    --arg session_id "$session_id" \
+    --arg workflow "$(echo "$state_json" | jq -r '.workflow // empty' 2>/dev/null || true)" \
+    --arg event_type "$event_type" \
+    --arg state "$state" \
+    --arg model "$model" \
+    --arg tool_name "$TOOL_NAME" \
+    --arg timestamp "$timestamp" \
+    --argjson sequence "$seq" \
+    --argjson epoch "$epoch" \
+    --argjson tool_bytes "$tool_bytes" \
+    --argjson tool_count "$tool_count" \
+    '{events: [{
+      event_id: $event_id,
+      run_id: $run_id,
+      thread_id: $session_id,
+      provider_session_id: $session_id,
+      workflow: $workflow,
+      event: $event_type,
+      state: $state,
+      provider: "codex",
+      model: $model,
+      precision: "unavailable",
+      timestamp: $timestamp,
+      sequence: $sequence,
+      state_budget: {
+        state: $state,
+        state_epoch: $epoch,
+        provider: "codex",
+        model: $model,
+        precision: "unavailable",
+        tool_result_bytes: $tool_bytes,
+        estimated_tool_output_tokens: ($tool_bytes / 4 | floor),
+        tool_result_count: $tool_count
+      }
+    }]}' \
+  )
+  [ -z "$payload" ] && return 0
+  if [ "$is_tool" = "true" ]; then
+    payload=$(echo "$payload" | jq \
+      --arg invocation_id "$event_id" \
+      --arg tool_name "$TOOL_NAME" \
+      --argjson result_bytes "$current_tool_bytes" \
+      '.events[0].tool = {
+        invocation_id: $invocation_id,
+        tool: $tool_name,
+        tool_type: "native_codex",
+        result_bytes: $result_bytes,
+        estimated_input_tokens: ($result_bytes / 4 | floor),
+        is_error: false
+      }')
+  fi
+  curl -sf --max-time 2 -X POST "$PB_URL/api/gateway/telemetry/events" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "$payload" >/dev/null 2>&1 || true
+}
+
+reset_native_telemetry_state() {
+  local epoch="$1"
+  echo "$epoch" > "$PROJECT_DIR/.state_epoch"
+  echo "0" > "$PROJECT_DIR/.telemetry_tool_bytes"
+  echo "0" > "$PROJECT_DIR/.telemetry_tool_count"
 }
 
 # ============================================================
@@ -368,25 +481,33 @@ case "$ENDPOINT" in
 
     case "$SW_ACTION" in
       start)
-        # Activate enforcement
-        mkdir -p "$PROJECT_DIR"
-        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
-        echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
-        # Fetch and cache initial state
-        STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-        if [ -n "$STATE_JSON" ]; then
-          echo "$STATE_JSON" > "$CACHE_FILE"
-        fi
-        # Check for capture_output + run_id from tool result
+        # A workflow load returns its authoritative post-load state. Never
+        # re-query here: that can target a stale gateway session and activate
+        # enforcement with the wrong phase.
+        PARSED=""
         if [ -n "$TOOL_RESULT" ]; then
-          # tool_response is an array of content objects; extract the text, parse as JSON
           PARSED=$(echo "$TOOL_RESULT" | jq -r 'if type == "array" then .[0].text // empty else . end' 2>/dev/null || true)
-          RUN_ID=$(echo "$PARSED" | jq -r '.run_id // empty' 2>/dev/null || true)
-          CAPTURE=$(echo "$PARSED" | jq -r '.capture_output // false' 2>/dev/null || true)
-          # Debug: persist what we got (not cleaned by final state handler)
-          [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
-          [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
         fi
+        STATE_JSON=$(echo "$PARSED" | jq -c '.state_snapshot // empty' 2>/dev/null || true)
+        if [ -z "$STATE_JSON" ] || [ "$STATE_JSON" = "null" ]; then
+          jq -n \
+            --arg tool "$TOOL_NAME" \
+            '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:("[statewright] " + $tool + " did not return an authoritative state snapshot. Enforcement was not activated; reload the workflow after updating the gateway.")}}'
+          exit 0
+        fi
+
+        # Activate enforcement only after the exact load response is available.
+        mkdir -p "$PROJECT_DIR"
+        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq"
+        echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
+        echo "$STATE_JSON" > "$CACHE_FILE"
+        reset_native_telemetry_state 1
+
+        RUN_ID=$(echo "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+        CAPTURE=$(echo "$STATE_JSON" | jq -r '.capture_output // false' 2>/dev/null || true)
+        [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
+        [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
+        emit_native_telemetry "workflow_loaded" "$STATE_JSON"
         # Tell the agent to start working immediately
         INIT_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
         INIT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
@@ -396,7 +517,7 @@ case "$ENDPOINT" in
         ;;
       stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count"
         ;;
       transition)
         # Read previous state before refreshing
@@ -418,6 +539,14 @@ case "$ENDPOINT" in
           echo "$STATE_JSON" > "$CACHE_FILE"
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
+          PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
+          case "$PREV_EPOCH" in ''|*[!0-9]*) PREV_EPOCH=0 ;; esac
+          reset_native_telemetry_state $((PREV_EPOCH + 1))
+          if [ "$IS_FINAL" = "true" ]; then
+            emit_native_telemetry "workflow_completed" "$STATE_JSON"
+          else
+            emit_native_telemetry "state_boundary" "$STATE_JSON"
+          fi
 
           if [ "$IS_FORK" = "true" ]; then
             # Fork transition — show branches and agent coordination instructions
@@ -452,7 +581,7 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -475,6 +604,9 @@ case "$ENDPOINT" in
         fi
         ;;
     esac
+    if [ -f "$ACTIVE_FILE" ] && [ -z "$SW_ACTION" ] && [ -f "$CACHE_FILE" ]; then
+      emit_native_telemetry "tool_observed" "$(cat "$CACHE_FILE")"
+    fi
     exit 0
     ;;
 

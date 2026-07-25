@@ -15,6 +15,9 @@ use crate::usage::{RuntimeToolReport, RuntimeUsageReport, UsageLedger};
 pub struct Gateway {
     pub session_manager: SessionManager,
     pub upstream: UpstreamManager,
+    /// Immutable transport identity. Client session scoping is derived from this
+    /// value once per load instead of repeatedly extending `session_id`.
+    base_session_id: String,
     session_id: String,
     workflows: HashMap<String, MachineDefinition>,
     active_workflow: Option<String>,
@@ -47,6 +50,7 @@ impl Gateway {
         Self {
             session_manager,
             upstream,
+            base_session_id: session_id.clone(),
             session_id,
             workflows,
             active_workflow,
@@ -63,6 +67,23 @@ impl Gateway {
     /// Get the session ID for this gateway instance.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Return the same state shape exposed by `statewright_get_state`, enriched
+    /// with run metadata needed by native hooks.  Load callers must use this
+    /// snapshot instead of performing a second, potentially different-session
+    /// lookup after activation.
+    fn current_state_snapshot(&self, capture_output: bool) -> Option<serde_json::Value> {
+        let session = self.session_manager.get(&self.session_id)?;
+        let mut state = custom_tools::handle_get_state(&session);
+        if let Some(run_id) = &self.current_run_id {
+            state["run_id"] = json!(run_id);
+        }
+        if let Some(workflow) = &self.active_workflow {
+            state["workflow"] = json!(workflow);
+        }
+        state["capture_output"] = json!(capture_output);
+        Some(state)
     }
 
     /// Set the API key fingerprint for session ownership verification.
@@ -1369,7 +1390,7 @@ impl Gateway {
                 // Accept session_id from client for per-session scoping
                 if let Some(sid) = arguments.get("session_id").and_then(|s| s.as_str()) {
                     // Create a session-scoped key: api_key_session + client_session
-                    let scoped_id = format!("{}_{}", self.session_id, sid);
+                    let scoped_id = format!("{}_{}", self.base_session_id, sid);
                     self.session_id = scoped_id;
                     self.project_id = Some(sid.to_string());
                 }
@@ -1392,6 +1413,17 @@ impl Gateway {
                                 if let Some(branch_session) = self.session_manager.get(branch_key) {
                                     // Switch to the branch session
                                     let branch_state = branch_session.current_state.clone();
+                                    self.session_id = branch_key.to_string();
+                                    let state_snapshot = match self.current_state_snapshot(false) {
+                                        Some(snapshot) => snapshot,
+                                        None => {
+                                            return JsonRpcResponse::error(
+                                                id,
+                                                -32603,
+                                                "Branch workflow state snapshot was unavailable",
+                                            );
+                                        }
+                                    };
                                     let result = json!({
                                         "loaded": workflow_name,
                                         "branch": branch_name,
@@ -1399,9 +1431,8 @@ impl Gateway {
                                         "states": branch_session.definition.states.keys().collect::<Vec<_>>(),
                                         "capture_output": false,
                                         "resumed": false,
+                                        "state_snapshot": state_snapshot,
                                     });
-                                    // Point this gateway at the branch session
-                                    self.session_id = branch_key.to_string();
                                     return JsonRpcResponse::success(
                                         id,
                                         serde_json::to_value(
@@ -1595,6 +1626,17 @@ impl Gateway {
                     });
                 self.usage.start(current_state, context_budget);
 
+                let state_snapshot = match self.current_state_snapshot(capture_output) {
+                    Some(snapshot) => snapshot,
+                    None => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32603,
+                            "Workflow loaded but its initial state snapshot was unavailable",
+                        );
+                    }
+                };
+
                 let result = json!({
                     "loaded": workflow_name,
                     "initial_state": current_state,
@@ -1603,6 +1645,7 @@ impl Gateway {
                     "capture_output": capture_output,
                     "resumed": resumed_state.is_some(),
                     "agent_decision_record": adr_path,
+                    "state_snapshot": state_snapshot,
                 });
                 JsonRpcResponse::success(
                     id,
@@ -2228,6 +2271,48 @@ mod tests {
         // Verify state changed
         let session = gw.session_manager.get("test-session").unwrap();
         assert_eq!(session.current_state, "implementing");
+    }
+
+    #[tokio::test]
+    async fn load_workflow_returns_authoritative_snapshot_without_session_key_growth() {
+        let mut gw = test_gateway();
+
+        for _ in 0..2 {
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_load_workflow",
+                    "arguments": { "name": "test", "session_id": "codex-session" }
+                })),
+                id: Some(json!(1)),
+            };
+            let response = gw.handle_message(req).await.unwrap();
+            let result_value = response.result.unwrap();
+            let text = result_value["content"][0]["text"].as_str().unwrap();
+            let result: serde_json::Value = serde_json::from_str(text).unwrap();
+
+            assert_eq!(result["initial_state"], "planning");
+            assert_eq!(result["state_snapshot"]["state"], "planning");
+            assert_eq!(
+                result["state_snapshot"]["allowed_tools"],
+                json!(["read_file", "grep"])
+            );
+            assert!(
+                result["state_snapshot"]["transitions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|transition| transition["event"] == "READY")
+            );
+        }
+
+        assert_eq!(gw.session_id(), "test-session_codex-session");
+        assert!(gw.session_manager.exists("test-session_codex-session"));
+        assert!(
+            !gw.session_manager
+                .exists("test-session_codex-session_codex-session")
+        );
     }
 
     #[tokio::test]

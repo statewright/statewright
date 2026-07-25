@@ -121,6 +121,7 @@ export class StateBudgetLedger {
   snapshot(state = null) {
     const budget = nonNegativeNumber(state?.context_budget_bytes);
     const pct = budget > 0 ? (this.toolResultBytes / budget) * 100 : null;
+    const totalTokens = this.stateUsage.total_tokens;
     return {
       state: this.state,
       context_budget_bytes: budget || null,
@@ -130,6 +131,14 @@ export class StateBudgetLedger {
       context_budget_percent: pct,
       token_usage: { ...this.stateUsage },
       session_token_usage: { ...this.session },
+      token_attribution: {
+        provider_total_tokens: totalTokens,
+        estimated_tool_output_tokens: this.estimatedToolOutputTokens,
+        // Residual includes prompts, model output, and any provider tokens that
+        // cannot be causally assigned to one completed tool result.
+        non_tool_tokens: Math.max(0, totalTokens - this.estimatedToolOutputTokens),
+        reported_reasoning_output_tokens: this.stateUsage.reasoning_output_tokens,
+      },
     };
   }
 

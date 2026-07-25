@@ -31,6 +31,11 @@ test("the ledger tracks token and tool-output budgets per state", () => {
   assert.ok(observed.tool.estimated_input_tokens >= 25);
   assert.equal(observed.ledger.token_usage.total_tokens, 15);
   assert.equal(observed.ledger.session_token_usage.total_tokens, 15);
+  assert.equal(observed.ledger.token_attribution.provider_total_tokens, 15);
+  assert.equal(
+    observed.ledger.token_attribution.non_tool_tokens,
+    Math.max(0, 15 - observed.ledger.estimated_tool_output_tokens),
+  );
   assert.ok(observed.ledger.context_budget_percent >= 100);
   assert.equal(ledger.thresholdCrossed(state, 90), true);
   assert.equal(ledger.thresholdCrossed(state, 90), false);

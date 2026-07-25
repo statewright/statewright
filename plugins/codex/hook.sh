@@ -22,6 +22,9 @@ STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tool-policy.sh
+source "${SCRIPT_DIR}/tool-policy.sh"
 
 # Session-scoped state: use session_id from hook input or CODEX_SESSION_ID env
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -215,18 +218,22 @@ case "$ENDPOINT" in
       exit 0  # No allowed_tools list = no enforcement
     fi
 
-    # Check if tool is allowed
-    if echo "$ALLOWED" | grep -qx "$TOOL_NAME"; then
+    STATEWRIGHT_ALLOWED_TOOLS="$ALLOWED"
+
+    # Normalize concrete Codex tool names to workflow capabilities before
+    # applying policy. Read-only shell use is admitted only by the strict
+    # classifier; broader shell use continues through Bash discernment below.
+    if statewright_tool_allowed "$TOOL_NAME" "$HOOK_INPUT"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
       # to prevent bypass of Write/Edit/Destructive restrictions via shell redirects
-      if [ "$TOOL_NAME" = "Bash" ]; then
+      if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] || [ "$STATEWRIGHT_TOOL_MODE" = "readonly_shell" ]; then
         COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
         if [ -n "$COMMAND" ]; then
           # Check for file write operations (redirects, heredocs) when Write/Edit not allowed
           HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
           HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
           if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
-            if echo "$COMMAND" | grep -qE '(^|[^0-9])>[^>&]|>>\s*\S'; then
+            if statewright_has_file_write_redirect "$COMMAND"; then
               REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
@@ -256,8 +263,11 @@ case "$ENDPOINT" in
           ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
           if [ -n "$ALLOWED_CMDS" ]; then
             CMD_OK=false
-            while IFS= read -r prefix; do
-              case "$COMMAND" in "$prefix"|"$prefix "*) CMD_OK=true; break ;; esac
+            while IFS= read -r pattern; do
+              # Preserve the historical literal-prefix form while accepting
+              # Claude-compatible glob patterns in allowed_commands.
+              # shellcheck disable=SC2254
+              case "$COMMAND" in "$pattern"|"$pattern "*|$pattern) CMD_OK=true; break ;; esac
             done <<< "$ALLOWED_CMDS"
             if [ "$CMD_OK" = false ]; then
               REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."

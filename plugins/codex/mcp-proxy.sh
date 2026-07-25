@@ -6,6 +6,8 @@
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 SESSION_HEADER_ARGS=()
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
   SESSION_HEADER_ARGS=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
@@ -195,6 +197,21 @@ while IFS= read -r line; do
     continue
   fi
 
+  # Repository artifacts stay local; only bounded index hits are returned.
+  if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_references" ]; then
+    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
+    QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
+    LIMIT=$(echo "$line" | jq -r '.params.arguments.limit // 8' 2>/dev/null)
+    RESULT=$(node "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
+    if [ -n "$RESULT" ]; then
+      RESULT_TEXT=$(echo "$RESULT" | jq -r 'if .error then .error else (.results | if length == 0 then "No provenance-addressable references found." else .[] | "## [\(.source_kind)] \(.path):\(.line_start)-\(.line_end)\ncommit: \(.commit_sha // "uncommitted")\nhash: \(.source_hash)\nrank: \(.rank) [\(.rank_reasons | join(", "))]\n\(.excerpt)\n" end) end' 2>/dev/null)
+      jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'$ID'}'
+    else
+      echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Reference search unavailable"}]},"id":'"$ID"'}'
+    fi
+    continue
+  fi
+
   # Forward to gateway with auth
   RESPONSE=$(curl -sf --max-time 10 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
@@ -206,9 +223,10 @@ while IFS= read -r line; do
     # Inject local tools into tools/list responses from gateway
     if [ "$METHOD" = "tools/list" ]; then
       SEARCH_TOOL='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}}'
+      REFERENCE_TOOL='{"name":"statewright_search_references","description":"Search the incremental local repository index with deterministic lexical ranking. Returns read-only provenance, source hashes, rank reasons, and excerpts; ignored and secret material is excluded.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Task, identifier, changed path, failed hypothesis, or validation signature to find"},"limit":{"type":"integer","minimum":1,"maximum":20,"default":8}},"required":["query"]}}'
       PAUSE_TOOL='{"name":"statewright_pause","description":"Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).","inputSchema":{"type":"object","properties":{}}}'
       FORCE_TOOL='{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}'
-      RESPONSE=$(echo "$RESPONSE" | jq -c --argjson s "$SEARCH_TOOL" --argjson p "$PAUSE_TOOL" --argjson f "$FORCE_TOOL" '.result.tools = ([.result.tools[] | select(.name != "statewright_search_docs" and .name != "statewright_pause" and .name != "statewright_force_state")] + [$s, $p, $f])' 2>/dev/null || echo "$RESPONSE")
+      RESPONSE=$(echo "$RESPONSE" | jq -c --argjson s "$SEARCH_TOOL" --argjson r "$REFERENCE_TOOL" --argjson p "$PAUSE_TOOL" --argjson f "$FORCE_TOOL" '.result.tools = ([.result.tools[] | select(.name != "statewright_search_docs" and .name != "statewright_search_references" and .name != "statewright_pause" and .name != "statewright_force_state")] + [$s, $r, $p, $f])' 2>/dev/null || echo "$RESPONSE")
     fi
     echo "$RESPONSE"
   else

@@ -17,6 +17,7 @@ class FakeClient extends EventEmitter {
   constructor() {
     super();
     this.turns = [];
+    this.runtimeUsageReports = [];
     this.currentTurnId = null;
     this.stateIndex = -1;
     this.states = [
@@ -100,6 +101,13 @@ class FakeClient extends EventEmitter {
       };
     }
     if (method === "mcpServer/tool/call") {
+      if (params.tool === "statewright_report_runtime_usage") {
+        this.runtimeUsageReports.push(params.arguments);
+        return { content: [{ type: "text", text: "ok" }] };
+      }
+      if (params.tool === "statewright_get_usage") {
+        return { content: [{ type: "text", text: "[]" }] };
+      }
       assert.equal(params.tool, "statewright_get_state");
       return {
         content: [{ type: "text", text: JSON.stringify(this.states[this.stateIndex]) }],
@@ -168,6 +176,7 @@ test("the adapter cuts turns at state transitions and applies each state route",
     fallbackModel: "luna",
     fallbackEffort: "medium",
     telemetry: async (event, fields) => telemetry.push({ event, ...fields }),
+    runtimeUsageControlToken: "test-control-token",
     transportSessionId: "br_codex_test",
     stdout,
     stderr,
@@ -190,6 +199,9 @@ test("the adapter cuts turns at state transitions and applies each state route",
   const usage = telemetry.filter((entry) => entry.event === "token_usage");
   assert.equal(usage.length, 3);
   assert.equal(usage.at(-1).state_budget.session_token_usage.total_tokens, 60);
+  assert.equal(client.runtimeUsageReports.length, 2);
+  assert.equal(client.runtimeUsageReports[0].kind, "usage");
+  assert.equal(client.runtimeUsageReports[0].report.precision, "exact");
   assert.equal(
     telemetry.find((entry) => entry.event === "session_started")?.mcp_session_id,
     "br_codex_test",

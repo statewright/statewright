@@ -80,6 +80,7 @@ export class StateBudgetLedger {
   constructor() {
     this.session = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
     this.state = null;
+    this.stateEpoch = 0;
     this.stateUsage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
     this.toolResultBytes = 0;
     this.toolResultCount = 0;
@@ -92,6 +93,7 @@ export class StateBudgetLedger {
     const next = state?.state ?? null;
     if (next === this.state) return this.snapshot();
     this.state = next;
+    this.stateEpoch += 1;
     this.stateUsage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
     this.toolResultBytes = 0;
     this.toolResultCount = 0;
@@ -124,6 +126,7 @@ export class StateBudgetLedger {
     const totalTokens = this.stateUsage.total_tokens;
     return {
       state: this.state,
+      state_epoch: this.stateEpoch,
       context_budget_bytes: budget || null,
       tool_result_bytes: this.toolResultBytes,
       tool_result_count: this.toolResultCount,

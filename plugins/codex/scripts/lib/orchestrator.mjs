@@ -57,6 +57,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     maxIdleTurns = 3,
     transportSessionId = null,
     telemetry = async () => {},
+    runtimeUsageControlToken = process.env.STATEWRIGHT_USAGE_CONTROL_TOKEN ?? null,
     stdout = process.stdout,
     stderr = process.stderr,
   }) {
@@ -77,6 +78,8 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.maxIdleTurns = maxIdleTurns;
     this.transportSessionId = transportSessionId;
     this.telemetry = telemetry;
+    this.runtimeUsageControlToken = runtimeUsageControlToken;
+    this.runtimeUsageSequence = 0;
     this.stdout = stdout;
     this.stderr = stderr;
     this.queue = new NotificationQueue();
@@ -255,6 +258,16 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     return parseMcpJsonResult(result);
   }
 
+  async getUsage() {
+    const result = await this.client.request("mcpServer/tool/call", {
+      threadId: this.thread.id,
+      server: this.serverName,
+      tool: "statewright_get_usage",
+      arguments: {},
+    });
+    return parseMcpJsonResult(result);
+  }
+
   async selectRoute(state) {
     const route = resolveStateRoute(state, this.catalog, this.route);
     await this.telemetry("route_selected", {
@@ -309,6 +322,44 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
       state: state?.state ?? null,
       state_budget: snapshot,
     });
+    try {
+      const stateUsage = await this.getUsage();
+      await this.telemetry("gateway_usage_snapshot", {
+        thread_id: this.thread.id,
+        workflow: this.workflow,
+        state: state?.state ?? null,
+        state_usage: Array.isArray(stateUsage) ? stateUsage : [],
+      });
+    } catch (error) {
+      await this.telemetry("gateway_usage_snapshot_failed", {
+        thread_id: this.thread.id,
+        state: state?.state ?? null,
+        error: String(error?.message ?? error).slice(0, 240),
+      });
+    }
+  }
+
+  async reportRuntimeUsage(kind, report) {
+    if (!this.runtimeUsageControlToken || !this.thread || !this.serverName) return;
+    try {
+      await this.client.request("mcpServer/tool/call", {
+        threadId: this.thread.id,
+        server: this.serverName,
+        tool: "statewright_report_runtime_usage",
+        arguments: {
+          control_token: this.runtimeUsageControlToken,
+          kind,
+          report: { sequence: ++this.runtimeUsageSequence, ...report },
+        },
+      });
+    } catch (error) {
+      await this.telemetry("runtime_usage_report_failed", {
+        thread_id: this.thread.id,
+        state: this.lastState?.state ?? null,
+        kind,
+        error: String(error?.message ?? error).slice(0, 240),
+      });
+    }
   }
 
   async emitBudgetThresholds(turnId, state) {
@@ -376,10 +427,25 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
           thread_id: this.thread.id,
           turn_id: turnId,
           state: this.lastState?.state ?? null,
+          provider: "codex",
+          model: route.model ?? null,
+          effort: route.effort ?? null,
+          precision: "exact",
           token_usage: observed.usage,
           token_usage_delta: observed.delta,
           state_budget: observed.ledger,
         });
+        if (observed.ledger.state) {
+          await this.reportRuntimeUsage("usage", {
+            state: observed.ledger.state,
+            state_epoch: observed.ledger.state_epoch,
+            provider: "codex",
+            model: route.model ?? null,
+            effort: route.effort ?? null,
+            precision: "exact",
+            token_usage: observed.ledger.token_usage,
+          });
+        }
       } else if (message.method === "item/completed") {
         const observed = this.budgetLedger.observeToolItem(params.item, this.lastState);
         await this.telemetry("tool_output_observed", {
@@ -389,6 +455,21 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
           tool: observed.tool,
           state_budget: observed.ledger,
         });
+        const isGatewayTool = params.item?.server === this.serverName;
+        const isTool = /tool/i.test(String(params.item?.type ?? ""));
+        if (isTool && !isGatewayTool && observed.ledger.state) {
+          await this.reportRuntimeUsage("tool", {
+            state: observed.ledger.state,
+            state_epoch: observed.ledger.state_epoch,
+            invocation_id: params.item?.id ?? `${turnId}:${this.runtimeUsageSequence + 1}`,
+            tool: observed.tool.tool,
+            tool_type: observed.tool.type,
+            source: "codex_adapter",
+            result_bytes: observed.tool.result_bytes,
+            estimated_input_tokens: observed.tool.estimated_input_tokens,
+            is_error: params.item?.status === "failed",
+          });
+        }
         await this.emitBudgetThresholds(turnId, this.lastState);
         if (!isStateBoundaryItem(params.item, this.serverName)) continue;
         boundaryTool = normalizeToolName(params.item.tool);

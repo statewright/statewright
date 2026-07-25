@@ -163,7 +163,10 @@ export async function main(argv = process.argv.slice(2)) {
   validate(options, prompt);
   const cwd = resolve(options.cwd);
   const telemetry = options.telemetryEnabled
-    ? createTelemetryWriter(resolve(options.telemetryPath))
+    ? createTelemetryWriter(resolve(options.telemetryPath), {
+        endpoint: process.env.STATEWRIGHT_TELEMETRY_URL ?? null,
+        apiKey: process.env.STATEWRIGHT_API_KEY ?? null,
+      })
     : createNullTelemetryWriter();
   const transportSessionId =
     process.env.STATEWRIGHT_MCP_SESSION_ID ?? `br_codex_${randomUUID()}`;

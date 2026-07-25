@@ -1,4 +1,5 @@
 import { appendFile, chmod, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -18,10 +19,13 @@ export function defaultTelemetryPath() {
   return join(homedir(), ".statewright", "telemetry", "codex-routing.jsonl");
 }
 
-export function createTelemetryWriter(path = defaultTelemetryPath()) {
+export function createTelemetryWriter(path = defaultTelemetryPath(), { endpoint = null, apiKey = null } = {}) {
+  let sequence = 0;
   return async (event, fields = {}) => {
     const record = scrubTelemetryFields({
       schema_version: 1,
+      event_id: randomUUID(),
+      sequence: ++sequence,
       timestamp: new Date().toISOString(),
       event,
       ...fields,
@@ -29,6 +33,22 @@ export function createTelemetryWriter(path = defaultTelemetryPath()) {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
     await chmod(path, 0o600);
+    if (endpoint && apiKey) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ events: [record] }),
+        });
+        if (!response.ok) throw new Error(`telemetry endpoint returned ${response.status}`);
+      } catch {
+        // The local JSONL is the durable outbox. Delivery is best-effort and
+        // must not alter workflow behavior when PocketBase is unavailable.
+      }
+    }
   };
 }
 

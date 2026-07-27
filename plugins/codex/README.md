@@ -30,10 +30,56 @@ Or manual setup:
 [mcp_servers.statewright]
 command = "bash"
 args = ["/path/to/mcp-proxy.sh"]
-env_vars = ["STATEWRIGHT_API_KEY", "STATEWRIGHT_GATEWAY_URL"]
+env_vars = [
+  "STATEWRIGHT_API_KEY",
+  "STATEWRIGHT_GATEWAY_URL",
+  "STATEWRIGHT_PB_URL",
+  "STATEWRIGHT_TELEMETRY_DIR",
+  "STATEWRIGHT_TELEMETRY_PORT",
+  "STATEWRIGHT_TELEMETRY_BUILD_ID",
+]
 ```
 
 Codex does not propagate parent environment variables to MCP child processes by default. The `env_vars` field explicitly forwards them.
+
+### Exact native token telemetry
+
+Native Codex hooks expose tool metadata but not provider token totals. To add
+exact per-response totals, merge
+[`config/otel-token-telemetry.toml`](config/otel-token-telemetry.toml) into
+`~/.codex/config.toml`, then restart Codex.
+
+The MCP proxy supervises a loopback-only OTLP/HTTP JSON receiver at
+`127.0.0.1:4318`. Codex sends no API key to that receiver. The receiver keeps
+the Statewright API key locally, discards raw OTLP records after parsing, and
+durably stores only sanitized token counts and correlation identifiers before
+upload. `log_user_prompt` must remain `false`.
+
+Provider usage that arrives before its workflow binding is durably quarantined
+for a five-second correlation window and reconciled when the hook publishes the
+state boundary; it is never treated as a completed upload or silently
+discarded. Sanitized records that remain unbound are visible on the loopback
+`/v1/unbound` endpoint, retained for 24 hours, and capped at 10,000 records.
+The `/health` response separates listener, delivery, and receive-protocol
+health and includes protocol, build, and configuration identities so the MCP
+proxy can replace a managed collector after plugin upgrades, endpoint changes,
+API-key rotation, or telemetry disablement.
+
+Codex emits `response.completed` token usage as a per-response delta. The
+Statewright app-server adapter continues to treat
+`thread/tokenUsage/updated.total` as cumulative. Both sources normalize to the
+same token fields:
+
+- input;
+- cache-read input;
+- cache-write input;
+- output;
+- reasoning output;
+- total.
+
+State totals are exact when this provider event is present. Per-tool token
+attribution remains an estimate based on tool-result bytes, and the remainder
+is reported as unattributed rather than mislabeled as reasoning.
 
 ## Usage
 

@@ -8,10 +8,137 @@ PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
+TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
+TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 SESSION_HEADER_ARGS=()
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
   SESSION_HEADER_ARGS=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
 fi
+
+telemetry_pid_matches() {
+  local pid="$1" command
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  case "$command" in *"$TELEMETRY_AGENT"*) return 0 ;; *) return 1 ;; esac
+}
+
+stop_managed_telemetry_agent() {
+  local pid
+  pid=$(cat "$TELEMETRY_DIR/agent.pid" 2>/dev/null || true)
+  if telemetry_pid_matches "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    telemetry_pid_matches "$pid" && return 1
+  fi
+  rm -f "$TELEMETRY_DIR/agent.pid"
+}
+
+acquire_telemetry_lock() {
+  local lock_dir="$TELEMETRY_DIR/agent-start.lock" owner
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" > "$lock_dir/owner.pid"
+    return 0
+  fi
+  owner=$(cat "$lock_dir/owner.pid" 2>/dev/null || true)
+  case "$owner" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$owner" 2>/dev/null && return 1 ;;
+  esac
+  rm -f "$lock_dir/owner.pid"
+  rmdir "$lock_dir" 2>/dev/null || return 1
+  mkdir "$lock_dir" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$lock_dir/owner.pid"
+}
+
+release_telemetry_lock() {
+  rm -f "$TELEMETRY_DIR/agent-start.lock/owner.pid"
+  rmdir "$TELEMETRY_DIR/agent-start.lock" 2>/dev/null || true
+}
+
+health_matches_telemetry_identity() {
+  local current="$1" expected="$2"
+  [ -n "$current" ] && echo "$current" | jq -e --argjson expected "$expected" \
+    '.protocol_version == $expected.protocol_version and
+     .agent_build_id == $expected.agent_build_id and
+     .config_identity == $expected.config_identity' >/dev/null 2>&1
+}
+
+start_local_telemetry_agent() {
+  local key expected current pid candidate_pid started=false
+  command -v node >/dev/null 2>&1 || return 0
+  [ -f "$TELEMETRY_AGENT" ] || return 0
+  mkdir -p "$TELEMETRY_DIR"
+  chmod 700 "$TELEMETRY_DIR"
+  acquire_telemetry_lock || return 0
+
+  key="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  key="${key%"${key##*[![:space:]]}"}"
+  if [ -z "$key" ]; then
+    stop_managed_telemetry_agent || true
+    release_telemetry_lock
+    return 0
+  fi
+  expected=$(STATEWRIGHT_API_KEY="$key" \
+    STATEWRIGHT_PB_URL="$PB_URL" \
+    STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
+    node "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
+  if [ -z "$expected" ]; then
+    release_telemetry_lock
+    return 0
+  fi
+  current=$(curl -sf --max-time 1 \
+    "http://127.0.0.1:${STATEWRIGHT_TELEMETRY_PORT:-4318}/health" 2>/dev/null || true)
+  if health_matches_telemetry_identity "$current" "$expected"; then
+    release_telemetry_lock
+    return 0
+  fi
+
+  pid=$(cat "$TELEMETRY_DIR/agent.pid" 2>/dev/null || true)
+  if telemetry_pid_matches "$pid"; then
+    if ! stop_managed_telemetry_agent; then
+      release_telemetry_lock
+      return 0
+    fi
+    current=$(curl -sf --max-time 1 \
+      "http://127.0.0.1:${STATEWRIGHT_TELEMETRY_PORT:-4318}/health" 2>/dev/null || true)
+  fi
+  if [ -n "$current" ]; then
+    echo "[statewright] incompatible token telemetry listener has no managed pid; leaving it untouched" >&2
+    release_telemetry_lock
+    return 0
+  fi
+
+  STATEWRIGHT_API_KEY="$key" \
+    STATEWRIGHT_PB_URL="$PB_URL" \
+    STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
+    nohup node "$TELEMETRY_AGENT" \
+      >>"$TELEMETRY_DIR/agent.log" 2>&1 &
+  candidate_pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    current=$(curl -sf --max-time 1 \
+      "http://127.0.0.1:${STATEWRIGHT_TELEMETRY_PORT:-4318}/health" 2>/dev/null || true)
+    if telemetry_pid_matches "$candidate_pid" &&
+        health_matches_telemetry_identity "$current" "$expected"; then
+      started=true
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$started" = "true" ]; then
+    printf '%s\n' "$candidate_pid" > "$TELEMETRY_DIR/agent.pid"
+    chmod 600 "$TELEMETRY_DIR/agent.pid"
+  else
+    telemetry_pid_matches "$candidate_pid" && kill "$candidate_pid" 2>/dev/null || true
+  fi
+  release_telemetry_lock
+}
+
+start_local_telemetry_agent
+[ "${STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY:-false}" = "true" ] && exit 0
 
 # --- Tool discovery (defined before main loop) ---
 upload_client_tools() {

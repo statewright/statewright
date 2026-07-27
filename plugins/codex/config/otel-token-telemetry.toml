@@ -1,0 +1,8 @@
+# Merge this table into ~/.codex/config.toml to enable exact native Codex
+# token totals. The Statewright MCP proxy supervises the loopback receiver.
+[otel]
+environment = "statewright"
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = {} } }
+trace_exporter = "none"
+metrics_exporter = "none"

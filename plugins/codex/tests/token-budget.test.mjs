@@ -27,13 +27,21 @@ test("Codex thread usage reads the cumulative total snapshot", () => {
 
   const observed = ledger.observeTokenUsage("turn-1", {
     last: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
-    total: { inputTokens: 30, cachedInputTokens: 4, outputTokens: 20, reasoningOutputTokens: 6, totalTokens: 50 },
+    total: {
+      inputTokens: 30,
+      cachedInputTokens: 4,
+      cacheWriteInputTokens: 2,
+      outputTokens: 20,
+      reasoningOutputTokens: 6,
+      totalTokens: 50,
+    },
   }, state);
 
   assert.equal(observed.available, true);
   assert.deepEqual(observed.usage, {
     input_tokens: 30,
     cached_input_tokens: 4,
+    cache_write_input_tokens: 2,
     output_tokens: 20,
     reasoning_output_tokens: 6,
     total_tokens: 50,
@@ -61,6 +69,7 @@ test("token usage is accumulated from snapshots without double counting", () => 
     {
       input_tokens: 4,
       cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
       output_tokens: 3,
       reasoning_output_tokens: 0,
       total_tokens: 5,
@@ -86,7 +95,7 @@ test("the ledger tracks token and tool-output budgets per state", () => {
   assert.equal(observed.ledger.session_token_usage.total_tokens, 15);
   assert.equal(observed.ledger.token_attribution.provider_total_tokens, 15);
   assert.equal(
-    observed.ledger.token_attribution.non_tool_tokens,
+    observed.ledger.token_attribution.unattributed_tokens,
     Math.max(0, 15 - observed.ledger.estimated_tool_output_tokens),
   );
   assert.ok(observed.ledger.context_budget_percent >= 100);

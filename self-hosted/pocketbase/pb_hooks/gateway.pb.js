@@ -137,7 +137,10 @@ function projectStateUsage(app, run, fingerprint, event, budget) {
   record.set('token_usage', usage)
   record.set('tool_result_bytes', telemetryNumber(budget.tool_result_bytes))
   record.set('estimated_tool_output_tokens', telemetryNumber(budget.estimated_tool_output_tokens))
-  record.set('non_tool_tokens', telemetryNumber(attribution.non_tool_tokens))
+  var unattributed = attribution.unattributed_tokens
+  if (unattributed === undefined) unattributed = attribution.non_tool_tokens
+  record.set('non_tool_tokens', telemetryNumber(unattributed))
+  record.set('unattributed_tokens', telemetryNumber(unattributed))
   record.set('reported_reasoning_output_tokens', telemetryNumber(attribution.reported_reasoning_output_tokens))
   record.set('context_budget_bytes', telemetryNumber(budget.context_budget_bytes))
   record.set('context_budget_percent', telemetryNumber(budget.context_budget_percent))

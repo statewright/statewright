@@ -1,6 +1,7 @@
 const TOKEN_FIELDS = [
   "input_tokens",
   "cached_input_tokens",
+  "cache_write_input_tokens",
   "output_tokens",
   "reasoning_output_tokens",
   "total_tokens",
@@ -9,6 +10,7 @@ const TOKEN_FIELDS = [
 const TOKEN_ALIASES = {
   input_tokens: ["inputTokens", "input_tokens"],
   cached_input_tokens: ["cachedInputTokens", "cached_input_tokens"],
+  cache_write_input_tokens: ["cacheWriteInputTokens", "cache_write_input_tokens"],
   output_tokens: ["outputTokens", "output_tokens"],
   reasoning_output_tokens: ["reasoningOutputTokens", "reasoning_output_tokens"],
   total_tokens: ["totalTokens", "total_tokens"],
@@ -176,7 +178,7 @@ export class StateBudgetLedger {
         estimated_tool_output_tokens: this.estimatedToolOutputTokens,
         // Residual includes prompts, model output, and any provider tokens that
         // cannot be causally assigned to one completed tool result.
-        non_tool_tokens: this.hasProviderUsage
+        unattributed_tokens: this.hasProviderUsage
           ? Math.max(0, totalTokens - this.estimatedToolOutputTokens)
           : null,
         reported_reasoning_output_tokens: this.hasProviderUsage

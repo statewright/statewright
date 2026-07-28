@@ -92,6 +92,24 @@ export function validateWorkflowName(workflow) {
   }
 }
 
+export function deliveryAgentEnvironment(environment, transportSessionId) {
+  const safe = { ...environment };
+  for (const name of Object.keys(safe)) {
+    if (
+      /^(KUBECONFIG|KUBE_|KUBERNETES_|AWS_|GOOGLE_|GCP_|AZURE_|DOCKER_CONFIG$|REGISTRY_|GH_TOKEN$|GITHUB_TOKEN$|NPM_TOKEN$|CARGO_REGISTRY_TOKEN$|STRIPE_|SMTP_|SENTRY_)/
+        .test(name)
+    ) {
+      delete safe[name];
+    }
+  }
+  return {
+    ...safe,
+    KUBECONFIG: "/dev/null",
+    STATEWRIGHT_DELIVERY_ACTIVE: "1",
+    STATEWRIGHT_MCP_SESSION_ID: transportSessionId,
+  };
+}
+
 function parseArgs(argv) {
   const options = {
     cwd: process.cwd(),
@@ -214,7 +232,9 @@ export async function main(argv = process.argv.slice(2)) {
     command: options.codexBin,
     args: buildAppServerArgs(transportSessionId),
     cwd,
-    env: { ...process.env, STATEWRIGHT_MCP_SESSION_ID: transportSessionId },
+    env: workspaceSession
+      ? deliveryAgentEnvironment(process.env, transportSessionId)
+      : { ...process.env, STATEWRIGHT_MCP_SESSION_ID: transportSessionId },
   });
   const orchestrator = new StatewrightCodexOrchestrator({
     client,

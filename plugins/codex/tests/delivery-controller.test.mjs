@@ -48,7 +48,7 @@ test("delivery actions run once even when a state is observed repeatedly", async
   );
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000 },
+      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
       promotion: { mode: "manual" },
     },
     manifest: {
@@ -59,10 +59,12 @@ test("delivery actions run once even when a state is observed repeatedly", async
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
     driverPath: () => driver,
+    checkpoint: async () => ({}),
     fingerprint: async () => "fingerprint",
     promote: async () => {
       throw new Error("promotion should not run");
     },
+    preflightCleanup: async () => {},
     cleanup: async () => {},
   };
   const controller = await new DeliveryController(session).initialize();
@@ -79,6 +81,62 @@ test("delivery actions run once even when a state is observed repeatedly", async
   assert.equal(controller.actions["deploy:fingerprint"].status, "complete");
 });
 
+test("driver receives only allowlisted operator environment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-controller-env-"));
+  const evidence = join(root, "evidence");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(evidence));
+  const captured = join(root, "environment.json");
+  const driver = join(root, "driver.mjs");
+  await writeFile(
+    driver,
+    [
+      'import { writeFile } from "node:fs/promises";',
+      `await writeFile(${JSON.stringify(captured)}, JSON.stringify({`,
+      "  path: process.env.PATH,",
+      "  secret: process.env.STATEWRIGHT_OPERATOR_SECRET,",
+      "  run: process.env.STATEWRIGHT_DELIVERY_RUN_ID,",
+      "}));",
+      'console.log(JSON.stringify({ ok: true }));',
+    ].join("\n"),
+  );
+  const previous = process.env.STATEWRIGHT_OPERATOR_SECRET;
+  process.env.STATEWRIGHT_OPERATOR_SECRET = "must-not-cross";
+  const session = {
+    config: {
+      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
+      promotion: { mode: "manual" },
+    },
+    manifest: {
+      run_id: "test-env",
+      manifest_digest: "digest",
+      evidence_path: evidence,
+    },
+    manifestPath: join(root, "manifest.json"),
+    primaryCwd: root,
+    driverPath: () => driver,
+    checkpoint: async () => ({}),
+    fingerprint: async () => "fingerprint",
+    promote: async () => {},
+    preflightCleanup: async () => {},
+    cleanup: async () => {},
+  };
+  try {
+    const controller = await new DeliveryController(session).initialize();
+    await controller.observeState({
+      state: "preview",
+      is_final: false,
+      meta: policyMeta(),
+    });
+    const environment = JSON.parse(await readFile(captured, "utf8"));
+    assert.ok(environment.path);
+    assert.equal(environment.secret, undefined);
+    assert.equal(environment.run, "test-env");
+  } finally {
+    if (previous === undefined) delete process.env.STATEWRIGHT_OPERATOR_SECRET;
+    else process.env.STATEWRIGHT_OPERATOR_SECRET = previous;
+  }
+});
+
 test("a repaired commit fingerprint redeploys and validation cannot outrun deploy", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-controller-repair-"));
   const evidence = join(root, "evidence");
@@ -88,7 +146,7 @@ test("a repaired commit fingerprint redeploys and validation cannot outrun deplo
   let fingerprint = "first";
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000 },
+      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
       promotion: { mode: "manual" },
     },
     manifest: {
@@ -99,8 +157,10 @@ test("a repaired commit fingerprint redeploys and validation cannot outrun deplo
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
     driverPath: () => driver,
+    checkpoint: async () => ({}),
     fingerprint: async () => fingerprint,
     promote: async () => {},
+    preflightCleanup: async () => {},
     cleanup: async () => {},
   };
   const controller = await new DeliveryController(session).initialize();
@@ -136,7 +196,7 @@ test("promotion lock spans Git promotion and the deployment driver", async () =>
   );
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000 },
+      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
       promotion: { mode: "squash" },
     },
     manifest: {
@@ -147,8 +207,10 @@ test("promotion lock spans Git promotion and the deployment driver", async () =>
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
     driverPath: () => driver,
+    checkpoint: async () => ({}),
     fingerprint: async () => "fingerprint",
     promote: async () => appendFile(sequence, "git-promote\n"),
+    preflightCleanup: async () => {},
     cleanup: async () => {},
   };
   const meta = policyMeta();
@@ -160,6 +222,7 @@ test("promotion lock spans Git promotion and the deployment driver", async () =>
 
   assert.deepEqual((await readFile(sequence, "utf8")).trim().split("\n"), [
     "lock",
+    "preflight-promote",
     "git-promote",
     "promote",
     "unlock",

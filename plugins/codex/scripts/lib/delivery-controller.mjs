@@ -1,9 +1,10 @@
 import { appendFile, chmod, readFile, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { extname, resolve } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import {
+  driverEnvironment,
+  runDriverProcess,
+} from "./driver-process.mjs";
 
 function workflowPolicy(state) {
   return {
@@ -95,6 +96,9 @@ export class DeliveryController {
     if (state?.state === this.policy.preview.deploy_state) actions.push("deploy");
     if (state?.state === this.policy.preview.validate_state) actions.push("validate");
     if (state?.state === this.policy.promotion.promote_state) actions.push("promote");
+    if (actions.includes("prepare") || actions.includes("deploy")) {
+      await this.session.checkpoint();
+    }
     for (const action of [...new Set(actions)]) await this.runAction(action, state.state);
 
     if (state?.is_final && !this.policy.failureStates.has(state.state)) {
@@ -121,14 +125,45 @@ export class DeliveryController {
     await writeJsonAtomic(this.actionPath, this.actions);
 
     let promotionLockHeld = false;
+    let promotionExecutionToken = null;
+    let renewalTimer = null;
+    let renewalChain = Promise.resolve();
+    let renewalError = null;
     try {
       let result;
       if (action === "promote") {
-        await this.invokeDriver("lock", fingerprint);
+        promotionExecutionToken = randomUUID();
+        await this.invokeDriver("lock", fingerprint, {
+          promotionExecutionToken,
+          timeoutMs: 60_000,
+        });
         promotionLockHeld = true;
+        renewalTimer = setInterval(() => {
+          renewalChain = renewalChain
+            .then(() =>
+              this.invokeDriver("renew", fingerprint, {
+                promotionExecutionToken,
+                timeoutMs: 60_000,
+              }))
+            .catch((error) => {
+              renewalError ??= error;
+            });
+        }, 60_000);
+        await this.invokeDriver("preflight-promote", fingerprint, {
+          promotionExecutionToken,
+          timeoutMs: 120_000,
+        });
         await this.session.promote();
-        result = await this.invokeDriver(action, fingerprint);
-        await this.invokeDriver("unlock", fingerprint);
+        if (renewalError) throw renewalError;
+        result = await this.invokeDriver(action, fingerprint, { promotionExecutionToken });
+        clearInterval(renewalTimer);
+        renewalTimer = null;
+        await renewalChain;
+        if (renewalError) throw renewalError;
+        await this.invokeDriver("unlock", fingerprint, {
+          promotionExecutionToken,
+          timeoutMs: 60_000,
+        });
         promotionLockHeld = false;
       } else {
         result = await this.invokeDriver(action, fingerprint);
@@ -157,10 +192,15 @@ export class DeliveryController {
       this.stderr.write(`[statewright] delivery ${action} complete\n`);
       return result;
     } catch (error) {
+      if (renewalTimer) clearInterval(renewalTimer);
+      await renewalChain;
       let finalError = error;
       if (promotionLockHeld) {
         try {
-          await this.invokeDriver("unlock", fingerprint);
+          await this.invokeDriver("unlock", fingerprint, {
+            promotionExecutionToken,
+            timeoutMs: 60_000,
+          });
           promotionLockHeld = false;
         } catch (unlockError) {
           finalError = new AggregateError(
@@ -188,25 +228,24 @@ export class DeliveryController {
     }
   }
 
-  async invokeDriver(action, fingerprint) {
+  async invokeDriver(action, fingerprint, options = {}) {
     const driver = this.session.driverPath();
     const args = [action, "--manifest", this.session.manifestPath];
     const command = [".js", ".mjs", ".cjs"].includes(extname(driver))
       ? process.execPath
       : driver;
     const commandArgs = command === process.execPath ? [driver, ...args] : args;
-    const { stdout } = await execFileAsync(command, commandArgs, {
+    const { stdout } = await runDriverProcess(command, commandArgs, {
       cwd: this.session.primaryCwd,
-      env: {
-        ...process.env,
+      env: driverEnvironment(this.session, {
         STATEWRIGHT_DELIVERY_ACTION: action,
-        STATEWRIGHT_DELIVERY_MANIFEST: this.session.manifestPath,
-        STATEWRIGHT_DELIVERY_RUN_ID: this.session.manifest.run_id,
         STATEWRIGHT_DELIVERY_FINGERPRINT: fingerprint,
-      },
-      encoding: "utf8",
-      timeout: this.session.config.preview.actionTimeoutMs,
-      maxBuffer: 2 * 1024 * 1024,
+        ...(options.promotionExecutionToken
+          ? { STATEWRIGHT_DELIVERY_EXECUTION_TOKEN: options.promotionExecutionToken }
+          : {}),
+      }),
+      timeoutMs:
+        options.timeoutMs ?? this.session.config.preview.actionTimeoutMs,
     });
     const text = stdout.trim();
     if (!text) return { ok: true };
@@ -223,6 +262,7 @@ export class DeliveryController {
     if (!this.completedAction("promote")) {
       throw new Error("refusing final cleanup because promotion did not complete.");
     }
+    await this.session.preflightCleanup();
     await this.runAction("teardown", "finalize");
     if (this.policy.workspace.cleanup === "after_promoted") {
       await this.session.cleanup();

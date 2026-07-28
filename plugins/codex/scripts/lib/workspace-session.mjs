@@ -1,12 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  chmod,
+  cp,
+  lstat,
+  mkdir,
+  realpath,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isSafeDeliveryRunId } from "./delivery-config.mjs";
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_VERSION = 1;
+const UUID_V4 =
+  /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 async function run(command, args, options = {}) {
   try {
@@ -23,7 +36,24 @@ async function run(command, args, options = {}) {
 }
 
 async function git(cwd, args) {
-  return run("git", args, { cwd });
+  const env = {};
+  for (const name of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"]) {
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  }
+  env.GIT_TERMINAL_PROMPT = "0";
+  return run(
+    "git",
+    [
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "commit.gpgSign=false",
+      "-c",
+      "tag.gpgSign=false",
+      ...args,
+    ],
+    { cwd, env },
+  );
 }
 
 function nowIso() {
@@ -41,6 +71,17 @@ function digestManifest(manifest) {
   return createHash("sha256").update(JSON.stringify(copy)).digest("hex");
 }
 
+function digestConfig(config) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      version: config.version,
+      workspace: config.workspace,
+      preview: config.preview,
+      promotion: config.promotion,
+    }))
+    .digest("hex");
+}
+
 async function writeJsonAtomic(path, value, mode = 0o600) {
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode });
@@ -51,6 +92,59 @@ async function writeJsonAtomic(path, value, mode = 0o600) {
 async function canonicalRepository(path) {
   const { stdout } = await git(path, ["rev-parse", "--show-toplevel"]);
   return stdout.trim();
+}
+
+async function bundleFiles(root, current = root) {
+  const entries = await readdir(current, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries.sort((left, right) =>
+    left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+    const path = join(current, entry.name);
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new Error(`preview driver bundle must not contain symlinks: ${path}`);
+    }
+    if (info.isDirectory()) files.push(...await bundleFiles(root, path));
+    else if (info.isFile()) files.push(path);
+    else throw new Error(`unsupported preview driver bundle entry: ${path}`);
+  }
+  return files;
+}
+
+export async function digestDriverBundle(root) {
+  const hash = createHash("sha256");
+  for (const path of await bundleFiles(root)) {
+    const name = relative(root, path).split("\\").join("/");
+    const content = await readFile(path);
+    hash.update(`${name.length}:${name}:${content.length}:`);
+    hash.update(content);
+  }
+  return hash.digest("hex");
+}
+
+async function snapshotDriverBundle(config, runRoot) {
+  const sourceInfo = await lstat(config.preview.driverRoot);
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isDirectory()) {
+    throw new Error("preview driver root must be a real directory.");
+  }
+  const sourceDigest = await digestDriverBundle(config.preview.driverRoot);
+  if (sourceDigest !== config.preview.bundleSha256) {
+    throw new Error(
+      `preview driver bundle digest mismatch: expected ${config.preview.bundleSha256}, `
+      + `found ${sourceDigest}.`,
+    );
+  }
+  const snapshotPath = join(runRoot, "trusted-driver");
+  await cp(config.preview.driverRoot, snapshotPath, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+  });
+  const snapshotDigest = await digestDriverBundle(snapshotPath);
+  if (snapshotDigest !== sourceDigest) {
+    throw new Error("preview driver bundle changed while it was being snapshotted.");
+  }
+  return { path: snapshotPath, digest: snapshotDigest };
 }
 
 async function assertRef(path, ref, description) {
@@ -102,13 +196,14 @@ export class WorkspaceSession {
     const runRoot = join(config.workspace.root, runId);
     const manifestPath = join(runRoot, "manifest.json");
     const existing = await stat(manifestPath).catch(() => null);
-    if (existing) return WorkspaceSession.resume(config, manifestPath);
+    if (existing) return WorkspaceSession.resume(config, manifestPath, options);
 
     await mkdir(config.workspace.root, { recursive: true, mode: 0o700 });
     await mkdir(runRoot, { recursive: false, mode: 0o700 });
 
     const created = [];
     try {
+      const driverBundle = await snapshotDriverBundle(config, runRoot);
       for (const configured of config.workspace.repositories) {
         const sourcePath = await canonicalRepository(configured.sourcePath);
         const baseCommit = await assertRef(
@@ -161,16 +256,21 @@ export class WorkspaceSession {
       const manifest = {
         version: MANIFEST_VERSION,
         run_id: runId,
+        ownership_token: randomUUID(),
         created_at: nowIso(),
         config_path: config.configPath,
+        config_digest: digestConfig(config),
         manifest_path: manifestPath,
         evidence_path: join(config.preview.evidenceRoot, runId),
+        driver_bundle_path: driverBundle.path,
+        driver_bundle_sha256: driverBundle.digest,
         status: "prepared",
         repositories,
         promotion: {
           mode: config.promotion.mode,
           status: "pending",
           completed_at: null,
+          journal: [],
         },
         manifest_digest: null,
       };
@@ -190,7 +290,7 @@ export class WorkspaceSession {
     }
   }
 
-  static async resume(config, manifestPath) {
+  static async resume(config, manifestPath, options = {}) {
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     if (manifest.version !== MANIFEST_VERSION) {
       throw new Error(`unsupported delivery manifest version: ${manifest.version}`);
@@ -198,8 +298,24 @@ export class WorkspaceSession {
     if (manifest.manifest_digest !== digestManifest(manifest)) {
       throw new Error(`delivery manifest digest mismatch: ${manifestPath}`);
     }
+    if (
+      typeof manifest.ownership_token !== "string"
+      || !UUID_V4.test(manifest.ownership_token)
+    ) {
+      throw new Error("delivery manifest ownership token is invalid.");
+    }
     if (manifest.config_path !== config.configPath) {
       throw new Error("delivery manifest was created from a different config path.");
+    }
+    if (manifest.config_digest !== digestConfig(config)) {
+      throw new Error("delivery manifest was created from different config contents.");
+    }
+    if (manifest.driver_bundle_sha256 !== config.preview.bundleSha256) {
+      throw new Error("delivery manifest driver digest does not match the current config.");
+    }
+    const driverDigest = await digestDriverBundle(manifest.driver_bundle_path);
+    if (driverDigest !== manifest.driver_bundle_sha256) {
+      throw new Error("snapshotted preview driver bundle digest mismatch.");
     }
     const configuredNames = config.workspace.repositories.map((repo) => repo.name).sort();
     const manifestNames = (manifest.repositories ?? []).map((repo) => repo.name).sort();
@@ -208,7 +324,8 @@ export class WorkspaceSession {
     }
     for (const repo of manifest.repositories ?? []) {
       const top = await canonicalRepository(repo.worktree_path).catch(() => null);
-      if (top !== repo.worktree_path) {
+      const expected = await realpath(repo.worktree_path).catch(() => null);
+      if (!top || !expected || await realpath(top) !== expected) {
         throw new Error(`delivery worktree is unavailable: ${repo.worktree_path}`);
       }
       const { stdout } = await git(repo.worktree_path, ["branch", "--show-current"]);
@@ -216,7 +333,20 @@ export class WorkspaceSession {
         throw new Error(`delivery worktree branch mismatch for ${repo.name}.`);
       }
     }
-    return new WorkspaceSession(config, manifest);
+    const session = new WorkspaceSession(config, manifest);
+    const interrupted = ["preparing", "applying", "recovery_required"].includes(
+      manifest.promotion?.status,
+    ) || (manifest.promotion?.journal ?? []).some(
+      (entry) =>
+        ["preparing", "prepared", "applying", "applied"].includes(entry.status),
+    );
+    if (interrupted && !options.allowRecovery) {
+      throw new Error(
+        "delivery promotion was interrupted; run statewright-delivery recover "
+        + "with the exact delivery run ID before resuming.",
+      );
+    }
+    return session;
   }
 
   async saveManifest() {
@@ -225,10 +355,11 @@ export class WorkspaceSession {
   }
 
   driverPath() {
-    if (resolve(this.config.preview.driver) === this.config.preview.driver) {
-      return this.config.preview.driver;
+    const path = resolve(this.manifest.driver_bundle_path, this.config.preview.driver);
+    if (!path.startsWith(`${resolve(this.manifest.driver_bundle_path)}/`)) {
+      throw new Error("snapshotted preview driver path escapes its bundle.");
     }
-    return resolve(this.primaryCwd, this.config.preview.driver);
+    return path;
   }
 
   async verifyCleanSourceWorktrees() {
@@ -238,6 +369,25 @@ export class WorkspaceSession {
         throw new Error(`run worktree '${repo.name}' must be clean before promotion.`);
       }
     }
+  }
+
+  async checkpoint() {
+    const commits = {};
+    for (const repo of this.manifest.repositories) {
+      const { stdout } = await git(repo.worktree_path, ["status", "--porcelain"]);
+      if (stdout.trim()) {
+        await git(repo.worktree_path, ["add", "-A"]);
+        await git(repo.worktree_path, [
+          "commit",
+          "-m",
+          `chore(statewright): checkpoint ${this.manifest.run_id}/${repo.name}`,
+        ]);
+      }
+      commits[repo.name] = (
+        await git(repo.worktree_path, ["rev-parse", "HEAD"])
+      ).stdout.trim();
+    }
+    return commits;
   }
 
   async fingerprint() {
@@ -294,11 +444,45 @@ export class WorkspaceSession {
 
     const plans = await this.preflightPromotion();
     const prepared = [];
+    const applied = [];
+    let keepPrepared = false;
     try {
       for (const { repo, targetWorktree } of plans) {
+        const sourceHead = (
+          await git(repo.worktree_path, ["rev-parse", "HEAD"])
+        ).stdout.trim();
         const promotionBranch = `statewright/promote-${this.manifest.run_id}-${repo.name}`;
+        const recoveryRef = `refs/statewright/recovery/${this.manifest.run_id}/${repo.name}`;
         await assertBranchName(repo.source_path, promotionBranch, "promotion branch");
         const promotionPath = join(this.runRoot, "promotion", repo.name);
+        const item = {
+          repo,
+          targetWorktree,
+          promotionBranch,
+          promotionPath,
+          promotedCommit: null,
+          sourceHead,
+          recoveryRef,
+          keepPromotionWorktree: false,
+        };
+        prepared.push(item);
+        this.manifest.promotion.status = "preparing";
+        this.manifest.promotion.journal = [
+          ...(this.manifest.promotion.journal ?? []).filter(
+            (entry) => entry.repository !== repo.name,
+          ),
+          {
+            repository: repo.name,
+            target_branch: repo.target_branch,
+            previous_commit: repo.target_head,
+            promoted_commit: null,
+            recovery_ref: recoveryRef,
+            promotion_branch: promotionBranch,
+            promotion_path: promotionPath,
+            status: "preparing",
+          },
+        ];
+        await this.saveManifest();
         await mkdir(dirname(promotionPath), { recursive: true, mode: 0o700 });
         await git(repo.source_path, [
           "worktree",
@@ -308,15 +492,6 @@ export class WorkspaceSession {
           promotionPath,
           repo.target_head,
         ]);
-        const item = {
-          repo,
-          targetWorktree,
-          promotionBranch,
-          promotionPath,
-          promotedCommit: null,
-          keepPromotionWorktree: false,
-        };
-        prepared.push(item);
         await git(promotionPath, ["merge", "--squash", repo.branch]);
         const staged = await git(promotionPath, ["diff", "--cached", "--quiet"]).then(
           () => false,
@@ -332,9 +507,27 @@ export class WorkspaceSession {
         item.promotedCommit = (
           await git(promotionPath, ["rev-parse", "HEAD"])
         ).stdout.trim();
+        await git(repo.source_path, [
+          "update-ref",
+          recoveryRef,
+          repo.target_head,
+        ]);
+        const journal = this.manifest.promotion.journal.find(
+          (entry) => entry.repository === repo.name,
+        );
+        journal.promoted_commit = item.promotedCommit;
+        journal.status = "prepared";
+        await this.saveManifest();
       }
 
       for (const item of prepared) {
+        const journal = this.manifest.promotion.journal.find(
+          (entry) => entry.repository === item.repo.name,
+        );
+        this.manifest.promotion.status = "applying";
+        journal.status = "applying";
+        journal.apply_started_at = nowIso();
+        await this.saveManifest();
         if (item.targetWorktree) {
           await git(item.targetWorktree.path, ["merge", "--ff-only", item.promotionBranch]);
         } else {
@@ -344,29 +537,113 @@ export class WorkspaceSession {
             item.promotedCommit,
             item.repo.target_head,
           ]);
-          await git(item.repo.source_path, ["worktree", "remove", item.promotionPath]);
-          await git(item.repo.source_path, ["branch", "-D", item.promotionBranch]);
-          await git(item.repo.source_path, [
-            "worktree",
-            "add",
-            "--detach",
-            item.promotionPath,
-            item.promotedCommit,
-          ]);
-          item.promotionBranch = null;
-          item.keepPromotionWorktree = true;
         }
+        applied.push(item);
+        journal.status = "applied";
+        journal.applied_at = nowIso();
+        await this.saveManifest();
+
+        await git(item.repo.source_path, ["worktree", "remove", item.promotionPath]);
+        await git(item.repo.source_path, ["branch", "-D", item.promotionBranch]);
+        await git(item.repo.source_path, [
+          "worktree",
+          "add",
+          "--detach",
+          item.promotionPath,
+          item.promotedCommit,
+        ]);
+        item.promotionBranch = null;
+        item.keepPromotionWorktree = true;
         item.repo.promoted_commit = item.promotedCommit;
-        item.repo.promotion_branch = item.promotionBranch;
-        item.repo.promoted_worktree_path =
-          item.targetWorktree?.path ?? item.promotionPath;
+        item.repo.promoted_source_commit = item.sourceHead;
+        item.repo.promotion_branch = null;
+        item.repo.promoted_worktree_path = item.promotionPath;
       }
       this.manifest.promotion.status = "complete";
       this.manifest.promotion.completed_at = nowIso();
       await this.saveManifest();
+      for (const item of prepared) {
+        await git(item.repo.source_path, ["update-ref", "-d", item.recoveryRef]).catch(
+          () => {},
+        );
+      }
       return this.manifest.promotion;
+    } catch (error) {
+      const rollbackErrors = [];
+      for (const item of [...applied].reverse()) {
+        try {
+          const current = await assertRef(
+            item.repo.source_path,
+            item.repo.target_branch,
+            `rollback target for ${item.repo.name}`,
+          );
+          if (current !== item.promotedCommit) {
+            throw new Error(
+              `cannot roll back '${item.repo.name}': target moved to ${current}.`,
+            );
+          }
+          if (item.targetWorktree) {
+            const status = await git(item.targetWorktree.path, ["status", "--porcelain"]);
+            if (status.stdout.trim()) {
+              throw new Error(
+                `cannot roll back dirty target worktree for '${item.repo.name}'.`,
+              );
+            }
+            await git(item.targetWorktree.path, ["reset", "--hard", item.repo.target_head]);
+          } else {
+            await git(item.repo.source_path, [
+              "update-ref",
+              `refs/heads/${item.repo.target_branch}`,
+              item.repo.target_head,
+              item.promotedCommit,
+            ]);
+          }
+          const journal = this.manifest.promotion.journal.find(
+            (entry) => entry.repository === item.repo.name,
+          );
+          journal.status = "rolled_back";
+          journal.rolled_back_at = nowIso();
+          item.repo.promoted_commit = null;
+          item.repo.promoted_source_commit = null;
+          item.repo.promotion_branch = null;
+          item.repo.promoted_worktree_path = null;
+          item.keepPromotionWorktree = false;
+        } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+      }
+      if (rollbackErrors.length > 0) {
+        keepPrepared = true;
+        this.manifest.promotion.status = "recovery_required";
+        this.manifest.promotion.recovery_errors = rollbackErrors.map(
+          (rollbackError) => String(rollbackError.message ?? rollbackError),
+        );
+      } else {
+        this.manifest.promotion.status = "pending";
+        for (const item of prepared) {
+          const journal = this.manifest.promotion.journal.find(
+            (entry) => entry.repository === item.repo.name,
+          );
+          if (journal && journal.status !== "rolled_back") {
+            journal.status = "rolled_back";
+            journal.rolled_back_at = nowIso();
+          }
+          await git(item.repo.source_path, ["update-ref", "-d", item.recoveryRef]).catch(
+            () => {},
+          );
+        }
+      }
+      await this.saveManifest();
+      if (rollbackErrors.length > 0) {
+        throw new AggregateError(
+          [error, ...rollbackErrors],
+          "multi-repository promotion failed and rollback requires operator recovery",
+        );
+      }
+      throw error;
     } finally {
       for (const item of prepared) {
+        if (keepPrepared) continue;
         if (item.keepPromotionWorktree) continue;
         await git(item.repo.source_path, ["worktree", "remove", item.promotionPath]).catch(
           () => {},
@@ -380,10 +657,203 @@ export class WorkspaceSession {
     }
   }
 
-  async cleanup() {
+  async preflightCleanup() {
     if (this.manifest.promotion.status !== "complete") {
       throw new Error("refusing worktree cleanup before promotion is complete.");
     }
+    await this.verifyPromotedSourceHeads();
+  }
+
+  async cleanup() {
+    await this.preflightCleanup();
+    await this.removeRunWorktrees();
+    this.manifest.status = "cleaned";
+    this.manifest.cleaned_at = nowIso();
+    await this.saveManifest();
+  }
+
+  async preflightDiscard(expectedRunId) {
+    if (expectedRunId !== this.manifest.run_id) {
+      throw new Error("discard confirmation must exactly match the delivery run ID.");
+    }
+    if (this.manifest.promotion.status === "complete") {
+      throw new Error("promoted delivery runs must use normal cleanup, not discard.");
+    }
+    if (
+      ["preparing", "applying", "recovery_required"].includes(
+        this.manifest.promotion.status,
+      )
+      || (this.manifest.promotion.journal ?? []).some(
+        (entry) =>
+          ["preparing", "prepared", "applying", "applied"].includes(entry.status),
+      )
+    ) {
+      throw new Error("interrupted promotion must be recovered before discard.");
+    }
+    for (const repo of this.manifest.repositories) {
+      const current = await assertRef(
+        repo.source_path,
+        repo.target_branch,
+        `discard target for ${repo.name}`,
+      );
+      if (current !== repo.target_head) {
+        throw new Error(
+          `refusing discard because target branch moved for '${repo.name}'.`,
+        );
+      }
+    }
+    await this.verifyCleanSourceWorktrees();
+    const realRunRoot = await realpath(this.runRoot);
+    for (const repo of this.manifest.repositories) {
+      const realWorktree = await realpath(repo.worktree_path);
+      if (!realWorktree.startsWith(`${realRunRoot}/`)) {
+        throw new Error(`refusing to discard foreign worktree path for '${repo.name}'.`);
+      }
+      const { stdout } = await git(repo.worktree_path, ["branch", "--show-current"]);
+      if (stdout.trim() !== repo.branch) {
+        throw new Error(`delivery worktree branch mismatch for '${repo.name}'.`);
+      }
+    }
+  }
+
+  async verifyPromotedSourceHeads() {
+    for (const repo of this.manifest.repositories) {
+      if (!repo.promoted_source_commit) {
+        throw new Error(`repository '${repo.name}' has no promoted source commit.`);
+      }
+      const current = (
+        await git(repo.worktree_path, ["rev-parse", "HEAD"])
+      ).stdout.trim();
+      if (current !== repo.promoted_source_commit) {
+        throw new Error(
+          `run worktree '${repo.name}' changed after promotion; refusing cleanup.`,
+        );
+      }
+      const status = await git(repo.worktree_path, ["status", "--porcelain"]);
+      if (status.stdout.trim()) {
+        throw new Error(
+          `run worktree '${repo.name}' is dirty after promotion; refusing cleanup.`,
+        );
+      }
+    }
+  }
+
+  async discard(expectedRunId) {
+    await this.preflightDiscard(expectedRunId);
+    await this.removeRunWorktrees();
+    this.manifest.status = "discarded";
+    this.manifest.discarded_at = nowIso();
+    await this.saveManifest();
+  }
+
+  async recoverPromotion(expectedRunId) {
+    if (expectedRunId !== this.manifest.run_id) {
+      throw new Error("recovery confirmation must exactly match the delivery run ID.");
+    }
+    if (this.manifest.promotion.status === "complete") {
+      throw new Error("completed promotion does not require recovery.");
+    }
+    const errors = [];
+    for (const entry of [...(this.manifest.promotion.journal ?? [])].reverse()) {
+      const repo = this.manifest.repositories.find(
+        (candidate) => candidate.name === entry.repository,
+      );
+      if (!repo) {
+        errors.push(
+          new Error(`recovery journal references unknown repo '${entry.repository}'.`),
+        );
+        continue;
+      }
+      try {
+        const current = await assertRef(
+          repo.source_path,
+          repo.target_branch,
+          `recovery target for ${repo.name}`,
+        );
+        if (
+          current !== entry.previous_commit
+          && (!entry.promoted_commit || current !== entry.promoted_commit)
+        ) {
+          throw new Error(
+            `cannot recover '${repo.name}': target moved to ${current}.`,
+          );
+        }
+        if (entry.promoted_commit && current === entry.promoted_commit) {
+          const worktrees = parseWorktrees(
+            (await git(repo.source_path, ["worktree", "list", "--porcelain"])).stdout,
+          );
+          const targetWorktree = worktrees.find(
+            (candidate) => candidate.branch === repo.target_branch,
+          );
+          if (targetWorktree) {
+            const status = await git(targetWorktree.path, ["status", "--porcelain"]);
+            if (status.stdout.trim()) {
+              throw new Error(
+                `cannot recover dirty target worktree for '${repo.name}'.`,
+              );
+            }
+            await git(targetWorktree.path, ["reset", "--hard", entry.previous_commit]);
+          } else {
+            await git(repo.source_path, [
+              "update-ref",
+              `refs/heads/${repo.target_branch}`,
+              entry.previous_commit,
+              entry.promoted_commit,
+            ]);
+          }
+        }
+        entry.status = "rolled_back";
+        entry.rolled_back_at = nowIso();
+        repo.promoted_commit = null;
+        repo.promoted_source_commit = null;
+        repo.promotion_branch = null;
+        repo.promoted_worktree_path = null;
+        const promotionPath =
+          entry.promotion_path ?? join(this.runRoot, "promotion", repo.name);
+        if (await stat(promotionPath).catch(() => null)) {
+          await git(repo.source_path, ["worktree", "remove", promotionPath]);
+        }
+        const promotionBranch =
+          entry.promotion_branch
+          ?? `statewright/promote-${this.manifest.run_id}-${repo.name}`;
+        const branchExists = await git(repo.source_path, [
+          "show-ref",
+          "--verify",
+          "--quiet",
+          `refs/heads/${promotionBranch}`,
+        ]).then(
+          () => true,
+          () => false,
+        );
+        if (branchExists) {
+          await git(repo.source_path, ["branch", "-D", promotionBranch]);
+        }
+        await git(repo.source_path, ["update-ref", "-d", entry.recovery_ref]).catch(
+          () => {},
+        );
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      this.manifest.promotion.status = "recovery_required";
+      this.manifest.promotion.recovery_errors = errors.map(
+        (error) => String(error.message ?? error),
+      );
+      await this.saveManifest();
+      throw new AggregateError(
+        errors,
+        "delivery promotion recovery requires operator action",
+      );
+    }
+    this.manifest.promotion.status = "pending";
+    this.manifest.promotion.recovered_at = nowIso();
+    this.manifest.promotion.recovery_errors = [];
+    await this.saveManifest();
+    return this.manifest.promotion;
+  }
+
+  async removeRunWorktrees() {
     for (const repo of [...this.manifest.repositories].reverse()) {
       await git(repo.source_path, ["worktree", "remove", repo.worktree_path]);
       await git(repo.source_path, ["branch", "-D", repo.branch]);
@@ -397,10 +867,7 @@ export class WorkspaceSession {
         }
       }
     }
-    this.manifest.status = "cleaned";
-    this.manifest.cleaned_at = nowIso();
-    await this.saveManifest();
   }
 }
 
-export { digestManifest, parseWorktrees };
+export { digestConfig, digestManifest, parseWorktrees };

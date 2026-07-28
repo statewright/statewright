@@ -19,7 +19,12 @@ function validConfig() {
         },
       ],
     },
-    preview: { driver: "scripts/preview.mjs" },
+    preview: {
+      driver_root: "scripts",
+      driver: "preview.mjs",
+      bundle_sha256: "a".repeat(64),
+      environment_allowlist: ["PATH", "KUBECONFIG", "STATEWRIGHT_API_KEY"],
+    },
     promotion: { mode: "squash", commit_message: "feat: promote preview" },
   };
 }
@@ -28,7 +33,13 @@ test("delivery config resolves trusted paths and one primary repository", () => 
   const config = validateDeliveryConfig(validConfig(), "/workspace/project/delivery.json");
   assert.equal(config.workspace.root, "/workspace/project/runs");
   assert.equal(config.workspace.repositories[0].sourcePath, "/workspace/project");
-  assert.equal(config.preview.driver, "scripts/preview.mjs");
+  assert.equal(config.preview.driver, "preview.mjs");
+  assert.equal(config.preview.driverRoot, "/workspace/project/scripts");
+  assert.deepEqual(config.preview.environmentAllowlist, [
+    "PATH",
+    "KUBECONFIG",
+    "STATEWRIGHT_API_KEY",
+  ]);
   assert.equal(config.preview.evidenceRoot, resolve("/workspace/project/runs", ".evidence"));
 });
 
@@ -48,6 +59,13 @@ test("delivery config rejects duplicate repositories and unsafe drivers", () => 
   assert.throws(
     () => validateDeliveryConfig(unsafe, "/workspace/project/delivery.json"),
     /must not contain '\.\.'/,
+  );
+
+  const unpinned = validConfig();
+  unpinned.preview.bundle_sha256 = "not-a-digest";
+  assert.throws(
+    () => validateDeliveryConfig(unpinned, "/workspace/project/delivery.json"),
+    /lowercase SHA-256/,
   );
 });
 

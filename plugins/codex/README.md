@@ -90,6 +90,43 @@ statewright_load_workflow(name='bugfix')
 statewright_list_workflows()
 ```
 
+### Isolated delivery runs
+
+`statewright-codex` can create declared multi-repository worktrees before
+opening a thread and bind workflow states to a trusted preview driver:
+
+```bash
+statewright-codex \
+  --delivery-config /path/to/preview-delivery.json \
+  --delivery-run-id my-run \
+  --workflow statewright-worktree-preview-delivery-v1 \
+  -- "Implement and validate the change"
+```
+
+The local config pins a driver-bundle SHA-256 and an environment allowlist.
+Statewright snapshots and verifies the bundle before task work, opens Codex in
+the primary run worktree, and preserves failed previews for diagnosis.
+
+Discard an unpromoted run explicitly:
+
+```bash
+node plugins/codex/scripts/statewright-delivery.mjs discard \
+  --delivery-config /path/to/preview-delivery.json \
+  --run-id my-run
+```
+
+Discard requires the exact run ID and clean run worktrees. Promoted runs use
+the normal workflow teardown path.
+
+If a process dies while target refs are moving, recover the durable promotion
+journal before resume or discard:
+
+```bash
+node plugins/codex/scripts/statewright-delivery.mjs recover \
+  --delivery-config /path/to/preview-delivery.json \
+  --run-id my-run
+```
+
 ## Agent decision record
 
 Set `meta.agent-decision-record` to `true` to make the gateway invoke the

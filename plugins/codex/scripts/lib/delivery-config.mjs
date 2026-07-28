@@ -24,11 +24,30 @@ function resolveConfiguredPath(configDir, value, field) {
 
 function validateRelativeDriver(value) {
   const driver = requireString(value, "preview.driver");
-  if (isAbsolute(driver)) return driver;
+  if (isAbsolute(driver)) {
+    throw new Error("preview.driver must be relative to preview.driver_root.");
+  }
   if (driver.split(/[\\/]/).includes("..")) {
     throw new Error("preview.driver must not contain '..'.");
   }
   return driver;
+}
+
+function validateEnvironmentAllowlist(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("preview.environment_allowlist must contain at least PATH.");
+  }
+  const names = new Set();
+  for (const name of value) {
+    if (typeof name !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+      throw new Error(`invalid preview environment variable name '${name}'.`);
+    }
+    names.add(name);
+  }
+  if (!names.has("PATH")) {
+    throw new Error("preview.environment_allowlist must include PATH.");
+  }
+  return [...names];
 }
 
 export function validateDeliveryConfig(raw, configPath) {
@@ -78,6 +97,18 @@ export function validateDeliveryConfig(raw, configPath) {
 
   const preview = requireObject(config.preview, "preview");
   const driver = validateRelativeDriver(preview.driver);
+  const driverRoot = resolveConfiguredPath(
+    configDir,
+    preview.driver_root,
+    "preview.driver_root",
+  );
+  const bundleSha256 = requireString(preview.bundle_sha256, "preview.bundle_sha256");
+  if (!/^[a-f0-9]{64}$/.test(bundleSha256)) {
+    throw new Error("preview.bundle_sha256 must be a lowercase SHA-256 digest.");
+  }
+  const environmentAllowlist = validateEnvironmentAllowlist(
+    preview.environment_allowlist,
+  );
   const evidenceRoot = preview.evidence_root
     ? resolveConfiguredPath(configDir, preview.evidence_root, "preview.evidence_root")
     : resolve(root, ".evidence");
@@ -106,7 +137,14 @@ export function validateDeliveryConfig(raw, configPath) {
     configPath,
     configDir,
     workspace: { mode: "git_worktree", root, repositories },
-    preview: { driver, evidenceRoot, actionTimeoutMs },
+    preview: {
+      driver,
+      driverRoot,
+      bundleSha256,
+      environmentAllowlist,
+      evidenceRoot,
+      actionTimeoutMs,
+    },
     promotion: { mode: promotion.mode, commitMessage },
   };
 }
@@ -129,11 +167,17 @@ export async function assertDeliveryConfigPaths(config) {
       throw new Error(`repository '${repo.name}' path does not exist: ${repo.sourcePath}`);
     }
   }
-  if (isAbsolute(config.preview.driver)) {
-    const info = await stat(config.preview.driver).catch(() => null);
-    if (!info?.isFile()) {
-      throw new Error(`preview driver does not exist: ${config.preview.driver}`);
-    }
+  const rootInfo = await stat(config.preview.driverRoot).catch(() => null);
+  if (!rootInfo?.isDirectory()) {
+    throw new Error(`preview driver root does not exist: ${config.preview.driverRoot}`);
+  }
+  const driverPath = resolve(config.preview.driverRoot, config.preview.driver);
+  if (!driverPath.startsWith(`${config.preview.driverRoot}/`)) {
+    throw new Error("preview driver escapes preview.driver_root.");
+  }
+  const driverInfo = await stat(driverPath).catch(() => null);
+  if (!driverInfo?.isFile()) {
+    throw new Error(`preview driver does not exist: ${driverPath}`);
   }
 }
 

@@ -154,6 +154,69 @@ pub fn validate_definition(definition: &MachineDefinition) -> Result<(), Validat
         }
     }
 
+    // 9. Delivery policies are versioned, internally coherent, and reference
+    // existing lifecycle states. Runtime adapters enforce the actual effects.
+    if let Some(meta) = &definition.meta {
+        if let Some(workspace) = &meta.workspace {
+            if workspace.version != 1 {
+                errors.push(format!(
+                    "workspace policy version {} is unsupported; expected 1",
+                    workspace.version
+                ));
+            }
+        }
+        if let Some(preview) = &meta.preview {
+            if preview.version != 1 {
+                errors.push(format!(
+                    "preview policy version {} is unsupported; expected 1",
+                    preview.version
+                ));
+            }
+            for (field, state) in [
+                ("prepare_state", preview.prepare_state.as_str()),
+                ("deploy_state", preview.deploy_state.as_str()),
+                ("validate_state", preview.validate_state.as_str()),
+            ] {
+                if !definition.states.contains_key(state) {
+                    errors.push(format!(
+                        "preview policy {} references nonexistent state '{}'",
+                        field, state
+                    ));
+                }
+            }
+            if preview.required
+                && meta
+                    .workspace
+                    .as_ref()
+                    .map_or(true, |policy| !policy.required)
+            {
+                errors.push("required preview policy requires a required workspace policy".into());
+            }
+        }
+        if let Some(promotion) = &meta.promotion {
+            if promotion.version != 1 {
+                errors.push(format!(
+                    "promotion policy version {} is unsupported; expected 1",
+                    promotion.version
+                ));
+            }
+            if !definition.states.contains_key(&promotion.promote_state) {
+                errors.push(format!(
+                    "promotion policy promote_state references nonexistent state '{}'",
+                    promotion.promote_state
+                ));
+            }
+            if promotion.required
+                && meta
+                    .preview
+                    .as_ref()
+                    .map_or(true, |policy| !policy.required)
+            {
+                errors.push("required promotion policy requires a required preview policy".into());
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -185,6 +248,81 @@ mod tests {
     #[test]
     fn accepts_valid_machine() {
         assert!(validate_definition(&valid_machine()).is_ok());
+    }
+
+    #[test]
+    fn accepts_coherent_delivery_policy() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "delivery",
+            "initial": "preview",
+            "meta": {
+                "workspace": {
+                    "version": 1,
+                    "mode": "git_worktree",
+                    "required": true,
+                    "cleanup": "after_promoted"
+                },
+                "preview": {
+                    "version": 1,
+                    "mode": "kubernetes",
+                    "required": true,
+                    "prepare_state": "preview",
+                    "deploy_state": "preview",
+                    "validate_state": "validate"
+                },
+                "promotion": {
+                    "version": 1,
+                    "mode": "squash",
+                    "required": true,
+                    "promote_state": "promote",
+                    "teardown_on_final": true
+                }
+            },
+            "states": {
+                "preview": { "on": { "DEPLOYED": "validate" } },
+                "validate": { "on": { "VALID": "promote" } },
+                "promote": { "on": { "DONE": "completed" } },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        assert!(validate_definition(&def).is_ok());
+    }
+
+    #[test]
+    fn rejects_delivery_policy_with_missing_state_or_required_parent() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "bad-delivery",
+            "initial": "start",
+            "meta": {
+                "preview": {
+                    "version": 1,
+                    "mode": "kubernetes",
+                    "required": true,
+                    "prepare_state": "missing",
+                    "deploy_state": "start",
+                    "validate_state": "end"
+                }
+            },
+            "states": {
+                "start": { "on": { "DONE": "end" } },
+                "end": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+
+        let err = validate_definition(&def).unwrap_err();
+        assert!(err
+            .errors
+            .iter()
+            .any(|error| error.contains("nonexistent state 'missing'")));
+        assert!(err
+            .errors
+            .iter()
+            .any(|error| error.contains("requires a required workspace")));
     }
 
     #[test]

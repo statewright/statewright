@@ -341,9 +341,75 @@ pub struct MachineMeta {
     /// States with an explicit `model` field override this.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Optional source-workspace isolation policy enforced by capable adapters.
+    #[serde(default)]
+    pub workspace: Option<WorkspacePolicy>,
+    /// Optional ephemeral runtime preview policy enforced by capable adapters.
+    #[serde(default)]
+    pub preview: Option<PreviewPolicy>,
+    /// Optional guarded promotion policy enforced by capable adapters.
+    #[serde(default)]
+    pub promotion: Option<PromotionPolicy>,
     /// Catch-all for forward compatibility with new meta fields.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacePolicy {
+    pub version: u32,
+    pub mode: WorkspaceMode,
+    #[serde(default)]
+    pub required: bool,
+    pub cleanup: WorkspaceCleanup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    GitWorktree,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceCleanup {
+    Never,
+    AfterPromoted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewPolicy {
+    pub version: u32,
+    pub mode: PreviewMode,
+    #[serde(default)]
+    pub required: bool,
+    pub prepare_state: String,
+    pub deploy_state: String,
+    pub validate_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewMode {
+    Kubernetes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionPolicy {
+    pub version: u32,
+    pub mode: PromotionMode,
+    #[serde(default)]
+    pub required: bool,
+    pub promote_state: String,
+    #[serde(default)]
+    pub teardown_on_final: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromotionMode {
+    Manual,
+    Squash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,5 +617,51 @@ mod tests {
         );
         assert_eq!(def.states["testing"].thinking_level.as_deref(), Some("off"));
         assert_eq!(def.states["done"].thinking_level, None);
+    }
+
+    #[test]
+    fn delivery_policies_deserialize_as_typed_metadata() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "delivery-test",
+            "initial": "preview",
+            "meta": {
+                "workspace": {
+                    "version": 1,
+                    "mode": "git_worktree",
+                    "required": true,
+                    "cleanup": "after_promoted"
+                },
+                "preview": {
+                    "version": 1,
+                    "mode": "kubernetes",
+                    "required": true,
+                    "prepare_state": "preview",
+                    "deploy_state": "preview",
+                    "validate_state": "validate"
+                },
+                "promotion": {
+                    "version": 1,
+                    "mode": "squash",
+                    "required": true,
+                    "promote_state": "promote",
+                    "teardown_on_final": true
+                }
+            },
+            "states": {
+                "preview": { "on": { "NEXT": "validate" } },
+                "validate": { "on": { "NEXT": "promote" } },
+                "promote": { "on": { "DONE": "done" } },
+                "done": { "type": "final" }
+            }
+        }))
+        .unwrap();
+
+        let meta = def.meta.unwrap();
+        assert_eq!(
+            meta.workspace.unwrap().cleanup,
+            WorkspaceCleanup::AfterPromoted
+        );
+        assert_eq!(meta.preview.unwrap().mode, PreviewMode::Kubernetes);
+        assert_eq!(meta.promotion.unwrap().mode, PromotionMode::Squash);
     }
 }

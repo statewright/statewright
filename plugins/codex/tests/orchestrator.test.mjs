@@ -232,7 +232,6 @@ test("an explicit project scope replaces the legacy thread session argument", ()
   assert.match(prompt, /"project_id":"magent-project"/);
   assert.doesNotMatch(prompt, /"session_id"/);
 });
-
 test("the never approval policy accepts MCP elicitation for bounded runs", async () => {
   const client = new FakeClient();
   const orchestrator = new StatewrightCodexOrchestrator({
@@ -271,4 +270,28 @@ test("interactive approval policies decline MCP elicitation", async () => {
   assert.deepEqual(client.responses, [
     { id: "elicitation-2", result: { action: "decline" } },
   ]);
+});
+
+test("a required delivery workflow stops before task work without a delivery session", async () => {
+  const client = new FakeClient();
+  client.states[0].meta = {
+    workspace: { required: true },
+  };
+  const orchestrator = new StatewrightCodexOrchestrator({
+    client,
+    workflow: "requires-preview",
+    prompt: "Do not start this task.",
+    cwd: "/tmp/project",
+    fallbackModel: "luna",
+    fallbackEffort: "medium",
+    telemetry: async () => {},
+    stdout: new BufferWriter(),
+    stderr: new BufferWriter(),
+  });
+
+  await assert.rejects(
+    orchestrator.run(),
+    /requires isolated delivery.*--delivery-config/,
+  );
+  assert.equal(client.turns.length, 1);
 });

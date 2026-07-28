@@ -26,6 +26,12 @@ import {
   createTelemetryWriter,
   defaultTelemetryPath,
 } from "./lib/telemetry.mjs";
+import {
+  assertDeliveryConfigPaths,
+  loadDeliveryConfig,
+} from "./lib/delivery-config.mjs";
+import { DeliveryController } from "./lib/delivery-controller.mjs";
+import { WorkspaceSession } from "./lib/workspace-session.mjs";
 
 const HELP = `Usage:
   statewright-codex --workflow NAME [options] -- TASK
@@ -44,6 +50,10 @@ Session:
   --resume-workflow           Resume the workflow's last paused Statewright run
   --project-id ID             Optional Statewright project scope
   --max-idle-turns N          Continuations allowed without a transition (default: 3)
+
+Delivery:
+  --delivery-config PATH      Trusted worktree/preview delivery config
+  --delivery-run-id ID        Resume or name a delivery run (safe slug)
 
 Permissions:
   --approval-policy POLICY    untrusted, on-request, or never (default: on-request)
@@ -110,6 +120,8 @@ function parseArgs(argv) {
     ["--telemetry-path", "telemetryPath"],
     ["--codex-bin", "codexBin"],
     ["--max-idle-turns", "maxIdleTurns"],
+    ["--delivery-config", "deliveryConfig"],
+    ["--delivery-run-id", "deliveryRunId"],
   ]);
 
   let promptMode = false;
@@ -175,13 +187,27 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const prompt = await readPrompt(options.promptParts);
   validate(options, prompt);
-  const cwd = resolve(options.cwd);
+  const requestedCwd = resolve(options.cwd);
+  let workspaceSession = null;
+  if (options.deliveryConfig) {
+    const deliveryConfig = await loadDeliveryConfig(options.deliveryConfig, requestedCwd);
+    await assertDeliveryConfigPaths(deliveryConfig);
+    workspaceSession = await WorkspaceSession.prepare(deliveryConfig, {
+      runId: options.deliveryRunId,
+    });
+  } else if (options.deliveryRunId) {
+    throw new Error("--delivery-run-id requires --delivery-config.");
+  }
+  const cwd = workspaceSession?.primaryCwd ?? requestedCwd;
   const telemetry = options.telemetryEnabled
     ? createTelemetryWriter(resolve(options.telemetryPath), {
         endpoint: process.env.STATEWRIGHT_TELEMETRY_URL ?? null,
         apiKey: process.env.STATEWRIGHT_API_KEY ?? null,
       })
     : createNullTelemetryWriter();
+  const deliveryController = workspaceSession
+    ? await new DeliveryController(workspaceSession, { telemetry }).initialize()
+    : null;
   const transportSessionId =
     process.env.STATEWRIGHT_MCP_SESSION_ID ?? `br_codex_${randomUUID()}`;
   const client = new AppServerClient({
@@ -207,6 +233,7 @@ export async function main(argv = process.argv.slice(2)) {
     maxIdleTurns: options.maxIdleTurns,
     transportSessionId,
     telemetry,
+    deliveryController,
   });
 
   // Plugin telemetry + update check — fire and forget
@@ -228,11 +255,14 @@ export async function main(argv = process.argv.slice(2)) {
     } catch {}
   }
 
+  let result;
   try {
-    return await orchestrator.run();
+    result = await orchestrator.run();
   } finally {
     await client.close();
   }
+  await deliveryController?.finalizeAfterClientClose();
+  return result;
 }
 
 function isMainModule() {

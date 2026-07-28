@@ -57,6 +57,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     maxIdleTurns = 3,
     transportSessionId = null,
     telemetry = async () => {},
+    deliveryController = null,
     runtimeUsageControlToken = process.env.STATEWRIGHT_USAGE_CONTROL_TOKEN ?? null,
     stdout = process.stdout,
     stderr = process.stderr,
@@ -78,6 +79,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.maxIdleTurns = maxIdleTurns;
     this.transportSessionId = transportSessionId;
     this.telemetry = telemetry;
+    this.deliveryController = deliveryController;
     this.runtimeUsageControlToken = runtimeUsageControlToken;
     this.runtimeUsageSequence = 0;
     this.stdout = stdout;
@@ -133,6 +135,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     }
 
     let state = await this.getState();
+    await this.observeDeliveryState(state);
     this.lastState = state;
     await this.observeStateBudget(state);
     let gate = await this.stopAtGate(state);
@@ -149,6 +152,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
         purpose: idleTurns === 0 ? "workflow" : "continuation",
       });
       state = await this.getState();
+      await this.observeDeliveryState(state);
       gate = await this.stopAtGate(state);
       if (gate) return gate;
 
@@ -266,6 +270,23 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
       arguments: {},
     });
     return parseMcpJsonResult(result);
+  }
+
+  async observeDeliveryState(state) {
+    if (this.deliveryController) {
+      await this.deliveryController.observeState(state);
+      return;
+    }
+    const required =
+      state?.meta?.workspace?.required
+      || state?.meta?.preview?.required
+      || state?.meta?.promotion?.required;
+    if (required) {
+      throw new Error(
+        "This workflow requires isolated delivery. Restart statewright-codex with "
+        + "--delivery-config before task work begins.",
+      );
+    }
   }
 
   async selectRoute(state) {

@@ -47,7 +47,7 @@ pub fn pre_call_check(
             if let Some(command) = extract_command(arguments) {
                 let allowed = allowed_cmds
                     .iter()
-                    .any(|prefix| command.starts_with(prefix));
+                    .any(|allowed| bash_classifier::matches_allowed_command(&command, allowed));
                 if !allowed {
                     return PreCallDecision::Block(format!(
                         "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
@@ -484,6 +484,22 @@ mod tests {
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Allow | PreCallDecision::Warn(_) => {}
             PreCallDecision::Block(msg) => panic!("should allow whitelisted command: {}", msg),
+        }
+    }
+
+    #[test]
+    fn allowed_commands_reject_shell_composition_and_prefix_collisions() {
+        let s = session();
+        for command in [
+            "pytest; kubectl apply -f pod.yaml",
+            "cargo test $(kubectl config view)",
+            "pytest-malicious tests/",
+        ] {
+            let args = json!({ "command": command });
+            match pre_call_check(&s, "Bash", &args) {
+                PreCallDecision::Block(_) => {}
+                _ => panic!("should block command whitelist bypass: {}", command),
+            }
         }
     }
 

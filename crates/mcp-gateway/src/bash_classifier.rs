@@ -123,7 +123,67 @@ pub fn check_against_allowed(command: &str, allowed_tools: &[String]) -> Result<
     Ok(())
 }
 
+/// Match one simple command against an allowed token prefix.
+///
+/// An entry such as `cargo test` permits `cargo test -p statewright-engine`, but
+/// shell composition, redirection, expansion, and prefix collisions are rejected.
+pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
+    let Some(command_tokens) = simple_command_tokens(command) else {
+        return false;
+    };
+    let Some(allowed_tokens) = simple_command_tokens(allowed) else {
+        return false;
+    };
+    !allowed_tokens.is_empty()
+        && command_tokens.len() >= allowed_tokens.len()
+        && command_tokens[..allowed_tokens.len()] == allowed_tokens
+}
+
 // --- Internal helpers ---
+
+fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => current.push(chars.next()?),
+                '`' | '$' => return None,
+                _ => current.push(ch),
+            },
+            Some(_) => unreachable!(),
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => current.push(chars.next()?),
+                ' ' | '\t' => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                ';' | '|' | '&' | '>' | '<' | '\n' | '\r' | '`' | '$' => return None,
+                _ => current.push(ch),
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
 
 /// Split a command string on `&&`, `||`, `;`, and `|` (single pipe).
 /// This is deliberately simple — not a full shell parser.
@@ -668,5 +728,26 @@ mod tests {
         // No > redirect, so this should NOT be FileWrite
         let classes = classify("psql << 'SQL'\nSELECT 1;\nSQL");
         assert!(!classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn allowed_command_matches_only_a_simple_token_prefix() {
+        assert!(matches_allowed_command(
+            "cargo test -p statewright-engine",
+            "cargo test"
+        ));
+        assert!(matches_allowed_command(
+            "node --test 'tests/smoke test.mjs'",
+            "node --test"
+        ));
+        assert!(!matches_allowed_command(
+            "cargo test; kubectl apply -f pod.yaml",
+            "cargo test"
+        ));
+        assert!(!matches_allowed_command(
+            "cargo test $(kubectl config view)",
+            "cargo test"
+        ));
+        assert!(!matches_allowed_command("cargo testbed", "cargo test"));
     }
 }

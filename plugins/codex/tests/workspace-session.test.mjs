@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
+import { validateDeliveryConfig } from "../scripts/lib/delivery-config.mjs";
 import {
   digestDriverBundle,
   WorkspaceSession,
@@ -53,6 +61,38 @@ async function config(root, repositories) {
     },
   };
 }
+
+test("documented config layout prepares with a non-self-referential driver digest", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-documented-config-"));
+  const app = await createRepository(root, "app");
+  const configDir = join(app, ".statewright");
+  const driverRoot = join(configDir, "delivery-driver");
+  await mkdir(driverRoot, { recursive: true });
+  await writeFile(join(driverRoot, "preview-delivery.mjs"), "console.log('{}');\n");
+  const configPath = join(configDir, "delivery.json");
+  const raw = {
+    workspace: {
+      root: "../../runs",
+      repositories: [{ name: "app", path: "..", target_branch: "main" }],
+    },
+    preview: {
+      bundle_sha256: await digestDriverBundle(driverRoot),
+    },
+  };
+  await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`);
+
+  const deliveryConfig = validateDeliveryConfig(raw, configPath);
+  const session = await WorkspaceSession.prepare(deliveryConfig, {
+    runId: "test-documented-config",
+  });
+
+  assert.equal(session.primary.source_path, await realpath(app));
+  assert.equal(session.driverPath(), join(
+    session.manifest.driver_bundle_path,
+    "preview-delivery.mjs",
+  ));
+  await session.discard("test-documented-config");
+});
 
 test("workspace preparation isolates multiple repositories from dirty canonical trees", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-workspace-"));

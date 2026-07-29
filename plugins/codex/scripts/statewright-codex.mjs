@@ -28,7 +28,9 @@ import {
 } from "./lib/telemetry.mjs";
 import {
   assertDeliveryConfigPaths,
-  loadDeliveryConfig,
+  DELIVERY_CONFIG_RELATIVE_PATH,
+  DELIVERY_DOCS_PATH,
+  resolveDeliveryBootstrap,
 } from "./lib/delivery-config.mjs";
 import { DeliveryController } from "./lib/delivery-controller.mjs";
 import { WorkspaceSession } from "./lib/workspace-session.mjs";
@@ -52,8 +54,11 @@ Session:
   --max-idle-turns N          Continuations allowed without a transition (default: 3)
 
 Delivery:
-  --delivery-config PATH      Trusted worktree/preview delivery config
+  ${DELIVERY_CONFIG_RELATIVE_PATH}   Auto-discovered project delivery config
+  --delivery-config PATH      Explicit config override
   --delivery-run-id ID        Resume or name a delivery run (safe slug)
+  enabled: false              Disable delivery in the project config
+  docs                        ${DELIVERY_DOCS_PATH}
 
 Permissions:
   --approval-policy POLICY    untrusted, on-request, or never (default: on-request)
@@ -206,15 +211,21 @@ export async function main(argv = process.argv.slice(2)) {
   const prompt = await readPrompt(options.promptParts);
   validate(options, prompt);
   const requestedCwd = resolve(options.cwd);
+  const deliveryBootstrap = await resolveDeliveryBootstrap({
+    cwd: requestedCwd,
+    explicitPath: options.deliveryConfig,
+  });
   let workspaceSession = null;
-  if (options.deliveryConfig) {
-    const deliveryConfig = await loadDeliveryConfig(options.deliveryConfig, requestedCwd);
-    await assertDeliveryConfigPaths(deliveryConfig);
-    workspaceSession = await WorkspaceSession.prepare(deliveryConfig, {
+  if (deliveryBootstrap.enabled) {
+    await assertDeliveryConfigPaths(deliveryBootstrap.config);
+    workspaceSession = await WorkspaceSession.prepare(deliveryBootstrap.config, {
       runId: options.deliveryRunId,
     });
   } else if (options.deliveryRunId) {
-    throw new Error("--delivery-run-id requires --delivery-config.");
+    throw new Error(
+      `--delivery-run-id requires enabled delivery. Configure `
+      + `${deliveryBootstrap.expectedConfigPath}; see ${deliveryBootstrap.docsPath}.`,
+    );
   }
   const cwd = workspaceSession?.primaryCwd ?? requestedCwd;
   const telemetry = options.telemetryEnabled
@@ -254,6 +265,7 @@ export async function main(argv = process.argv.slice(2)) {
     transportSessionId,
     telemetry,
     deliveryController,
+    deliveryBootstrap,
   });
 
   // Plugin telemetry + update check — fire and forget

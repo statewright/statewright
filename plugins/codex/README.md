@@ -92,16 +92,21 @@ statewright_list_workflows()
 
 ### Isolated delivery runs
 
-`statewright-codex` can create declared multi-repository worktrees before
-opening a thread and bind workflow states to a trusted preview driver:
+`statewright-codex` automatically discovers `.statewright/delivery.json`,
+creates its declared worktrees before opening a thread, and binds workflow
+states to a trusted preview driver:
 
 ```bash
 statewright-codex \
-  --delivery-config /path/to/preview-delivery.json \
   --delivery-run-id my-run \
   --workflow statewright-worktree-preview-delivery-v1 \
   -- "Implement and validate the change"
 ```
+
+The config file is the switch: it is enabled by default when present, and
+`"enabled": false` turns delivery off. With no file, delivery remains dormant.
+See [the isolated delivery guide](docs/isolated-delivery.md) for defaults,
+multi-repository overrides, explicit config selection, and promotion modes.
 
 The local config pins a driver-bundle SHA-256 and an environment allowlist.
 Statewright snapshots and verifies the bundle before task work, opens Codex in

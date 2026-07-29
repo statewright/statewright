@@ -58,6 +58,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     transportSessionId = null,
     telemetry = async () => {},
     deliveryController = null,
+    deliveryBootstrap = null,
     runtimeUsageControlToken = process.env.STATEWRIGHT_USAGE_CONTROL_TOKEN ?? null,
     stdout = process.stdout,
     stderr = process.stderr,
@@ -80,6 +81,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.transportSessionId = transportSessionId;
     this.telemetry = telemetry;
     this.deliveryController = deliveryController;
+    this.deliveryBootstrap = deliveryBootstrap;
     this.runtimeUsageControlToken = runtimeUsageControlToken;
     this.runtimeUsageSequence = 0;
     this.stdout = stdout;
@@ -282,9 +284,13 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
       || state?.meta?.preview?.required
       || state?.meta?.promotion?.required;
     if (required) {
+      const configPath =
+        this.deliveryBootstrap?.expectedConfigPath ?? ".statewright/delivery.json";
+      const docsPath =
+        this.deliveryBootstrap?.docsPath ?? "plugins/codex/docs/isolated-delivery.md";
       throw new Error(
-        "This workflow requires isolated delivery. Restart statewright-codex with "
-        + "--delivery-config before task work begins.",
+        `This workflow requires isolated delivery. Set enabled=true in ${configPath}; `
+        + `see ${docsPath}.`,
       );
     }
   }

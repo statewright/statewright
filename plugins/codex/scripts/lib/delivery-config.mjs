@@ -1,7 +1,17 @@
 import { stat, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const SAFE_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
+export const DELIVERY_CONFIG_RELATIVE_PATH = join(".statewright", "delivery.json");
+export const DELIVERY_DOCS_PATH = "plugins/codex/docs/isolated-delivery.md";
+const DEFAULT_ENVIRONMENT_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+];
 
 function requireObject(value, field) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -52,21 +62,42 @@ function validateEnvironmentAllowlist(value) {
 
 export function validateDeliveryConfig(raw, configPath) {
   const config = requireObject(raw, "delivery config");
-  if (config.version !== 1) {
+  if ((config.version ?? 1) !== 1) {
     throw new Error("delivery config version must be 1.");
   }
+  const enabled = Object.hasOwn(config, "enabled") ? config.enabled : true;
+  if (typeof enabled !== "boolean") {
+    throw new Error("delivery config enabled must be true or false.");
+  }
   const configDir = dirname(configPath);
+  if (!enabled) {
+    return {
+      version: 1,
+      enabled: false,
+      configPath,
+      configDir,
+      docsPath: DELIVERY_DOCS_PATH,
+    };
+  }
+
   const workspace = requireObject(config.workspace, "workspace");
-  if (workspace.mode !== "git_worktree") {
+  if ((workspace.mode ?? "git_worktree") !== "git_worktree") {
     throw new Error("workspace.mode must be 'git_worktree'.");
   }
-  const root = resolveConfiguredPath(configDir, workspace.root, "workspace.root");
+  const root = workspace.root
+    ? resolveConfiguredPath(configDir, workspace.root, "workspace.root")
+    : join(homedir(), ".statewright", "delivery-runs");
   if (!Array.isArray(workspace.repositories) || workspace.repositories.length === 0) {
     throw new Error("workspace.repositories must contain at least one repository.");
   }
 
   const names = new Set();
-  let primaryCount = 0;
+  const declaredPrimaryCount = workspace.repositories.filter(
+    (entry) => entry?.primary === true,
+  ).length;
+  if (declaredPrimaryCount > 1) {
+    throw new Error("workspace.repositories must declare at most one primary repository.");
+  }
   const repositories = workspace.repositories.map((entry, index) => {
     const repo = requireObject(entry, `workspace.repositories[${index}]`);
     const name = requireString(repo.name, `workspace.repositories[${index}].name`);
@@ -75,7 +106,10 @@ export function validateDeliveryConfig(raw, configPath) {
     }
     if (names.has(name)) throw new Error(`duplicate repository name '${name}'.`);
     names.add(name);
-    if (repo.primary === true) primaryCount += 1;
+    const targetBranch = requireString(
+      repo.target_branch,
+      `workspace.repositories[${index}].target_branch`,
+    );
     return {
       name,
       sourcePath: resolveConfiguredPath(
@@ -83,23 +117,20 @@ export function validateDeliveryConfig(raw, configPath) {
         repo.path,
         `workspace.repositories[${index}].path`,
       ),
-      baseRef: requireString(repo.base_ref, `workspace.repositories[${index}].base_ref`),
-      targetBranch: requireString(
-        repo.target_branch,
-        `workspace.repositories[${index}].target_branch`,
+      baseRef: requireString(
+        repo.base_ref ?? targetBranch,
+        `workspace.repositories[${index}].base_ref`,
       ),
-      primary: repo.primary === true,
+      targetBranch,
+      primary: declaredPrimaryCount === 0 ? index === 0 : repo.primary === true,
     };
   });
-  if (primaryCount !== 1) {
-    throw new Error("workspace.repositories must declare exactly one primary repository.");
-  }
 
   const preview = requireObject(config.preview, "preview");
-  const driver = validateRelativeDriver(preview.driver);
+  const driver = validateRelativeDriver(preview.driver ?? "preview-delivery.mjs");
   const driverRoot = resolveConfiguredPath(
     configDir,
-    preview.driver_root,
+    preview.driver_root ?? "delivery-driver",
     "preview.driver_root",
   );
   const bundleSha256 = requireString(preview.bundle_sha256, "preview.bundle_sha256");
@@ -107,7 +138,7 @@ export function validateDeliveryConfig(raw, configPath) {
     throw new Error("preview.bundle_sha256 must be a lowercase SHA-256 digest.");
   }
   const environmentAllowlist = validateEnvironmentAllowlist(
-    preview.environment_allowlist,
+    preview.environment_allowlist ?? DEFAULT_ENVIRONMENT_ALLOWLIST,
   );
   const evidenceRoot = preview.evidence_root
     ? resolveConfiguredPath(configDir, preview.evidence_root, "preview.evidence_root")
@@ -134,8 +165,10 @@ export function validateDeliveryConfig(raw, configPath) {
 
   return {
     version: 1,
+    enabled: true,
     configPath,
     configDir,
+    docsPath: DELIVERY_DOCS_PATH,
     workspace: { mode: "git_worktree", root, repositories },
     preview: {
       driver,
@@ -160,7 +193,46 @@ export async function loadDeliveryConfig(path, cwd = process.cwd()) {
   return validateDeliveryConfig(raw, configPath);
 }
 
+export async function findDeliveryConfig(cwd = process.cwd()) {
+  let current = resolve(cwd);
+  while (true) {
+    const candidate = join(current, DELIVERY_CONFIG_RELATIVE_PATH);
+    const info = await stat(candidate).catch(() => null);
+    if (info?.isFile()) return candidate;
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+export async function resolveDeliveryBootstrap({
+  cwd = process.cwd(),
+  explicitPath = null,
+} = {}) {
+  const configPath = explicitPath
+    ? resolve(cwd, explicitPath)
+    : await findDeliveryConfig(cwd);
+  if (!configPath) {
+    return {
+      enabled: false,
+      source: "dormant",
+      config: null,
+      expectedConfigPath: resolve(cwd, DELIVERY_CONFIG_RELATIVE_PATH),
+      docsPath: DELIVERY_DOCS_PATH,
+    };
+  }
+  const config = await loadDeliveryConfig(configPath);
+  return {
+    enabled: config.enabled,
+    source: explicitPath ? "explicit" : "project",
+    config,
+    expectedConfigPath: configPath,
+    docsPath: DELIVERY_DOCS_PATH,
+  };
+}
+
 export async function assertDeliveryConfigPaths(config) {
+  if (!config.enabled) return;
   for (const repo of config.workspace.repositories) {
     const info = await stat(repo.sourcePath).catch(() => null);
     if (!info?.isDirectory()) {

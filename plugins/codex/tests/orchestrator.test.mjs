@@ -284,6 +284,11 @@ test("a required delivery workflow stops before task work without a delivery ses
     cwd: "/tmp/project",
     fallbackModel: "luna",
     fallbackEffort: "medium",
+    deliveryBootstrap: {
+      enabled: false,
+      expectedConfigPath: "/tmp/project/.statewright/delivery.json",
+      docsPath: "plugins/codex/docs/isolated-delivery.md",
+    },
     telemetry: async () => {},
     stdout: new BufferWriter(),
     stderr: new BufferWriter(),
@@ -291,7 +296,7 @@ test("a required delivery workflow stops before task work without a delivery ses
 
   await assert.rejects(
     orchestrator.run(),
-    /requires isolated delivery.*--delivery-config/,
+    /requires isolated delivery.*[.]statewright[/]delivery[.]json.*isolated-delivery[.]md/,
   );
   assert.equal(client.turns.length, 1);
 });

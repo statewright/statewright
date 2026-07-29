@@ -22,6 +22,8 @@ export function hookEnvironment(session, extra = {}) {
     ...env,
     STATEWRIGHT_DELIVERY_MANIFEST: session.manifestPath,
     STATEWRIGHT_DELIVERY_RUN_ID: session.manifest.run_id,
+    STATEWRIGHT_DELIVERY_PRIMARY_WORKTREE: session.primaryCwd,
+    STATEWRIGHT_DELIVERY_EVIDENCE_PATH: session.manifest.evidence_path,
     STATEWRIGHT_DELIVERY_HOOK_ROOT: session.manifest.hook_bundle_path,
     STATEWRIGHT_DELIVERY_TASKFILE: session.config.hooks.taskfile,
     ...extra,

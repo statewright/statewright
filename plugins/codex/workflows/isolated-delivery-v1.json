@@ -1,0 +1,129 @@
+{
+  "id": "isolated-delivery-v1",
+  "initial": "plan",
+  "meta": {
+    "version": 1,
+    "task_type": "feature",
+    "danger_level": "moderate",
+    "requires_human_approval": true,
+    "capture_output": true,
+    "immutable": true,
+    "failure_states": ["blocked"],
+    "workspace": {
+      "version": 1,
+      "mode": "git_worktree",
+      "required": true,
+      "cleanup": "never"
+    },
+    "preview": {
+      "version": 1,
+      "mode": "taskfile",
+      "required": true,
+      "prepare_state": "preview_deploy",
+      "deploy_state": "preview_deploy",
+      "validate_state": "preview_validate"
+    }
+  },
+  "states": {
+    "plan": {
+      "instructions": "Understand the requested change, repository boundaries, and project validation commands. Do not edit. Transition only after recording a bounded implementation plan.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "medium",
+      "max_iterations": 10,
+      "safe_next": "blocked",
+      "on": {
+        "READY": "implement",
+        "BLOCKED": "blocked"
+      }
+    },
+    "implement": {
+      "instructions": "Implement the planned change in the isolated worktree. Keep edits scoped and run only the project validation commands allowed below.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
+      "allowed_commands": ["git status", "git diff", "task test"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "medium",
+      "max_iterations": 30,
+      "safe_next": "blocked",
+      "on": {
+        "IMPLEMENTED": "validate_local",
+        "BLOCKED": "blocked"
+      }
+    },
+    "validate_local": {
+      "instructions": "Run the project validation task and inspect the resulting diff. Failed or unavailable validation is not success.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
+      "allowed_commands": ["git status", "git diff", "task test"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "medium",
+      "max_iterations": 12,
+      "safe_next": "blocked",
+      "on": {
+        "VALID": "audit",
+        "REPAIR": "implement",
+        "BLOCKED": "blocked"
+      }
+    },
+    "audit": {
+      "instructions": "Review the committed diff and delivery hook definitions. Check for credential exposure, mutable deployment inputs, unsafe cleanup, missing validation, and unrelated changes. Do not edit.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-sol",
+      "thinking_level": "high",
+      "max_iterations": 12,
+      "safe_next": "blocked",
+      "on": {
+        "APPROVED": {
+          "target": "preview_deploy",
+          "requires_approval": true,
+          "approval_message": "Local validation and review are complete. Approve project-defined preview preparation and deployment."
+        },
+        "REPAIR": "implement",
+        "BLOCKED": "blocked"
+      }
+    },
+    "preview_deploy": {
+      "instructions": "The trusted adapter has run the project prepare and deploy tasks for the exact worktree fingerprint. Inspect the recorded action evidence; do not substitute a manual deployment.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "low",
+      "max_iterations": 8,
+      "safe_next": "blocked",
+      "on": {
+        "PREVIEW_READY": "preview_validate",
+        "BLOCKED": "blocked"
+      }
+    },
+    "preview_validate": {
+      "instructions": "The trusted adapter has run the project validation task against the deployed fingerprint. Inspect the evidence and return to implementation if it does not prove the requested behavior.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "medium",
+      "max_iterations": 8,
+      "safe_next": "blocked",
+      "on": {
+        "VALIDATED": "record",
+        "REPAIR": "implement",
+        "BLOCKED": "blocked"
+      }
+    },
+    "record": {
+      "instructions": "Record the base and final commits, validation evidence, preview disposition, unresolved risks, and manual promotion or cleanup instructions. Do not claim promotion or cleanup that did not occur.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "low",
+      "max_iterations": 8,
+      "safe_next": "blocked",
+      "on": {
+        "RECORDED": "completed",
+        "BLOCKED": "blocked"
+      }
+    },
+    "completed": {
+      "type": "final"
+    },
+    "blocked": {
+      "type": "final"
+    }
+  },
+  "guards": {}
+}

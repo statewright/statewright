@@ -3,7 +3,11 @@ import test from "node:test";
 import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { DeliveryController } from "../scripts/lib/delivery-controller.mjs";
+import {
+  DeliveryController,
+  validateWorkflowPolicy,
+  workflowPolicy,
+} from "../scripts/lib/delivery-controller.mjs";
 
 function policyMeta() {
   return {
@@ -31,6 +35,45 @@ function policyMeta() {
     failure_states: ["blocked"],
   };
 }
+
+test("Taskfile preview workflows may omit automatic promotion", () => {
+  const meta = policyMeta();
+  delete meta.promotion;
+  const policy = workflowPolicy({ meta });
+  assert.doesNotThrow(() => validateWorkflowPolicy(policy, {
+    config: { promotion: { mode: "manual" } },
+  }));
+});
+
+test("controller observes Taskfile preview workflow without automatic promotion", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-controller-manual-"));
+  const telemetry = [];
+  const controller = await new DeliveryController({
+    config: { promotion: { mode: "manual" } },
+    manifest: {
+      evidence_path: root,
+      manifest_digest: "manifest-digest",
+      run_id: "manual-run",
+    },
+  }, {
+    telemetry: async (event, data) => telemetry.push({ event, data }),
+  }).initialize();
+  const meta = policyMeta();
+  delete meta.promotion;
+
+  await controller.observeState({ meta, state: "implement", is_final: false });
+
+  assert.deepEqual(telemetry, [{
+    event: "delivery_policy_validated",
+    data: {
+      run_id: "manual-run",
+      manifest_digest: "manifest-digest",
+      workspace_mode: "git_worktree",
+      preview_mode: "taskfile",
+      promotion_mode: "none",
+    },
+  }]);
+});
 
 test("delivery actions run once even when a state is observed repeatedly", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-controller-"));
@@ -105,6 +148,8 @@ test("driver receives only allowlisted operator environment", async () => {
       "  path: process.env.PATH,",
       "  secret: process.env.STATEWRIGHT_OPERATOR_SECRET,",
       "  run: process.env.STATEWRIGHT_DELIVERY_RUN_ID,",
+      "  worktree: process.env.STATEWRIGHT_DELIVERY_PRIMARY_WORKTREE,",
+      "  evidence: process.env.STATEWRIGHT_DELIVERY_EVIDENCE_PATH,",
       "}));",
       'console.log(JSON.stringify({ ok: true }));',
     ].join("\n"),
@@ -151,6 +196,8 @@ test("driver receives only allowlisted operator environment", async () => {
     assert.ok(environment.path);
     assert.equal(environment.secret, undefined);
     assert.equal(environment.run, "test-env");
+    assert.equal(environment.worktree, root);
+    assert.equal(environment.evidence, evidence);
   } finally {
     if (previous === undefined) delete process.env.STATEWRIGHT_OPERATOR_SECRET;
     else process.env.STATEWRIGHT_OPERATOR_SECRET = previous;

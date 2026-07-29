@@ -218,6 +218,15 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 *\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
 
+### Isolated Codex delivery
+
+The Codex adapter can create clean multi-repository worktrees before a task
+starts, then run project-owned Taskfile hooks for preview preparation,
+deployment, validation, promotion, and cleanup. Statewright pins the hook
+bundle, limits its environment, and binds deploy and validation evidence to the
+exact source fingerprint. See the
+[isolated delivery guide](plugins/codex/docs/isolated-delivery.md).
+
 ### MCP tools
 
 The gateway exposes these tools to the connected agent:
@@ -266,7 +275,7 @@ The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, em
 
 ## Docs
 
-[docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), and [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows).
+[docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows), and [isolated Codex delivery](https://docs.statewright.ai/plugins/codex-isolated-delivery).
 
 ## Contributing
 

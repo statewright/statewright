@@ -30,26 +30,28 @@ function validateWorkflowPolicy(policy, session) {
   if (policy.preview.mode !== "taskfile") {
     throw new Error("workflow preview.mode must be 'taskfile'.");
   }
-  requireVersionOne(policy.promotion, "promotion");
-  if (!["manual", "squash"].includes(policy.promotion.mode)) {
-    throw new Error("workflow promotion.mode must be 'manual' or 'squash'.");
-  }
-  if (policy.promotion.mode !== session.config.promotion.mode) {
-    throw new Error(
-      `workflow promotion mode '${policy.promotion.mode}' does not match delivery config `
-      + `'${session.config.promotion.mode}'.`,
-    );
-  }
   for (const field of ["prepare_state", "deploy_state", "validate_state"]) {
     if (typeof policy.preview[field] !== "string" || !policy.preview[field]) {
       throw new Error(`workflow preview.${field} is required.`);
     }
   }
-  if (
-    typeof policy.promotion.promote_state !== "string"
-    || !policy.promotion.promote_state
-  ) {
-    throw new Error("workflow promotion.promote_state is required.");
+  if (policy.promotion) {
+    requireVersionOne(policy.promotion, "promotion");
+    if (!["manual", "squash"].includes(policy.promotion.mode)) {
+      throw new Error("workflow promotion.mode must be 'manual' or 'squash'.");
+    }
+    if (policy.promotion.mode !== session.config.promotion.mode) {
+      throw new Error(
+        `workflow promotion mode '${policy.promotion.mode}' does not match delivery config `
+        + `'${session.config.promotion.mode}'.`,
+      );
+    }
+    if (
+      typeof policy.promotion.promote_state !== "string"
+      || !policy.promotion.promote_state
+    ) {
+      throw new Error("workflow promotion.promote_state is required.");
+    }
   }
 }
 
@@ -87,7 +89,7 @@ export class DeliveryController {
         manifest_digest: this.session.manifest.manifest_digest,
         workspace_mode: this.policy.workspace.mode,
         preview_mode: this.policy.preview.mode,
-        promotion_mode: this.policy.promotion.mode,
+        promotion_mode: this.policy.promotion?.mode ?? "none",
       });
     }
 
@@ -95,7 +97,7 @@ export class DeliveryController {
     if (state?.state === this.policy.preview.prepare_state) actions.push("prepare");
     if (state?.state === this.policy.preview.deploy_state) actions.push("deploy");
     if (state?.state === this.policy.preview.validate_state) actions.push("validate");
-    if (state?.state === this.policy.promotion.promote_state) actions.push("promote");
+    if (state?.state === this.policy.promotion?.promote_state) actions.push("promote");
     if (actions.includes("prepare") || actions.includes("deploy")) {
       await this.session.checkpoint();
     }

@@ -94,12 +94,12 @@ statewright_list_workflows()
 
 `statewright-codex` automatically discovers `.statewright/delivery.json`,
 creates its declared worktrees before opening a thread, and binds workflow
-states to a trusted preview driver:
+states to digest-pinned project Taskfile hooks:
 
 ```bash
-statewright-codex \
+node /path/to/statewright/plugins/codex/scripts/statewright-codex.mjs \
   --delivery-run-id my-run \
-  --workflow statewright-worktree-preview-delivery-v1 \
+  --workflow isolated-delivery-v1 \
   -- "Implement and validate the change"
 ```
 
@@ -108,9 +108,18 @@ The config file is the switch: it is enabled by default when present, and
 See [the isolated delivery guide](docs/isolated-delivery.md) for defaults,
 multi-repository overrides, explicit config selection, and promotion modes.
 
-The local config pins a driver-bundle SHA-256 and an environment allowlist.
-Statewright snapshots and verifies the bundle before task work, opens Codex in
-the primary run worktree, and preserves failed previews for diagnosis.
+The local config pins a hook-bundle SHA-256 and an environment allowlist.
+Statewright snapshots the project hooks and built-in Taskfile adapter before
+task work, opens Codex in the primary run worktree, and preserves failed
+previews for diagnosis. Projects own their database copy, migrations,
+deployment, and validation tasks.
+
+Generate the hook digest with:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-delivery.mjs \
+  digest --root .statewright/delivery-hooks
+```
 
 Discard an unpromoted run explicitly:
 

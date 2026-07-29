@@ -7,7 +7,10 @@ import {
   assertDeliveryConfigPaths,
   loadDeliveryConfig,
 } from "./lib/delivery-config.mjs";
-import { WorkspaceSession } from "./lib/workspace-session.mjs";
+import {
+  digestHookBundle,
+  WorkspaceSession,
+} from "./lib/workspace-session.mjs";
 import {
   hookEnvironment,
   runHookProcess,
@@ -15,11 +18,19 @@ import {
 
 function parseArgs(argv) {
   const action = argv[0];
-  if (!["discard", "recover"].includes(action)) {
+  if (!["digest", "discard", "recover"].includes(action)) {
     throw new Error(
-      "usage: statewright-delivery <discard|recover> "
-      + "--delivery-config PATH --run-id ID",
+      "usage: statewright-delivery digest --root PATH | "
+      + "statewright-delivery <discard|recover> --delivery-config PATH --run-id ID",
     );
+  }
+  if (action === "digest") {
+    const rootIndex = argv.indexOf("--root");
+    const root = argv[rootIndex + 1];
+    if (rootIndex === -1 || !root) {
+      throw new Error("digest requires --root PATH.");
+    }
+    return { action, root };
   }
   const configIndex = argv.indexOf("--delivery-config");
   const runIndex = argv.indexOf("--run-id");
@@ -29,6 +40,14 @@ function parseArgs(argv) {
     throw new Error(`${action} requires --delivery-config PATH and --run-id ID.`);
   }
   return { action, configPath, runId };
+}
+
+export async function digestDeliveryHooks(root, cwd = process.cwd()) {
+  const path = resolve(cwd, root);
+  return {
+    root: path,
+    sha256: await digestHookBundle(path),
+  };
 }
 
 async function runHook(session, action, env = {}) {
@@ -101,10 +120,12 @@ function isMainModule() {
 
 if (isMainModule()) {
   Promise.resolve(parseArgs(process.argv.slice(2)))
-    .then(({ action, configPath, runId }) =>
-      action === "recover"
+    .then(({ action, configPath, runId, root }) => {
+      if (action === "digest") return digestDeliveryHooks(root);
+      return action === "recover"
         ? recoverDelivery(configPath, runId)
-        : discardDelivery(configPath, runId))
+        : discardDelivery(configPath, runId);
+    })
     .then(
       (result) => process.stdout.write(`${JSON.stringify(result)}\n`),
       (error) => {

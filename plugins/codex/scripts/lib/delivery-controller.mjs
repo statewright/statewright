@@ -2,9 +2,9 @@ import { appendFile, chmod, readFile, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { extname, resolve } from "node:path";
 import {
-  driverEnvironment,
-  runDriverProcess,
-} from "./driver-process.mjs";
+  hookEnvironment,
+  runHookProcess,
+} from "./hook-process.mjs";
 
 function workflowPolicy(state) {
   return {
@@ -27,8 +27,8 @@ function validateWorkflowPolicy(policy, session) {
     throw new Error("workflow workspace.mode must be 'git_worktree'.");
   }
   requireVersionOne(policy.preview, "preview");
-  if (policy.preview.mode !== "kubernetes") {
-    throw new Error("workflow preview.mode must be 'kubernetes'.");
+  if (policy.preview.mode !== "taskfile") {
+    throw new Error("workflow preview.mode must be 'taskfile'.");
   }
   requireVersionOne(policy.promotion, "promotion");
   if (!["manual", "squash"].includes(policy.promotion.mode)) {
@@ -133,7 +133,7 @@ export class DeliveryController {
       let result;
       if (action === "promote") {
         promotionExecutionToken = randomUUID();
-        await this.invokeDriver("lock", fingerprint, {
+        await this.invokeHook("lock", fingerprint, {
           promotionExecutionToken,
           timeoutMs: 60_000,
         });
@@ -141,7 +141,7 @@ export class DeliveryController {
         renewalTimer = setInterval(() => {
           renewalChain = renewalChain
             .then(() =>
-              this.invokeDriver("renew", fingerprint, {
+              this.invokeHook("renew", fingerprint, {
                 promotionExecutionToken,
                 timeoutMs: 60_000,
               }))
@@ -149,24 +149,24 @@ export class DeliveryController {
               renewalError ??= error;
             });
         }, 60_000);
-        await this.invokeDriver("preflight-promote", fingerprint, {
+        await this.invokeHook("preflight-promote", fingerprint, {
           promotionExecutionToken,
           timeoutMs: 120_000,
         });
         await this.session.promote();
         if (renewalError) throw renewalError;
-        result = await this.invokeDriver(action, fingerprint, { promotionExecutionToken });
+        result = await this.invokeHook(action, fingerprint, { promotionExecutionToken });
         clearInterval(renewalTimer);
         renewalTimer = null;
         await renewalChain;
         if (renewalError) throw renewalError;
-        await this.invokeDriver("unlock", fingerprint, {
+        await this.invokeHook("unlock", fingerprint, {
           promotionExecutionToken,
           timeoutMs: 60_000,
         });
         promotionLockHeld = false;
       } else {
-        result = await this.invokeDriver(action, fingerprint);
+        result = await this.invokeHook(action, fingerprint);
       }
       const completed = {
         status: "complete",
@@ -197,7 +197,7 @@ export class DeliveryController {
       let finalError = error;
       if (promotionLockHeld) {
         try {
-          await this.invokeDriver("unlock", fingerprint, {
+          await this.invokeHook("unlock", fingerprint, {
             promotionExecutionToken,
             timeoutMs: 60_000,
           });
@@ -228,31 +228,34 @@ export class DeliveryController {
     }
   }
 
-  async invokeDriver(action, fingerprint, options = {}) {
-    const driver = this.session.driverPath();
+  async invokeHook(action, fingerprint, options = {}) {
+    const task = this.session.config.hooks.actions[action];
+    if (!task) throw new Error(`no Taskfile hook is configured for '${action}'.`);
+    const adapter = this.session.adapterPath();
     const args = [action, "--manifest", this.session.manifestPath];
-    const command = [".js", ".mjs", ".cjs"].includes(extname(driver))
+    const command = [".js", ".mjs", ".cjs"].includes(extname(adapter))
       ? process.execPath
-      : driver;
-    const commandArgs = command === process.execPath ? [driver, ...args] : args;
-    const { stdout } = await runDriverProcess(command, commandArgs, {
+      : adapter;
+    const commandArgs = command === process.execPath ? [adapter, ...args] : args;
+    const { stdout } = await runHookProcess(command, commandArgs, {
       cwd: this.session.primaryCwd,
-      env: driverEnvironment(this.session, {
+      env: hookEnvironment(this.session, {
         STATEWRIGHT_DELIVERY_ACTION: action,
         STATEWRIGHT_DELIVERY_FINGERPRINT: fingerprint,
+        STATEWRIGHT_DELIVERY_TASK: task,
         ...(options.promotionExecutionToken
           ? { STATEWRIGHT_DELIVERY_EXECUTION_TOKEN: options.promotionExecutionToken }
           : {}),
       }),
       timeoutMs:
-        options.timeoutMs ?? this.session.config.preview.actionTimeoutMs,
+        options.timeoutMs ?? this.session.config.hooks.actionTimeoutMs,
     });
     const text = stdout.trim();
     if (!text) return { ok: true };
     try {
       return JSON.parse(text.split("\n").at(-1));
     } catch {
-      throw new Error(`preview driver returned non-JSON output for '${action}'.`);
+      throw new Error(`Taskfile delivery adapter returned non-JSON output for '${action}'.`);
     }
   }
 

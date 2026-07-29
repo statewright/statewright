@@ -15,7 +15,7 @@ function policyMeta() {
     },
     preview: {
       version: 1,
-      mode: "kubernetes",
+      mode: "taskfile",
       required: true,
       prepare_state: "preview",
       deploy_state: "preview",
@@ -48,17 +48,27 @@ test("delivery actions run once even when a state is observed repeatedly", async
   );
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
+      hooks: {
+        actionTimeoutMs: 10_000,
+        environmentAllowlist: ["PATH"],
+        taskfile: "Taskfile.yml",
+        actions: Object.fromEntries(
+          ["prepare", "deploy", "validate", "lock", "renew", "preflight-promote",
+            "promote", "unlock", "teardown", "discard"]
+            .map((action) => [action, `delivery:${action}`]),
+        ),
+      },
       promotion: { mode: "manual" },
     },
     manifest: {
       run_id: "test-controller",
       manifest_digest: "digest",
       evidence_path: evidence,
+      hook_bundle_path: root,
     },
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
-    driverPath: () => driver,
+    adapterPath: () => driver,
     checkpoint: async () => ({}),
     fingerprint: async () => "fingerprint",
     promote: async () => {
@@ -103,17 +113,27 @@ test("driver receives only allowlisted operator environment", async () => {
   process.env.STATEWRIGHT_OPERATOR_SECRET = "must-not-cross";
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
+      hooks: {
+        actionTimeoutMs: 10_000,
+        environmentAllowlist: ["PATH"],
+        taskfile: "Taskfile.yml",
+        actions: Object.fromEntries(
+          ["prepare", "deploy", "validate", "lock", "renew", "preflight-promote",
+            "promote", "unlock", "teardown", "discard"]
+            .map((action) => [action, `delivery:${action}`]),
+        ),
+      },
       promotion: { mode: "manual" },
     },
     manifest: {
       run_id: "test-env",
       manifest_digest: "digest",
       evidence_path: evidence,
+      hook_bundle_path: root,
     },
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
-    driverPath: () => driver,
+    adapterPath: () => driver,
     checkpoint: async () => ({}),
     fingerprint: async () => "fingerprint",
     promote: async () => {},
@@ -146,17 +166,27 @@ test("a repaired commit fingerprint redeploys and validation cannot outrun deplo
   let fingerprint = "first";
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
+      hooks: {
+        actionTimeoutMs: 10_000,
+        environmentAllowlist: ["PATH"],
+        taskfile: "Taskfile.yml",
+        actions: Object.fromEntries(
+          ["prepare", "deploy", "validate", "lock", "renew", "preflight-promote",
+            "promote", "unlock", "teardown", "discard"]
+            .map((action) => [action, `delivery:${action}`]),
+        ),
+      },
       promotion: { mode: "manual" },
     },
     manifest: {
       run_id: "test-repair",
       manifest_digest: "digest",
       evidence_path: evidence,
+      hook_bundle_path: root,
     },
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
-    driverPath: () => driver,
+    adapterPath: () => driver,
     checkpoint: async () => ({}),
     fingerprint: async () => fingerprint,
     promote: async () => {},
@@ -196,17 +226,27 @@ test("promotion lock spans Git promotion and the deployment driver", async () =>
   );
   const session = {
     config: {
-      preview: { actionTimeoutMs: 10_000, environmentAllowlist: ["PATH"] },
+      hooks: {
+        actionTimeoutMs: 10_000,
+        environmentAllowlist: ["PATH"],
+        taskfile: "Taskfile.yml",
+        actions: Object.fromEntries(
+          ["prepare", "deploy", "validate", "lock", "renew", "preflight-promote",
+            "promote", "unlock", "teardown", "discard"]
+            .map((action) => [action, `delivery:${action}`]),
+        ),
+      },
       promotion: { mode: "squash" },
     },
     manifest: {
       run_id: "test-promote",
       manifest_digest: "digest",
       evidence_path: evidence,
+      hook_bundle_path: root,
     },
     manifestPath: join(root, "manifest.json"),
     primaryCwd: root,
-    driverPath: () => driver,
+    adapterPath: () => driver,
     checkpoint: async () => ({}),
     fingerprint: async () => "fingerprint",
     promote: async () => appendFile(sequence, "git-promote\n"),

@@ -13,11 +13,17 @@ import {
 } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { isSafeDeliveryRunId } from "./delivery-config.mjs";
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_VERSION = 1;
+const TASKFILE_ADAPTER_SOURCE = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "taskfile-delivery-adapter.mjs",
+);
 const UUID_V4 =
   /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
@@ -76,6 +82,7 @@ function digestConfig(config) {
     .update(JSON.stringify({
       version: config.version,
       workspace: config.workspace,
+      hooks: config.hooks,
       preview: config.preview,
       promotion: config.promotion,
     }))
@@ -102,16 +109,16 @@ async function bundleFiles(root, current = root) {
     const path = join(current, entry.name);
     const info = await lstat(path);
     if (info.isSymbolicLink()) {
-      throw new Error(`preview driver bundle must not contain symlinks: ${path}`);
+      throw new Error(`delivery hook bundle must not contain symlinks: ${path}`);
     }
     if (info.isDirectory()) files.push(...await bundleFiles(root, path));
     else if (info.isFile()) files.push(path);
-    else throw new Error(`unsupported preview driver bundle entry: ${path}`);
+    else throw new Error(`unsupported delivery hook bundle entry: ${path}`);
   }
   return files;
 }
 
-export async function digestDriverBundle(root) {
+export async function digestHookBundle(root) {
   const hash = createHash("sha256");
   for (const path of await bundleFiles(root)) {
     const name = relative(root, path).split("\\").join("/");
@@ -122,29 +129,48 @@ export async function digestDriverBundle(root) {
   return hash.digest("hex");
 }
 
-async function snapshotDriverBundle(config, runRoot) {
-  const sourceInfo = await lstat(config.preview.driverRoot);
+async function snapshotHookBundle(config, runRoot) {
+  const sourceInfo = await lstat(config.hooks.root);
   if (sourceInfo.isSymbolicLink() || !sourceInfo.isDirectory()) {
-    throw new Error("preview driver root must be a real directory.");
+    throw new Error("delivery hook root must be a real directory.");
   }
-  const sourceDigest = await digestDriverBundle(config.preview.driverRoot);
-  if (sourceDigest !== config.preview.bundleSha256) {
+  const sourceDigest = await digestHookBundle(config.hooks.root);
+  if (sourceDigest !== config.hooks.bundleSha256) {
     throw new Error(
-      `preview driver bundle digest mismatch: expected ${config.preview.bundleSha256}, `
+      `delivery hook bundle digest mismatch: expected ${config.hooks.bundleSha256}, `
       + `found ${sourceDigest}.`,
     );
   }
-  const snapshotPath = join(runRoot, "trusted-driver");
-  await cp(config.preview.driverRoot, snapshotPath, {
+  const snapshotPath = join(runRoot, "trusted-hooks");
+  await cp(config.hooks.root, snapshotPath, {
     recursive: true,
     errorOnExist: true,
     force: false,
   });
-  const snapshotDigest = await digestDriverBundle(snapshotPath);
+  const snapshotDigest = await digestHookBundle(snapshotPath);
   if (snapshotDigest !== sourceDigest) {
-    throw new Error("preview driver bundle changed while it was being snapshotted.");
+    throw new Error("delivery hook bundle changed while it was being snapshotted.");
   }
   return { path: snapshotPath, digest: snapshotDigest };
+}
+
+async function snapshotTaskfileAdapter(runRoot) {
+  const sourceInfo = await lstat(TASKFILE_ADAPTER_SOURCE);
+  if (sourceInfo.isSymbolicLink() || !sourceInfo.isFile()) {
+    throw new Error("built-in Taskfile delivery adapter must be a regular file.");
+  }
+  const content = await readFile(TASKFILE_ADAPTER_SOURCE);
+  const digest = createHash("sha256").update(content).digest("hex");
+  const root = join(runRoot, "trusted-adapter");
+  const path = join(root, "taskfile-delivery-adapter.mjs");
+  await mkdir(root, { recursive: false, mode: 0o700 });
+  await writeFile(path, content, { mode: 0o500 });
+  const snapshot = await readFile(path);
+  const snapshotDigest = createHash("sha256").update(snapshot).digest("hex");
+  if (snapshotDigest !== digest) {
+    throw new Error("Taskfile delivery adapter changed while it was being snapshotted.");
+  }
+  return { path, digest };
 }
 
 async function assertRef(path, ref, description) {
@@ -203,7 +229,8 @@ export class WorkspaceSession {
 
     const created = [];
     try {
-      const driverBundle = await snapshotDriverBundle(config, runRoot);
+      const hookBundle = await snapshotHookBundle(config, runRoot);
+      const adapter = await snapshotTaskfileAdapter(runRoot);
       for (const configured of config.workspace.repositories) {
         const sourcePath = await canonicalRepository(configured.sourcePath);
         const baseCommit = await assertRef(
@@ -262,8 +289,10 @@ export class WorkspaceSession {
         config_digest: digestConfig(config),
         manifest_path: manifestPath,
         evidence_path: join(config.preview.evidenceRoot, runId),
-        driver_bundle_path: driverBundle.path,
-        driver_bundle_sha256: driverBundle.digest,
+        hook_bundle_path: hookBundle.path,
+        hook_bundle_sha256: hookBundle.digest,
+        adapter_path: adapter.path,
+        adapter_sha256: adapter.digest,
         status: "prepared",
         repositories,
         promotion: {
@@ -310,12 +339,17 @@ export class WorkspaceSession {
     if (manifest.config_digest !== digestConfig(config)) {
       throw new Error("delivery manifest was created from different config contents.");
     }
-    if (manifest.driver_bundle_sha256 !== config.preview.bundleSha256) {
-      throw new Error("delivery manifest driver digest does not match the current config.");
+    if (manifest.hook_bundle_sha256 !== config.hooks.bundleSha256) {
+      throw new Error("delivery manifest hook digest does not match the current config.");
     }
-    const driverDigest = await digestDriverBundle(manifest.driver_bundle_path);
-    if (driverDigest !== manifest.driver_bundle_sha256) {
-      throw new Error("snapshotted preview driver bundle digest mismatch.");
+    const hookDigest = await digestHookBundle(manifest.hook_bundle_path);
+    if (hookDigest !== manifest.hook_bundle_sha256) {
+      throw new Error("snapshotted delivery hook bundle digest mismatch.");
+    }
+    const adapterContent = await readFile(manifest.adapter_path);
+    const adapterDigest = createHash("sha256").update(adapterContent).digest("hex");
+    if (adapterDigest !== manifest.adapter_sha256) {
+      throw new Error("snapshotted Taskfile delivery adapter digest mismatch.");
     }
     const configuredNames = config.workspace.repositories.map((repo) => repo.name).sort();
     const manifestNames = (manifest.repositories ?? []).map((repo) => repo.name).sort();
@@ -354,10 +388,10 @@ export class WorkspaceSession {
     await writeJsonAtomic(this.manifestPath, this.manifest);
   }
 
-  driverPath() {
-    const path = resolve(this.manifest.driver_bundle_path, this.config.preview.driver);
-    if (!path.startsWith(`${resolve(this.manifest.driver_bundle_path)}/`)) {
-      throw new Error("snapshotted preview driver path escapes its bundle.");
+  adapterPath() {
+    const path = resolve(this.manifest.adapter_path);
+    if (!path.startsWith(`${resolve(this.runRoot)}/trusted-adapter/`)) {
+      throw new Error("snapshotted Taskfile delivery adapter escapes the run root.");
     }
     return path;
   }

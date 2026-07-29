@@ -9,9 +9,9 @@ import {
 } from "./lib/delivery-config.mjs";
 import { WorkspaceSession } from "./lib/workspace-session.mjs";
 import {
-  driverEnvironment,
-  runDriverProcess,
-} from "./lib/driver-process.mjs";
+  hookEnvironment,
+  runHookProcess,
+} from "./lib/hook-process.mjs";
 
 function parseArgs(argv) {
   const action = argv[0];
@@ -31,19 +31,26 @@ function parseArgs(argv) {
   return { action, configPath, runId };
 }
 
-async function runDriver(session, action, env = {}) {
-  const { stdout } = await runDriverProcess(
+async function runHook(session, action, env = {}) {
+  const task = session.config.hooks.actions[action];
+  if (!task) throw new Error(`no Taskfile hook is configured for '${action}'.`);
+  const { stdout } = await runHookProcess(
     process.execPath,
-    [session.driverPath(), action, "--manifest", session.manifestPath],
+    [session.adapterPath(), action, "--manifest", session.manifestPath],
     {
       cwd: session.primaryCwd,
-      timeoutMs: session.config.preview.actionTimeoutMs,
-      env: driverEnvironment(session, env),
+      timeoutMs: session.config.hooks.actionTimeoutMs,
+      env: hookEnvironment(session, {
+        STATEWRIGHT_DELIVERY_ACTION: action,
+        STATEWRIGHT_DELIVERY_FINGERPRINT: "run",
+        STATEWRIGHT_DELIVERY_TASK: task,
+        ...env,
+      }),
     },
   );
-  const result = JSON.parse(stdout.trim());
+  const result = JSON.parse(stdout.trim().split("\n").at(-1));
   if (result.ok !== true || result.action !== action) {
-    throw new Error(`delivery driver did not confirm '${action}'.`);
+    throw new Error(`Taskfile delivery adapter did not confirm '${action}'.`);
   }
   return result;
 }
@@ -54,7 +61,7 @@ export async function discardDelivery(configPath, runId, cwd = process.cwd()) {
   const manifestPath = resolve(config.workspace.root, runId, "manifest.json");
   const session = await WorkspaceSession.resume(config, manifestPath);
   await session.preflightDiscard(runId);
-  const runtime = await runDriver(session, "discard", {
+  const runtime = await runHook(session, "discard", {
     STATEWRIGHT_DELIVERY_DISCARD_RUN_ID: runId,
   });
   await session.discard(runId);
@@ -107,4 +114,4 @@ if (isMainModule()) {
     );
 }
 
-export { parseArgs, runDriver };
+export { parseArgs, runHook };

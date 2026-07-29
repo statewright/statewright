@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { validateDeliveryConfig } from "../scripts/lib/delivery-config.mjs";
 import {
-  digestDriverBundle,
+  digestHookBundle,
   WorkspaceSession,
 } from "../scripts/lib/workspace-session.mjs";
 
@@ -37,9 +37,12 @@ async function createRepository(root, name) {
 }
 
 async function config(root, repositories) {
-  const driverRoot = join(root, "driver");
-  await mkdir(driverRoot, { recursive: true });
-  await writeFile(join(driverRoot, "preview.mjs"), "console.log('{}');\n");
+  const hookRoot = join(root, "delivery-hooks");
+  await mkdir(hookRoot, { recursive: true });
+  await writeFile(
+    join(hookRoot, "Taskfile.yml"),
+    'version: "3"\ntasks:\n  delivery:prepare:\n    cmds:\n      - echo prepared\n',
+  );
   return {
     configPath: join(root, "delivery.json"),
     workspace: {
@@ -47,14 +50,19 @@ async function config(root, repositories) {
       root: join(root, "runs"),
       repositories,
     },
-    preview: {
-      driver: "preview.mjs",
-      driverRoot,
-      bundleSha256: await digestDriverBundle(driverRoot),
+    hooks: {
+      root: hookRoot,
+      taskfile: "Taskfile.yml",
+      bundleSha256: await digestHookBundle(hookRoot),
+      actions: Object.fromEntries(
+        ["prepare", "deploy", "validate", "lock", "renew", "preflight-promote",
+          "promote", "unlock", "teardown", "discard"]
+          .map((action) => [action, `delivery:${action}`]),
+      ),
       environmentAllowlist: ["PATH"],
-      evidenceRoot: join(root, "evidence"),
       actionTimeoutMs: 10_000,
     },
+    preview: { evidenceRoot: join(root, "evidence") },
     promotion: {
       mode: "squash",
       commitMessage: "feat: promote test",
@@ -62,21 +70,24 @@ async function config(root, repositories) {
   };
 }
 
-test("documented config layout prepares with a non-self-referential driver digest", async () => {
+test("documented config layout prepares with a non-self-referential hook digest", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-documented-config-"));
   const app = await createRepository(root, "app");
   const configDir = join(app, ".statewright");
-  const driverRoot = join(configDir, "delivery-driver");
-  await mkdir(driverRoot, { recursive: true });
-  await writeFile(join(driverRoot, "preview-delivery.mjs"), "console.log('{}');\n");
+  const hookRoot = join(configDir, "delivery-hooks");
+  await mkdir(hookRoot, { recursive: true });
+  await writeFile(
+    join(hookRoot, "Taskfile.yml"),
+    'version: "3"\ntasks:\n  delivery:prepare:\n    cmds:\n      - echo prepared\n',
+  );
   const configPath = join(configDir, "delivery.json");
   const raw = {
     workspace: {
       root: "../../runs",
       repositories: [{ name: "app", path: "..", target_branch: "main" }],
     },
-    preview: {
-      bundle_sha256: await digestDriverBundle(driverRoot),
+    hooks: {
+      bundle_sha256: await digestHookBundle(hookRoot),
     },
   };
   await writeFile(configPath, `${JSON.stringify(raw, null, 2)}\n`);
@@ -87,10 +98,11 @@ test("documented config layout prepares with a non-self-referential driver diges
   });
 
   assert.equal(session.primary.source_path, await realpath(app));
-  assert.equal(session.driverPath(), join(
-    session.manifest.driver_bundle_path,
-    "preview-delivery.mjs",
-  ));
+  assert.equal(
+    await readFile(join(session.manifest.hook_bundle_path, "Taskfile.yml"), "utf8"),
+    await readFile(join(hookRoot, "Taskfile.yml"), "utf8"),
+  );
+  assert.match(session.adapterPath(), /trusted-adapter[/\\]taskfile-delivery-adapter[.]mjs$/);
   await session.discard("test-documented-config");
 });
 
@@ -128,8 +140,8 @@ test("workspace preparation isolates multiple repositories from dirty canonical 
   assert.match((await git(app, "status", "--porcelain")).stdout, /dirty\.txt/);
 });
 
-test("driver bundle is pinned and snapshotted before agent work starts", async () => {
-  const root = await mkdtemp(join(tmpdir(), "statewright-driver-snapshot-"));
+test("hook bundle and built-in adapter are pinned before agent work starts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-hook-snapshot-"));
   const app = await createRepository(root, "app");
   const deliveryConfig = await config(root, [
     {
@@ -141,15 +153,39 @@ test("driver bundle is pinned and snapshotted before agent work starts", async (
     },
   ]);
   const session = await WorkspaceSession.prepare(deliveryConfig, {
-    runId: "test-driver-snapshot",
+    runId: "test-hook-snapshot",
   });
 
-  await writeFile(join(deliveryConfig.preview.driverRoot, "preview.mjs"), "changed\n");
-  assert.equal(await readFile(session.driverPath(), "utf8"), "console.log('{}');\n");
-  await writeFile(session.driverPath(), "tampered\n");
+  const taskfile = join(deliveryConfig.hooks.root, "Taskfile.yml");
+  const snapshotTaskfile = join(session.manifest.hook_bundle_path, "Taskfile.yml");
+  const original = await readFile(snapshotTaskfile, "utf8");
+  await writeFile(taskfile, "changed\n");
+  assert.equal(await readFile(snapshotTaskfile, "utf8"), original);
+  await chmod(session.adapterPath(), 0o700);
+  await writeFile(session.adapterPath(), "tampered\n");
   await assert.rejects(
     WorkspaceSession.resume(deliveryConfig, session.manifestPath),
-    /driver bundle digest mismatch/,
+    /adapter digest mismatch/,
+  );
+});
+
+test("resume rejects a tampered hook bundle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-hook-tamper-"));
+  const app = await createRepository(root, "app");
+  const deliveryConfig = await config(root, [{
+    name: "app",
+    sourcePath: app,
+    baseRef: "main",
+    targetBranch: "main",
+    primary: true,
+  }]);
+  const session = await WorkspaceSession.prepare(deliveryConfig, {
+    runId: "test-hook-tamper",
+  });
+  await writeFile(join(session.manifest.hook_bundle_path, "Taskfile.yml"), "tampered\n");
+  await assert.rejects(
+    WorkspaceSession.resume(deliveryConfig, session.manifestPath),
+    /hook bundle digest mismatch/,
   );
 });
 

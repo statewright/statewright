@@ -25,12 +25,17 @@ function validConfig() {
         },
       ],
     },
-    preview: {
-      driver_root: "scripts",
-      driver: "preview.mjs",
+    hooks: {
+      root: "scripts",
+      taskfile: "Taskfile.delivery.yml",
       bundle_sha256: "a".repeat(64),
       environment_allowlist: ["PATH", "KUBECONFIG", "STATEWRIGHT_API_KEY"],
+      actions: {
+        prepare: "preview:prepare",
+        deploy: "preview:deploy",
+      },
     },
+    preview: {},
     promotion: { mode: "squash", commit_message: "feat: promote preview" },
   };
 }
@@ -39,9 +44,11 @@ test("delivery config resolves trusted paths and one primary repository", () => 
   const config = validateDeliveryConfig(validConfig(), "/workspace/project/delivery.json");
   assert.equal(config.workspace.root, "/workspace/project/runs");
   assert.equal(config.workspace.repositories[0].sourcePath, "/workspace/project");
-  assert.equal(config.preview.driver, "preview.mjs");
-  assert.equal(config.preview.driverRoot, "/workspace/project/scripts");
-  assert.deepEqual(config.preview.environmentAllowlist, [
+  assert.equal(config.hooks.taskfile, "Taskfile.delivery.yml");
+  assert.equal(config.hooks.root, "/workspace/project/scripts");
+  assert.equal(config.hooks.actions.prepare, "preview:prepare");
+  assert.equal(config.hooks.actions.validate, "delivery:validate");
+  assert.deepEqual(config.hooks.environmentAllowlist, [
     "PATH",
     "KUBECONFIG",
     "STATEWRIGHT_API_KEY",
@@ -55,9 +62,11 @@ test("delivery config applies mechanical defaults without guessing trust inputs"
   delete raw.workspace.root;
   delete raw.workspace.repositories[0].base_ref;
   delete raw.workspace.repositories[0].primary;
-  delete raw.preview.driver;
-  delete raw.preview.driver_root;
-  delete raw.preview.environment_allowlist;
+  delete raw.hooks.taskfile;
+  delete raw.hooks.root;
+  delete raw.hooks.environment_allowlist;
+  delete raw.hooks.actions;
+  delete raw.preview;
   delete raw.promotion;
 
   const config = validateDeliveryConfig(raw, "/workspace/project/.statewright/delivery.json");
@@ -66,9 +75,10 @@ test("delivery config applies mechanical defaults without guessing trust inputs"
   assert.match(config.workspace.root, /[.]statewright[/\\]delivery-runs$/);
   assert.equal(config.workspace.repositories[0].baseRef, "main");
   assert.equal(config.workspace.repositories[0].primary, true);
-  assert.equal(config.preview.driver, "preview-delivery.mjs");
-  assert.equal(config.preview.driverRoot, "/workspace/project/.statewright/delivery-driver");
-  assert.deepEqual(config.preview.environmentAllowlist, [
+  assert.equal(config.hooks.taskfile, "Taskfile.yml");
+  assert.equal(config.hooks.root, "/workspace/project/.statewright/delivery-hooks");
+  assert.equal(config.hooks.actions.prepare, "delivery:prepare");
+  assert.deepEqual(config.hooks.environmentAllowlist, [
     "PATH",
     "HOME",
     "TMPDIR",
@@ -99,7 +109,7 @@ test("enabled rejects every present non-boolean value", () => {
   }
 });
 
-test("delivery config rejects duplicate repositories and unsafe drivers", () => {
+test("delivery config rejects duplicate repositories and unsafe Taskfile hooks", () => {
   const duplicate = validConfig();
   duplicate.workspace.repositories.push({
     ...duplicate.workspace.repositories[0],
@@ -111,17 +121,31 @@ test("delivery config rejects duplicate repositories and unsafe drivers", () => 
   );
 
   const unsafe = validConfig();
-  unsafe.preview.driver = "../preview.mjs";
+  unsafe.hooks.taskfile = "../Taskfile.yml";
   assert.throws(
     () => validateDeliveryConfig(unsafe, "/workspace/project/delivery.json"),
     /must not contain '\.\.'/,
   );
 
   const unpinned = validConfig();
-  unpinned.preview.bundle_sha256 = "not-a-digest";
+  unpinned.hooks.bundle_sha256 = "not-a-digest";
   assert.throws(
     () => validateDeliveryConfig(unpinned, "/workspace/project/delivery.json"),
     /lowercase SHA-256/,
+  );
+
+  const unknownAction = validConfig();
+  unknownAction.hooks.actions.typo = "delivery:typo";
+  assert.throws(
+    () => validateDeliveryConfig(unknownAction, "/workspace/project/delivery.json"),
+    /unsupported action 'typo'/,
+  );
+
+  const unsafeTask = validConfig();
+  unsafeTask.hooks.actions.prepare = "delivery:prepare && deploy";
+  assert.throws(
+    () => validateDeliveryConfig(unsafeTask, "/workspace/project/delivery.json"),
+    /safe Taskfile task name/,
   );
 });
 
@@ -140,7 +164,7 @@ test("delivery config rejects multiple primaries and an unbounded action timeout
   );
 
   const timeout = validConfig();
-  timeout.preview.action_timeout_ms = 10;
+  timeout.hooks.action_timeout_ms = 10;
   assert.throws(
     () => validateDeliveryConfig(timeout, "/workspace/project/delivery.json"),
     /1000 to 7200000/,

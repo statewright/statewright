@@ -264,7 +264,7 @@ mod tests {
                 },
                 "preview": {
                     "version": 1,
-                    "mode": "kubernetes",
+                    "mode": "taskfile",
                     "required": true,
                     "prepare_state": "preview",
                     "deploy_state": "preview",
@@ -299,7 +299,7 @@ mod tests {
             "meta": {
                 "preview": {
                     "version": 1,
-                    "mode": "kubernetes",
+                    "mode": "taskfile",
                     "required": true,
                     "prepare_state": "missing",
                     "deploy_state": "start",

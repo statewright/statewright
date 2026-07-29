@@ -391,7 +391,7 @@ pub struct PreviewPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewMode {
-    Kubernetes,
+    Taskfile,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,7 +633,7 @@ mod tests {
                 },
                 "preview": {
                     "version": 1,
-                    "mode": "kubernetes",
+                    "mode": "taskfile",
                     "required": true,
                     "prepare_state": "preview",
                     "deploy_state": "preview",
@@ -661,7 +661,7 @@ mod tests {
             meta.workspace.unwrap().cleanup,
             WorkspaceCleanup::AfterPromoted
         );
-        assert_eq!(meta.preview.unwrap().mode, PreviewMode::Kubernetes);
+        assert_eq!(meta.preview.unwrap().mode, PreviewMode::Taskfile);
         assert_eq!(meta.promotion.unwrap().mode, PromotionMode::Squash);
     }
 }

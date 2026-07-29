@@ -13,20 +13,22 @@ function terminateTree(child, signal) {
   }
 }
 
-export function driverEnvironment(session, extra = {}) {
+export function hookEnvironment(session, extra = {}) {
   const env = {};
-  for (const name of session.config.preview.environmentAllowlist) {
+  for (const name of session.config.hooks.environmentAllowlist) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
   return {
     ...env,
     STATEWRIGHT_DELIVERY_MANIFEST: session.manifestPath,
     STATEWRIGHT_DELIVERY_RUN_ID: session.manifest.run_id,
+    STATEWRIGHT_DELIVERY_HOOK_ROOT: session.manifest.hook_bundle_path,
+    STATEWRIGHT_DELIVERY_TASKFILE: session.config.hooks.taskfile,
     ...extra,
   };
 }
 
-export function runDriverProcess(command, args, options) {
+export function runHookProcess(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,

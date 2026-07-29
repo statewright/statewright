@@ -3,8 +3,21 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 const SAFE_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const SAFE_TASK_NAME = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/;
 export const DELIVERY_CONFIG_RELATIVE_PATH = join(".statewright", "delivery.json");
 export const DELIVERY_DOCS_PATH = "plugins/codex/docs/isolated-delivery.md";
+export const DELIVERY_ACTIONS = [
+  "prepare",
+  "deploy",
+  "validate",
+  "lock",
+  "renew",
+  "preflight-promote",
+  "promote",
+  "unlock",
+  "teardown",
+  "discard",
+];
 const DEFAULT_ENVIRONMENT_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -32,32 +45,48 @@ function resolveConfiguredPath(configDir, value, field) {
   return resolve(configDir, input);
 }
 
-function validateRelativeDriver(value) {
-  const driver = requireString(value, "preview.driver");
-  if (isAbsolute(driver)) {
-    throw new Error("preview.driver must be relative to preview.driver_root.");
+function validateRelativePath(value, field, rootField) {
+  const path = requireString(value, field);
+  if (isAbsolute(path)) {
+    throw new Error(`${field} must be relative to ${rootField}.`);
   }
-  if (driver.split(/[\\/]/).includes("..")) {
-    throw new Error("preview.driver must not contain '..'.");
+  if (path.split(/[\\/]/).includes("..")) {
+    throw new Error(`${field} must not contain '..'.`);
   }
-  return driver;
+  return path;
 }
 
 function validateEnvironmentAllowlist(value) {
   if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("preview.environment_allowlist must contain at least PATH.");
+    throw new Error("hooks.environment_allowlist must contain at least PATH.");
   }
   const names = new Set();
   for (const name of value) {
     if (typeof name !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(name)) {
-      throw new Error(`invalid preview environment variable name '${name}'.`);
+      throw new Error(`invalid hook environment variable name '${name}'.`);
     }
     names.add(name);
   }
   if (!names.has("PATH")) {
-    throw new Error("preview.environment_allowlist must include PATH.");
+    throw new Error("hooks.environment_allowlist must include PATH.");
   }
   return [...names];
+}
+
+function validateActions(value) {
+  const overrides = value === undefined ? {} : requireObject(value, "hooks.actions");
+  for (const action of Object.keys(overrides)) {
+    if (!DELIVERY_ACTIONS.includes(action)) {
+      throw new Error(`hooks.actions contains unsupported action '${action}'.`);
+    }
+  }
+  return Object.fromEntries(DELIVERY_ACTIONS.map((action) => {
+    const task = overrides[action] ?? `delivery:${action}`;
+    if (typeof task !== "string" || !SAFE_TASK_NAME.test(task)) {
+      throw new Error(`hooks.actions.${action} must be a safe Taskfile task name.`);
+    }
+    return [action, task];
+  }));
 }
 
 export function validateDeliveryConfig(raw, configPath) {
@@ -84,7 +113,7 @@ export function validateDeliveryConfig(raw, configPath) {
   if ((workspace.mode ?? "git_worktree") !== "git_worktree") {
     throw new Error("workspace.mode must be 'git_worktree'.");
   }
-  const root = workspace.root
+  const workspaceRoot = workspace.root
     ? resolveConfiguredPath(configDir, workspace.root, "workspace.root")
     : join(homedir(), ".statewright", "delivery-runs");
   if (!Array.isArray(workspace.repositories) || workspace.repositories.length === 0) {
@@ -126,31 +155,38 @@ export function validateDeliveryConfig(raw, configPath) {
     };
   });
 
-  const preview = requireObject(config.preview, "preview");
-  const driver = validateRelativeDriver(preview.driver ?? "preview-delivery.mjs");
-  const driverRoot = resolveConfiguredPath(
+  const hooks = requireObject(config.hooks, "hooks");
+  const hookRoot = resolveConfiguredPath(
     configDir,
-    preview.driver_root ?? "delivery-driver",
-    "preview.driver_root",
+    hooks.root ?? "delivery-hooks",
+    "hooks.root",
   );
-  const bundleSha256 = requireString(preview.bundle_sha256, "preview.bundle_sha256");
+  const taskfile = validateRelativePath(
+    hooks.taskfile ?? "Taskfile.yml",
+    "hooks.taskfile",
+    "hooks.root",
+  );
+  const bundleSha256 = requireString(hooks.bundle_sha256, "hooks.bundle_sha256");
   if (!/^[a-f0-9]{64}$/.test(bundleSha256)) {
-    throw new Error("preview.bundle_sha256 must be a lowercase SHA-256 digest.");
+    throw new Error("hooks.bundle_sha256 must be a lowercase SHA-256 digest.");
   }
   const environmentAllowlist = validateEnvironmentAllowlist(
-    preview.environment_allowlist ?? DEFAULT_ENVIRONMENT_ALLOWLIST,
+    hooks.environment_allowlist ?? DEFAULT_ENVIRONMENT_ALLOWLIST,
   );
-  const evidenceRoot = preview.evidence_root
-    ? resolveConfiguredPath(configDir, preview.evidence_root, "preview.evidence_root")
-    : resolve(root, ".evidence");
-  const actionTimeoutMs = preview.action_timeout_ms ?? 1_800_000;
+  const actions = validateActions(hooks.actions);
+  const actionTimeoutMs = hooks.action_timeout_ms ?? 1_800_000;
   if (
     !Number.isSafeInteger(actionTimeoutMs)
     || actionTimeoutMs < 1_000
     || actionTimeoutMs > 7_200_000
   ) {
-    throw new Error("preview.action_timeout_ms must be an integer from 1000 to 7200000.");
+    throw new Error("hooks.action_timeout_ms must be an integer from 1000 to 7200000.");
   }
+
+  const preview = requireObject(config.preview ?? {}, "preview");
+  const evidenceRoot = preview.evidence_root
+    ? resolveConfiguredPath(configDir, preview.evidence_root, "preview.evidence_root")
+    : resolve(workspaceRoot, ".evidence");
 
   const promotion = requireObject(config.promotion ?? { mode: "manual" }, "promotion");
   if (!["manual", "squash"].includes(promotion.mode)) {
@@ -169,15 +205,16 @@ export function validateDeliveryConfig(raw, configPath) {
     configPath,
     configDir,
     docsPath: DELIVERY_DOCS_PATH,
-    workspace: { mode: "git_worktree", root, repositories },
-    preview: {
-      driver,
-      driverRoot,
+    workspace: { mode: "git_worktree", root: workspaceRoot, repositories },
+    hooks: {
+      root: hookRoot,
+      taskfile,
       bundleSha256,
+      actions,
       environmentAllowlist,
-      evidenceRoot,
       actionTimeoutMs,
     },
+    preview: { evidenceRoot },
     promotion: { mode: promotion.mode, commitMessage },
   };
 }
@@ -239,17 +276,17 @@ export async function assertDeliveryConfigPaths(config) {
       throw new Error(`repository '${repo.name}' path does not exist: ${repo.sourcePath}`);
     }
   }
-  const rootInfo = await stat(config.preview.driverRoot).catch(() => null);
+  const rootInfo = await stat(config.hooks.root).catch(() => null);
   if (!rootInfo?.isDirectory()) {
-    throw new Error(`preview driver root does not exist: ${config.preview.driverRoot}`);
+    throw new Error(`delivery hook root does not exist: ${config.hooks.root}`);
   }
-  const driverPath = resolve(config.preview.driverRoot, config.preview.driver);
-  if (!driverPath.startsWith(`${config.preview.driverRoot}/`)) {
-    throw new Error("preview driver escapes preview.driver_root.");
+  const taskfilePath = resolve(config.hooks.root, config.hooks.taskfile);
+  if (!taskfilePath.startsWith(`${config.hooks.root}/`)) {
+    throw new Error("delivery taskfile escapes hooks.root.");
   }
-  const driverInfo = await stat(driverPath).catch(() => null);
-  if (!driverInfo?.isFile()) {
-    throw new Error(`preview driver does not exist: ${driverPath}`);
+  const taskfileInfo = await stat(taskfilePath).catch(() => null);
+  if (!taskfileInfo?.isFile()) {
+    throw new Error(`delivery taskfile does not exist: ${taskfilePath}`);
   }
 }
 

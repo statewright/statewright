@@ -18,6 +18,7 @@ class FakeClient extends EventEmitter {
     super();
     this.turns = [];
     this.runtimeUsageReports = [];
+    this.workflowLoads = [];
     this.currentTurnId = null;
     this.stateIndex = -1;
     this.states = [
@@ -92,7 +93,15 @@ class FakeClient extends EventEmitter {
       return {
         data: [
           {
-            name: "statewright",
+            name: "plugin_statewright_statewright",
+            tools: {
+              statewright_get_state: {},
+              statewright_load_workflow: {},
+              statewright_transition: {},
+            },
+          },
+          {
+            name: "statewright_adapter",
             tools: {
               statewright_get_state: {},
               statewright_load_workflow: {},
@@ -104,6 +113,12 @@ class FakeClient extends EventEmitter {
       };
     }
     if (method === "mcpServer/tool/call") {
+      assert.equal(params.server, "statewright_adapter");
+      if (params.tool === "statewright_load_workflow") {
+        this.workflowLoads.push(params.arguments);
+        this.stateIndex = 0;
+        return { content: [{ type: "text", text: "loaded" }] };
+      }
       if (params.tool === "statewright_report_runtime_usage") {
         this.runtimeUsageReports.push(params.arguments);
         return { content: [{ type: "text", text: "ok" }] };
@@ -130,7 +145,7 @@ class FakeClient extends EventEmitter {
             tokenUsage: { totalTokens: number * 10, inputTokens: number * 8, outputTokens: number * 2 },
           },
         });
-        const tool = number === 1 ? "statewright_load_workflow" : "statewright_transition";
+        const tool = "statewright_transition";
         this.stateIndex += 1;
         this.emit("notification", {
           method: "item/completed",
@@ -139,7 +154,7 @@ class FakeClient extends EventEmitter {
             turnId,
             item: {
               type: "mcpToolCall",
-              server: "statewright",
+              server: "statewright_adapter",
               tool,
               status: "completed",
               result: { content: [] },
@@ -188,11 +203,13 @@ test("the adapter cuts turns at state transitions and applies each state route",
   const result = await orchestrator.run();
 
   assert.equal(result.status, "complete");
-  assert.equal(client.turns.length, 3);
+  assert.deepEqual(client.workflowLoads, [
+    { name: "rugged-sdlc", session_id: "thread-1" },
+  ]);
+  assert.equal(client.turns.length, 2);
   assert.deepEqual(
     client.turns.map(({ model, effort }) => ({ model, effort })),
     [
-      { model: "gpt-5.6-luna", effort: "medium" },
       { model: "gpt-5.6-sol", effort: "max" },
       { model: "gpt-5.6-luna", effort: "medium" },
     ],
@@ -200,8 +217,8 @@ test("the adapter cuts turns at state transitions and applies each state route",
   assert.equal(telemetry.filter((entry) => entry.event === "state_boundary").length, 3);
   assert.equal(telemetry.filter((entry) => entry.event === "state_budget_started").length, 2);
   const usage = telemetry.filter((entry) => entry.event === "token_usage");
-  assert.equal(usage.length, 3);
-  assert.equal(usage.at(-1).state_budget.session_token_usage.total_tokens, 60);
+  assert.equal(usage.length, 2);
+  assert.equal(usage.at(-1).state_budget.session_token_usage.total_tokens, 30);
   assert.equal(client.runtimeUsageReports.length, 2);
   assert.equal(client.runtimeUsageReports[0].kind, "usage");
   assert.equal(client.runtimeUsageReports[0].report.precision, "exact");
@@ -210,10 +227,7 @@ test("the adapter cuts turns at state transitions and applies each state route",
     "br_codex_test",
   );
   assert.equal(JSON.stringify(telemetry).includes("Implement the approved plan."), false);
-  assert.match(
-    client.turns[0].input[0].text,
-    /"name":"rugged-sdlc","session_id":"thread-1"/,
-  );
+  assert.equal(client.turns[0].input[0].text, "Implement the approved plan.");
   assert.match(stderr.value, /state=discover model=gpt-5.6-sol effort=max/);
   assert.match(stderr.value, /workflow complete in 'done'/);
 });
@@ -228,9 +242,11 @@ test("an explicit project scope replaces the legacy thread session argument", ()
   });
   orchestrator.thread = { id: "thread-1" };
 
-  const prompt = orchestrator.bootstrapPrompt();
-  assert.match(prompt, /"project_id":"magent-project"/);
-  assert.doesNotMatch(prompt, /"session_id"/);
+  const args = orchestrator.workflowArguments();
+  assert.deepEqual(args, {
+    name: "[magent] desktop-android-pulse v1",
+    project_id: "magent-project",
+  });
 });
 test("the never approval policy accepts MCP elicitation for bounded runs", async () => {
   const client = new FakeClient();
@@ -298,5 +314,5 @@ test("a required delivery workflow stops before task work without a delivery ses
     orchestrator.run(),
     /requires isolated delivery.*[.]statewright[/]delivery[.]json.*isolated-delivery[.]md/,
   );
-  assert.equal(client.turns.length, 1);
+  assert.equal(client.turns.length, 0);
 });

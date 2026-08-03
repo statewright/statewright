@@ -16,7 +16,7 @@ Sentry.setTag("platform", `${process.platform}-${process.arch}`);
 import { readFile, readFile as readFileAsync } from "node:fs/promises";
 import { realpathSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { AppServerClient } from "./lib/app-server-client.mjs";
@@ -73,20 +73,51 @@ Runtime:
   --codex-bin PATH            Codex executable (default: codex)
   -h, --help                  Show this help
 
-The adapter starts one cheap bootstrap turn to activate Statewright through the normal MCP tool.
+The adapter activates Statewright directly through its launcher-owned MCP transport.
 At every successful state transition it interrupts the current turn, resolves the new state's
 model and thinking_level against model/list, and starts the next turn with explicit overrides.
 `;
+
+const MCP_PROXY_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "mcp-proxy.sh",
+);
+const MCP_PROXY_ENV_VARS = [
+  "STATEWRIGHT_GATEWAY_URL",
+  "STATEWRIGHT_PB_URL",
+  "STATEWRIGHT_API_KEY",
+  "STATEWRIGHT_TELEMETRY_DIR",
+  "STATEWRIGHT_TELEMETRY_PORT",
+  "STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY",
+];
 
 export function buildAppServerArgs(transportSessionId) {
   if (!/^br_[a-zA-Z0-9_-]+$/.test(transportSessionId)) {
     throw new Error("STATEWRIGHT_MCP_SESSION_ID must start with br_ and contain only letters, digits, '_' or '-'.");
   }
+  // Bind the proxy shipped beside this launcher. A complete transport avoids
+  // mixing branch-local adapter code with an older installed plugin cache.
   return [
     "app-server",
     "--stdio",
     "-c",
-    `mcp_servers.statewright.env.STATEWRIGHT_MCP_SESSION_ID=${JSON.stringify(transportSessionId)}`,
+    'mcp_servers.statewright_adapter.command="bash"',
+    "-c",
+    `mcp_servers.statewright_adapter.args=[${JSON.stringify(MCP_PROXY_PATH)}]`,
+    "-c",
+    `mcp_servers.statewright_adapter.env_vars=${JSON.stringify(MCP_PROXY_ENV_VARS)}`,
+    "-c",
+    `mcp_servers.statewright_adapter.env.STATEWRIGHT_MCP_SESSION_ID=${JSON.stringify(transportSessionId)}`,
+    // The installed plugin contributes the same tools under `statewright`.
+    // Shadow it with a complete disabled transport so model tool selection has
+    // exactly one Statewright endpoint during launcher-owned runs.
+    "-c",
+    'mcp_servers.statewright.command="bash"',
+    "-c",
+    `mcp_servers.statewright.args=[${JSON.stringify(MCP_PROXY_PATH)}]`,
+    "-c",
+    "mcp_servers.statewright.enabled=false",
   ];
 }
 

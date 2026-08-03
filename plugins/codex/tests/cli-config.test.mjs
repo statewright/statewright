@@ -6,13 +6,35 @@ import {
   validateWorkflowName,
 } from "../scripts/statewright-codex.mjs";
 
-test("app-server configuration explicitly injects the isolated MCP session id", () => {
-  assert.deepEqual(buildAppServerArgs("br_codex_test-123"), [
+test("app-server binds the complete proxy transport shipped with the launcher", () => {
+  const args = buildAppServerArgs("br_codex_test-123");
+  assert.deepEqual(args.slice(0, 5), [
     "app-server",
     "--stdio",
     "-c",
-    'mcp_servers.statewright.env.STATEWRIGHT_MCP_SESSION_ID="br_codex_test-123"',
+    'mcp_servers.statewright_adapter.command="bash"',
+    "-c",
   ]);
+  assert.match(
+    args[5],
+    /mcp_servers[.]statewright_adapter[.]args=.*plugins\/codex\/mcp-proxy[.]sh/,
+  );
+  assert.equal(args[6], "-c");
+  assert.match(args[7], /env_vars=.*STATEWRIGHT_GATEWAY_URL.*STATEWRIGHT_API_KEY/);
+  assert.equal(args[8], "-c");
+  assert.equal(
+    args[9],
+    'mcp_servers.statewright_adapter.env.STATEWRIGHT_MCP_SESSION_ID="br_codex_test-123"',
+  );
+  assert.equal(args[10], "-c");
+  assert.equal(args[11], 'mcp_servers.statewright.command="bash"');
+  assert.equal(args[12], "-c");
+  assert.match(
+    args[13],
+    /mcp_servers[.]statewright[.]args=.*plugins\/codex\/mcp-proxy[.]sh/,
+  );
+  assert.equal(args[14], "-c");
+  assert.equal(args[15], "mcp_servers.statewright.enabled=false");
 });
 test("invalid transport session ids cannot inject Codex configuration", () => {
   assert.throws(() => buildAppServerArgs('br_codex_bad"value'), /contain only/);

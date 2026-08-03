@@ -124,17 +124,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.stderr.write(`[statewright] thread ${this.thread.id}\n`);
 
     this.serverName = await this.findStatewrightServer();
-    const bootstrap = await this.runTurn({
-      prompt: this.bootstrapPrompt(),
-      route: this.route,
-      purpose: "bootstrap",
-      suppressOutput: true,
-    });
-    if (!["statewright_load_workflow", "statewright_start"].includes(bootstrap.boundaryTool)) {
-      throw new Error(
-        "The bootstrap turn ended without loading the Statewright workflow. No task work was started.",
-      );
-    }
+    await this.loadWorkflow();
 
     let state = await this.getState();
     await this.observeDeliveryState(state);
@@ -232,26 +222,43 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
         });
         for (const server of response.data ?? []) {
           const tools = Object.keys(server.tools ?? {});
-          if (tools.some((tool) => tool.endsWith("statewright_get_state"))) return server.name;
+          if (!tools.some((tool) => tool.endsWith("statewright_get_state"))) continue;
+          if (server.name === "statewright_adapter") return server.name;
         }
         cursor = response.nextCursor ?? null;
       } while (cursor);
       if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 250));
     }
     throw new Error(
-      "No Statewright MCP server is attached to the app-server thread. Install or configure the Statewright Codex plugin first.",
+      "The launcher-owned Statewright MCP server 'statewright_adapter' is unavailable.",
     );
   }
 
-  bootstrapPrompt() {
+  workflowArguments() {
     const args = { name: this.workflow };
     if (this.projectId) args.project_id = this.projectId;
     else args.session_id = this.thread.id;
     if (this.resumeWorkflow) args.resume = true;
-    return (
-      `Call statewright_load_workflow exactly once with these JSON arguments: ${JSON.stringify(args)}. ` +
-      "Do not inspect the repository or begin the user's task. Stop immediately after the tool succeeds."
-    );
+    return args;
+  }
+
+  async loadWorkflow() {
+    const result = await this.client.request("mcpServer/tool/call", {
+      threadId: this.thread.id,
+      server: this.serverName,
+      tool: "statewright_load_workflow",
+      arguments: this.workflowArguments(),
+    });
+    if (result?.isError === true || result?.error) {
+      throw new Error("The launcher-owned Statewright MCP server rejected workflow activation.");
+    }
+    await this.telemetry("state_boundary", {
+      thread_id: this.thread.id,
+      turn_id: null,
+      state: null,
+      tool: "statewright_load_workflow",
+      source: "adapter",
+    });
   }
 
   async getState() {

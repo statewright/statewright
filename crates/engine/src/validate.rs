@@ -315,14 +315,16 @@ mod tests {
         .unwrap();
 
         let err = validate_definition(&def).unwrap_err();
-        assert!(err
-            .errors
-            .iter()
-            .any(|error| error.contains("nonexistent state 'missing'")));
-        assert!(err
-            .errors
-            .iter()
-            .any(|error| error.contains("requires a required workspace")));
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.contains("nonexistent state 'missing'"))
+        );
+        assert!(
+            err.errors
+                .iter()
+                .any(|error| error.contains("requires a required workspace"))
+        );
     }
 
     #[test]

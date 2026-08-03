@@ -197,7 +197,7 @@ export class AdapterBridge {
         }
         if (url.pathname === "/hooks/stop") {
           const result = adapterResult(await this.client.call("statewright_adapter_stop"));
-          if (result?.active === false) this.terminalStopObserved = true;
+          if (result?.decision === "allow") this.terminalStopObserved = true;
           await this.record("executor_adapter_stop", {
             decision: result?.decision ?? null,
             state: result?.state ?? null,

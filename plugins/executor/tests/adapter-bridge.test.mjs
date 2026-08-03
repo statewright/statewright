@@ -167,7 +167,7 @@ test("bridge drain accepts delayed terminal hooks and waits for a quiet interval
   const client = {
     async call(name) {
       calls.push(name);
-      return { decision: "allow", state: "completed", active: false };
+      return { decision: "allow", state: "completed", active: true };
     },
   };
   const bridge = await new AdapterBridge(client, {
@@ -197,7 +197,9 @@ test("bridge drain accepts delayed terminal hooks and waits for a quiet interval
     });
 
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).state, "completed");
+    const result = await response.json();
+    assert.equal(result.state, "completed");
+    assert.equal(result.active, true);
     assert.equal(await drain, true);
     assert.ok(Date.now() - startedAt >= 120);
     assert.equal(bridge.terminalStopObserved, true);

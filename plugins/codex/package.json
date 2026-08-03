@@ -1,0 +1,9 @@
+{
+  "name": "statewright-codex",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@sentry/node": "^10.69.0"
+  }
+}

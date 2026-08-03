@@ -7,7 +7,15 @@
  * state defines it.
  */
 
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
+import * as Sentry from "@sentry/node"
+
+vi.mock("@sentry/node", () => ({
+  init: vi.fn(),
+  setTag: vi.fn(),
+  setUser: vi.fn(),
+}))
+
 import { classifyBashCommand, type StateResponse } from "./index"
 
 function state(overrides: Partial<StateResponse> = {}): StateResponse {
@@ -91,5 +99,21 @@ describe("classifyBashCommand — allowed_commands prefix matching", () => {
 
   it("is inert when the state defines no allowed_commands", () => {
     expect(classifyBashCommand("git commit -m x", state()).allowed).toBe(true)
+  })
+})
+
+describe("Sentry initialization", () => {
+  it("calls Sentry.init with the plugins DSN on module load", () => {
+    expect(Sentry.init).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dsn: expect.stringContaining("glitch.enhasa.cloud/12"),
+        release: expect.stringMatching(/^statewright-opencode@\d+\.\d+\.\d+$/),
+      })
+    )
+  })
+
+  it("sets plugin and platform tags", () => {
+    expect(Sentry.setTag).toHaveBeenCalledWith("plugin", "opencode")
+    expect(Sentry.setTag).toHaveBeenCalledWith("platform", expect.stringMatching(/.+-.+/))
   })
 })

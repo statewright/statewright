@@ -7,6 +7,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest"
+import * as Sentry from "@sentry/node"
+
+// Mock @sentry/node before anything imports it
+vi.mock("@sentry/node", () => ({
+  init: vi.fn(),
+  setTag: vi.fn(),
+  setUser: vi.fn(),
+}))
 
 // Mock node:fs
 vi.mock("node:fs", () => ({
@@ -17,6 +25,7 @@ vi.mock("node:fs", () => ({
 // Mock node:os
 vi.mock("node:os", () => ({
   homedir: vi.fn(() => "/home/test"),
+  tmpdir: vi.fn(() => "/tmp"),
 }))
 
 // Mock node:path
@@ -228,18 +237,36 @@ function setupFetch(responses: Array<{ match: string; body: unknown; headers?: R
 
 // --- Tests ---
 
+describe("Sentry initialization", () => {
+  it("calls Sentry.init with the plugins DSN on module load", () => {
+    expect(Sentry.init).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dsn: expect.stringContaining("glitch.enhasa.cloud/12"),
+        release: expect.stringMatching(/^statewright-pi@\d+\.\d+\.\d+$/),
+      })
+    )
+  })
+
+  it("sets plugin and platform tags", () => {
+    expect(Sentry.setTag).toHaveBeenCalledWith("plugin", "pi")
+    expect(Sentry.setTag).toHaveBeenCalledWith("platform", expect.stringMatching(/.+-.+/))
+  })
+})
+
 describe("statewright Pi extension", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     originalFetch = globalThis.fetch
     process.env.STATEWRIGHT_API_KEY = API_KEY
     process.env.STATEWRIGHT_GATEWAY_URL = "http://localhost:3001"
+    process.env.STATEWRIGHT_WORKFLOW = "test-workflow"
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
     delete process.env.STATEWRIGHT_API_KEY
     delete process.env.STATEWRIGHT_GATEWAY_URL
+    delete process.env.STATEWRIGHT_WORKFLOW
   })
 
   describe("initialization", () => {

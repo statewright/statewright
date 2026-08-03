@@ -157,6 +157,14 @@ SETTINGS
   echo "  Created $CLAUDE_SETTINGS"
 fi
 
+# Report install telemetry
+API_KEY=$(cat "$PLUGIN_DIR/api_key" 2>/dev/null || true)
+PLATFORM="$(uname -s)-$(uname -m)"
+curl -sf -X POST "${STATEWRIGHT_URL}/api/telemetry/plugin-event" \
+  -H "Content-Type: application/json" \
+  -d "{\"plugin\":\"claude-code\",\"event\":\"install\",\"api_key\":\"${API_KEY}\",\"platform\":\"${PLATFORM}\"}" \
+  >/dev/null 2>&1 || true
+
 echo ""
 echo "  Done. Start a new Claude Code session:"
 echo ""

@@ -14,6 +14,19 @@
  *   STATEWRIGHT_GATEWAY_URL env var     Override gateway URL (default: managed cloud)
  */
 
+import * as Sentry from "@sentry/node"
+
+const PLUGIN_NAME = "pi"
+const PLUGIN_VERSION = "0.3.0"
+
+Sentry.init({
+  dsn: "https://3c30b803a5b44d74bf9657db7a89f033@glitch.enhasa.cloud/12",
+  release: `statewright-${PLUGIN_NAME}@${PLUGIN_VERSION}`,
+  environment: process.env.NODE_ENV || "production",
+})
+Sentry.setTag("plugin", PLUGIN_NAME)
+Sentry.setTag("platform", `${process.platform}-${process.arch}`)
+
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"
 import { Type } from "typebox"
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, unlinkSync, rmdirSync } from "node:fs"
@@ -139,6 +152,25 @@ function formatStatusBar(s: StateCache | null, extra?: string): string {
   return result
 }
 function swLog(msg: string) { if (process.env.STATEWRIGHT_DEBUG) console.error(`${SW_LOG_COLOR}[statewright] ${msg}${SW_LOG_RESET}`) }
+
+// --- Plugin telemetry ---
+
+const PB_URL = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
+
+function reportPluginEvent(apiKey: string, event = "connect") {
+  if (process.env.STATEWRIGHT_NO_UPDATE_CHECK) return
+  Sentry.setUser({ id: apiKey.slice(0, 8) })
+  fetch(`${PB_URL}/api/telemetry/plugin-event`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plugin: PLUGIN_NAME, event, version: PLUGIN_VERSION, api_key: apiKey, platform: `${process.platform}-${process.arch}` }),
+    signal: AbortSignal.timeout(5000),
+  }).then(r => r.json()).then((data: any) => {
+    if (data.latest_version && data.latest_version !== PLUGIN_VERSION) {
+      console.log(`[statewright] Update available: v${PLUGIN_VERSION} → v${data.latest_version}. Run: npm update statewright-pi`)
+    }
+  }).catch(() => {})
+}
 
 // --- Gateway client ---
 
@@ -1330,6 +1362,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       return false
     }
     console.log(`[statewright] Connected to ${GW_URL}`)
+    reportPluginEvent(key!, "connect")
     registerStatewrightTools()
     lazyInitDone = true
     return true
@@ -1349,6 +1382,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     console.log(`[statewright] Connected to ${GW_URL}`)
+    reportPluginEvent(apiKey, "connect")
   }
 
   // --- Text-only Ollama provider for plugin orchestration mode ---

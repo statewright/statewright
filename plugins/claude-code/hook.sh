@@ -67,14 +67,23 @@ mcp_call() {
 
 case "$ENDPOINT" in
   user-prompt)
-    # --- Plugin update check (once per session) ---
-    if [ ! -f "$STATEWRIGHT_DIR/.update_checked" ]; then
-      mkdir -p "$STATEWRIGHT_DIR"
-      touch "$STATEWRIGHT_DIR/.update_checked"
-      LOCAL_VER=$(jq -r '.version // "0.0.0"' "$(dirname "$0")/plugin.json" 2>/dev/null || echo "0.0.0")
-      REMOTE_VER=$(curl -sf --max-time 3 "https://raw.githubusercontent.com/statewright/statewright/main/plugins/claude-code/plugin.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
-      if [ -n "$REMOTE_VER" ] && [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright plugin update available: v${LOCAL_VER} → v${REMOTE_VER}. Run: /plugin install statewright to update.\"}}"
+    # --- Plugin update check (24h TTL, async, opt-out via STATEWRIGHT_NO_UPDATE_CHECK) ---
+    if [ -z "${STATEWRIGHT_NO_UPDATE_CHECK:-}" ]; then
+      UPDATE_CACHE="$STATEWRIGHT_DIR/.update_cache"
+      NEEDS_CHECK=true
+      if [ -f "$UPDATE_CACHE" ]; then
+        CACHE_AGE=$(( $(date +%s) - $(stat -f %m "$UPDATE_CACHE" 2>/dev/null || stat -c %Y "$UPDATE_CACHE" 2>/dev/null || echo 0) ))
+        [ "$CACHE_AGE" -lt 86400 ] && NEEDS_CHECK=false
+      fi
+      if [ "$NEEDS_CHECK" = true ]; then
+        mkdir -p "$STATEWRIGHT_DIR"
+        LOCAL_VER=$(jq -r '.version // "0.0.0"' "$(dirname "$0")/plugin.json" 2>/dev/null || echo "0.0.0")
+        PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
+        REMOTE_VER=$(curl -sf --max-time 3 "${PB_URL}/api/plugins/versions" 2>/dev/null | jq -r '.versions["claude-code"] // empty' 2>/dev/null || true)
+        echo "{\"version\":\"${LOCAL_VER}\",\"latest\":\"${REMOTE_VER}\",\"checked\":$(date +%s)}" > "$UPDATE_CACHE"
+        if [ -n "$REMOTE_VER" ] && [ "$LOCAL_VER" != "$REMOTE_VER" ]; then
+          echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright plugin update available: v${LOCAL_VER} → v${REMOTE_VER}. Run: /plugin install statewright to update. Suppress with STATEWRIGHT_NO_UPDATE_CHECK=1.\"}}"
+        fi
       fi
     fi
 

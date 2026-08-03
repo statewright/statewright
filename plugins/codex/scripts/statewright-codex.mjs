@@ -1,10 +1,24 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import * as Sentry from "@sentry/node";
+
+const PLUGIN_NAME = "codex";
+const PLUGIN_VERSION = "0.3.0";
+
+Sentry.init({
+  dsn: "https://3c30b803a5b44d74bf9657db7a89f033@glitch.enhasa.cloud/12",
+  release: `statewright-${PLUGIN_NAME}@${PLUGIN_VERSION}`,
+  environment: process.env.NODE_ENV || "production",
+});
+Sentry.setTag("plugin", PLUGIN_NAME);
+Sentry.setTag("platform", `${process.platform}-${process.arch}`);
+
+import { readFile, readFile as readFileAsync } from "node:fs/promises";
+import { realpathSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { AppServerClient } from "./lib/app-server-client.mjs";
 import { StatewrightCodexOrchestrator } from "./lib/orchestrator.mjs";
 import {
@@ -194,6 +208,25 @@ export async function main(argv = process.argv.slice(2)) {
     transportSessionId,
     telemetry,
   });
+
+  // Plugin telemetry + update check — fire and forget
+  if (!process.env.STATEWRIGHT_NO_UPDATE_CHECK) {
+    try {
+      const apiKey = process.env.STATEWRIGHT_API_KEY ?? readFileSync(join(homedir(), ".statewright", "api_key"), "utf8").trim()
+      const pbUrl = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
+      Sentry.setUser({ id: apiKey.slice(0, 8) })
+      fetch(`${pbUrl}/api/telemetry/plugin-event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plugin: PLUGIN_NAME, event: "connect", version: PLUGIN_VERSION, api_key: apiKey, platform: `${process.platform}-${process.arch}` }),
+        signal: AbortSignal.timeout(5000),
+      }).then(r => r.json()).then(data => {
+        if (data.latest_version && data.latest_version !== PLUGIN_VERSION) {
+          process.stderr.write(`[statewright] Update available: v${PLUGIN_VERSION} → v${data.latest_version}. Set STATEWRIGHT_NO_UPDATE_CHECK=1 to suppress.\n`)
+        }
+      }).catch(() => {})
+    } catch {}
+  }
 
   try {
     return await orchestrator.run();

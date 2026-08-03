@@ -44,7 +44,10 @@ class FakeClient extends EventEmitter {
 
   async start() {}
   notify() {}
-  respond() {}
+  respond(id, result) {
+    this.responses ??= [];
+    this.responses.push({ id, result });
+  }
   respondError() {}
 
   async request(method, params = {}) {
@@ -228,4 +231,44 @@ test("an explicit project scope replaces the legacy thread session argument", ()
   const prompt = orchestrator.bootstrapPrompt();
   assert.match(prompt, /"project_id":"magent-project"/);
   assert.doesNotMatch(prompt, /"session_id"/);
+});
+
+test("the never approval policy accepts MCP elicitation for bounded runs", async () => {
+  const client = new FakeClient();
+  const orchestrator = new StatewrightCodexOrchestrator({
+    client,
+    workflow: "smoke-readonly",
+    prompt: "Read only.",
+    cwd: "/tmp/project",
+    approvalPolicy: "never",
+  });
+
+  await orchestrator.handleServerRequest({
+    id: "elicitation-1",
+    method: "mcpServer/elicitation/request",
+  });
+
+  assert.deepEqual(client.responses, [
+    { id: "elicitation-1", result: { action: "accept" } },
+  ]);
+});
+
+test("interactive approval policies decline MCP elicitation", async () => {
+  const client = new FakeClient();
+  const orchestrator = new StatewrightCodexOrchestrator({
+    client,
+    workflow: "smoke-readonly",
+    prompt: "Read only.",
+    cwd: "/tmp/project",
+    approvalPolicy: "on-request",
+  });
+
+  await orchestrator.handleServerRequest({
+    id: "elicitation-2",
+    method: "mcpServer/elicitation/request",
+  });
+
+  assert.deepEqual(client.responses, [
+    { id: "elicitation-2", result: { action: "decline" } },
+  ]);
 });

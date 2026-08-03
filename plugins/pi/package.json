@@ -1,6 +1,6 @@
 {
   "name": "statewright-pi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Statewright state machine guardrails for Pi coding agent",
   "main": "src/index.ts",
   "license": "Apache-2.0",
@@ -24,6 +24,7 @@
     "vitest": "^3.2.0"
   },
   "dependencies": {
+    "@sentry/node": "^10.69.0",
     "minimatch": "^10.2.5",
     "tree-sitter-wasm": "^1.0.6",
     "web-tree-sitter": "^0.26.9"

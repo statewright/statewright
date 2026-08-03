@@ -526,7 +526,9 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     } else if (method === "item/tool/requestUserInput") {
       this.client.respond(message.id, { answers: {} });
     } else if (method === "mcpServer/elicitation/request") {
-      this.client.respond(message.id, { action: "decline" });
+      this.client.respond(message.id, {
+        action: this.approvalPolicy === "never" ? "accept" : "decline",
+      });
     } else {
       this.client.respondError(message.id, -32601, `Unsupported adapter request: ${method}`);
     }

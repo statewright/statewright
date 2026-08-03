@@ -87,6 +87,8 @@ const MCP_PROXY_ENV_VARS = [
   "STATEWRIGHT_GATEWAY_URL",
   "STATEWRIGHT_PB_URL",
   "STATEWRIGHT_API_KEY",
+  "STATEWRIGHT_CLIENT_ID",
+  "STATEWRIGHT_BRANCH_SESSION_ID",
   "STATEWRIGHT_TELEMETRY_DIR",
   "STATEWRIGHT_TELEMETRY_PORT",
   "STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY",
@@ -109,6 +111,10 @@ export function buildAppServerArgs(transportSessionId) {
     `mcp_servers.statewright_adapter.env_vars=${JSON.stringify(MCP_PROXY_ENV_VARS)}`,
     "-c",
     `mcp_servers.statewright_adapter.env.STATEWRIGHT_MCP_SESSION_ID=${JSON.stringify(transportSessionId)}`,
+    "-c",
+    `mcp_servers.statewright_adapter.env.STATEWRIGHT_CLIENT_ID=${JSON.stringify(transportSessionId)}`,
+    "-c",
+    `mcp_servers.statewright_adapter.env.STATEWRIGHT_BRANCH_SESSION_ID=${JSON.stringify(transportSessionId)}`,
     // The installed plugin contributes the same tools under `statewright`.
     // Shadow it with a complete disabled transport so model tool selection has
     // exactly one Statewright endpoint during launcher-owned runs.
@@ -143,6 +149,8 @@ export function deliveryAgentEnvironment(environment, transportSessionId) {
     KUBECONFIG: "/dev/null",
     STATEWRIGHT_DELIVERY_ACTIVE: "1",
     STATEWRIGHT_MCP_SESSION_ID: transportSessionId,
+    STATEWRIGHT_CLIENT_ID: transportSessionId,
+    STATEWRIGHT_BRANCH_SESSION_ID: transportSessionId,
   };
 }
 
@@ -276,7 +284,12 @@ export async function main(argv = process.argv.slice(2)) {
     cwd,
     env: workspaceSession
       ? deliveryAgentEnvironment(process.env, transportSessionId)
-      : { ...process.env, STATEWRIGHT_MCP_SESSION_ID: transportSessionId },
+      : {
+          ...process.env,
+          STATEWRIGHT_MCP_SESSION_ID: transportSessionId,
+          STATEWRIGHT_CLIENT_ID: transportSessionId,
+          STATEWRIGHT_BRANCH_SESSION_ID: transportSessionId,
+        },
   });
   const orchestrator = new StatewrightCodexOrchestrator({
     client,

@@ -27,14 +27,24 @@ test("app-server binds the complete proxy transport shipped with the launcher", 
     'mcp_servers.statewright_adapter.env.STATEWRIGHT_MCP_SESSION_ID="br_codex_test-123"',
   );
   assert.equal(args[10], "-c");
-  assert.equal(args[11], 'mcp_servers.statewright.command="bash"');
+  assert.equal(
+    args[11],
+    'mcp_servers.statewright_adapter.env.STATEWRIGHT_CLIENT_ID="br_codex_test-123"',
+  );
   assert.equal(args[12], "-c");
-  assert.match(
+  assert.equal(
     args[13],
-    /mcp_servers[.]statewright[.]args=.*plugins\/codex\/mcp-proxy[.]sh/,
+    'mcp_servers.statewright_adapter.env.STATEWRIGHT_BRANCH_SESSION_ID="br_codex_test-123"',
   );
   assert.equal(args[14], "-c");
-  assert.equal(args[15], "mcp_servers.statewright.enabled=false");
+  assert.equal(args[15], 'mcp_servers.statewright.command="bash"');
+  assert.equal(args[16], "-c");
+  assert.match(
+    args[17],
+    /mcp_servers[.]statewright[.]args=.*plugins\/codex\/mcp-proxy[.]sh/,
+  );
+  assert.equal(args[18], "-c");
+  assert.equal(args[19], "mcp_servers.statewright.enabled=false");
 });
 test("invalid transport session ids cannot inject Codex configuration", () => {
   assert.throws(() => buildAppServerArgs('br_codex_bad"value'), /contain only/);
@@ -64,6 +74,9 @@ test("delivery agent environment excludes cluster and publishing credentials", (
   assert.equal(environment.KUBECONFIG, "/dev/null");
   assert.equal(environment.STATEWRIGHT_DELIVERY_ACTIVE, "1");
   assert.equal(environment.STATEWRIGHT_API_KEY, "required-for-statewright");
+  assert.equal(environment.STATEWRIGHT_MCP_SESSION_ID, "br_codex_test");
+  assert.equal(environment.STATEWRIGHT_CLIENT_ID, "br_codex_test");
+  assert.equal(environment.STATEWRIGHT_BRANCH_SESSION_ID, "br_codex_test");
   assert.equal(environment.AWS_ACCESS_KEY_ID, undefined);
   assert.equal(environment.GH_TOKEN, undefined);
   assert.equal(environment.STRIPE_SECRET_KEY, undefined);

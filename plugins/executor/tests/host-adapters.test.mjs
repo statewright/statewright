@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildHostLaunch,
   hostRoutingMode,
+  hostRequiresTerminalStop,
   hostSupportsLiveRouting,
   prepareHostSession,
   SUPPORTED_HOSTS,
@@ -66,6 +67,11 @@ test("hosts use the strongest available workflow routing boundary", () => {
   assert.ok(omx.args.includes(
     'mcp_servers.statewright.env_vars=["STATEWRIGHT_ADAPTER_URL","STATEWRIGHT_ADAPTER_TOKEN"]',
   ));
+});
+
+test("OMX waits for the Codex terminal hook after its wrapper exits", () => {
+  assert.equal(hostRequiresTerminalStop("omx"), true);
+  assert.equal(hostRequiresTerminalStop("claude"), false);
 });
 
 test("Cursor sessions are executor-owned and resumable", async () => {

@@ -177,8 +177,16 @@ test("bridge drain accepts delayed terminal hooks and waits for a quiet interval
 
   try {
     const startedAt = Date.now();
-    const drain = bridge.waitForIdle({ quietMs: 80, timeoutMs: 500, pollMs: 5 });
-    await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+    const drain = bridge.waitForShutdown({
+      quietMs: 40,
+      timeoutMs: 500,
+      pollMs: 5,
+      requireTerminalStop: true,
+    });
+    assert.equal(await Promise.race([
+      drain.then(() => "drained"),
+      new Promise((resolveWait) => setTimeout(() => resolveWait("waiting"), 80)),
+    ]), "waiting");
     const response = await fetch(`${bridge.url}/hooks/stop`, {
       method: "POST",
       headers: {
@@ -191,7 +199,8 @@ test("bridge drain accepts delayed terminal hooks and waits for a quiet interval
     assert.equal(response.status, 200);
     assert.equal((await response.json()).state, "completed");
     assert.equal(await drain, true);
-    assert.ok(Date.now() - startedAt >= 100);
+    assert.ok(Date.now() - startedAt >= 120);
+    assert.equal(bridge.terminalStopObserved, true);
     assert.deepEqual(calls, ["statewright_adapter_stop"]);
   } finally {
     await bridge.close();

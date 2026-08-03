@@ -120,4 +120,8 @@ export function hostRoutingMode(host) {
   return "startup";
 }
 
+export function hostRequiresTerminalStop(host) {
+  return host === "omx";
+}
+
 export const SUPPORTED_HOSTS = ["pi", "claude", "opencode", "cursor", "omx"];

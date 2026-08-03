@@ -24,6 +24,7 @@ import { AdapterBridge } from "./lib/adapter-bridge.mjs";
 import {
   buildHostLaunch,
   hostRoutingMode,
+  hostRequiresTerminalStop,
   hostSupportsLiveRouting,
   prepareHostSession,
   SUPPORTED_HOSTS,
@@ -427,10 +428,18 @@ export async function main(argv = process.argv.slice(2)) {
     return result;
   } finally {
     if (adapterBridge) {
-      const drained = await adapterBridge.waitForIdle();
+      const requireTerminalStop = hostRequiresTerminalStop(options.host);
+      const drained = await adapterBridge.waitForShutdown({ requireTerminalStop });
       if (!drained) {
         await telemetry("executor_adapter_drain_timeout", {
           active_requests: adapterBridge.activeRequests,
+          require_terminal_stop: requireTerminalStop,
+          terminal_stop_observed: adapterBridge.terminalStopObserved,
+        });
+      } else {
+        await telemetry("executor_adapter_drained", {
+          require_terminal_stop: requireTerminalStop,
+          terminal_stop_observed: adapterBridge.terminalStopObserved,
         });
       }
     }

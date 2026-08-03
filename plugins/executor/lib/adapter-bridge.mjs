@@ -91,6 +91,7 @@ export class AdapterBridge {
     this.url = null;
     this.activeRequests = 0;
     this.lastRequestAt = 0;
+    this.terminalStopObserved = false;
   }
 
   async record(event, fields = {}) {
@@ -196,6 +197,7 @@ export class AdapterBridge {
         }
         if (url.pathname === "/hooks/stop") {
           const result = adapterResult(await this.client.call("statewright_adapter_stop"));
+          if (result?.active === false) this.terminalStopObserved = true;
           await this.record("executor_adapter_stop", {
             decision: result?.decision ?? null,
             state: result?.state ?? null,
@@ -221,15 +223,21 @@ export class AdapterBridge {
     return this;
   }
 
-  async waitForIdle(options = {}) {
+  async waitForShutdown(options = {}) {
     const quietMs = options.quietMs ?? 500;
     const timeoutMs = options.timeoutMs ?? 3_000;
     const pollMs = options.pollMs ?? 25;
+    const requireTerminalStop = Boolean(options.requireTerminalStop);
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < timeoutMs) {
       const quietSince = Math.max(startedAt, this.lastRequestAt);
-      if (this.activeRequests === 0 && Date.now() - quietSince >= quietMs) {
+      const terminalReady = !requireTerminalStop || this.terminalStopObserved;
+      if (
+        terminalReady
+        && this.activeRequests === 0
+        && Date.now() - quietSince >= quietMs
+      ) {
         return true;
       }
       await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));

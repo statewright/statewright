@@ -2573,9 +2573,7 @@ fn record_post_patch_task_evidence_result(
 ) {
     let delta = causal_task_reproducer_delta(output);
     let signal = match (tool_name, delta) {
-        ("write_task_reproducer", _)
-            if output.contains("SW_TASK_REPRODUCER_STATUS=qualified") =>
-        {
+        ("write_task_reproducer", _) if output.contains("SW_TASK_REPRODUCER_STATUS=qualified") => {
             "post_patch_task_reproducer_qualified"
         }
         ("write_task_reproducer", _) => "post_patch_task_reproducer_unavailable",
@@ -3113,7 +3111,12 @@ fn advance_causal_failover_hypothesis(
     if !causal_one_pass || exhausted {
         return None;
     }
-    advance_patch_hypothesis(hypotheses, active_index, "model_declined_hypothesis", detail)
+    advance_patch_hypothesis(
+        hypotheses,
+        active_index,
+        "model_declined_hypothesis",
+        detail,
+    )
 }
 
 fn should_repair_parse_fail_on_active_hypothesis(
@@ -4829,11 +4832,7 @@ fn calibrated_scope_timeout_seconds(configured: usize, baseline_elapsed_ms: Opti
         return configured;
     };
     let elapsed_seconds = elapsed_ms.saturating_add(999) / 1_000;
-    let calibrated = elapsed_seconds
-        .saturating_mul(3)
-        .saturating_add(1)
-        / 2
-        + 20;
+    let calibrated = elapsed_seconds.saturating_mul(3).saturating_add(1) / 2 + 20;
     configured.max(calibrated as usize).min(600)
 }
 
@@ -5447,11 +5446,8 @@ fn post_edit_source_repair_scope(
             "[POST_EDIT_REPAIR] timeout={}s scope={}",
             candidate_timeout, attempt.desc
         );
-        let output = run_feedback_scope_validation_with_timeout(
-            &attempt.scope,
-            workdir,
-            candidate_timeout,
-        );
+        let output =
+            run_feedback_scope_validation_with_timeout(&attempt.scope, workdir, candidate_timeout);
         let restored_side_effects =
             restore_tracked_test_side_effects(workdir, &changed_before_test);
         if !restored_side_effects.is_empty() {
@@ -10219,8 +10215,7 @@ async fn main() {
             }
         }
 
-        if causal_one_pass
-            && task_evidence_budget_exhausted(&current_state, steps_in_current_state)
+        if causal_one_pass && task_evidence_budget_exhausted(&current_state, steps_in_current_state)
         {
             let target = failure_triage_state_name(&definition);
             record_causal_event(
@@ -10408,8 +10403,7 @@ async fn main() {
                 &transitions,
             );
             let mut native_messages = vec![ToolProtocolMessage::from(&messages[0])];
-            let protocol_window =
-                conversation.protocol_window_with_diagnostics(history_start);
+            let protocol_window = conversation.protocol_window_with_diagnostics(history_start);
             if !protocol_window.interrupted_call_ids.is_empty() {
                 println!(
                     "  [TOOL PROTOCOL] closed_interrupted_results={} ids={}",
@@ -11746,21 +11740,16 @@ async fn main() {
                 tools::snapshot_candidate(&args.workdir);
             }
 
-            let causal_candidate_before_write = if causal_one_pass
-                && writes_files
-                && is_implementation_state(&current_state)
-            {
-                Some((
-                    tools::patch_fingerprint(&args.workdir),
-                    tools::all_diff_stats(&args.workdir),
-                    causal_control::target_paths_fingerprint(
-                        &args.workdir,
-                        &targeted_paths,
-                    ),
-                ))
-            } else {
-                None
-            };
+            let causal_candidate_before_write =
+                if causal_one_pass && writes_files && is_implementation_state(&current_state) {
+                    Some((
+                        tools::patch_fingerprint(&args.workdir),
+                        tools::all_diff_stats(&args.workdir),
+                        causal_control::target_paths_fingerprint(&args.workdir, &targeted_paths),
+                    ))
+                } else {
+                    None
+                };
 
             let is_edit_tool = matches!(
                 tool_name.as_str(),
@@ -14524,9 +14513,7 @@ Localization context:
         if let Some(accepted) = accepted_clean_candidate_fingerprint.as_deref() {
             let current = tools::patch_fingerprint(&args.workdir);
             if current == accepted {
-                println!(
-                    "[CAUSAL ACCEPT] preserved first clean candidate fingerprint={accepted}"
-                );
+                println!("[CAUSAL ACCEPT] preserved first clean candidate fingerprint={accepted}");
             } else {
                 eprintln!(
                     "[CAUSAL ACCEPT] invariant violation: accepted fingerprint={} current={}; no alternate candidate will be substituted",

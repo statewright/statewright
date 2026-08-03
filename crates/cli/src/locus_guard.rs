@@ -17,9 +17,7 @@ pub fn is_package_adjacent_source(target: &str, allowed: &HashSet<String>) -> bo
 }
 
 fn normalize(path: &str) -> String {
-    path.trim()
-        .trim_start_matches("./")
-        .replace('\\', "/")
+    path.trim().trim_start_matches("./").replace('\\', "/")
 }
 
 #[cfg(test)]

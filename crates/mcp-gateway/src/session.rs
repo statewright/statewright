@@ -209,8 +209,17 @@ impl SessionManager {
         on_complete: String,
         on_fail: Option<String>,
     ) -> bool {
-        if let Some(session) = self.sessions.write().unwrap_or_else(|p| p.into_inner()).get_mut(instance_id) {
-            let mut context = if definition.context.is_object() { definition.context.clone() } else { serde_json::json!({}) };
+        if let Some(session) = self
+            .sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(instance_id)
+        {
+            let mut context = if definition.context.is_object() {
+                definition.context.clone()
+            } else {
+                serde_json::json!({})
+            };
             if input.is_object() {
                 context = statewright_engine::apply_context_patch(&context, &input);
             }
@@ -247,7 +256,8 @@ impl SessionManager {
         } else {
             subflow.on_fail.unwrap_or_else(|| "failed".to_string())
         };
-        let context = statewright_engine::apply_context_patch(&subflow.parent_context, &session.context);
+        let context =
+            statewright_engine::apply_context_patch(&subflow.parent_context, &session.context);
         session.definition = subflow.parent_definition;
         session.previous_state = Some(subflow.parent_state);
         session.current_state = target.clone();

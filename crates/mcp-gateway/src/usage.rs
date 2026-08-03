@@ -156,7 +156,11 @@ impl UsageLedger {
     pub fn report_tool(&mut self, report: RuntimeToolReport) -> Result<(), String> {
         self.validate(report.sequence, &report.state, report.state_epoch)?;
         let state = self.state.as_mut().expect("validated state");
-        if state.tools.iter().any(|tool| tool.invocation_id == report.invocation_id) {
+        if state
+            .tools
+            .iter()
+            .any(|tool| tool.invocation_id == report.invocation_id)
+        {
             self.last_sequence = report.sequence;
             return Ok(());
         }
@@ -218,7 +222,11 @@ impl UsageLedger {
     }
 }
 
-fn empty_state(state: &str, state_epoch: u64, context_budget_bytes: Option<u64>) -> StateUsageSummary {
+fn empty_state(
+    state: &str,
+    state_epoch: u64,
+    context_budget_bytes: Option<u64>,
+) -> StateUsageSummary {
     StateUsageSummary {
         state: state.to_string(),
         state_epoch,
@@ -272,7 +280,10 @@ mod tests {
                 model: Some("gpt-5.6-sol".into()),
                 effort: Some("high".into()),
                 precision: "exact".into(),
-                token_usage: TokenUsage { total_tokens: 50, ..Default::default() },
+                token_usage: TokenUsage {
+                    total_tokens: 50,
+                    ..Default::default()
+                },
             })
             .unwrap();
         ledger
@@ -311,11 +322,24 @@ mod tests {
         };
         ledger.report_usage(report.clone()).unwrap();
         assert!(ledger.report_usage(report).is_err());
-        assert!(ledger
-            .report_usage(RuntimeUsageReport { state: "other".into(), sequence: 2, ..RuntimeUsageReport {
-                sequence: 0, state: String::new(), state_epoch: 1, provider: String::new(), model: None, effort: None, precision: String::new(), token_usage: TokenUsage::default()
-            }})
-            .is_err());
+        assert!(
+            ledger
+                .report_usage(RuntimeUsageReport {
+                    state: "other".into(),
+                    sequence: 2,
+                    ..RuntimeUsageReport {
+                        sequence: 0,
+                        state: String::new(),
+                        state_epoch: 1,
+                        provider: String::new(),
+                        model: None,
+                        effort: None,
+                        precision: String::new(),
+                        token_usage: TokenUsage::default()
+                    }
+                })
+                .is_err()
+        );
     }
 
     #[test]

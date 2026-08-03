@@ -1,12 +1,11 @@
 use super::{
     auto_test_failure_signature, baseline_prove_repair_scope, causal_candidate_gate_passed,
     compact_test_telemetry, enforce_causal_serial_env, extract_paths_from_malformed,
-    inspect_class_locations,
-    is_stagnation_diagnostic_tool, malformed_response_path_diagnostics, parse_response,
-    pre_completion_guard_failure, ranked_locus_excerpts, remaining_fanout_budget_seconds,
-    restore_env, source_scope_ambiguous_candidate_count_with_window,
-    test_collection_failure_unrelated_to_diff, test_collection_or_scope_failure,
-    test_has_patch_blocking_collection_failure, test_passed,
+    inspect_class_locations, is_stagnation_diagnostic_tool, malformed_response_path_diagnostics,
+    parse_response, pre_completion_guard_failure, ranked_locus_excerpts,
+    remaining_fanout_budget_seconds, restore_env,
+    source_scope_ambiguous_candidate_count_with_window, test_collection_failure_unrelated_to_diff,
+    test_collection_or_scope_failure, test_has_patch_blocking_collection_failure, test_passed,
     untrusted_scope_must_route_unavailable,
 };
 use serde_json::json;
@@ -3125,14 +3124,16 @@ fn causal_failover_advances_to_the_next_ranked_hypothesis() {
 
     assert_eq!(active, 1);
     assert!(prompt.contains("pkg/second.py"));
-    assert!(super::advance_causal_failover_hypothesis(
-        false,
-        &hypotheses,
-        &mut active,
-        false,
-        "non-causal mode keeps its existing failure policy",
-    )
-    .is_none());
+    assert!(
+        super::advance_causal_failover_hypothesis(
+            false,
+            &hypotheses,
+            &mut active,
+            false,
+            "non-causal mode keeps its existing failure policy",
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -3156,11 +3157,28 @@ fn causal_serial_env_keeps_local_candidate_selection_but_disables_fanout() {
 
     enforce_causal_serial_env();
 
-    assert_eq!(std::env::var("SW_CANDIDATE_FANOUT_DISABLED").ok().as_deref(), Some("1"));
-    assert_eq!(std::env::var("SW_CANDIDATE_FANOUT").ok().as_deref(), Some("0"));
-    assert_eq!(std::env::var("SW_SCOUT_LANE_ESCALATION").ok().as_deref(), Some("0"));
-    assert_eq!(std::env::var("SW_CANDIDATE_BANK").ok().as_deref(), Some("1"));
-    assert_eq!(std::env::var("SW_PATCH_TOURNAMENT").ok().as_deref(), Some("best_of_n"));
+    assert_eq!(
+        std::env::var("SW_CANDIDATE_FANOUT_DISABLED")
+            .ok()
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        std::env::var("SW_CANDIDATE_FANOUT").ok().as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        std::env::var("SW_SCOUT_LANE_ESCALATION").ok().as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        std::env::var("SW_CANDIDATE_BANK").ok().as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        std::env::var("SW_PATCH_TOURNAMENT").ok().as_deref(),
+        Some("best_of_n")
+    );
 
     for (key, value) in previous {
         restore_env(key, value);
@@ -3307,21 +3325,15 @@ fn post_patch_task_evidence_delta_routes_are_typed_and_bounded() {
         "TASK_EVIDENCE_FIXED"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_DELTA=changed_fail\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_DELTA=changed_fail\n"),
         "TASK_EVIDENCE_CHANGED"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_DELTA=unchanged_fail\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_DELTA=unchanged_fail\n"),
         "TASK_EVIDENCE_REPAIR"
     );
     assert_eq!(
-        super::task_evidence_transition_for_output(
-            "SW_TASK_REPRODUCER_STATUS=no_causal_oracle\n"
-        ),
+        super::task_evidence_transition_for_output("SW_TASK_REPRODUCER_STATUS=no_causal_oracle\n"),
         "TASK_EVIDENCE_UNAVAILABLE"
     );
     assert!(!super::task_evidence_budget_exhausted(
@@ -3339,9 +3351,7 @@ fn post_patch_task_evidence_delta_routes_are_typed_and_bounded() {
         "FAIL"
     ));
     assert!(!super::task_evidence_fail_must_repair(
-        true,
-        "editing",
-        "FAIL"
+        true, "editing", "FAIL"
     ));
     assert!(!super::task_evidence_fail_must_repair(
         false,

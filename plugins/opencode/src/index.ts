@@ -48,6 +48,7 @@ export interface StateResponse {
   model: string | null
   defaultModel: string | null
   thinkingLevel: string | null
+  pendingApproval?: { message?: string | null } | null
   deliveryRequired: boolean
   executor?: { active: boolean; id?: string; delivery?: boolean }
   additionalContext: string
@@ -71,6 +72,51 @@ interface OpenCodeClient {
       }
     }): Promise<unknown>
   }
+  session?: {
+    prompt(options: {
+      path: { id: string }
+      body: {
+        model?: { providerID: string; modelID: string }
+        variant?: string
+        parts: Array<{ type: "text"; text: string }>
+      }
+    }): Promise<unknown>
+  }
+}
+
+function sessionIdFromEvent(event: Record<string, any>): string | null {
+  return event.properties?.sessionID
+    ?? event.properties?.sessionId
+    ?? event.properties?.info?.id
+    ?? event.sessionID
+    ?? null
+}
+
+function continuationBody(state: StateResponse) {
+  const body: {
+    model?: { providerID: string; modelID: string }
+    variant?: string
+    parts: Array<{ type: "text"; text: string }>
+  } = {
+    parts: [{
+      type: "text",
+      text: `${state.additionalContext} Continue the active Statewright workflow now.`,
+    }],
+  }
+  if (state.model) {
+    const separator = state.model.indexOf("/")
+    if (separator <= 0 || separator === state.model.length - 1) {
+      throw new Error(
+        `[statewright] OpenCode model routes must use provider/model syntax: '${state.model}'.`,
+      )
+    }
+    body.model = {
+      providerID: state.model.slice(0, separator),
+      modelID: state.model.slice(separator + 1),
+    }
+    if (state.thinkingLevel) body.variant = state.thinkingLevel
+  }
+  return body
 }
 
 async function showToast(
@@ -237,9 +283,10 @@ export function createStatewrightHooks(
   client: OpenCodeClient,
   token: string | null = process.env.STATEWRIGHT_ADAPTER_TOKEN ?? null,
 ) {
+  const continuingSessions = new Set<string>()
   return {
     // OpenCode publishes session lifecycle through the generic event hook.
-    event: async ({ event }: { event: { type: string } }) => {
+    event: async ({ event }: { event: Record<string, any> & { type: string } }) => {
       if (event.type !== "session.created" && event.type !== "session.idle") return
       const state = await getState(adapter, token)
       if (!state) return
@@ -258,7 +305,7 @@ export function createStatewrightHooks(
         return
       }
 
-      const pending = (state as any).pendingApproval ?? (state as any).pending_approval
+      const pending = state.pendingApproval ?? (state as any).pending_approval
       if (pending) {
         await showToast(
           client,
@@ -267,6 +314,20 @@ export function createStatewrightHooks(
         )
       } else if (state.isFinal) {
         await showToast(client, `Workflow finished: ${state.state}`, "success")
+      } else {
+        const sessionId = sessionIdFromEvent(event)
+        if (!sessionId || !client.session?.prompt || continuingSessions.has(sessionId)) return
+        continuingSessions.add(sessionId)
+        void client.session.prompt({
+          path: { id: sessionId },
+          body: continuationBody(state),
+        }).catch(async (error) => {
+          await showToast(
+            client,
+            `Could not continue Statewright workflow: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          )
+        }).finally(() => continuingSessions.delete(sessionId))
       }
     },
 
@@ -292,6 +353,7 @@ export function createStatewrightHooks(
       input: { tool: string },
       output: { args: Record<string, unknown> },
     ) => {
+      if (input.tool.includes("statewright_")) return
       const state = await getState(adapter, token)
       if (state) requireDeliveryOwner(state)
       await enforceBeforeTool(adapter, { tool: input.tool, args: output.args }, token)
@@ -302,6 +364,15 @@ export function createStatewrightHooks(
       input: { tool: string; args?: Record<string, unknown> },
       output: { output?: string; metadata?: Record<string, unknown> },
     ) => {
+      if (input.tool.includes("statewright_")) {
+        const state = await getState(adapter, token)
+        if (state?.isFinal) {
+          await showToast(client, `Workflow finished: ${state.state}`, "success")
+        } else if (state) {
+          await showToast(client, `Phase: ${state.state}`)
+        }
+        return
+      }
       const resp = await hookRequest(adapter, "post-tool", {
         tool_name: input.tool,
         tool_input: input.args ?? {},

@@ -9,6 +9,23 @@ SESSION_ID="${STATEWRIGHT_MCP_SESSION_ID:-}"
 
 while IFS= read -r line; do
   [ -z "$line" ] && continue
+  method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+  if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN}" \
+      --data-binary "$line" 2>/dev/null || true)
+    if [[ "$method" == notifications/* ]]; then
+      continue
+    fi
+    if [ -n "$response" ]; then
+      printf '%s\n' "$response"
+    else
+      id=$(printf '%s' "$line" | jq -r '.id // null' 2>/dev/null)
+      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright executor bridge unavailable."},"id":%s}\n' "$id"
+    fi
+    continue
+  fi
   if [ -z "$API_KEY" ]; then
     id=$(printf '%s' "$line" | jq -r '.id // null' 2>/dev/null)
     printf '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key is not configured."},"id":%s}\n' "$id"

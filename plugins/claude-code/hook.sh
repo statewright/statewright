@@ -108,7 +108,7 @@ case "$ENDPOINT" in
     fi
 
     # --- No API key: provisioning (runs even when dormant) ---
-    if [ -z "$API_KEY" ]; then
+    if [ -z "$API_KEY" ] && [ -z "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
       # Let key-paste prompts through
       if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
         PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')
@@ -157,6 +157,10 @@ case "$ENDPOINT" in
 
     # Gateway unreachable — graceful degradation
     if [ -z "$CURRENT" ]; then
+      if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+        echo '{"decision":"block","reason":"Statewright executor bridge is unavailable; refusing to continue without workflow state.","hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
+        exit 0
+      fi
       echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. Running without workflow enforcement this turn."}}'
       rm -f "$CACHE_FILE"  # Clear cache so PreToolUse allows all tools
       exit 0
@@ -413,11 +417,33 @@ case "$ENDPOINT" in
         --arg response "$TOOL_RESULT" --argjson is_error "$IS_ERROR" \
         '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error}')
       RESPONSE=$(adapter_call post-tool POST "$REQUEST" || true)
-      if [ -n "$RESPONSE" ]; then
-        INTERRUPT_TO=$(echo "$RESPONSE" | jq -r '.interrupt.to // empty')
-        if [ -n "$INTERRUPT_TO" ]; then
-          jq -n --arg state "$INTERRUPT_TO" '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":("[statewright] Validation interrupt entered: " + $state + ". Continue under the new Statewright phase.")}}'
-        fi
+      if [ -z "$RESPONSE" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[statewright] Executor bridge became unavailable after this tool call. Stop before issuing another tool call; workflow state could not be accounted."}}'
+        exit 0
+      fi
+      INTERRUPT_TO=$(echo "$RESPONSE" | jq -r '.interrupt.to // empty')
+      if [ -n "$INTERRUPT_TO" ]; then
+        jq -n --arg state "$INTERRUPT_TO" '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":("[statewright] Validation interrupt entered: " + $state + ". Continue under the new Statewright phase.")}}'
+      fi
+      exit 0
+    fi
+
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -n "$SW_ACTION" ]; then
+      if [ "$SW_ACTION" = "stop" ]; then
+        exit 0
+      fi
+      STATE_JSON=$(adapter_call state GET || true)
+      if [ -z "$STATE_JSON" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[statewright] Executor bridge became unavailable after a Statewright control call. Stop before issuing another tool call."}}'
+        exit 0
+      fi
+      CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty')
+      IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // .isFinal // false')
+      CONTEXT=$(echo "$STATE_JSON" | jq -r '.additionalContext // empty')
+      if [ "$IS_FINAL" = "true" ]; then
+        jq -n --arg state "$CURRENT" '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":("[statewright] Workflow complete. Final state: " + $state + ".")}}'
+      elif [ -n "$CURRENT" ]; then
+        jq -n --arg context "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":($context + " KEEP WORKING -- continue this phase immediately.")}}'
       fi
       exit 0
     fi

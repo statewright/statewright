@@ -4,6 +4,7 @@ import {
   buildHostLaunch,
   hostRoutingMode,
   hostSupportsLiveRouting,
+  prepareHostSession,
   SUPPORTED_HOSTS,
 } from "../lib/host-adapters.mjs";
 
@@ -17,6 +18,7 @@ const base = {
   prompt: "Fix it",
   hostSessionId: "session-1",
   hostArgs: [],
+  pluginsRoot: "/statewright/plugins",
 };
 
 test("every supported TUI has an executor launch contract", () => {
@@ -28,17 +30,18 @@ test("every supported TUI has an executor launch contract", () => {
   }
 });
 
-test("Pi and OpenCode apply workflow routes live", () => {
+test("hosts use the strongest available workflow routing boundary", () => {
   assert.equal(hostSupportsLiveRouting("pi"), true);
   assert.equal(hostSupportsLiveRouting("opencode"), true);
   assert.equal(hostSupportsLiveRouting("claude"), false);
   assert.equal(hostRoutingMode("claude"), "restart");
-  assert.equal(hostRoutingMode("cursor"), "startup");
+  assert.equal(hostRoutingMode("cursor"), "restart");
 
   const pi = buildHostLaunch({ ...base, host: "pi" }, state);
   assert.deepEqual(pi.args.slice(0, 2), ["--session-id", "session-1"]);
   assert.ok(pi.args.includes("openai/gpt-5.6-terra"));
   assert.ok(pi.args.includes("medium"));
+  assert.ok(pi.args.includes("/statewright/plugins/pi/src/index.ts"));
 
   const opencode = buildHostLaunch({ ...base, host: "opencode" }, state);
   assert.ok(opencode.args.includes("openai/gpt-5.6-terra"));
@@ -47,7 +50,32 @@ test("Pi and OpenCode apply workflow routes live", () => {
   assert.ok(claude.args.includes("--resume"));
   assert.ok(!claude.args.includes("--session-id"));
 
+  const cursor = buildHostLaunch({ ...base, host: "cursor" }, state);
+  assert.deepEqual(
+    cursor.args.slice(cursor.args.indexOf("--resume"), cursor.args.indexOf("--resume") + 2),
+    ["--resume", "session-1"],
+  );
+
   const omx = buildHostLaunch({ ...base, host: "omx" }, state);
   assert.ok(omx.args.includes("gpt-5.6-terra"));
   assert.ok(omx.args.some((arg) => arg.includes("model_reasoning_effort")));
+});
+
+test("Cursor sessions are executor-owned and resumable", async () => {
+  const calls = [];
+  const id = await prepareHostSession({
+    ...base,
+    host: "cursor",
+    hostBin: "cursor-agent",
+    environment: { PATH: "/bin" },
+  }, "fallback", async (...args) => {
+    calls.push(args);
+    return { stdout: "chat_123\n" };
+  });
+  assert.equal(id, "chat_123");
+  assert.deepEqual(calls[0].slice(0, 2), ["cursor-agent", ["create-chat"]]);
+  assert.equal(
+    await prepareHostSession({ ...base, host: "pi" }, "pi-session"),
+    "pi-session",
+  );
 });

@@ -123,3 +123,23 @@ test("postToolUse and stop bridge lifecycle endpoints", async () => {
   assert.equal(postCount, 1)
   assert.equal((await invoke("stop")).followup_message, "Continue the workflow.")
 })
+
+test("Statewright control tools bypass workload policy and accounting", async () => {
+  const before = postCount
+  const result = await invoke("pre-tool", {
+    tool_name: "CallMcpTool",
+    tool_input: {
+      server_name: "statewright",
+      tool_name: "statewright_transition",
+    },
+  })
+  assert.equal(result.permission, "allow")
+  await invoke("post-tool", {
+    tool_name: "CallMcpTool",
+    tool_input: {
+      server_name: "statewright",
+      tool_name: "statewright_transition",
+    },
+  })
+  assert.equal(postCount, before)
+})

@@ -201,6 +201,45 @@ async function gwCall(
   args: Record<string, unknown> = {},
 ): Promise<Record<string, unknown> | null> {
   lastGwError = ""
+  if (process.env.STATEWRIGHT_ADAPTER_URL) {
+    try {
+      const response = await fetch(`${process.env.STATEWRIGHT_ADAPTER_URL.replace(/\/$/, "")}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(process.env.STATEWRIGHT_ADAPTER_TOKEN
+            ? { Authorization: `Bearer ${process.env.STATEWRIGHT_ADAPTER_TOKEN}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: rpcId++,
+          method: "tools/call",
+          params: { name: toolName, arguments: args },
+        }),
+        signal: AbortSignal.timeout(8_000),
+      })
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+      const data = (await response.json()) as JsonRpcResult
+      if (data.error) {
+        lastGwError = data.error.message ?? JSON.stringify(data.error)
+        return null
+      }
+      if ((data.result as Record<string, unknown>)?.isError) {
+        const errText = data.result?.content?.[0]?.text ?? "unknown error"
+        lastGwError = errText
+        return null
+      }
+      const payload = data.result?.content?.[0]?.text
+      if (!payload) return data.result ?? null
+      try { return JSON.parse(payload) } catch { return { _raw: payload } }
+    } catch (error) {
+      lastGwError = `Statewright executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`
+      return null
+    }
+  }
   const apiKey = getApiKey()
   if (!apiKey) return null
 
@@ -270,6 +309,13 @@ async function gwCall(
 }
 
 async function gwInit(): Promise<boolean> {
+  if (process.env.STATEWRIGHT_ADAPTER_URL) {
+    try {
+      return Boolean((await adapterCall("state"))?.state)
+    } catch {
+      return false
+    }
+  }
   const apiKey = getApiKey()
   if (!apiKey) return false
 
@@ -1411,7 +1457,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
   if (!lazyMode) {
     const apiKey = getApiKey()
-    if (!apiKey) {
+    if (!apiKey && !process.env.STATEWRIGHT_ADAPTER_URL) {
       console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
       return
     }
@@ -1422,8 +1468,12 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       return
     }
 
-    console.log(`[statewright] Connected to ${GW_URL}`)
-    reportPluginEvent(apiKey, "connect")
+    console.log(
+      process.env.STATEWRIGHT_ADAPTER_URL
+        ? "[statewright] Connected to Statewright executor"
+        : `[statewright] Connected to ${GW_URL}`,
+    )
+    if (apiKey) reportPluginEvent(apiKey, "connect")
   }
 
   // --- Text-only Ollama provider for plugin orchestration mode ---
@@ -2464,17 +2514,25 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     const state = await refreshState()
     if (!state) return
 
-    if (
-      requiresDeliveryOwner(state.meta)
-      && !(await executorOwnsDelivery())
-    ) {
-      pi.setActiveTools(pi.getActiveTools().filter((tool: string) => tool.startsWith("statewright_")))
-      ctx.ui.notify(
-        "[statewright] This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
-        "error",
-      )
-      ctx.abort()
-      return
+    if (requiresDeliveryOwner(state.meta)) {
+      try {
+        if (!(await executorOwnsDelivery())) {
+          pi.setActiveTools(pi.getActiveTools().filter((tool: string) => tool.startsWith("statewright_")))
+          ctx.ui.notify(
+            "[statewright] This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
+            "error",
+          )
+          ctx.abort()
+          return
+        }
+      } catch (error) {
+        ctx.ui.notify(
+          `[statewright] Executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        )
+        ctx.abort()
+        return
+      }
     }
 
     await applyModelRouting(state, ctx)
@@ -3044,14 +3102,23 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       .map((c: { text?: string }) => c.text ?? "")
       .join("\n")
     if (process.env.STATEWRIGHT_ADAPTER_URL && !event.toolName.startsWith("statewright_")) {
-      await adapterCall("post-tool", {
-        tool_name: event.toolName,
-        tool_input: event.input ?? {},
-        tool_response: toolOutput,
-        is_error: Boolean((event as unknown as { isError?: boolean }).isError),
-      })
-      await refreshState()
-      if (stateCache) await applyModelRouting(stateCache, ctx)
+      try {
+        await adapterCall("post-tool", {
+          tool_name: event.toolName,
+          tool_input: event.input ?? {},
+          tool_response: toolOutput,
+          is_error: Boolean((event as unknown as { isError?: boolean }).isError),
+        })
+        await refreshState()
+        if (stateCache) await applyModelRouting(stateCache, ctx)
+      } catch (error) {
+        ctx.ui.notify(
+          `[statewright] Executor bridge unavailable after tool execution: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        )
+        ctx.abort()
+        return
+      }
     }
     captureToolLog(event.toolName, event.input, toolOutput).catch(() => {})
 

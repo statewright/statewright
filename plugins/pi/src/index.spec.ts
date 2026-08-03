@@ -302,6 +302,9 @@ describe("statewright Pi extension", () => {
     delete process.env.STATEWRIGHT_API_KEY
     delete process.env.STATEWRIGHT_GATEWAY_URL
     delete process.env.STATEWRIGHT_WORKFLOW
+    delete process.env.STATEWRIGHT_ADAPTER_URL
+    delete process.env.STATEWRIGHT_ADAPTER_TOKEN
+    delete process.env.STATEWRIGHT_EXECUTOR_ID
   })
 
   describe("initialization", () => {
@@ -316,6 +319,29 @@ describe("statewright Pi extension", () => {
       expect(pi.registerTool).not.toHaveBeenCalled()
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("No API key"))
       warn.mockRestore()
+    })
+
+    it("runs as a first-class executor adapter without receiving the remote API key", async () => {
+      delete process.env.STATEWRIGHT_API_KEY
+      process.env.STATEWRIGHT_ADAPTER_URL = "http://127.0.0.1:4321"
+      process.env.STATEWRIGHT_ADAPTER_TOKEN = "bridge-token"
+      process.env.STATEWRIGHT_EXECUTOR_ID = "executor-1"
+      ;(readFileSync as Mock).mockImplementation(() => { throw new Error("ENOENT") })
+      setupFetch([{
+        match: "/hooks/state",
+        body: { ...MOCK_STATE, isFinal: false, executor: { active: true, delivery: false } },
+      }])
+      const pi = createMockPi()
+
+      await statewrightExtension(asPi(pi))
+
+      expect(pi.registerTool).toHaveBeenCalledTimes(9)
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://127.0.0.1:4321/hooks/state",
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer bridge-token" }),
+        }),
+      )
     })
 
     it("exits when gateway unreachable", async () => {

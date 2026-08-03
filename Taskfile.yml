@@ -4,6 +4,12 @@ vars:
   CARGO: "{{.HOME}}/.cargo/bin/cargo"
 
 tasks:
+  plugins:sync-executor-core:
+    desc: "Refresh the Codex marketplace copy of the shared executor core"
+    cmds:
+      - node plugins/codex/scripts/sync-executor-core.mjs
+      - node plugins/codex/scripts/sync-executor-core.mjs --check
+
   test:
     desc: "Run all workspace tests"
     cmds:

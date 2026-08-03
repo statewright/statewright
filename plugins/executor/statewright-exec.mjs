@@ -2,29 +2,30 @@
 
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import {
   assertDeliveryConfigPaths,
   DELIVERY_CONFIG_RELATIVE_PATH,
   resolveDeliveryBootstrap,
-} from "../codex/scripts/lib/delivery-config.mjs";
-import { DeliveryController } from "../codex/scripts/lib/delivery-controller.mjs";
-import { WorkspaceSession } from "../codex/scripts/lib/workspace-session.mjs";
+} from "./lib/delivery-config.mjs";
+import { DeliveryController } from "./lib/delivery-controller.mjs";
+import { WorkspaceSession } from "./lib/workspace-session.mjs";
 import {
   createNullTelemetryWriter,
   createTelemetryWriter,
   defaultTelemetryPath,
-} from "../codex/scripts/lib/telemetry.mjs";
+} from "./lib/telemetry.mjs";
 import { ExecutorLease, validateExecutorLease } from "./lib/executor-lease.mjs";
 import { AdapterBridge } from "./lib/adapter-bridge.mjs";
 import {
   buildHostLaunch,
   hostRoutingMode,
   hostSupportsLiveRouting,
+  prepareHostSession,
   SUPPORTED_HOSTS,
 } from "./lib/host-adapters.mjs";
 import { RemoteStatewrightClient, resolveApiKey } from "./lib/remote-client.mjs";
@@ -44,6 +45,8 @@ Session:
   --resume-workflow          Resume the workflow's paused run
   --host-bin PATH            Override the host executable
   --host-arg ARG             Pass one argument to the host (repeatable)
+  --plugins-root PATH        Statewright plugins directory
+                             (default: STATEWRIGHT_PLUGINS_ROOT or repository sibling)
   --fallback-model MODEL     Host startup model when the workflow has no route
   --fallback-effort LEVEL    Host startup effort when the workflow has no route
   --keep-host-on-final       Leave the TUI open after a final workflow state
@@ -73,6 +76,7 @@ function parseArgs(argv) {
     ["--cwd", "cwd"],
     ["--project-id", "projectId"],
     ["--host-bin", "hostBin"],
+    ["--plugins-root", "pluginsRoot"],
     ["--fallback-model", "fallbackModel"],
     ["--fallback-effort", "fallbackEffort"],
     ["--delivery-config", "deliveryConfig"],
@@ -111,19 +115,40 @@ function validateOptions(options) {
   if (!options.prompt) throw new Error("Provide the task after '--'.");
 }
 
+export function resolvePluginsRoot(options) {
+  const requested = options.pluginsRoot
+    ?? process.env.STATEWRIGHT_PLUGINS_ROOT
+    ?? resolve(EXECUTOR_ROOT, "..");
+  let root;
+  try {
+    root = realpathSync(resolve(requested));
+  } catch {
+    throw new Error(`Statewright plugins root does not exist: ${resolve(requested)}`);
+  }
+  const adapterPath = join(root, options.host);
+  try {
+    if (!statSync(adapterPath).isDirectory()) throw new Error("not a directory");
+  } catch {
+    throw new Error(
+      `Statewright ${options.host} adapter was not found under plugins root: ${adapterPath}`,
+    );
+  }
+  return root;
+}
+
 function sanitizedAgentEnvironment(environment) {
   const safe = { ...environment };
   for (const name of Object.keys(safe)) {
     if (
-      /^(KUBECONFIG|KUBE_|KUBERNETES_|DOCKER_CONFIG$|REGISTRY_|GH_TOKEN$|GITHUB_TOKEN$|NPM_TOKEN$|CARGO_REGISTRY_TOKEN$|STRIPE_|SMTP_|SENTRY_)/.test(name)
+      /^(KUBECONFIG|KUBE_|KUBERNETES_|DOCKER_CONFIG$|REGISTRY_|GH_TOKEN$|GITHUB_TOKEN$|NPM_TOKEN$|CARGO_REGISTRY_TOKEN$|STATEWRIGHT_API_KEY$|STRIPE_|SMTP_|SENTRY_)/.test(name)
     ) delete safe[name];
   }
   safe.KUBECONFIG = "/dev/null";
   return safe;
 }
 
-function opencodeEnvironment(environment) {
-  const pluginUrl = pathToFileURL(resolve(EXECUTOR_ROOT, "..", "opencode", "src", "index.ts")).href;
+function opencodeEnvironment(environment, pluginsRoot) {
+  const pluginUrl = pathToFileURL(resolve(pluginsRoot, "opencode", "src", "index.ts")).href;
   const proxyPath = resolve(EXECUTOR_ROOT, "mcp-proxy.sh");
   let inline = {};
   if (environment.OPENCODE_CONFIG_CONTENT) {
@@ -168,7 +193,7 @@ export function executorAgentEnvironment(environment, session) {
     result.STATEWRIGHT_DELIVERY_MANIFEST = session.workspaceSession.manifestPath;
     result.STATEWRIGHT_EXECUTOR_LEASE = session.leasePath;
   }
-  if (session.host === "opencode") result = opencodeEnvironment(result);
+  if (session.host === "opencode") result = opencodeEnvironment(result, session.pluginsRoot);
   return result;
 }
 
@@ -280,6 +305,7 @@ export async function main(argv = process.argv.slice(2)) {
     return { status: "help" };
   }
   validateOptions(options);
+  options.pluginsRoot = resolvePluginsRoot(options);
 
   const requestedCwd = resolve(options.cwd);
   const deliveryBootstrap = await resolveDeliveryBootstrap({
@@ -300,7 +326,7 @@ export async function main(argv = process.argv.slice(2)) {
   const apiKey = await resolveApiKey();
   const executorId = randomUUID();
   const transportSessionId = `br_exec_${randomUUID()}`;
-  const hostSessionId = randomUUID();
+  const fallbackHostSessionId = randomUUID();
   const telemetry = options.telemetryEnabled
     ? createTelemetryWriter(resolve(options.telemetryPath), {
         endpoint: process.env.STATEWRIGHT_TELEMETRY_URL ?? null,
@@ -375,8 +401,14 @@ export async function main(argv = process.argv.slice(2)) {
       workspaceSession,
       leasePath,
       adapterBridge,
+      pluginsRoot: options.pluginsRoot,
     };
     const environment = executorAgentEnvironment(process.env, session);
+    const hostSessionId = await prepareHostSession({
+      ...options,
+      cwd,
+      environment,
+    }, fallbackHostSessionId);
     const result = await observeHost({
       ...options,
       cwd,

@@ -1,8 +1,24 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const EXECUTOR_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PLUGINS_ROOT = resolve(EXECUTOR_ROOT, "..");
+const execFileAsync = promisify(execFile);
+
+export async function prepareHostSession(options, fallbackId, execute = execFileAsync) {
+  if (options.host !== "cursor") return fallbackId;
+  const { stdout } = await execute(
+    options.hostBin ?? "cursor-agent",
+    ["create-chat"],
+    { cwd: options.cwd, env: options.environment, encoding: "utf8" },
+  );
+  const sessionId = String(stdout).trim().split(/\s+/).at(-1) ?? "";
+  if (!sessionId || /[\u0000-\u001f\u007f]/.test(sessionId)) {
+    throw new Error("Cursor did not return a usable chat ID from create-chat.");
+  }
+  return sessionId;
+}
 
 function routeParts(state, fallbackModel, fallbackEffort) {
   return {
@@ -17,6 +33,7 @@ function withPrompt(args, prompt) {
 }
 
 export function buildHostLaunch(options, state, continuation = false) {
+  const pluginsRoot = options.pluginsRoot ?? resolve(EXECUTOR_ROOT, "..");
   const route = routeParts(state, options.fallbackModel, options.fallbackEffort);
   const prompt = continuation
     ? `Continue the active Statewright workflow from state '${state.state}'.`
@@ -27,7 +44,7 @@ export function buildHostLaunch(options, state, continuation = false) {
     case "pi": {
       const args = [
         "--session-id", options.hostSessionId,
-        "--extension", resolve(PLUGINS_ROOT, "pi", "src", "index.ts"),
+        "--extension", resolve(pluginsRoot, "pi", "src", "index.ts"),
       ];
       if (route.model) args.push("--model", route.model);
       if (route.effort) args.push("--thinking", route.effort);
@@ -35,7 +52,7 @@ export function buildHostLaunch(options, state, continuation = false) {
     }
     case "claude": {
       const args = [
-        "--plugin-dir", resolve(PLUGINS_ROOT, "claude-code"),
+        "--plugin-dir", resolve(pluginsRoot, "claude-code"),
       ];
       if (continuation) args.push("--resume", options.hostSessionId);
       else args.push("--session-id", options.hostSessionId);
@@ -52,11 +69,11 @@ export function buildHostLaunch(options, state, continuation = false) {
     case "cursor": {
       const args = [
         "--workspace", options.cwd,
-        "--plugin-dir", resolve(PLUGINS_ROOT, "cursor"),
+        "--plugin-dir", resolve(pluginsRoot, "cursor"),
         "--trust",
       ];
       if (route.model) args.push("--model", route.model.split("/").at(-1));
-      if (continuation && options.hostSessionId) args.push("--resume", options.hostSessionId);
+      if (options.hostSessionId) args.push("--resume", options.hostSessionId);
       return {
         command: options.hostBin ?? "cursor-agent",
         args: withPrompt([...args, ...extra], prompt),
@@ -65,7 +82,7 @@ export function buildHostLaunch(options, state, continuation = false) {
     case "omx": {
       const args = [
         "--direct",
-        "--plugin-dir", resolve(PLUGINS_ROOT, "omx"),
+        "--plugin-dir", resolve(pluginsRoot, "omx"),
         ...extra,
       ];
       if (route.model) args.push("--model", route.model.split("/").at(-1));
@@ -86,7 +103,7 @@ export function hostSupportsLiveRouting(host) {
 
 export function hostRoutingMode(host) {
   if (host === "pi" || host === "opencode") return "live";
-  if (host === "claude") return "restart";
+  if (host === "claude" || host === "cursor") return "restart";
   return "startup";
 }
 

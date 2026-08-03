@@ -72,6 +72,10 @@ pre_tool() {
     return
   fi
   normalized=$(normalize_tool_name "$tool_name" "$tool_input")
+  if [[ "$normalized" == statewright_* ]]; then
+    echo '{"permission":"allow"}'
+    return
+  fi
   response=$(jq -cn --arg name "$tool_name" --argjson input "$tool_input" \
     --arg normalized "$normalized" \
     '{tool_name:$normalized,tool_input:$input,host_tool_name:$name}' \
@@ -95,6 +99,10 @@ pre_tool() {
 post_tool() {
   local tool_name="$1" tool_input="$2" tool_response="$3" is_error="$4" normalized
   normalized=$(normalize_tool_name "$tool_name" "$tool_input")
+  if [[ "$normalized" == statewright_* ]]; then
+    echo '{}'
+    return
+  fi
   jq -cn --arg name "$normalized" --argjson input "$tool_input" \
     --arg response "$tool_response" --argjson is_error "$is_error" \
     '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error}' \
@@ -120,7 +128,11 @@ case "$EVENT" in
     EFFORT=$(printf '%s' "$STATE" | jq -r '.thinkingLevel // "default"')
     CONTEXT=$(printf '%s' "$STATE" | jq -r '.additionalContext // empty')
     if [ -n "$MODEL" ]; then
-      CONTEXT="${CONTEXT} Recommended route: model ${MODEL}, effort ${EFFORT}. Cursor hooks cannot switch the active model; select this route at session start when possible."
+      if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+        CONTEXT="${CONTEXT} Active route: model ${MODEL}, effort ${EFFORT}. The Statewright executor will resume this chat on route changes."
+      else
+        CONTEXT="${CONTEXT} Recommended route: model ${MODEL}, effort ${EFFORT}. Select this route at session start when possible."
+      fi
     fi
     jq -cn --arg context "$CONTEXT" '{additional_context:$context}'
     ;;

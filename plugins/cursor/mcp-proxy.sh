@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -o pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+  exec bash "${SCRIPT_DIR}/../executor/mcp-proxy.sh"
+fi
+
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "${HOME}/.statewright/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"

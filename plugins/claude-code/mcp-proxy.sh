@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+  exec bash "${SCRIPT_DIR}/../executor/mcp-proxy.sh"
+fi
+
 CLIENT_ID=$(statewright_client_id)
 SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then

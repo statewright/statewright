@@ -1,10 +1,37 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
+
+const executorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+async function invokeProxy(line, environment) {
+  return await new Promise((resolveChild) => {
+    const child = spawn("bash", [resolve(executorRoot, "mcp-proxy.sh")], {
+      env: { ...process.env, STATEWRIGHT_API_KEY: "", ...environment },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (status) => resolveChild({ status, stdout, stderr }));
+    child.stdin.end(`${JSON.stringify(line)}\n`);
+  });
+}
 
 test("bridge authenticates adapters and preserves one executor identity", async () => {
   const calls = [];
   const client = {
+    async request(method, params = {}) {
+      calls.push({ method, params });
+      if (method === "tools/list") {
+        return { tools: [{ name: "statewright_transition" }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true }) }] };
+    },
     async call(name, args = {}) {
       calls.push({ name, args });
       if (name === "statewright_get_state") {
@@ -66,6 +93,32 @@ test("bridge authenticates adapters and preserves one executor identity", async 
         is_error: false,
       },
     });
+
+    const mcp = await (await fetch(`${bridge.url}/mcp`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/list",
+        params: {},
+      }),
+    })).json();
+    assert.equal(mcp.id, 7);
+    assert.equal(mcp.result.tools[0].name, "statewright_transition");
+    assert.deepEqual(calls.at(-1), { method: "tools/list", params: {} });
+
+    const proxied = await invokeProxy({
+      jsonrpc: "2.0",
+      id: 8,
+      method: "tools/list",
+      params: {},
+    }, {
+      STATEWRIGHT_ADAPTER_URL: bridge.url,
+      STATEWRIGHT_ADAPTER_TOKEN: "test-token",
+    });
+    assert.equal(proxied.status, 0, proxied.stderr);
+    assert.equal(JSON.parse(proxied.stdout).result.tools[0].name, "statewright_transition");
   } finally {
     await bridge.close();
   }

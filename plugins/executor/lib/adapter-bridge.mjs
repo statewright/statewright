@@ -18,6 +18,7 @@ function camelState(raw, executor) {
     model: raw.model ?? null,
     defaultModel: raw.default_model ?? null,
     thinkingLevel: raw.thinking_level ?? null,
+    pendingApproval: raw.pending_approval ?? null,
     deliveryRequired: Boolean(
       raw.meta?.workspace?.required
       || raw.meta?.preview?.required
@@ -108,6 +109,42 @@ export class AdapterBridge {
           return;
         }
         const body = await requestBody(request);
+        if (url.pathname === "/mcp") {
+          const method = body.method;
+          const id = body.id ?? null;
+          if (typeof method !== "string") {
+            json(response, 200, {
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32600, message: "Invalid MCP request." },
+            });
+            return;
+          }
+          if (method.startsWith("notifications/")) {
+            response.writeHead(204);
+            response.end();
+            return;
+          }
+          if (!["initialize", "tools/list", "tools/call"].includes(method)) {
+            json(response, 200, {
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32601, message: `Unsupported MCP method '${method}'.` },
+            });
+            return;
+          }
+          try {
+            const result = await this.client.request(method, body.params ?? {});
+            json(response, 200, { jsonrpc: "2.0", id, result });
+          } catch (error) {
+            json(response, 200, {
+              jsonrpc: "2.0",
+              id,
+              error: { code: -32603, message: error.message },
+            });
+          }
+          return;
+        }
         if (url.pathname === "/hooks/pre-tool") {
           json(response, 200, adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",

@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { executorAgentEnvironment } from "../statewright-exec.mjs";
+import {
+  executorAgentEnvironment,
+  resolvePluginsRoot,
+} from "../statewright-exec.mjs";
 import { ExecutorLease, validateExecutorLease } from "../lib/executor-lease.mjs";
 
 test("executor environment binds all adapters to one transport identity", () => {
   const environment = executorAgentEnvironment({
     KUBECONFIG: "/sensitive/kubeconfig",
     GH_TOKEN: "secret",
+    STATEWRIGHT_API_KEY: "sw_live_secret",
     PATH: "/bin",
   }, {
     workflow: "delivery",
@@ -19,6 +23,7 @@ test("executor environment binds all adapters to one transport identity", () => 
     workspaceSession: { manifestPath: "/run/manifest.json" },
     leasePath: "/run/lease.json",
     adapterBridge: { url: "http://127.0.0.1:1234", token: "bridge-token" },
+    pluginsRoot: "/statewright/plugins",
   });
 
   assert.equal(environment.STATEWRIGHT_CLIENT_ID, "br_exec_1");
@@ -28,6 +33,21 @@ test("executor environment binds all adapters to one transport identity", () => 
   assert.equal(environment.STATEWRIGHT_DELIVERY_ACTIVE, "1");
   assert.equal(environment.KUBECONFIG, "/dev/null");
   assert.equal(environment.GH_TOKEN, undefined);
+  assert.equal(environment.STATEWRIGHT_API_KEY, undefined);
+});
+
+test("executor validates an explicit plugins root before host launch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "statewright-plugins-test-"));
+  try {
+    await mkdir(join(directory, "pi"));
+    assert.equal(resolvePluginsRoot({ host: "pi", pluginsRoot: directory }), await realpath(directory));
+    assert.throws(
+      () => resolvePluginsRoot({ host: "claude", pluginsRoot: directory }),
+      /claude adapter was not found/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("delivery owner is a fresh matching lease, not an environment marker", async () => {

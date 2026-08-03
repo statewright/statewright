@@ -209,6 +209,7 @@ async function gwCall(
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
+      "X-Statewright-Client-Id": process.env.STATEWRIGHT_CLIENT_ID ?? "statewright-pi",
     }
     if (sessionId) headers["Mcp-Session-Id"] = sessionId
 
@@ -278,6 +279,7 @@ async function gwInit(): Promise<boolean> {
     const initHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
+      "X-Statewright-Client-Id": process.env.STATEWRIGHT_CLIENT_ID ?? "statewright-pi",
     }
     if (presetSessionId) initHeaders["Mcp-Session-Id"] = presetSessionId
 
@@ -306,6 +308,34 @@ async function gwInit(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function adapterCall(
+  endpoint: "state" | "pre-tool" | "post-tool" | "stop",
+  body?: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
+  const base = process.env.STATEWRIGHT_ADAPTER_URL?.replace(/\/$/, "")
+  if (!base) return null
+  const token = process.env.STATEWRIGHT_ADAPTER_TOKEN
+  const response = await fetch(`${base}/hooks/${endpoint}`, {
+    method: body ? "POST" : "GET",
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(5_000),
+  })
+  if (!response.ok) {
+    throw new Error(`Statewright executor bridge ${endpoint} failed with HTTP ${response.status}.`)
+  }
+  return await response.json() as Record<string, unknown>
+}
+
+async function executorOwnsDelivery(): Promise<boolean> {
+  const state = await adapterCall("state")
+  const executor = state?.executor as { active?: boolean; delivery?: boolean } | undefined
+  return Boolean(executor?.active && executor.delivery)
 }
 
 // --- Tool name mapping ---
@@ -355,6 +385,17 @@ interface WorkflowMeta {
   requires_human_approval?: boolean
   orchestration?: "plugin" | "agentic"
   task_description?: string
+  workspace?: { required?: boolean }
+  preview?: { required?: boolean }
+  promotion?: { required?: boolean }
+}
+
+export function requiresDeliveryOwner(meta: WorkflowMeta): boolean {
+  return Boolean(
+    meta.workspace?.required
+    || meta.preview?.required
+    || meta.promotion?.required,
+  )
 }
 
 interface StateCache {
@@ -1411,7 +1452,17 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
     // Auto-load workflow from STATEWRIGHT_WORKFLOW env var (for CI/harness/experiments)
     const autoWorkflow = process.env.STATEWRIGHT_WORKFLOW
-    if (autoWorkflow && !stateCache) {
+    if (autoWorkflow && !stateCache && process.env.STATEWRIGHT_EXECUTOR_ID) {
+      await refreshState()
+      if (stateCache) {
+        ctx.ui?.setStatus?.("!statewright", formatStatusBar(stateCache))
+        ctx.ui?.notify?.(
+          `[statewright] Executor attached: ${autoWorkflow}`,
+          "info",
+        )
+      }
+    }
+    if (autoWorkflow && !stateCache && !process.env.STATEWRIGHT_EXECUTOR_ID) {
       const result = await gwCall("statewright_load_workflow", { name: autoWorkflow }) as { run_id?: string } & Record<string, unknown> | null
       if (result && !(result as Record<string, unknown>)._error) {
         dormant = false
@@ -2413,6 +2464,19 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     const state = await refreshState()
     if (!state) return
 
+    if (
+      requiresDeliveryOwner(state.meta)
+      && !(await executorOwnsDelivery())
+    ) {
+      pi.setActiveTools(pi.getActiveTools().filter((tool: string) => tool.startsWith("statewright_")))
+      ctx.ui.notify(
+        "[statewright] This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
+        "error",
+      )
+      ctx.abort()
+      return
+    }
+
     await applyModelRouting(state, ctx)
 
     // Arm inactivity timer only if not already running.
@@ -2760,6 +2824,30 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
     if (event.toolName.startsWith("statewright_")) return
 
+    // Executor-owned sessions use the gateway's adapter RPC as the single
+    // policy authority. Standalone Pi sessions retain the local compatibility
+    // enforcement below.
+    if (process.env.STATEWRIGHT_ADAPTER_URL) {
+      try {
+        const decision = await adapterCall("pre-tool", {
+          tool_name: event.toolName,
+          tool_input: event.input ?? {},
+        })
+        if (decision?.decision === "deny") {
+          return {
+            block: true,
+            reason: String(decision.reason ?? "Blocked by Statewright"),
+          }
+        }
+        return
+      } catch (error) {
+        return {
+          block: true,
+          reason: `Statewright executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+    }
+
     // NOTE: Native tool calls are ALLOWED. gemma4:31b refuses to produce JSON-in-text
     // and insists on native tool_calls regardless of system prompt instructions.
     // Let Pi handle them natively. The tool_call enforcement below gates by state.
@@ -2955,6 +3043,16 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       .filter((c: { type: string; text?: string }) => c.type === "text")
       .map((c: { text?: string }) => c.text ?? "")
       .join("\n")
+    if (process.env.STATEWRIGHT_ADAPTER_URL && !event.toolName.startsWith("statewright_")) {
+      await adapterCall("post-tool", {
+        tool_name: event.toolName,
+        tool_input: event.input ?? {},
+        tool_response: toolOutput,
+        is_error: Boolean((event as unknown as { isError?: boolean }).isError),
+      })
+      await refreshState()
+      if (stateCache) await applyModelRouting(stateCache, ctx)
+    }
     captureToolLog(event.toolName, event.input, toolOutput).catch(() => {})
 
     // Plugin orchestration: capture last tool result + auto-transition on test outcomes
@@ -3053,6 +3151,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     }
 
     // Interrupt detection for file-changing tools
+    if (process.env.STATEWRIGHT_ADAPTER_URL) return
     if (!stateCache?.interrupts) return
     const isFileEdit = ["Edit", "Write", "MultiEdit", "edit_file", "write_file", "apply_patch"].includes(event.toolName)
     if (!isFileEdit) return

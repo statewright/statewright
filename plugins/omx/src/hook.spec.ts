@@ -112,11 +112,13 @@ function setupFetch(handler: (url: string, body: JsonRpcBody | null) => Record<s
     return {
       ok: true,
       headers: new Headers({ "mcp-session-id": "test-session" }),
-      json: async () => ({
-        jsonrpc: "2.0",
-        id: body?.id ?? 1,
-        result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-      }),
+      json: async () => urlStr.includes("/hooks/")
+        ? result
+        : ({
+            jsonrpc: "2.0",
+            id: body?.id ?? 1,
+            result: { content: [{ type: "text", text: JSON.stringify(result) }] },
+          }),
     } as Response
   })
   globalThis.fetch = fetchMock
@@ -324,6 +326,17 @@ describe("pure logic", () => {
       expect(ctx).toContain("Implement the fix")
     })
 
+    it("includes the recommended route without claiming OMX can switch it", () => {
+      const ctx = formatStateContext({
+        ...MOCK_STATE,
+        model: "openai/gpt-5.6-terra",
+        thinkingLevel: "medium",
+      })
+      expect(ctx).toContain("openai/gpt-5.6-terra")
+      expect(ctx).toContain("effort medium")
+      expect(ctx).toContain("cannot switch")
+    })
+
     it("includes rationale mandate", () => {
       const ctx = formatStateContext(MOCK_STATE)
       expect(ctx).toContain("data.rationale")
@@ -431,6 +444,39 @@ describe("handleUserPrompt", () => {
     expect(writeFileSync).toHaveBeenCalled()
   })
 
+  it("uses executor state without local activation or API-key bootstrap", async () => {
+    setupFetch((url) => url.endsWith("/hooks/state")
+      ? {
+          ...MOCK_STATE,
+          additionalContext: "Executor state: implementing.",
+          executor: { active: true, delivery: true },
+        }
+      : null)
+
+    const result = await handleUserPrompt(
+      {} as HookInput,
+      makeOpts({ apiKey: null, adapterUrl: "http://executor.test" }),
+    )
+
+    expect(result!.hookSpecificOutput!.additionalContext).toContain("Executor state")
+    expect(writeFileSync).not.toHaveBeenCalled()
+  })
+
+  it("blocks a required delivery workflow without an active owner", async () => {
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") ? true : false
+    )
+    setupGateway({
+      ...MOCK_GW_STATE,
+      meta: { workspace: { required: true } },
+    })
+
+    const result = await handleUserPrompt({} as HookInput, makeOpts())
+
+    expect(result!.decision).toBe("block")
+    expect(result!.reason).toContain("isolated delivery")
+  })
+
   it("forwards the adapter MCP session id to the gateway", async () => {
     ;(existsSync as Mock).mockImplementation((p: string) =>
       p.includes(".active") ? true : false
@@ -485,6 +531,25 @@ describe("handlePreTool", () => {
     expect(result).toBeNull()
   })
 
+  it("delegates executor-owned tool policy to the shared bridge", async () => {
+    setupFetch((url, body) => url.endsWith("/hooks/pre-tool")
+      ? {
+          decision: (body as unknown as { tool_name?: string })?.tool_name === "Write"
+            ? "deny"
+            : "allow",
+          reason: "Write is blocked centrally",
+        }
+      : null)
+
+    const result = await handlePreTool(
+      { tool_name: "Write", tool_input: { file_path: "src/main.ts" } },
+      makeOpts({ adapterUrl: "http://executor.test" }),
+    )
+
+    expect(result!.hookSpecificOutput!.permissionDecision).toBe("deny")
+    expect(result!.hookSpecificOutput!.permissionDecisionReason).toContain("centrally")
+  })
+
   it("allows everything when no cache file", async () => {
     ;(existsSync as Mock).mockImplementation((p: string) =>
       p.includes(".active") ? true : false
@@ -509,6 +574,25 @@ describe("handlePreTool", () => {
     expect(result).not.toBeNull()
     expect(result!.hookSpecificOutput!.permissionDecision).toBe("deny")
     expect(result!.hookSpecificOutput!.permissionDecisionReason).toContain("Write")
+  })
+
+  it("denies every tool when required delivery has no active owner", async () => {
+    const requiredState = {
+      ...MOCK_GW_STATE,
+      meta: { promotion: { required: true } },
+    }
+    ;(existsSync as Mock).mockImplementation((p: string) =>
+      p.includes(".active") || p.includes(".state_cache") ? true : false
+    )
+    ;(readFileSync as Mock).mockImplementation((p: string) => {
+      if (typeof p === "string" && p.includes(".state_cache")) return JSON.stringify(requiredState)
+      throw new Error("ENOENT")
+    })
+
+    const result = await handlePreTool({ tool_name: "Read" }, makeOpts())
+
+    expect(result!.hookSpecificOutput!.permissionDecision).toBe("deny")
+    expect(result!.hookSpecificOutput!.permissionDecisionReason).toContain("isolated delivery")
   })
 
   it("allows tool in allowed_tools (silent pass)", async () => {
@@ -886,6 +970,17 @@ describe("handleStop", () => {
   it("allows Codex to stop when there is no active workflow", async () => {
     const result = await handleStop({}, makeOpts())
     expect(result).toBeNull()
+  })
+
+  it("blocks an executor-owned nonfinal stop through the shared bridge", async () => {
+    setupFetch((url) => url.endsWith("/hooks/stop")
+      ? { decision: "block", reason: "Continue state testing" }
+      : null)
+
+    const result = await handleStop({}, makeOpts({ adapterUrl: "http://executor.test" }))
+
+    expect(result!.decision).toBe("block")
+    expect(result!.reason).toContain("Continue state testing")
   })
 
   it("does not suppress the host review UI when the workflow is nonfinal", async () => {

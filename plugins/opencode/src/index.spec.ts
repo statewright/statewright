@@ -11,7 +11,12 @@ vi.mock("@sentry/node", () => ({
   setUser: vi.fn(),
 }))
 
-import { enforceBeforeTool } from "./index"
+import {
+  applyStateRoute,
+  createStatewrightHooks,
+  enforceBeforeTool,
+  requireDeliveryOwner,
+} from "./index"
 
 describe("enforceBeforeTool", () => {
   it("sends tool arguments to pre-tool in one gateway request", async () => {
@@ -53,6 +58,118 @@ describe("enforceBeforeTool", () => {
       tool: "bash",
       args: { command: "ghpr list" },
     })).rejects.toThrow("command prefix collision")
+    vi.unstubAllGlobals()
+  })
+})
+
+describe("state routing", () => {
+  it("routes the outgoing message by provider, model, and reasoning variant", () => {
+    const message = {
+      model: {
+        providerID: "anthropic",
+        modelID: "claude-sonnet-4-6",
+        variant: "low",
+      },
+    }
+
+    expect(applyStateRoute({
+      model: "openai/gpt-5.6-terra",
+      thinkingLevel: "high",
+    }, message)).toBe(true)
+    expect(message.model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5.6-terra",
+      variant: "high",
+    })
+  })
+
+  it("rejects malformed state model routes instead of guessing a provider", () => {
+    const message = {
+      model: { providerID: "openai", modelID: "gpt-5.6-terra" },
+    }
+    expect(() => applyStateRoute({
+      model: "gpt-5.6-sol",
+      thinkingLevel: null,
+    }, message)).toThrow("provider/model")
+  })
+
+  it("requires a real isolated-delivery owner for required workflows", () => {
+    expect(() => requireDeliveryOwner(
+      { deliveryRequired: true },
+    )).toThrow("Statewright executor")
+    expect(() => requireDeliveryOwner(
+      {
+        deliveryRequired: true,
+        executor: { active: true, delivery: true },
+      },
+    )).not.toThrow()
+  })
+})
+
+describe("OpenCode host contract", () => {
+  it("handles lifecycle events through event and routes chat.message output", async () => {
+    const showToast = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        state: "implementing",
+        isFinal: false,
+        iteration: 2,
+        maxIterations: 5,
+        allowedTools: ["Read", "Edit"],
+        allowedCommands: [],
+        instructions: "Implement the change",
+        model: "openai/gpt-5.6-terra",
+        defaultModel: "openai/gpt-5.6-terra",
+        thinkingLevel: "medium",
+        deliveryRequired: false,
+        additionalContext: "Current state: implementing",
+      }),
+    }))
+    const hooks = createStatewrightHooks("4321", { tui: { showToast } })
+
+    await hooks.event({ event: { type: "session.created" } })
+    expect(showToast).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({ message: expect.stringContaining("implementing") }),
+    }))
+
+    const output = {
+      message: {
+        model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+      },
+    }
+    await hooks["chat.message"]({}, output)
+    expect(output.message.model).toEqual({
+      providerID: "openai",
+      modelID: "gpt-5.6-terra",
+      variant: "medium",
+    })
+    vi.unstubAllGlobals()
+  })
+
+  it("uses OpenCode's two-argument tool hook contract", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ deliveryRequired: false }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ decision: "allow" }),
+      })
+    vi.stubGlobal("fetch", fetchMock)
+    const hooks = createStatewrightHooks("4321", {
+      tui: { showToast: vi.fn().mockResolvedValue(undefined) },
+    })
+
+    await hooks["tool.execute.before"](
+      { tool: "bash" },
+      { args: { command: "git status --short" } },
+    )
+    expect(fetchMock.mock.calls[1][1].body).toBe(JSON.stringify({
+      tool_name: "bash",
+      tool_input: { command: "git status --short" },
+    }))
     vi.unstubAllGlobals()
   })
 })

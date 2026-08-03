@@ -495,6 +495,12 @@ pub fn is_custom_tool(name: &str) -> bool {
             | "statewright_create_workflow"
             | "statewright_force_state"
             | "statewright_run_agent"
+            // Adapter-only RPCs are intentionally omitted from tools/list.
+            // Native TUI plugins use them to apply the same gateway policy to
+            // built-in host tools that do not flow through MCP.
+            | "statewright_adapter_pre_tool"
+            | "statewright_adapter_post_tool"
+            | "statewright_adapter_stop"
     )
 }
 
@@ -644,6 +650,9 @@ mod tests {
         assert!(is_custom_tool("statewright_deactivate"));
         assert!(is_custom_tool("statewright_get_status"));
         assert!(is_custom_tool("statewright_create_workflow"));
+        assert!(is_custom_tool("statewright_adapter_pre_tool"));
+        assert!(is_custom_tool("statewright_adapter_post_tool"));
+        assert!(is_custom_tool("statewright_adapter_stop"));
         assert!(!is_custom_tool("read_file"));
         assert!(!is_custom_tool("statewright_other"));
     }

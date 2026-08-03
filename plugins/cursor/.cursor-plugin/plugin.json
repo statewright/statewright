@@ -1,0 +1,14 @@
+{
+  "name": "statewright",
+  "displayName": "Statewright",
+  "version": "0.3.0",
+  "description": "State-machine workflow enforcement and isolated delivery for Cursor Agent.",
+  "author": { "name": "Statewright" },
+  "homepage": "https://statewright.ai",
+  "repository": "https://github.com/statewright/statewright",
+  "license": "Apache-2.0",
+  "category": "developer-tools",
+  "hooks": "./hooks.json",
+  "mcpServers": "./mcp.json",
+  "rules": "./statewright.mdc"
+}

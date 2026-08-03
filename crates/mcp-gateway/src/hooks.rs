@@ -67,6 +67,10 @@ pub struct StateResponse {
     pub allowed_tools: Vec<String>,
     pub allowed_commands: Vec<String>,
     pub instructions: Option<String>,
+    pub model: Option<String>,
+    pub default_model: Option<String>,
+    pub thinking_level: Option<String>,
+    pub delivery_required: bool,
     pub additional_context: String,
 }
 
@@ -268,6 +272,10 @@ async fn handle_state(State(state): State<Arc<RwLock<HookState>>>) -> Json<State
                 allowed_tools: vec![],
                 allowed_commands: vec![],
                 instructions: None,
+                model: None,
+                default_model: None,
+                thinking_level: None,
+                delivery_required: false,
                 additional_context: "No active session".into(),
             });
         }
@@ -283,6 +291,29 @@ async fn handle_state(State(state): State<Arc<RwLock<HookState>>>) -> Json<State
         .cloned()
         .unwrap_or_default();
     let instructions = state_def.and_then(|s| s.instructions.as_ref()).cloned();
+    let default_model = session
+        .definition
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.default_model.as_ref())
+        .cloned();
+    let model = state_def
+        .and_then(|definition| definition.model.as_ref())
+        .cloned()
+        .or_else(|| default_model.clone());
+    let thinking_level = state_def
+        .and_then(|definition| definition.thinking_level.as_ref())
+        .cloned();
+    let delivery_required = session.definition.meta.as_ref().is_some_and(|meta| {
+        meta.workspace
+            .as_ref()
+            .is_some_and(|policy| policy.required)
+            || meta.preview.as_ref().is_some_and(|policy| policy.required)
+            || meta
+                .promotion
+                .as_ref()
+                .is_some_and(|policy| policy.required)
+    });
 
     let context = format!(
         "Statewright state machine active. Current state: {}. \
@@ -301,6 +332,10 @@ async fn handle_state(State(state): State<Arc<RwLock<HookState>>>) -> Json<State
         allowed_tools,
         allowed_commands,
         instructions,
+        model,
+        default_model,
+        thinking_level,
+        delivery_required,
         additional_context: context,
     })
 }
@@ -394,5 +429,49 @@ mod tests {
         .await
         .0;
         assert_eq!(allowed.decision, "allow");
+    }
+
+    #[tokio::test]
+    async fn state_exposes_routing_and_required_delivery_policy() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-routing-test",
+            "initial": "active",
+            "meta": {
+                "default_model": "anthropic/claude-sonnet-4-6",
+                "workspace": {
+                    "version": 1,
+                    "mode": "git_worktree",
+                    "required": true,
+                    "cleanup": "after_promoted"
+                }
+            },
+            "states": {
+                "active": {
+                    "allowed_tools": ["Read"],
+                    "model": "openai/gpt-5.6-terra",
+                    "thinking_level": "medium",
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("routing-session".into(), definition);
+        let state = Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "routing-session".into(),
+        }));
+
+        let response = handle_state(State(state)).await.0;
+
+        assert_eq!(response.model.as_deref(), Some("openai/gpt-5.6-terra"));
+        assert_eq!(
+            response.default_model.as_deref(),
+            Some("anthropic/claude-sonnet-4-6")
+        );
+        assert_eq!(response.thinking_level.as_deref(), Some("medium"));
+        assert!(response.delivery_required);
     }
 }

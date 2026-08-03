@@ -31,6 +31,10 @@ export interface StateCache {
   interrupts: Record<string, { file_pattern: string; target: string }>
   allowedCommands: string[]
   blockedEnv: string[]
+  model?: string | null
+  defaultModel?: string | null
+  thinkingLevel?: string | null
+  deliveryRequired?: boolean
   interruptReturn?: string
   fork?: {
     active: boolean
@@ -43,6 +47,8 @@ export interface HookInput {
   tool_name?: string
   tool_input?: Record<string, unknown>
   tool_response?: string
+  tool_result?: unknown
+  is_error?: boolean
   prompt?: string
   session_id?: string
 }
@@ -62,6 +68,22 @@ export interface HandlerOpts {
   apiKey: string | null
   gwUrl: string
   sessionDir: string
+  adapterUrl?: string
+  adapterToken?: string
+}
+
+interface AdapterState extends StateCache {
+  executor?: { active?: boolean; id?: string; delivery?: boolean }
+  additionalContext?: string
+}
+
+interface AdapterDecision {
+  decision?: "allow" | "deny" | "block"
+  reason?: string
+  additional_context?: string | null
+  state?: string
+  completed?: boolean
+  interrupt?: { to?: string } | null
 }
 
 interface GatewayState {
@@ -76,10 +98,18 @@ interface GatewayState {
   interrupts?: Record<string, { file_pattern: string; target: string }>
   allowed_commands?: string[]
   blocked_env?: string[]
+  model?: string | null
+  default_model?: string | null
+  thinking_level?: string | null
   run_id?: string
   capture_output?: boolean
   pending_approval?: { approval_id: string; message?: string | null }
-  meta?: { approval_mode?: string }
+  meta?: {
+    approval_mode?: string
+    workspace?: { required?: boolean }
+    preview?: { required?: boolean }
+    promotion?: { required?: boolean }
+  }
   fork?: {
     active: boolean
     current_branch: string
@@ -348,6 +378,12 @@ export function formatStateContext(cache: StateCache): string {
     `MANDATORY: Every statewright_transition call MUST include data.rationale.`,
   ]
   if (cache.instructions) lines.push(`Instructions: ${cache.instructions}`)
+  if (cache.model) {
+    lines.push(
+      `Recommended route: model ${cache.model}, effort ${cache.thinkingLevel ?? "default"}. `
+      + "OMX hooks cannot switch the active Codex model; start the session with this route when possible.",
+    )
+  }
   if (cache.interruptReturn)
     lines.push(`IN INTERRUPT HANDLER. Return to: ${cache.interruptReturn}`)
   if (cache.fork?.active)
@@ -391,6 +427,9 @@ async function gwCall(
         ...(process.env.STATEWRIGHT_MCP_SESSION_ID
           ? { "Mcp-Session-Id": process.env.STATEWRIGHT_MCP_SESSION_ID }
           : {}),
+        ...(process.env.STATEWRIGHT_CLIENT_ID
+          ? { "X-Statewright-Client-Id": process.env.STATEWRIGHT_CLIENT_ID }
+          : {}),
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -411,6 +450,36 @@ async function gwCall(
   }
 }
 
+async function adapterCall<T>(
+  opts: HandlerOpts,
+  endpoint: "state" | "pre-tool" | "post-tool" | "stop",
+  body?: Record<string, unknown>,
+): Promise<T> {
+  if (!opts.adapterUrl) throw new Error("Statewright executor bridge is not configured")
+  const response = await fetch(`${opts.adapterUrl.replace(/\/$/, "")}/hooks/${endpoint}`, {
+    method: body ? "POST" : "GET",
+    headers: {
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(opts.adapterToken ? { Authorization: `Bearer ${opts.adapterToken}` } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(5000),
+  })
+  if (!response.ok) {
+    throw new Error(`Statewright executor bridge ${endpoint} failed with HTTP ${response.status}`)
+  }
+  return await response.json() as T
+}
+
+function formatAdapterState(state: AdapterState): string {
+  if (state.additionalContext) return state.additionalContext
+  return formatStateContext(state)
+}
+
+function executorOwnsDelivery(state: AdapterState): boolean {
+  return Boolean(state.executor?.active && state.executor.delivery)
+}
+
 function parseGatewayState(raw: GatewayState): StateCache {
   return {
     state: raw.state,
@@ -424,6 +493,14 @@ function parseGatewayState(raw: GatewayState): StateCache {
     interrupts: raw.interrupts ?? {},
     allowedCommands: raw.allowed_commands ?? [],
     blockedEnv: raw.blocked_env ?? [],
+    model: raw.model ?? null,
+    defaultModel: raw.default_model ?? null,
+    thinkingLevel: raw.thinking_level ?? null,
+    deliveryRequired: Boolean(
+      raw.meta?.workspace?.required
+      || raw.meta?.preview?.required
+      || raw.meta?.promotion?.required,
+    ),
     interruptReturn: (raw.context?._interrupt_return as string) ?? undefined,
     fork: raw.fork
       ? {
@@ -489,6 +566,29 @@ export async function handleUserPrompt(
   input: HookInput,
   opts: HandlerOpts,
 ): Promise<HookOutput | null> {
+  if (opts.adapterUrl) {
+    try {
+      const state = await adapterCall<AdapterState>(opts, "state")
+      if (state.deliveryRequired && !executorOwnsDelivery(state)) {
+        return {
+          decision: "block",
+          reason: "This workflow requires isolated delivery, but the Statewright executor does not own an active delivery session.",
+        }
+      }
+      return {
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: formatAdapterState(state),
+        },
+      }
+    } catch (error) {
+      return {
+        decision: "block",
+        reason: `Statewright executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
   // Key-paste detection (even without current key)
   if (!opts.apiKey) {
     const prompt = input.prompt ?? ""
@@ -556,6 +656,12 @@ export async function handleUserPrompt(
   writeCache(opts.sessionDir, raw)
 
   const cache = parseGatewayState(raw)
+  if (cache.deliveryRequired && process.env.STATEWRIGHT_DELIVERY_ACTIVE !== "1") {
+    return {
+      decision: "block",
+      reason: "This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
+    }
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
@@ -568,6 +674,41 @@ export async function handlePreTool(
   input: HookInput,
   opts: HandlerOpts,
 ): Promise<HookOutput | null> {
+  if (opts.adapterUrl) {
+    try {
+      const decision = await adapterCall<AdapterDecision>(opts, "pre-tool", {
+        tool_name: input.tool_name ?? "",
+        tool_input: input.tool_input ?? {},
+      })
+      if (decision.decision === "deny" || decision.decision === "block") {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: decision.reason ?? "Blocked by Statewright",
+          },
+        }
+      }
+      if (decision.additional_context) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            additionalContext: decision.additional_context,
+          },
+        }
+      }
+      return null
+    } catch (error) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: `Statewright executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      }
+    }
+  }
+
   if (!isActive(opts.sessionDir)) return null
 
   const toolName = input.tool_name ?? ""
@@ -581,6 +722,16 @@ export async function handlePreTool(
   if (!raw) return null
 
   const cache = parseGatewayState(raw)
+  if (cache.deliveryRequired && process.env.STATEWRIGHT_DELIVERY_ACTIVE !== "1") {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          "This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
+      },
+    }
+  }
   if (cache.allowedTools.length === 0) return null
 
   // Tool allowlist check
@@ -620,6 +771,60 @@ export async function handlePostTool(
   opts: HandlerOpts,
 ): Promise<HookOutput | null> {
   const toolName = input.tool_name ?? ""
+
+  if (opts.adapterUrl) {
+    try {
+      if (toolName.includes("statewright_")) {
+        const state = await adapterCall<AdapterState>(opts, "state")
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: formatAdapterState(state),
+          },
+        }
+      }
+      const response = await adapterCall<AdapterDecision>(opts, "post-tool", {
+        tool_name: toolName,
+        tool_input: input.tool_input ?? {},
+        tool_response: typeof input.tool_response === "string"
+          ? input.tool_response
+          : JSON.stringify(input.tool_result ?? ""),
+        is_error: Boolean(input.is_error),
+      })
+      if (response.interrupt?.to) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: `[statewright] Validation interrupt entered: ${response.interrupt.to}. Continue under the new Statewright phase.`,
+          },
+        }
+      }
+      if (response.completed) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: "[statewright] Workflow complete.",
+          },
+        }
+      }
+      if (response.additional_context) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: "PostToolUse",
+            additionalContext: response.additional_context,
+          },
+        }
+      }
+      return null
+    } catch (error) {
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PostToolUse",
+          additionalContext: `Statewright executor bridge error: ${error instanceof Error ? error.message : String(error)}. Stop before issuing another tool call.`,
+        },
+      }
+    }
+  }
 
   // --- Log capture: submit tool call to PocketBase workflow_logs ---
   try {
@@ -873,6 +1078,24 @@ export async function handleStop(
   _input: HookInput,
   opts: HandlerOpts,
 ): Promise<HookOutput | null> {
+  if (opts.adapterUrl) {
+    try {
+      const response = await adapterCall<AdapterDecision>(opts, "stop", {})
+      if (response.decision === "block" || response.decision === "deny") {
+        return {
+          decision: "block",
+          reason: response.reason ?? "Continue the active Statewright workflow.",
+        }
+      }
+      return null
+    } catch (error) {
+      return {
+        decision: "block",
+        reason: `Statewright executor bridge unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
   // Approval gates are delivered by PostToolUse so Codex can present its own
   // review UI. Never suppress that UI from Stop.
   return null
@@ -949,7 +1172,13 @@ async function main(): Promise<void> {
   ).slice(0, 12)
   const sessionDir = join(swDir, "sessions", sessionKey)
 
-  const opts: HandlerOpts = { apiKey, gwUrl, sessionDir }
+  const opts: HandlerOpts = {
+    apiKey,
+    gwUrl,
+    sessionDir,
+    adapterUrl: process.env.STATEWRIGHT_ADAPTER_URL,
+    adapterToken: process.env.STATEWRIGHT_ADAPTER_TOKEN,
+  }
 
   let result: HookOutput | null = null
   switch (endpoint) {

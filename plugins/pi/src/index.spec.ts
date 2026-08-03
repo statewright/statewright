@@ -55,7 +55,7 @@ vi.mock("typebox", () => ({
 }))
 
 import { readFileSync } from "node:fs"
-import statewrightExtension from "./index.js"
+import statewrightExtension, { requiresDeliveryOwner } from "./index.js"
 
 // --- Types ---
 
@@ -84,6 +84,7 @@ interface MockCtx {
   ui: MockUI
   modelRegistry: MockModelRegistry
   model: MockModel | undefined
+  abort: Mock
 }
 
 type EventHandler = (event: Record<string, unknown>, ctx: MockCtx) => Promise<unknown>
@@ -94,6 +95,7 @@ interface MockPi {
   sendUserMessage: Mock
   exec: Mock
   setModel: Mock
+  setActiveTools: Mock
   getActiveTools: () => string[]
   _tools: RegisteredTool[]
   _handlers: Record<string, EventHandler[]>
@@ -176,6 +178,7 @@ function createCtx(currentModel?: MockModel): MockCtx {
       getAll: vi.fn(() => MOCK_MODELS),
     },
     model: currentModel ?? MOCK_MODELS[2], // default to opus
+    abort: vi.fn(),
   }
 }
 
@@ -250,6 +253,38 @@ describe("Sentry initialization", () => {
   it("sets plugin and platform tags", () => {
     expect(Sentry.setTag).toHaveBeenCalledWith("plugin", "pi")
     expect(Sentry.setTag).toHaveBeenCalledWith("platform", expect.stringMatching(/.+-.+/))
+  })
+})
+
+describe("isolated delivery capability", () => {
+  it("detects any required delivery policy", () => {
+    expect(requiresDeliveryOwner({ workspace: { required: true } })).toBe(true)
+    expect(requiresDeliveryOwner({ preview: { required: true } })).toBe(true)
+    expect(requiresDeliveryOwner({ promotion: { required: true } })).toBe(true)
+    expect(requiresDeliveryOwner({ workspace: { required: false } })).toBe(false)
+    expect(requiresDeliveryOwner({})).toBe(false)
+  })
+
+  it("aborts a required workflow when no delivery owner is active", async () => {
+    setupFetch([{
+      match: "/mcp",
+      body: { ...MOCK_STATE, meta: { workspace: { required: true } } },
+    }])
+    const pi = createMockPi()
+    const ctx = createCtx()
+
+    await statewrightExtension(asPi(pi))
+    await pi._fire("before_agent_start", {}, ctx)
+
+    expect(ctx.abort).toHaveBeenCalledOnce()
+    expect(pi.setActiveTools).toHaveBeenCalledWith(expect.arrayContaining([
+      "statewright_get_state",
+      "statewright_transition",
+    ]))
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Statewright executor"),
+      "error",
+    )
   })
 })
 

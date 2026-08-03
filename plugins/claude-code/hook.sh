@@ -22,11 +22,19 @@ STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
 
 # Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
 SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
 SESSION_KEY="${SESSION_KEY:0:12}"
+CLIENT_ID=$(statewright_client_id "$HOOK_SESSION")
+SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
+if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
+  SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
+fi
 PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
@@ -58,7 +66,19 @@ mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
+    "${SESSION_HEADER_ARGS[@]}" \
     -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+}
+
+adapter_call() {
+  local endpoint="$1" method="${2:-GET}" body="${3:-}"
+  [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] || return 1
+  local args=(-sf --max-time 5 -X "$method" "${STATEWRIGHT_ADAPTER_URL%/}/hooks/${endpoint}")
+  [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ] && args+=(-H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN}")
+  if [ -n "$body" ]; then
+    args+=(-H 'Content-Type: application/json' --data-binary "$body")
+  fi
+  curl "${args[@]}" 2>/dev/null
 }
 
 # ============================================================
@@ -117,7 +137,7 @@ case "$ENDPOINT" in
     fi
 
     # --- No local .active: dormant (no cross-session leak from gateway) ---
-    if [ ! -f "$ACTIVE_FILE" ]; then
+    if [ ! -f "$ACTIVE_FILE" ] && [ -z "${STATEWRIGHT_EXECUTOR_ID:-}" ]; then
       HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
         mkdir -p "$PROJECT_DIR"
@@ -128,7 +148,11 @@ case "$ENDPOINT" in
     fi
 
     # --- Active workflow: fetch state from gateway ---
-    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+      STATE_JSON=$(adapter_call state GET || true)
+    else
+      STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+    fi
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
 
     # Gateway unreachable — graceful degradation
@@ -171,6 +195,14 @@ case "$ENDPOINT" in
     ENV_OVERRIDES=$(echo "$STATE_JSON" | jq -r '.env_overrides // {} | to_entries | map(.key + "=" + .value) | join(", ")' 2>/dev/null || true)
     MODEL=$(echo "$STATE_JSON" | jq -r '.model // empty' 2>/dev/null || true)
     DEFAULT_MODEL=$(echo "$STATE_JSON" | jq -r '.default_model // empty' 2>/dev/null || true)
+    THINKING_LEVEL=$(echo "$STATE_JSON" | jq -r '.thinking_level // empty' 2>/dev/null || true)
+    DELIVERY_REQUIRED=$(echo "$STATE_JSON" | jq -r '(.meta.workspace.required // false) or (.meta.preview.required // false) or (.meta.promotion.required // false)' 2>/dev/null || true)
+
+    EXECUTOR_DELIVERY=$(echo "$STATE_JSON" | jq -r '.executor.delivery // false' 2>/dev/null || true)
+    if [ "$DELIVERY_REQUIRED" = "true" ] && [ "$EXECUTOR_DELIVERY" != "true" ]; then
+      echo '{"decision":"block","reason":"This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.","hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
+      exit 0
+    fi
 
     # Command discovery: detect Taskfile/Makefile and list available commands
     AVAILABLE_CMDS=""
@@ -201,6 +233,9 @@ case "$ENDPOINT" in
         MODEL_NOTE=" Recommended model for this phase: $MODEL. Use /model to switch if supported."
       fi
     fi
+    if [ -n "$THINKING_LEVEL" ]; then
+      MODEL_NOTE="${MODEL_NOTE} Recommended effort for this phase: $THINKING_LEVEL. Claude hooks cannot switch effort inside an active session; start or resume with --effort $THINKING_LEVEL when a launcher owns the boundary."
+    fi
     CONTEXT="Statewright workflow active. AUTONOMOUS MODE: work continuously through each state — use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates (requires_approval) or final states. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${MODEL_NOTE}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
     jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
@@ -208,11 +243,31 @@ case "$ENDPOINT" in
 
   pre-tool)
     # --- No active workflow: allow everything (dormant) ---
-    if [ ! -f "$ACTIVE_FILE" ]; then
+    if [ ! -f "$ACTIVE_FILE" ] && [ -z "${STATEWRIGHT_EXECUTOR_ID:-}" ]; then
       exit 0
     fi
 
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
+
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+      case "$TOOL_NAME" in
+        *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      esac
+      TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
+      REQUEST=$(jq -cn --arg name "$TOOL_NAME" --argjson input "$TOOL_INPUT" \
+        '{tool_name:$name,tool_input:$input}')
+      RESPONSE=$(adapter_call pre-tool POST "$REQUEST" || true)
+      if [ -z "$RESPONSE" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright executor bridge is unavailable; refusing an unguarded tool call."}}'
+        exit 0
+      fi
+      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "allow"')
+      if [ "$DECISION" = "deny" ]; then
+        REASON=$(echo "$RESPONSE" | jq -r '.reason // "Blocked by Statewright"')
+        jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+      fi
+      exit 0
+    fi
 
     # Block Agent calls with worktree isolation during active forks — branches must edit in-place
     if [ "$TOOL_NAME" = "Agent" ]; then
@@ -238,6 +293,11 @@ case "$ENDPOINT" in
     fi
 
     STATE_JSON=$(cat "$CACHE_FILE")
+    DELIVERY_REQUIRED=$(echo "$STATE_JSON" | jq -r '(.meta.workspace.required // false) or (.meta.preview.required // false) or (.meta.promotion.required // false)' 2>/dev/null || true)
+    if [ "$DELIVERY_REQUIRED" = "true" ] && [ "${STATEWRIGHT_DELIVERY_ACTIVE:-}" != "1" ]; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle."}}'
+      exit 0
+    fi
 
     # Fork enforcement: during an active fork, the cached state is already branch-specific
     # (get_state returns the current branch's state for sequential execution). For parallel
@@ -345,6 +405,22 @@ case "$ENDPOINT" in
       *statewright_force_state*) SW_ACTION="transition" ;;
       *statewright_get_state*) SW_ACTION="refresh_cache" ;;
     esac
+
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -z "$SW_ACTION" ]; then
+      TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
+      IS_ERROR=$(echo "$HOOK_INPUT" | jq -r '.is_error // false' 2>/dev/null || echo false)
+      REQUEST=$(jq -cn --arg name "$TOOL_NAME" --argjson input "$TOOL_INPUT" \
+        --arg response "$TOOL_RESULT" --argjson is_error "$IS_ERROR" \
+        '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error}')
+      RESPONSE=$(adapter_call post-tool POST "$REQUEST" || true)
+      if [ -n "$RESPONSE" ]; then
+        INTERRUPT_TO=$(echo "$RESPONSE" | jq -r '.interrupt.to // empty')
+        if [ -n "$INTERRUPT_TO" ]; then
+          jq -n --arg state "$INTERRUPT_TO" '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":("[statewright] Validation interrupt entered: " + $state + ". Continue under the new Statewright phase.")}}'
+        fi
+      fi
+      exit 0
+    fi
 
     # --- Interrupt detection for file-changing tools (Edit, Write, MultiEdit) ---
     if [ -f "$ACTIVE_FILE" ] && [ -z "$SW_ACTION" ] && [ -f "$CACHE_FILE" ]; then
@@ -512,6 +588,19 @@ case "$ENDPOINT" in
     ;;
 
   stop)
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+      RESPONSE=$(adapter_call stop POST '{}' || true)
+      if [ -z "$RESPONSE" ]; then
+        jq -n '{"decision":"block","reason":"Statewright executor bridge is unavailable; cannot verify workflow completion."}'
+        exit 0
+      fi
+      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "allow"')
+      if [ "$DECISION" = "block" ]; then
+        REASON=$(echo "$RESPONSE" | jq -r '.reason // "Continue the active Statewright workflow."')
+        jq -n --arg reason "$REASON" '{"decision":"block","reason":$reason}'
+      fi
+      exit 0
+    fi
     # Review gates are surfaced from PostToolUse. Stop must not suppress the
     # host UI's prompt or an external review integration.
     exit 0

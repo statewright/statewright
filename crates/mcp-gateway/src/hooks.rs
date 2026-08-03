@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::enforcement::{self, EnforcementDecision};
+use crate::interceptors::{self, PreCallDecision};
 use crate::session::SessionManager;
 
 /// Shared state for the hook HTTP server.
@@ -134,11 +135,7 @@ async fn handle_pre_tool(
     );
 
     match enforcement::enforce_tool_call(&session, &req.tool_name) {
-        EnforcementDecision::Allow => Json(PreToolResponse {
-            decision: "allow".into(),
-            additional_context: None,
-            status_message: Some(status),
-        }),
+        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None),
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),
             additional_context: Some(format!("BLOCKED: {}", reason)),
@@ -152,27 +149,67 @@ async fn handle_pre_tool(
                 new_state.clone(),
                 session.context.clone(),
             );
-            Json(PreToolResponse {
-                decision: "allow".into(),
-                additional_context: Some(format!(
-                    "State transitioned: {} -> {} (via {}). You are now in the {} phase.",
-                    old_state, new_state, event, new_state
-                )),
-                status_message: Some(format!("{} -> {}", old_state, new_state)),
-            })
+            let context = Some(format!(
+                "State transitioned: {} -> {} (via {}). You are now in the {} phase.",
+                old_state, new_state, event, new_state
+            ));
+            match state.session_manager.get(&state.session_id) {
+                Some(updated) => pre_tool_policy_response(
+                    &updated,
+                    &req,
+                    format!("{} -> {}", old_state, new_state),
+                    context,
+                ),
+                None => Json(PreToolResponse {
+                    decision: "deny".into(),
+                    additional_context: Some(
+                        "BLOCKED: workflow session disappeared during implicit transition".into(),
+                    ),
+                    status_message: Some(format!("{} -> {}", old_state, new_state)),
+                }),
+            }
         }
-        EnforcementDecision::CheckpointReached { iteration, max } => Json(PreToolResponse {
-            decision: "allow".into(),
-            additional_context: Some(format!(
+        EnforcementDecision::CheckpointReached { iteration, max } => pre_tool_policy_response(
+            &session,
+            &req,
+            format!("{} CHECKPOINT {}/{}", session.current_state, iteration, max),
+            Some(format!(
                 "CHECKPOINT: You have reached iteration {}/{} in state '{}'. \
                  You MUST make your best edit now and transition to the next state \
                  using statewright_transition.",
                 iteration, max, session.current_state
             )),
-            status_message: Some(format!(
-                "{} CHECKPOINT {}/{}",
-                session.current_state, iteration, max
-            )),
+        ),
+    }
+}
+
+fn pre_tool_policy_response(
+    session: &crate::session::GatewaySession,
+    req: &PreToolRequest,
+    status: String,
+    context: Option<String>,
+) -> Json<PreToolResponse> {
+    match interceptors::pre_call_check(session, &req.tool_name, &req.tool_input) {
+        PreCallDecision::Allow => Json(PreToolResponse {
+            decision: "allow".into(),
+            additional_context: context,
+            status_message: Some(status),
+        }),
+        PreCallDecision::Warn(warning) => Json(PreToolResponse {
+            decision: "allow".into(),
+            additional_context: Some(match context {
+                Some(context) => format!("{} {}", context, warning),
+                None => warning,
+            }),
+            status_message: Some(status),
+        }),
+        PreCallDecision::Block(reason) => Json(PreToolResponse {
+            decision: "deny".into(),
+            additional_context: Some(match context {
+                Some(context) => format!("{} BLOCKED: {}", context, reason),
+                None => format!("BLOCKED: {}", reason),
+            }),
+            status_message: Some(status),
         }),
     }
 }
@@ -295,5 +332,67 @@ async fn handle_stop(State(state): State<Arc<RwLock<HookState>>>) -> Json<StopRe
                 session.current_state
             )),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use statewright_engine::MachineDefinition;
+
+    fn hook_state() -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-policy-test",
+            "initial": "active",
+            "states": {
+                "active": {
+                    "allowed_tools": ["bash"],
+                    "allowed_commands": ["gh"],
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("test-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "test-session".into(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn pre_tool_applies_allowed_command_policy_to_tool_input() {
+        let blocked = handle_pre_tool(
+            State(hook_state()),
+            Json(PreToolRequest {
+                tool_name: "bash".into(),
+                tool_input: json!({"command": "ghpr list"}),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(blocked.decision, "deny");
+        assert!(
+            blocked
+                .additional_context
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not in the allowed commands")
+        );
+
+        let allowed = handle_pre_tool(
+            State(hook_state()),
+            Json(PreToolRequest {
+                tool_name: "bash".into(),
+                tool_input: json!({"command": "gh pr list"}),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(allowed.decision, "allow");
     }
 }

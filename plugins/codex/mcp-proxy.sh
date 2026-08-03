@@ -10,9 +10,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
-SESSION_HEADER_ARGS=()
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
+
+CLIENT_ID=$(statewright_client_id codex)
+SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
-  SESSION_HEADER_ARGS=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
+  SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
 fi
 
 telemetry_pid_matches() {

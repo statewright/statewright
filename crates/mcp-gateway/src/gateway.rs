@@ -15,9 +15,6 @@ use crate::usage::{RuntimeToolReport, RuntimeUsageReport, UsageLedger};
 pub struct Gateway {
     pub session_manager: SessionManager,
     pub upstream: UpstreamManager,
-    /// Immutable transport identity. Client session scoping is derived from this
-    /// value once per load instead of repeatedly extending `session_id`.
-    base_session_id: String,
     session_id: String,
     workflows: HashMap<String, MachineDefinition>,
     active_workflow: Option<String>,
@@ -50,7 +47,6 @@ impl Gateway {
         Self {
             session_manager,
             upstream,
-            base_session_id: session_id.clone(),
             session_id,
             workflows,
             active_workflow,
@@ -1154,6 +1150,16 @@ impl Gateway {
                 }
             }
             "statewright_get_state" => {
+                if self.active_workflow.is_none() {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "No active workflow. Load a workflow before requesting state."
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                    );
+                }
                 let session = match self.session_manager.get(&self.session_id) {
                     Some(s) => s,
                     None => {
@@ -1387,18 +1393,15 @@ impl Gateway {
             "statewright_load_workflow" => {
                 let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
-                // Accept session_id from client for per-session scoping
-                if let Some(sid) = arguments.get("session_id").and_then(|s| s.as_str()) {
-                    // Create a session-scoped key: api_key_session + client_session
-                    let scoped_id = format!("{}_{}", self.base_session_id, sid);
-                    self.session_id = scoped_id;
-                    self.project_id = Some(sid.to_string());
-                }
-                // Legacy: accept project_id too
-                if let Some(pid) = arguments.get("project_id").and_then(|p| p.as_str()) {
-                    if self.project_id.is_none() {
-                        self.project_id = Some(pid.to_string());
-                    }
+                // Transport identity is established by the remote MCP layer
+                // and must never be rewritten by a tool argument. Keep the
+                // legacy session_id field as project/run metadata only.
+                if let Some(pid) = arguments
+                    .get("project_id")
+                    .and_then(|p| p.as_str())
+                    .or_else(|| arguments.get("session_id").and_then(|s| s.as_str()))
+                {
+                    self.project_id = Some(pid.to_string());
                 }
 
                 // Branch parameter: connect sub-agent to a specific fork branch session
@@ -1526,16 +1529,20 @@ impl Gateway {
                     #[cfg(feature = "metering")]
                     {
                         if let Some(pool) = &self.db_pool {
+                            let project_id = self.project_id.clone().unwrap_or_default();
                             let row = sqlx::query_as::<
                                 _,
                                 (String, Option<String>, Option<serde_json::Value>),
                             >(
                                 "SELECT id, final_state, context_snapshot FROM workflow_runs \
                                  WHERE owner = $1 AND workflow_name = $2 AND status = 'paused' \
+                                   AND session_id = $3 AND project_id = $4 \
                                  ORDER BY updated DESC LIMIT 1",
                             )
                             .bind(&self.owner_id)
                             .bind(workflow_name)
+                            .bind(&self.session_id)
+                            .bind(&project_id)
                             .fetch_optional(pool)
                             .await
                             .ok()
@@ -1720,6 +1727,7 @@ impl Gateway {
                     }
                 }
                 self.active_workflow = None;
+                self.current_run_id = None;
                 let result = json!({ "deactivated": true });
                 JsonRpcResponse::success(
                     id,
@@ -1787,7 +1795,8 @@ impl Gateway {
             }
             "statewright_get_status" => {
                 let session = self.session_manager.get(&self.session_id);
-                let usage = session.as_ref().map(|s| {
+                let active = self.active_workflow.is_some();
+                let usage = active.then(|| session.as_ref()).flatten().map(|s| {
                     let (used, limit, _) = s.usage();
                     json!({
                         "transitions": used,
@@ -1798,10 +1807,10 @@ impl Gateway {
                 });
                 let result = json!({
                     "active_workflow": self.active_workflow,
-                    "current_state": session.as_ref().map(|s| &s.current_state),
-                    "iteration": session.as_ref().map(|s| s.iteration_count),
-                    "transition_count": session.as_ref().map(|s| s.transition_count),
-                    "is_final": session.as_ref().map(|s| s.is_final()),
+                    "current_state": active.then(|| session.as_ref().map(|s| &s.current_state)).flatten(),
+                    "iteration": active.then(|| session.as_ref().map(|s| s.iteration_count)).flatten(),
+                    "transition_count": active.then(|| session.as_ref().map(|s| s.transition_count)).flatten(),
+                    "is_final": active.then(|| session.as_ref().map(|s| s.is_final())).flatten(),
                     "available_workflows": self.workflows.keys().collect::<Vec<_>>(),
                     "usage": usage,
                 });
@@ -2274,7 +2283,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_workflow_returns_authoritative_snapshot_without_session_key_growth() {
+    async fn load_workflow_returns_authoritative_snapshot_without_rewriting_transport_identity() {
         let mut gw = test_gateway();
 
         for _ in 0..2 {
@@ -2307,12 +2316,10 @@ mod tests {
             );
         }
 
-        assert_eq!(gw.session_id(), "test-session_codex-session");
-        assert!(gw.session_manager.exists("test-session_codex-session"));
-        assert!(
-            !gw.session_manager
-                .exists("test-session_codex-session_codex-session")
-        );
+        assert_eq!(gw.session_id(), "test-session");
+        assert!(gw.session_manager.exists("test-session"));
+        assert!(!gw.session_manager.exists("test-session_codex-session"));
+        assert_eq!(gw.project_id.as_deref(), Some("codex-session"));
     }
 
     #[tokio::test]

@@ -29,14 +29,21 @@ TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 # shellcheck source=tool-policy.sh
 source "${SCRIPT_DIR}/tool-policy.sh"
+# shellcheck source=client-id.sh
+source "${SCRIPT_DIR}/client-id.sh"
 
-# Session-scoped state: use session_id from hook input or CODEX_SESSION_ID env
+# Session-scoped state shared with the MCP proxy.
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-SESSION_KEY="${HOOK_SESSION:-${CODEX_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
-SESSION_KEY="${SESSION_KEY:0:12}"
+CLIENT_ID=$(statewright_client_id codex "$HOOK_SESSION")
+SESSION_KEY="${CLIENT_ID#swc_}"
+SESSION_KEY="${SESSION_KEY:0:16}"
 PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
+SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
+if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
+  SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
+fi
 
 # --- Auto-bootstrap settings.json + MCP config ---
 SETTINGS="$HOME/.claude/settings.json"
@@ -65,6 +72,7 @@ mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
+    "${SESSION_HEADER_ARGS[@]}" \
     -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 

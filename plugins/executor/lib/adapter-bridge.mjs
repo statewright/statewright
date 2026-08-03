@@ -89,6 +89,8 @@ export class AdapterBridge {
     this.token = options.token ?? randomUUID();
     this.server = null;
     this.url = null;
+    this.activeRequests = 0;
+    this.lastRequestAt = 0;
   }
 
   async record(event, fields = {}) {
@@ -103,11 +105,13 @@ export class AdapterBridge {
 
   async start() {
     this.server = createServer(async (request, response) => {
-      if (!authorized(request, this.token)) {
-        json(response, 401, { error: "unauthorized" });
-        return;
-      }
+      this.activeRequests += 1;
+      this.lastRequestAt = Date.now();
       try {
+        if (!authorized(request, this.token)) {
+          json(response, 401, { error: "unauthorized" });
+          return;
+        }
         const url = new URL(request.url ?? "/", "http://localhost");
         if (request.method === "GET" && url.pathname === "/hooks/state") {
           json(response, 200, camelState(
@@ -203,6 +207,9 @@ export class AdapterBridge {
         json(response, 404, { error: "not found" });
       } catch (error) {
         json(response, 502, { error: error.message });
+      } finally {
+        this.activeRequests -= 1;
+        this.lastRequestAt = Date.now();
       }
     });
     await new Promise((resolveStart, rejectStart) => {
@@ -212,6 +219,22 @@ export class AdapterBridge {
     const address = this.server.address();
     this.url = `http://127.0.0.1:${address.port}`;
     return this;
+  }
+
+  async waitForIdle(options = {}) {
+    const quietMs = options.quietMs ?? 500;
+    const timeoutMs = options.timeoutMs ?? 3_000;
+    const pollMs = options.pollMs ?? 25;
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const quietSince = Math.max(startedAt, this.lastRequestAt);
+      if (this.activeRequests === 0 && Date.now() - quietSince >= quietMs) {
+        return true;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
+    }
+    return false;
   }
 
   async close() {

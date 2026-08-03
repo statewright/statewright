@@ -161,3 +161,39 @@ test("bridge authenticates adapters and preserves one executor identity", async 
     await bridge.close();
   }
 });
+
+test("bridge drain accepts delayed terminal hooks and waits for a quiet interval", async () => {
+  const calls = [];
+  const client = {
+    async call(name) {
+      calls.push(name);
+      return { decision: "allow", state: "completed", active: false };
+    },
+  };
+  const bridge = await new AdapterBridge(client, {
+    token: "test-token",
+    host: "omx",
+  }).start();
+
+  try {
+    const startedAt = Date.now();
+    const drain = bridge.waitForIdle({ quietMs: 80, timeoutMs: 500, pollMs: 5 });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 30));
+    const response = await fetch(`${bridge.url}/hooks/stop`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-token",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).state, "completed");
+    assert.equal(await drain, true);
+    assert.ok(Date.now() - startedAt >= 100);
+    assert.deepEqual(calls, ["statewright_adapter_stop"]);
+  } finally {
+    await bridge.close();
+  }
+});

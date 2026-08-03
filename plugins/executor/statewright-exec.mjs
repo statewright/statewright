@@ -426,6 +426,14 @@ export async function main(argv = process.argv.slice(2)) {
     if (result.code && !result.finalSeen) process.exitCode = result.code;
     return result;
   } finally {
+    if (adapterBridge) {
+      const drained = await adapterBridge.waitForIdle();
+      if (!drained) {
+        await telemetry("executor_adapter_drain_timeout", {
+          active_requests: adapterBridge.activeRequests,
+        });
+      }
+    }
     await adapterBridge?.close();
     lease?.stop();
     if (!workspaceSession) await rm(leasePath, { force: true }).catch(() => {});

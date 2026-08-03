@@ -16,6 +16,16 @@ Then install:
 
 Your browser opens. Sign up. Generate a key. Paste it. Done.
 
+For executor-owned isolated delivery and state model routing, launch Claude Code through the shared executor:
+
+```bash
+node plugins/executor/statewright-exec.mjs \
+  --host claude --workflow bugfix --cwd "$PWD" -- \
+  "Fix the failing tests"
+```
+
+The executor owns the remote credential and MCP session. Claude Code receives an authenticated loopback bridge. When a workflow state changes its model or effort route, the executor stops the CLI and resumes the same Claude session with the new route.
+
 ## What happens
 
 Every prompt, statewright checks your workflow state and tells Claude which tools are allowed. Claude reads first, edits second, tests third. No skipping phases.

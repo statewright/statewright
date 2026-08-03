@@ -129,7 +129,7 @@ async function showToast(
   }).catch(() => {})
 }
 
-export function requireDeliveryOwner(
+function requireDeliveryOwner(
   state: Pick<StateResponse, "deliveryRequired" | "executor">,
 ): void {
   if (state.deliveryRequired && (!state.executor?.active || !state.executor.delivery)) {
@@ -140,7 +140,7 @@ export function requireDeliveryOwner(
   }
 }
 
-export function applyStateRoute(
+function applyStateRoute(
   state: Pick<StateResponse, "model" | "thinkingLevel">,
   message: RoutedMessage,
 ): boolean {
@@ -236,7 +236,7 @@ async function getState(
   }
 }
 
-export async function enforceBeforeTool(
+async function enforceBeforeTool(
   adapter: string,
   input: { tool: string; args: Record<string, unknown> },
   token: string | null = process.env.STATEWRIGHT_ADAPTER_TOKEN ?? null,
@@ -278,12 +278,12 @@ function reportPluginEvent(event = "connect") {
   } catch {}
 }
 
-export function createStatewrightHooks(
+function createStatewrightHooks(
   adapter: string,
   client: OpenCodeClient,
   token: string | null = process.env.STATEWRIGHT_ADAPTER_TOKEN ?? null,
 ) {
-  const continuingSessions = new Set<string>()
+  const continuedStateBySession = new Map<string, string>()
   return {
     // OpenCode publishes session lifecycle through the generic event hook.
     event: async ({ event }: { event: Record<string, any> & { type: string } }) => {
@@ -316,18 +316,21 @@ export function createStatewrightHooks(
         await showToast(client, `Workflow finished: ${state.state}`, "success")
       } else {
         const sessionId = sessionIdFromEvent(event)
-        if (!sessionId || !client.session?.prompt || continuingSessions.has(sessionId)) return
-        continuingSessions.add(sessionId)
+        if (!sessionId || !client.session?.prompt) return
+        const stateKey = `${state.state}:${state.iteration}`
+        if (continuedStateBySession.get(sessionId) === stateKey) return
+        continuedStateBySession.set(sessionId, stateKey)
         void client.session.prompt({
           path: { id: sessionId },
           body: continuationBody(state),
         }).catch(async (error) => {
+          continuedStateBySession.delete(sessionId)
           await showToast(
             client,
             `Could not continue Statewright workflow: ${error instanceof Error ? error.message : String(error)}`,
             "error",
           )
-        }).finally(() => continuingSessions.delete(sessionId))
+        })
       }
     },
 
@@ -394,7 +397,7 @@ export function createStatewrightHooks(
   }
 }
 
-export const StatewrightPlugin: Plugin = async ({ client }) => {
+const pluginFactory: Plugin = async ({ client }) => {
   const connection = getAdapterConnection()
   if (!connection) {
     console.warn("[statewright] Gateway not running — plugin inactive")
@@ -410,4 +413,14 @@ export const StatewrightPlugin: Plugin = async ({ client }) => {
   )
 }
 
-export default StatewrightPlugin
+// OpenCode v1 treats every module export as a plugin factory and rejects
+// non-functions. Keep the runtime module to one callable export while exposing
+// internals as properties of that factory for focused contract tests.
+export const StatewrightPlugin = Object.assign(pluginFactory, {
+  testApi: {
+    applyStateRoute,
+    createStatewrightHooks,
+    enforceBeforeTool,
+    requireDeliveryOwner,
+  },
+})

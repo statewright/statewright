@@ -24,11 +24,21 @@ Or add to `~/.pi/agent/settings.json`:
    ```
 3. Start Pi — the extension connects automatically
 
+For executor-owned workflow routing, delivery, and telemetry, launch Pi through the shared executor:
+
+```bash
+node plugins/executor/statewright-exec.mjs \
+  --host pi --workflow bugfix --cwd "$PWD" -- \
+  "Fix the failing tests"
+```
+
+In executor mode Pi does not receive the remote Statewright API key. Its control tools, pre-tool policy, post-tool accounting, and stop handling use the authenticated loopback bridge owned by `statewright-exec`.
+
 ## Features
 
 ### Per-state model routing
 
-Switch models per workflow state. Frontier plans, commodity executes.
+Switch models in the active Pi session through Pi's native `setModel()` API. Frontier plans, commodity executes.
 
 ```json
 "planning":      { "model": "openai-codex/gpt-5.5" },
@@ -38,7 +48,7 @@ Switch models per workflow state. Frontier plans, commodity executes.
 
 ### Per-state thinking level
 
-Control reasoning effort. `xhigh` for planning, `off` for grunt work.
+Control reasoning effort live through Pi's native `setThinkingLevel()` API. `xhigh` for planning, `off` for grunt work.
 
 ```json
 "planning":      { "thinking_level": "xhigh" },
@@ -73,7 +83,7 @@ wait for resolution. Otherwise Pi continues steering through the state machine.
 
 ```bash
 cd plugins/pi
-npm test           # 33 tests (vitest)
+npm test           # vitest regression suite
 npm run test:watch
 ```
 

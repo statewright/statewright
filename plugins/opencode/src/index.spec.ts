@@ -12,11 +12,16 @@ vi.mock("@sentry/node", () => ({
 }))
 
 import {
+  StatewrightPlugin,
+} from "./index"
+import * as pluginModule from "./index"
+
+const {
   applyStateRoute,
   createStatewrightHooks,
   enforceBeforeTool,
   requireDeliveryOwner,
-} from "./index"
+} = StatewrightPlugin.testApi
 
 describe("enforceBeforeTool", () => {
   it("sends tool arguments to pre-tool in one gateway request", async () => {
@@ -107,6 +112,11 @@ describe("state routing", () => {
 })
 
 describe("OpenCode host contract", () => {
+  it("exports exactly one callable plugin factory", () => {
+    expect(Object.values(pluginModule).filter((value) => typeof value === "function"))
+      .toEqual([StatewrightPlugin])
+  })
+
   it("handles lifecycle events through event and routes chat.message output", async () => {
     const showToast = vi.fn().mockResolvedValue(undefined)
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
@@ -187,6 +197,11 @@ describe("OpenCode host contract", () => {
         }],
       },
     })
+
+    await hooks.event({
+      event: { type: "session.idle", properties: { sessionID: "session-7" } },
+    })
+    expect(prompt).toHaveBeenCalledTimes(1)
     vi.unstubAllGlobals()
   })
 

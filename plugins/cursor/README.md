@@ -1,42 +1,40 @@
-# Statewright Plugin for Cursor
+# Statewright for Cursor
 
-State machine guardrails for Cursor IDE. MCP server provides the tools; `.mdc` rule provides the behavioral constraints. Tool enforcement is advisory — Cursor has no hook system to block tool calls, so the rule instructs the agent to self-enforce.
+Statewright supports two Cursor modes:
 
-## Setup
+- `statewright-exec --host cursor` uses Cursor Agent hooks for hard tool enforcement, executor-owned MCP transport, and same-chat resume across model route changes.
+- Standalone IDE MCP/rules mode exposes workflow tools and instructions but remains advisory.
 
-1. Build the gateway: `cargo install statewright-gateway`
+## Executor mode
 
-2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`
+Install and authenticate `cursor-agent`, then run:
 
-3. Copy the MCP config into your project:
-   ```bash
-   # Merge into existing .cursor/mcp.json, or:
-   cp plugins/cursor/mcp.json .cursor/mcp.json
-   ```
+```bash
+node plugins/executor/statewright-exec.mjs \
+  --host cursor --workflow bugfix --cwd "$PWD" -- \
+  "Fix the failing tests"
+```
 
-4. Copy the rule file:
-   ```bash
-   mkdir -p .cursor/rules
-   cp plugins/cursor/statewright.mdc .cursor/rules/statewright.mdc
-   ```
+The executor creates a Cursor chat with `cursor-agent create-chat`, launches the Statewright Cursor plugin against that chat, and always resumes the same chat ID. On a state route change it restarts the CLI with the new model and resumes the existing chat. The child process receives only an authenticated loopback bridge, not the remote Statewright API key.
 
-5. Open the project in Cursor. The gateway launches automatically as an MCP server.
+Cursor's hooks map native tools such as `Shell`, `ReadFile`, and `StrReplace` to portable Statewright capabilities. Pre-tool policy is evaluated before execution, post-tool results are accounted to the active state, and nonfinal stop attempts are returned to the workflow.
 
-## What It Does
+## Standalone IDE mode
 
-| Component | Purpose |
-|-----------|---------|
-| `mcp.json` | Registers gateway as MCP server, exposes `statewright_get_state` and `statewright_transition` tools |
-| `statewright.mdc` | Always-on rule instructing the agent to check state, respect tool restrictions, and follow transitions |
+1. Build the gateway: `cargo install statewright-gateway`.
+2. Copy a workflow template: `cp templates/bugfix/config.json .statewright/config.json`.
+3. Merge `plugins/cursor/mcp.json` into `.cursor/mcp.json`.
+4. Copy `plugins/cursor/statewright.mdc` into `.cursor/rules/statewright.mdc`.
+5. Open the project in Cursor.
 
-## Limitations vs Claude Code
+This mode cannot claim hard enforcement because MCP and an `.mdc` rule alone do not intercept every Cursor tool call. Use executor mode when enforcement or isolated delivery is required.
 
-| Capability | Claude Code | Cursor |
-|------------|-------------|--------|
-| Tool blocking | Hard enforcement via PreToolUse hook | Advisory only (self-enforcement via rule) |
-| Context injection | System-reminder channel (highest trust) | `.mdc` rule (always-on) |
-| Stop prevention | Stop hook blocks premature exit | Advisory instruction in rule |
-| Status display | Status line in TUI | None |
-| Iteration tracking | Gateway-side with checkpoint prompts | Agent must self-check via `statewright_get_state` |
+## Capability boundary
 
-The MCP tools work identically — the gap is enforcement. A well-tuned frontier model follows the `.mdc` instructions reliably enough for most workflows. The state machine still prevents the failure modes; it just can't force the model to comply the way a hook can.
+| Capability | Executor mode | Standalone IDE mode |
+|------------|---------------|---------------------|
+| Tool policy | Hard, native pre-tool hook | Advisory rule |
+| State context | Session-start and post-tool hooks | `.mdc` rule and MCP results |
+| Stop handling | Native stop hook | Advisory |
+| Model routing | Restart and resume same chat | Manual |
+| Isolated delivery | Shared executor | Unavailable |

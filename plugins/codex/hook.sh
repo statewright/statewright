@@ -6,6 +6,29 @@ set -o pipefail
 
 ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Executor-owned runs must use the authenticated loopback bridge before any
+# standalone bootstrap, credential lookup, cache mutation, or telemetry setup.
+if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+  EXECUTOR_HOOK="${SCRIPT_DIR}/scripts/executor-hook.mjs"
+  if command -v node >/dev/null 2>&1 && [ -f "$EXECUTOR_HOOK" ]; then
+    printf '%s' "$HOOK_INPUT" | node "$EXECUTOR_HOOK" "$ENDPOINT"
+    exit $?
+  fi
+  case "$ENDPOINT" in
+    pre-tool)
+      echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright executor hook is unavailable."}}'
+      ;;
+    post-tool)
+      echo '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"Statewright executor hook is unavailable. Stop before issuing another tool call."}}'
+      ;;
+    *)
+      echo '{"decision":"block","reason":"Statewright executor hook is unavailable."}'
+      ;;
+  esac
+  exit 0
+fi
 
 # jq is required for JSON processing — prompt install if missing
 if ! command -v jq &>/dev/null; then
@@ -24,7 +47,6 @@ API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/new
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 LOCAL_TELEMETRY_URL="${STATEWRIGHT_LOCAL_TELEMETRY_URL:-http://127.0.0.1:${STATEWRIGHT_TELEMETRY_PORT:-4318}}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 # shellcheck source=tool-policy.sh

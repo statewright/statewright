@@ -373,7 +373,16 @@ async function adapterCall(
     signal: AbortSignal.timeout(5_000),
   })
   if (!response.ok) {
-    throw new Error(`Statewright executor bridge ${endpoint} failed with HTTP ${response.status}.`)
+    const raw = await response.text()
+    let detail = raw.trim()
+    try {
+      const parsed = JSON.parse(raw) as { error?: unknown }
+      if (typeof parsed.error === "string") detail = parsed.error
+    } catch { /* keep the raw bridge response */ }
+    throw new Error(
+      `Statewright executor bridge ${endpoint} failed with HTTP ${response.status}`
+      + `${detail ? `: ${detail}` : "."}`,
+    )
   }
   return await response.json() as Record<string, unknown>
 }

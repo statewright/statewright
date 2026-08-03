@@ -79,6 +79,8 @@ function authorized(request, token) {
 export class AdapterBridge {
   constructor(client, options = {}) {
     this.client = client;
+    this.host = options.host ?? "unknown";
+    this.telemetry = options.telemetry ?? (async () => {});
     this.executor = {
       active: true,
       id: options.executorId,
@@ -87,6 +89,16 @@ export class AdapterBridge {
     this.token = options.token ?? randomUUID();
     this.server = null;
     this.url = null;
+  }
+
+  async record(event, fields = {}) {
+    try {
+      await this.telemetry(event, { host: this.host, ...fields });
+    } catch (error) {
+      process.stderr.write(
+        `[statewright] Could not record adapter telemetry: ${error.message}\n`,
+      );
+    }
   }
 
   async start() {
@@ -146,23 +158,46 @@ export class AdapterBridge {
           return;
         }
         if (url.pathname === "/hooks/pre-tool") {
-          json(response, 200, adapterResult(await this.client.call("statewright_adapter_pre_tool", {
+          const result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
-          })));
+          }));
+          await this.record("executor_adapter_pre_tool", {
+            tool_name: body.tool_name ?? "",
+            policy_tool_name: result?.policy_tool_name ?? null,
+            decision: result?.decision ?? null,
+            state: result?.state ?? null,
+          });
+          json(response, 200, result);
           return;
         }
         if (url.pathname === "/hooks/post-tool") {
-          json(response, 200, adapterResult(await this.client.call("statewright_adapter_post_tool", {
+          const result = adapterResult(await this.client.call("statewright_adapter_post_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
             tool_response: body.tool_response ?? "",
             is_error: Boolean(body.is_error),
-          })));
+          }));
+          await this.record("executor_adapter_post_tool", {
+            tool_name: body.tool_name ?? "",
+            policy_tool_name: result?.policy_tool_name ?? null,
+            state: result?.state ?? null,
+            previous_state: result?.previous_state ?? null,
+            transition: result?.transition ?? null,
+            completed: Boolean(result?.completed),
+            is_error: Boolean(body.is_error),
+          });
+          json(response, 200, result);
           return;
         }
         if (url.pathname === "/hooks/stop") {
-          json(response, 200, adapterResult(await this.client.call("statewright_adapter_stop")));
+          const result = adapterResult(await this.client.call("statewright_adapter_stop"));
+          await this.record("executor_adapter_stop", {
+            decision: result?.decision ?? null,
+            state: result?.state ?? null,
+            active: Boolean(result?.active),
+          });
+          json(response, 200, result);
           return;
         }
         json(response, 404, { error: "not found" });

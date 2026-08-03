@@ -4,7 +4,9 @@
       "command": "bash",
       "args": ["${PLUGIN_ROOT}/mcp-proxy.sh"],
       "env": {
-        "STATEWRIGHT_MCP_SESSION_ID": "${STATEWRIGHT_MCP_SESSION_ID}"
+        "STATEWRIGHT_MCP_SESSION_ID": "${STATEWRIGHT_MCP_SESSION_ID}",
+        "STATEWRIGHT_ADAPTER_URL": "${STATEWRIGHT_ADAPTER_URL}",
+        "STATEWRIGHT_ADAPTER_TOKEN": "${STATEWRIGHT_ADAPTER_TOKEN}"
       }
     }
   }

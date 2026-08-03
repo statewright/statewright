@@ -2,7 +2,7 @@
 
 State machine guardrails for [Oh My Codex (OMX)](https://github.com/Yeachan-Heo/oh-my-codex).
 
-Enforces per-state tool restrictions, interrupts, fork/join, and approval gates via Codex native hooks. Talks to the statewright managed gateway — no local engine required.
+Enforces per-state tool restrictions, interrupts, fork/join, and approval gates via Codex native hooks. In executor mode, all hooks and MCP calls use the shared executor's authenticated loopback bridge.
 
 ## Install
 
@@ -24,6 +24,18 @@ bash install.sh
 1. Get an API key at [statewright.ai/keys](https://statewright.ai/keys)
 2. Save it: `echo 'sw_live_...' > ~/.statewright/api_key`
 3. Start OMX — the plugin activates automatically
+
+For executor-owned delivery, credentials, telemetry, and startup routing:
+
+```bash
+node plugins/executor/statewright-exec.mjs \
+  --host omx --workflow bugfix --cwd "$PWD" -- \
+  "Fix the failing tests"
+```
+
+OMX receives the state's model and reasoning effort at process startup. Its native hooks provide hard tool enforcement, but OMX does not currently expose a proven same-session route-change API. Statewright does not claim live routing for this host.
+
+The executor launches OMX through its native Codex plugin installation. It does not pass Claude/Cursor-style `--plugin-dir`; Codex does not support that flag. The Statewright Codex hooks detect the per-run authenticated adapter connection, while the executor explicitly binds Codex's `statewright` MCP server to its loopback proxy. OMX therefore inherits the same session ownership, native tool enforcement, continuation, and telemetry path as Codex without depending on ambient plugin configuration.
 
 ## Usage
 
@@ -47,7 +59,7 @@ Registers four Codex native hooks via `.codex/hooks.json`:
   injects the current phase context again, and permits stopping only after a
   final state (or when no reliable state is available).
 
-State cache is file-based (`~/.statewright/sessions/`) so PreToolUse enforcement requires zero network calls.
+Standalone mode uses the file cache under `~/.statewright/sessions/`. Executor mode sends hook decisions through the loopback adapter and keeps the remote credential and workflow session in `statewright-exec`.
 
 ## Development
 

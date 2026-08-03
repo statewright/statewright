@@ -8,11 +8,20 @@ const execFileAsync = promisify(execFile);
 
 export async function prepareHostSession(options, fallbackId, execute = execFileAsync) {
   if (options.host !== "cursor") return fallbackId;
-  const { stdout } = await execute(
-    options.hostBin ?? "cursor-agent",
-    ["create-chat"],
-    { cwd: options.cwd, env: options.environment, encoding: "utf8" },
-  );
+  let stdout;
+  try {
+    ({ stdout } = await execute(
+      options.hostBin ?? "cursor-agent",
+      ["create-chat"],
+      { cwd: options.cwd, env: options.environment, encoding: "utf8" },
+    ));
+  } catch (error) {
+    // Cursor can create and print the chat successfully before a later
+    // Keychain lookup makes the command exit nonzero. The printed ID remains
+    // the authoritative result and is validated below.
+    stdout = error?.stdout;
+    if (!stdout) throw error;
+  }
   const sessionId = String(stdout).trim().split(/\s+/).at(-1) ?? "";
   if (!sessionId || /[\u0000-\u001f\u007f]/.test(sessionId)) {
     throw new Error("Cursor did not return a usable chat ID from create-chat.");
@@ -44,6 +53,7 @@ export function buildHostLaunch(options, state, continuation = false) {
     case "pi": {
       const args = [
         "--session-id", options.hostSessionId,
+        "--no-extensions",
         "--extension", resolve(pluginsRoot, "pi", "src", "index.ts"),
       ];
       if (route.model) args.push("--model", route.model);
@@ -80,9 +90,12 @@ export function buildHostLaunch(options, state, continuation = false) {
       };
     }
     case "omx": {
+      const proxyPath = resolve(EXECUTOR_ROOT, "mcp-proxy.sh");
       const args = [
         "--direct",
-        "--plugin-dir", resolve(pluginsRoot, "omx"),
+        "-c", 'mcp_servers.statewright.command="bash"',
+        "-c", `mcp_servers.statewright.args=[${JSON.stringify(proxyPath)}]`,
+        "-c", 'mcp_servers.statewright.env_vars=["STATEWRIGHT_ADAPTER_URL","STATEWRIGHT_ADAPTER_TOKEN"]',
         ...extra,
       ];
       if (route.model) args.push("--model", route.model.split("/").at(-1));

@@ -164,6 +164,12 @@ final outcome.
 - **Stop**: blocks Codex from yielding while an active workflow is nonfinal and
   permits it only after a final state.
 
+When launched by `plugins/executor/statewright-exec.mjs`, the Codex hooks and
+MCP proxy join the executor's authenticated loopback adapter before performing
+any standalone bootstrap. The executor remains the sole owner of the remote
+workflow session, credentials, delivery lifecycle, and telemetry. OMX uses
+this same Codex-native path when launched with `--host omx`.
+
 ## License
 
 FSL-1.1-ALv2 (see plugins/LICENSE.md)

@@ -616,8 +616,11 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
+        let policy_tool_name =
+            enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input);
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
-            &session, tool_name,
+            &session,
+            &policy_tool_name,
         ) {
             EnforcementDecision::Allow => (session, None),
             EnforcementDecision::Block {
@@ -663,7 +666,7 @@ impl Gateway {
             }
         };
 
-        let interceptor = interceptors::pre_call_check(&session, tool_name, tool_input);
+        let interceptor = interceptors::pre_call_check(&session, &policy_tool_name, tool_input);
         match interceptor {
             PreCallDecision::Block(reason) => json!({
                 "decision": "deny",
@@ -673,11 +676,13 @@ impl Gateway {
             PreCallDecision::Warn(warning) => json!({
                 "decision": "allow",
                 "warning": warning,
+                "policy_tool_name": policy_tool_name,
                 "additional_context": checkpoint_context,
                 "state": session.current_state,
             }),
             PreCallDecision::Allow => json!({
                 "decision": "allow",
+                "policy_tool_name": policy_tool_name,
                 "additional_context": checkpoint_context,
                 "state": session.current_state,
             }),
@@ -698,6 +703,8 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"active": false, "error": "No active session"}),
         };
+        let policy_tool_name =
+            enforcement::resolve_adapter_tool_name(&before, tool_name, tool_input);
         let previous_state = before.current_state.clone();
         self.session_manager.increment_iteration(&self.session_id);
 
@@ -708,7 +715,7 @@ impl Gateway {
             }],
             is_error,
         };
-        let update = interceptors::post_call_annotations(tool_name, tool_input, &result);
+        let update = interceptors::post_call_annotations(&policy_tool_name, tool_input, &result);
         let edited_path = update.file_edited.clone();
         if let Some(ref path) = edited_path {
             self.session_manager
@@ -723,7 +730,7 @@ impl Gateway {
                 .add_context_bytes(&self.session_id, update.result_bytes);
         }
         self.usage
-            .note_gateway_tool(tool_name, update.result_bytes, is_error);
+            .note_gateway_tool(&policy_tool_name, update.result_bytes, is_error);
 
         let mut interrupt = serde_json::Value::Null;
         if let Some(path) = edited_path {
@@ -769,6 +776,7 @@ impl Gateway {
         };
         json!({
             "active": true,
+            "policy_tool_name": policy_tool_name,
             "state": session.current_state,
             "previous_state": previous_state,
             "iteration": session.iteration_count,
@@ -2520,7 +2528,7 @@ mod tests {
                 params: Some(json!({
                     "name": "statewright_adapter_pre_tool",
                     "arguments": {
-                        "tool_name": "read_file",
+                        "tool_name": "Read",
                         "tool_input": {"path": "src/lib.rs"}
                     }
                 })),
@@ -2528,7 +2536,28 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(tool_result_json(allowed)["decision"], "allow");
+        let allowed = tool_result_json(allowed);
+        assert_eq!(allowed["decision"], "allow");
+        assert_eq!(allowed["policy_tool_name"], "read_file");
+
+        let readonly_shell = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "sed -n '1,12p' src/lib.rs"}
+                    }
+                })),
+                id: Some(json!(2)),
+            })
+            .await
+            .unwrap();
+        let readonly_shell = tool_result_json(readonly_shell);
+        assert_eq!(readonly_shell["decision"], "allow");
+        assert_eq!(readonly_shell["policy_tool_name"], "read_file");
 
         let denied = gateway
             .handle_message(JsonRpcRequest {
@@ -2554,7 +2583,7 @@ mod tests {
                 params: Some(json!({
                     "name": "statewright_adapter_post_tool",
                     "arguments": {
-                        "tool_name": "read_file",
+                        "tool_name": "Read",
                         "tool_input": {"path": "src/lib.rs"},
                         "tool_response": "contents",
                         "is_error": false
@@ -2564,7 +2593,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(tool_result_json(posted)["iteration"], 1);
+        let posted = tool_result_json(posted);
+        assert_eq!(posted["iteration"], 1);
+        assert_eq!(posted["policy_tool_name"], "read_file");
 
         let stopped = gateway
             .handle_message(JsonRpcRequest {

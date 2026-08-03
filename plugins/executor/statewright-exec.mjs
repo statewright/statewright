@@ -125,7 +125,8 @@ export function resolvePluginsRoot(options) {
   } catch {
     throw new Error(`Statewright plugins root does not exist: ${resolve(requested)}`);
   }
-  const adapterPath = join(root, options.host);
+  const adapterDirectory = options.host === "claude" ? "claude-code" : options.host;
+  const adapterPath = join(root, adapterDirectory);
   try {
     if (!statSync(adapterPath).isDirectory()) throw new Error("not a directory");
   } catch {
@@ -392,6 +393,8 @@ export async function main(argv = process.argv.slice(2)) {
     adapterBridge = await new AdapterBridge(client, {
       executorId,
       deliveryActive: verifiedDeliveryOwner,
+      host: options.host,
+      telemetry,
     }).start();
     const session = {
       workflow: options.workflow,

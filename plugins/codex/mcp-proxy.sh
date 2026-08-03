@@ -3,10 +3,33 @@
 # Used as `type: "command"` MCP server in plugin .mcp.json
 # No OAuth, no static auth headers — reads key dynamically from ~/.statewright/api_key
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Executor-owned runs keep the remote credential and workflow session in the
+# host-neutral executor. Forward MCP before starting standalone telemetry or
+# deriving an independent client identity.
+if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
+      --data-binary "$line" 2>/dev/null || true)
+    case "$method" in notifications/*) continue ;; esac
+    if [ -n "$response" ]; then
+      printf '%s\n' "$response"
+    else
+      id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
+      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright executor bridge unavailable."},"id":%s}\n' "$id"
+    fi
+  done
+  exit 0
+fi
+
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"

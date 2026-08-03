@@ -40,7 +40,9 @@ node_modules/
 site/node_modules/
 site/dist/
 plugins/pi/node_modules/
+plugins/pi/node_modules
 plugins/omx/node_modules/
+plugins/opencode/node_modules
 self-hosted/ui/node_modules/
 self-hosted/ui/dist/
 self-hosted/ui/test-results/

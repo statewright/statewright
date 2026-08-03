@@ -24,6 +24,7 @@ async function invokeProxy(line, environment) {
 
 test("bridge authenticates adapters and preserves one executor identity", async () => {
   const calls = [];
+  const telemetry = [];
   const client = {
     async request(method, params = {}) {
       calls.push({ method, params });
@@ -45,10 +46,20 @@ test("bridge authenticates adapters and preserves one executor identity", async 
         };
       }
       if (name === "statewright_adapter_pre_tool") {
-        return { decision: "allow", additional_context: "checkpoint" };
+        return {
+          decision: "allow",
+          policy_tool_name: "Read",
+          state: "implementing",
+          additional_context: "checkpoint",
+        };
       }
       if (name === "statewright_adapter_post_tool") {
-        return { previous_state: "implementing", state: "testing", completed: false };
+        return {
+          policy_tool_name: "Read",
+          previous_state: "implementing",
+          state: "testing",
+          completed: false,
+        };
       }
       return { decision: "block", reason: "workflow is not final" };
     },
@@ -57,6 +68,8 @@ test("bridge authenticates adapters and preserves one executor identity", async 
     executorId: "executor-1",
     deliveryActive: true,
     token: "test-token",
+    host: "pi",
+    telemetry: async (event, fields) => telemetry.push({ event, fields }),
   }).start();
 
   try {
@@ -93,6 +106,31 @@ test("bridge authenticates adapters and preserves one executor identity", async 
         is_error: false,
       },
     });
+    assert.deepEqual(telemetry, [
+      {
+        event: "executor_adapter_pre_tool",
+        fields: {
+          host: "pi",
+          tool_name: "Read",
+          policy_tool_name: "Read",
+          decision: "allow",
+          state: "implementing",
+        },
+      },
+      {
+        event: "executor_adapter_post_tool",
+        fields: {
+          host: "pi",
+          tool_name: "Read",
+          policy_tool_name: "Read",
+          state: "testing",
+          previous_state: "implementing",
+          transition: "implementing => testing",
+          completed: false,
+          is_error: false,
+        },
+      },
+    ]);
 
     const mcp = await (await fetch(`${bridge.url}/mcp`, {
       method: "POST",

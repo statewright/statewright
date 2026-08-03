@@ -39,6 +39,7 @@ test("hosts use the strongest available workflow routing boundary", () => {
 
   const pi = buildHostLaunch({ ...base, host: "pi" }, state);
   assert.deepEqual(pi.args.slice(0, 2), ["--session-id", "session-1"]);
+  assert.ok(pi.args.includes("--no-extensions"));
   assert.ok(pi.args.includes("openai/gpt-5.6-terra"));
   assert.ok(pi.args.includes("medium"));
   assert.ok(pi.args.includes("/statewright/plugins/pi/src/index.ts"));
@@ -59,6 +60,12 @@ test("hosts use the strongest available workflow routing boundary", () => {
   const omx = buildHostLaunch({ ...base, host: "omx" }, state);
   assert.ok(omx.args.includes("gpt-5.6-terra"));
   assert.ok(omx.args.some((arg) => arg.includes("model_reasoning_effort")));
+  assert.ok(!omx.args.includes("--plugin-dir"));
+  assert.ok(omx.args.includes('mcp_servers.statewright.command="bash"'));
+  assert.ok(omx.args.some((arg) => arg.includes("plugins/executor/mcp-proxy.sh")));
+  assert.ok(omx.args.includes(
+    'mcp_servers.statewright.env_vars=["STATEWRIGHT_ADAPTER_URL","STATEWRIGHT_ADAPTER_TOKEN"]',
+  ));
 });
 
 test("Cursor sessions are executor-owned and resumable", async () => {
@@ -74,6 +81,14 @@ test("Cursor sessions are executor-owned and resumable", async () => {
   });
   assert.equal(id, "chat_123");
   assert.deepEqual(calls[0].slice(0, 2), ["cursor-agent", ["create-chat"]]);
+  const keychainError = new Error("SecItemCopyMatching failed -25300");
+  keychainError.stdout = "9b6abd72-de88-41dc-8c05-685c3bbae4a4\n";
+  assert.equal(
+    await prepareHostSession({ ...base, host: "cursor" }, "fallback", async () => {
+      throw keychainError;
+    }),
+    "9b6abd72-de88-41dc-8c05-685c3bbae4a4",
+  );
   assert.equal(
     await prepareHostSession({ ...base, host: "pi" }, "pi-session"),
     "pi-session",

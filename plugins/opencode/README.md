@@ -2,7 +2,19 @@
 
 State machine guardrails for opencode. TypeScript plugin using opencode's native plugin API.
 
-## Setup
+## Executor setup
+
+Launch OpenCode through the shared executor:
+
+```bash
+node plugins/executor/statewright-exec.mjs \
+  --host opencode --workflow bugfix --cwd "$PWD" -- \
+  "Fix the staging credential mismatch"
+```
+
+The executor injects the plugin and a loopback Statewright MCP server through `OPENCODE_CONFIG_CONTENT`. OpenCode does not receive the remote API key. The plugin applies the state's provider/model and reasoning variant to outgoing messages, enforces tool policy, reports results to the executor, and uses `session.prompt` to continue a nonfinal workflow in the same OpenCode session.
+
+## Standalone setup
 
 1. Build the gateway: `cargo install statewright-gateway`
 
@@ -40,16 +52,9 @@ State machine guardrails for opencode. TypeScript plugin using opencode's native
 - `tool.execute.before` — queries gateway, throws to block unauthorized tools
 - `tool.execute.after` — increments iteration, detects transitions, shows toast
 - `session.created` — shows current state in TUI toast
-- `session.idle` — shows completion status
+- `session.idle` — stops at final/approval states or continues the active workflow in the same session
+- `chat.message` — applies the current state model and reasoning variant
 
-## Differences from Claude Code Plugin
+## Capability notes
 
-| Feature | Claude Code | opencode |
-|---|---|---|
-| State injection | UserPromptSubmit (user channel) | session.created (toast) |
-| Tool blocking | PreToolUse JSON deny | tool.execute.before throw |
-| Transition display | additionalContext → Claude reads | tui.toast.show |
-| Checkpoint prompt | UserPromptSubmit convention | No equivalent — tool output only |
-| Stop behavior | Blocks only for a cached approval gate | `session.idle` prompts review when pending; otherwise advises continuation |
-
-The main gap: opencode has no `UserPromptSubmit` equivalent, so the steering convention ("report transitions in this format") cannot be injected via the high-trust user message channel. Transition reporting relies on the model seeing the `statewright_get_state` tool response and the toast messages.
+OpenCode has no Claude-style `UserPromptSubmit` hook. Statewright therefore injects state context through the first prompt and subsequent same-session continuation prompts, while toasts provide operator visibility. Tool blocking and model routing are native and enforced; they are not advisory.

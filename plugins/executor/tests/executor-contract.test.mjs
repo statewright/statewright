@@ -40,11 +40,13 @@ test("executor validates an explicit plugins root before host launch", async () 
   const directory = await mkdtemp(join(tmpdir(), "statewright-plugins-test-"));
   try {
     await mkdir(join(directory, "pi"));
+    await mkdir(join(directory, "claude-code"));
     assert.equal(resolvePluginsRoot({ host: "pi", pluginsRoot: directory }), await realpath(directory));
-    assert.throws(
-      () => resolvePluginsRoot({ host: "claude", pluginsRoot: directory }),
-      /claude adapter was not found/,
+    assert.equal(
+      resolvePluginsRoot({ host: "claude", pluginsRoot: directory }),
+      await realpath(directory),
     );
+    assert.throws(() => resolvePluginsRoot({ host: "omx", pluginsRoot: directory }), /omx adapter/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

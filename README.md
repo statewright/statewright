@@ -92,13 +92,13 @@ Three layers, each independently useful:
 
 2. **Agent binary** (`crates/cli`, binary: `sw-agent`) — Direct-to-Ollama agent executor. Loads a workflow, runs the LLM in a constrained loop, enforces tool access, and streams structured JSONL events. Supports per-state model routing via `--config`, and single-state execution via `--state` (the TUI or MCP gateway orchestrates, `sw-agent` executes one state at a time and exits).
 
-3. **Plugin layer** (`crates/mcp-gateway` + `plugins/`) — MCP gateway that integrates with coding agents (Claude Code, Codex, Pi, etc.). When you activate a workflow, hooks enforce tool restrictions per state. The model sees 5 tools instead of 30. It gets clear instructions for the current phase and transitions when conditions are met. The `statewright_run_agent` MCP tool spawns the Rust binary for states that benefit from direct Ollama execution.
+3. **Executor and plugin layer** (`plugins/executor` + `crates/mcp-gateway` + `plugins/`) — One executor owns the workflow session, credentials, isolated delivery, telemetry, and host lifecycle. Thin host adapters translate native tool hooks and model-routing controls for Pi, Claude Code, OpenCode, Cursor, and OMX. Codex uses the same delivery core through its app-server adapter. The `statewright_run_agent` MCP tool remains available for states that benefit from direct Ollama execution.
 
 The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface that spawns `sw-agent` as a subprocess and renders its JSONL event stream in real time. It handles keyboard input, demo mode, and fixture selection.
 
 ### Per-state model routing
 
-States can specify which model to use via the `model` field. A `default_model` in `meta` applies to states without an explicit override. Clients that support programmatic model switching (Pi, the Rust harness) enforce this; others treat it as advisory.
+States can specify which model to use via the `model` field. A `default_model` in `meta` applies to states without an explicit override. The executor uses the strongest deterministic boundary each host exposes: Pi and OpenCode switch live, Claude Code and Cursor resume the same session after a route change, OMX applies the route at startup, and the Codex app-server adapter routes each turn.
 
 ```json
 {
@@ -205,26 +205,26 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 ## Supported agents
 
-**Hard** enforcement means tool calls are intercepted at the hook layer before execution. **Advisory** means rules are injected into context but the model isn't prevented from ignoring them.
+**Hard** enforcement means tool calls are intercepted before execution. **Live**, **resume**, and **startup** describe when a host can apply a state model route. Launch non-Codex hosts through [`statewright-exec`](plugins/executor/) when the workflow requires isolated delivery or executor-owned routing.
 
-| Agent | Integration | Enforcement |
-|-------|------------|-------------|
-| [Claude Code](plugins/claude-code/) | Hooks + MCP | Hard |
-| [Codex](plugins/codex/) | Hooks + MCP | Hard |
-| [Oh My Codex](plugins/omx/) | Hooks + MCP | Hard |
-| [Pi](plugins/pi/) | TypeScript extension | Hard* |
-| [opencode](plugins/opencode/) | TypeScript plugin | Hard (alpha) |
-| [Cursor](plugins/cursor/) | MCP + rules | Advisory |
+| Agent | Executor integration | Tool enforcement | Route boundary |
+|-------|----------------------|------------------|----------------|
+| [Claude Code](plugins/claude-code/) | Hooks + executor MCP bridge | Hard | Resume same session |
+| [Codex](plugins/codex/) | App server + hooks + shared delivery core | Hard | Live per turn |
+| [Oh My Codex](plugins/omx/) | Native hooks + executor MCP bridge | Hard | Startup |
+| [Pi](plugins/pi/) | Native extension + executor MCP bridge | Hard* | Live |
+| [OpenCode](plugins/opencode/) | Native plugin + executor MCP bridge | Hard | Live |
+| [Cursor](plugins/cursor/) | Native hooks + executor MCP bridge | Hard in executor mode | Resume same chat |
 
 *\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
 
-### Isolated Codex delivery
+### Isolated delivery
 
-The Codex adapter can create clean multi-repository worktrees before a task
+The shared executor can create clean multi-repository worktrees before a task
 starts, then run project-owned Taskfile hooks for preview preparation,
-deployment, validation, promotion, and cleanup. Statewright pins the hook
-bundle, limits its environment, and binds deploy and validation evidence to the
-exact source fingerprint. See the
+deployment, validation, promotion, and cleanup. Codex and the other executor
+hosts use the same pinned delivery core. Statewright limits the hook environment
+and binds deploy and validation evidence to the exact source fingerprint. See the
 [isolated delivery guide](plugins/codex/docs/isolated-delivery.md).
 
 ### MCP tools
@@ -269,7 +269,7 @@ The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, em
 
 - Requires MCP support in the agent (or hooks for non-MCP agents like Codex)
 - Workflow definitions are authored by hand, though agents can generate them via `statewright_create_workflow`
-- Cursor enforcement is advisory, not hard. MCP alone can't gate tool calls in Cursor's architecture
+- Standalone Cursor MCP/rules mode remains advisory. `statewright-exec --host cursor` uses Cursor hooks for hard enforcement and resumes the same chat across route changes.
 - Research results are from a 5-task SWE-bench subset, not the full 2294-instance benchmark
 - If a workflow is too restrictive, the agent gets stuck. `statewright_deactivate` is the escape hatch
 

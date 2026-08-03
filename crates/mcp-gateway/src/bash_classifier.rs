@@ -123,6 +123,46 @@ pub fn check_against_allowed(command: &str, allowed_tools: &[String]) -> Result<
     Ok(())
 }
 
+/// Return the workflow capabilities needed by a strictly read-only shell command.
+///
+/// This is narrower than general Bash admission: unknown commands, shell expansion,
+/// redirects, environment assignments, network access, and every write/destructive
+/// class fail closed instead of inheriting the broad `Bash` capability.
+pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
+    if command.trim().is_empty()
+        || command
+            .chars()
+            .any(|character| ['\n', '\r', '<', '>', '`'].contains(&character))
+        || command.contains("$(")
+    {
+        return None;
+    }
+
+    let mut capabilities = Vec::new();
+    for segment in split_segments(command) {
+        let segment = segment.trim();
+        let first = segment.split_whitespace().next()?;
+        if first.contains('=') {
+            return None;
+        }
+        let capability = match classify_segment(segment) {
+            OpClass::FileRead | OpClass::GitRead => "Read",
+            OpClass::ContentSearch => "Grep",
+            OpClass::FileSearch => "Glob",
+            OpClass::Passthrough => readonly_passthrough_capability(segment)?,
+            OpClass::FileWrite
+            | OpClass::FileModify
+            | OpClass::Destructive
+            | OpClass::Network
+            | OpClass::GitWrite => return None,
+        };
+        capabilities.push(capability);
+    }
+    capabilities.sort_unstable();
+    capabilities.dedup();
+    (!capabilities.is_empty()).then_some(capabilities)
+}
+
 /// Match one simple command against an allowed token prefix.
 ///
 /// An entry such as `cargo test` permits `cargo test -p statewright-engine`, but
@@ -183,6 +223,18 @@ fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
         tokens.push(current);
     }
     Some(tokens)
+}
+
+fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
+    let tokens = simple_command_tokens(segment)?;
+    let executable = tokens.first()?.rsplit('/').next()?;
+    match executable {
+        "ls" | "pwd" | "stat" | "file" | "wc" | "du" | "dirname" | "basename" | "realpath"
+        | "jq" | "cut" | "tr" | "sort" | "uniq" | "which" | "true" | "false" | "sed" | "awk"
+        | "gawk" => Some("Read"),
+        "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
+        _ => None,
+    }
 }
 
 /// Split a command string on `&&`, `||`, `;`, and `|` (single pipe).
@@ -749,5 +801,20 @@ mod tests {
             "cargo test"
         ));
         assert!(!matches_allowed_command("cargo testbed", "cargo test"));
+    }
+
+    #[test]
+    fn readonly_capabilities_reuse_command_classification_without_bash_escalation() {
+        assert_eq!(
+            readonly_capabilities("sed -n '1,12p' README.md"),
+            Some(vec!["Read"]),
+        );
+        assert_eq!(
+            readonly_capabilities("cat README.md | rg Statewright"),
+            Some(vec!["Grep", "Read"]),
+        );
+        assert_eq!(readonly_capabilities("printf x > marker.txt"), None);
+        assert_eq!(readonly_capabilities("python3 -c 'print(1)'"), None);
+        assert_eq!(readonly_capabilities("rm marker.txt"), None);
     }
 }

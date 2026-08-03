@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Agent interfaces for headless TUI testing
+# Agent interfaces for terminal-backed TUI testing
 # Each agent gets a spawn function that returns a session name
 
 HT="${HT_BIN:-$(which ht-terminal 2>/dev/null || echo "$HOME/bin/ht-terminal")}"
@@ -59,6 +59,36 @@ spawn_codex() {
     codex -q "$prompt" \
     --full-auto \
     -C "$workdir" 2>&1 | jq -r '.id // empty' 2>/dev/null
+  echo "$name"
+}
+
+spawn_statewright_codex() {
+  local name="$1" prompt="$2" workdir="$3" workflow="$4"
+  local run_id="$5" config_path="$6" telemetry_path="$7"
+  local launcher="$SCRIPT_DIR/../../plugins/codex/scripts/statewright-codex.mjs"
+  local command
+  printf -v command '%q ' \
+    env \
+    STATEWRIGHT_GATEWAY_URL="$STAGING_GW" \
+    STATEWRIGHT_PB_URL="$STAGING_PB" \
+    STATEWRIGHT_API_KEY="$STAGING_KEY" \
+    STATEWRIGHT_TELEMETRY_URL="$STAGING_PB/api/gateway/telemetry/events" \
+    STATEWRIGHT_NO_UPDATE_CHECK=1 \
+    node "$launcher" \
+    --workflow "$workflow" \
+    --cwd "$workdir" \
+    --delivery-config "$config_path" \
+    --delivery-run-id "$run_id" \
+    --fallback-model gpt-5.6-terra \
+    --fallback-effort medium \
+    --approval-policy never \
+    --approvals-reviewer auto_review \
+    --sandbox workspace-write \
+    --telemetry-path "$telemetry_path" \
+    -- "$prompt"
+  tmux kill-session -t "$name" 2>/dev/null || true
+  tmux new-session -d -s "$name" -x 160 -y 50 -c "$workdir" "$command"
+  tmux set-option -t "$name" remain-on-exit on >/dev/null
   echo "$name"
 }
 
@@ -155,11 +185,24 @@ spawn_omx_exec() {
 
 agent_view() {
   local name="$1"
-  $HT view "$name" 2>/dev/null
+  if tmux has-session -t "$name" 2>/dev/null; then
+    tmux capture-pane -p -t "$name" -S -2000 2>/dev/null
+  else
+    $HT view "$name" 2>/dev/null
+  fi
 }
 
 agent_wait() {
   local name="$1" text="$2" timeout="${3:-30}"
+  if tmux has-session -t "$name" 2>/dev/null; then
+    local elapsed=0
+    while [ "$elapsed" -lt "$timeout" ]; do
+      agent_view "$name" | grep -q "$text" && return 0
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    return 1
+  fi
   $HT wait "$name" --wait-text "$text" --timeout "${timeout}s" 2>/dev/null
 }
 
@@ -170,6 +213,10 @@ agent_send() {
 
 agent_stop() {
   local name="$1"
-  $HT stop "$name" 2>/dev/null
-  $HT remove "$name" 2>/dev/null
+  if tmux has-session -t "$name" 2>/dev/null; then
+    tmux kill-session -t "$name" 2>/dev/null
+  else
+    $HT stop "$name" 2>/dev/null
+    $HT remove "$name" 2>/dev/null
+  fi
 }

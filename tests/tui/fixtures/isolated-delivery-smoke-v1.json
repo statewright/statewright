@@ -1,0 +1,73 @@
+{
+  "id": "isolated-delivery-smoke-v1",
+  "initial": "implement",
+  "meta": {
+    "version": 1,
+    "task_type": "test",
+    "danger_level": "safe",
+    "requires_human_approval": false,
+    "capture_output": true,
+    "immutable": false,
+    "failure_states": ["blocked"],
+    "workspace": {
+      "version": 1,
+      "mode": "git_worktree",
+      "required": true,
+      "cleanup": "never"
+    },
+    "preview": {
+      "version": 1,
+      "mode": "taskfile",
+      "required": true,
+      "prepare_state": "preview_deploy",
+      "deploy_state": "preview_deploy",
+      "validate_state": "preview_validate"
+    }
+  },
+  "states": {
+    "implement": {
+      "instructions": "Change RESULT.txt from TODO to exactly DELIVERED, run task test, inspect the diff, and transition IMPLEMENTED. Do not modify any other file.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
+      "allowed_commands": ["cat RESULT.txt", "git status", "git diff", "task test"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "medium",
+      "max_iterations": 12,
+      "safe_next": "blocked",
+      "on": {
+        "IMPLEMENTED": "preview_deploy",
+        "BLOCKED": "blocked"
+      }
+    },
+    "preview_deploy": {
+      "instructions": "The trusted adapter has prepared and deployed the exact isolated-worktree fingerprint. Inspect Statewright state, then transition PREVIEW_READY.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "low",
+      "max_iterations": 4,
+      "safe_next": "blocked",
+      "on": {
+        "PREVIEW_READY": "preview_validate",
+        "BLOCKED": "blocked"
+      }
+    },
+    "preview_validate": {
+      "instructions": "The trusted adapter has validated the deployed fingerprint. Inspect Statewright state, then transition VALIDATED.",
+      "allowed_tools": ["Read", "Grep", "Glob"],
+      "model": "gpt-5.6-terra",
+      "thinking_level": "low",
+      "max_iterations": 4,
+      "safe_next": "blocked",
+      "on": {
+        "VALIDATED": "completed",
+        "BLOCKED": "blocked"
+      }
+    },
+    "completed": {
+      "type": "final"
+    },
+    "blocked": {
+      "type": "final"
+    }
+  },
+  "guards": {}
+}

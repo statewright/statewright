@@ -139,6 +139,44 @@ assert_transition_event() {
   fi
 }
 
+assert_file_exact() {
+  local path="$1" expected="$2" label="$3"
+  TOTAL_COUNT=$((TOTAL_COUNT + 1))
+  local actual=""
+  [ -f "$path" ] && actual=$(cat "$path")
+  if [ "$actual" = "$expected" ]; then
+    echo "  PASS: $label"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "  FAIL: $label (expected '$expected', got '$actual')"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+assert_file_contains() {
+  local path="$1" pattern="$2" label="$3"
+  TOTAL_COUNT=$((TOTAL_COUNT + 1))
+  if [ -f "$path" ] && grep -q "$pattern" "$path"; then
+    echo "  PASS: $label"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "  FAIL: $label (expected '$pattern' in $path)"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
+assert_json() {
+  local json="$1" filter="$2" label="$3"
+  TOTAL_COUNT=$((TOTAL_COUNT + 1))
+  if printf '%s' "$json" | jq -e "$filter" >/dev/null 2>&1; then
+    echo "  PASS: $label"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "  FAIL: $label (jq assertion failed: $filter)"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+}
+
 report() {
   echo ""
   echo "=== Results: $PASS_COUNT passed, $FAIL_COUNT failed, $TOTAL_COUNT total ==="

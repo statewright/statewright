@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Statewright TUI E2E Test Harness
-# Spawns real agent TUIs via headless-terminal, runs scenarios, verifies DB artifacts
+# Spawns real agent terminals, runs scenarios, and verifies durable artifacts.
 #
 # Usage:
 #   ./harness.sh                    # run all scenarios against claude
@@ -36,8 +36,13 @@ echo "Agent: $AGENT"
 echo "Gateway: $STAGING_GW"
 echo ""
 
-# Check ht
-if ! command -v "$HT" &>/dev/null; then
+# Scenario 11 uses a real, attachable tmux session. Legacy scenarios still use ht-terminal.
+if [[ "$SCENARIO_FILTER" == *"11"* ]]; then
+  if ! command -v tmux &>/dev/null; then
+    echo "ERROR: tmux is required for scenario 11"
+    exit 1
+  fi
+elif ! command -v "$HT" &>/dev/null; then
   echo "ERROR: headless-terminal (ht) not found at $HT"
   echo "Install: brew install montanaflynn/tap/ht"
   echo "  or: curl -L https://github.com/montanaflynn/headless-terminal/releases/latest/..."
@@ -64,11 +69,19 @@ echo ""
 cleanup() {
   echo ""
   echo "Cleaning up..."
+  if declare -F cleanup_delivery_scenario >/dev/null; then
+    cleanup_delivery_scenario
+  fi
   # Stop any running ht sessions
-  for name in $($HT list 2>/dev/null | jq -r '.[].name // empty' 2>/dev/null); do
+  for name in $($HT list 2>/dev/null | jq -r '(.sessions // .)[]?.name // empty' 2>/dev/null); do
     if [[ "$name" == sw-* ]]; then
       $HT stop "$name" 2>/dev/null || true
       $HT remove "$name" 2>/dev/null || true
+    fi
+  done
+  for name in $(tmux list-sessions -F '#S' 2>/dev/null); do
+    if [[ "$name" == sw-* ]]; then
+      tmux kill-session -t "$name" 2>/dev/null || true
     fi
   done
   teardown_fixture

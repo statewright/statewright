@@ -86,6 +86,7 @@ function telemetryTokenUsage(value) {
   value = value || {}
   return {
     input_tokens: telemetryNumber(value.input_tokens),
+    cache_write_input_tokens: telemetryNumber(value.cache_write_input_tokens),
     cached_input_tokens: telemetryNumber(value.cached_input_tokens),
     output_tokens: telemetryNumber(value.output_tokens),
     reasoning_output_tokens: telemetryNumber(value.reasoning_output_tokens),

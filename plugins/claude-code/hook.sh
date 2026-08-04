@@ -99,7 +99,7 @@ project_claude_transcript_usage() {
       --state-file "$CACHE_FILE" \
       --epoch-file "$PROJECT_DIR/.state_epoch" \
       --ledger-file "$PROJECT_DIR/.claude_transcript_usage.json" \
-      >/dev/null 2>>"$STATEWRIGHT_DIR/logs/claude-telemetry.log" || true
+      >>"$STATEWRIGHT_DIR/logs/claude-telemetry.log" 2>&1 || true
 }
 
 clear_session_telemetry_state() {
@@ -869,6 +869,10 @@ case "$ENDPOINT" in
     # SessionEnd is the first lifecycle hook where that provider-exact usage
     # can be projected before session-scoped bookkeeping is removed.
     mkdir -p "$STATEWRIGHT_DIR/logs"
+    project_claude_transcript_usage
+    # The terminal assistant row can flush immediately after the first
+    # projection attempt. The ledger makes this bounded retry idempotent.
+    sleep 1
     project_claude_transcript_usage
     clear_session_telemetry_state
     exit 0

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 
 const EMPTY_USAGE = Object.freeze({
   input_tokens: 0,
+  cache_write_input_tokens: 0,
   cached_input_tokens: 0,
   output_tokens: 0,
   reasoning_output_tokens: 0,
@@ -23,6 +24,7 @@ function normalizedUsage(usage = {}) {
   const output = number(usage.output_tokens);
   return {
     input_tokens: input,
+    cache_write_input_tokens: cacheWrite,
     cached_input_tokens: cached,
     output_tokens: output,
     reasoning_output_tokens: 0,
@@ -199,8 +201,12 @@ function parseArgs(argv) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  projectClaudeTranscriptUsage(parseArgs(process.argv.slice(2))).catch((error) => {
-    process.stderr.write(`[statewright] Claude transcript telemetry: ${error.message}\n`);
-    process.exitCode = 1;
-  });
+  projectClaudeTranscriptUsage(parseArgs(process.argv.slice(2)))
+    .then((result) => {
+      process.stdout.write(`${JSON.stringify({ projected: result.projected === true, reason: result.reason ?? "" })}\n`);
+    })
+    .catch((error) => {
+      process.stderr.write(`[statewright] Claude transcript telemetry: ${error.message}\n`);
+      process.exitCode = 1;
+    });
 }

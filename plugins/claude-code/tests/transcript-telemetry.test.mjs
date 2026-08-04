@@ -53,7 +53,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     assert.equal(first.projected, true);
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].events[0].token_usage_delta, {
-      input_tokens: 11, cached_input_tokens: 3, output_tokens: 5, reasoning_output_tokens: 0, total_tokens: 21,
+      input_tokens: 11, cache_write_input_tokens: 2, cached_input_tokens: 3, output_tokens: 5, reasoning_output_tokens: 0, total_tokens: 21,
     });
     assert.equal(requests[0].events[0].state_budget.state_epoch, 3);
     assert.equal(requests[0].events[0].thread_id, "swc_session");
@@ -63,7 +63,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     const second = await projectClaudeTranscriptUsage(options);
     assert.equal(second.projected, true);
     assert.deepEqual(requests[1].events[0].state_budget.token_usage, {
-      input_tokens: 18, cached_input_tokens: 4, output_tokens: 7, reasoning_output_tokens: 0, total_tokens: 31,
+      input_tokens: 18, cache_write_input_tokens: 2, cached_input_tokens: 4, output_tokens: 7, reasoning_output_tokens: 0, total_tokens: 31,
     });
 
     await writeFile(stateFile, JSON.stringify({
@@ -76,7 +76,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     assert.equal(requests[2].events[0].state, "completed");
     assert.equal(requests[2].events[0].state_budget.state_epoch, 4);
     assert.deepEqual(requests[2].events[0].token_usage_delta, {
-      input_tokens: 2, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 3,
+      input_tokens: 2, cache_write_input_tokens: 0, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 3,
     });
     assert.doesNotMatch(await readFile(ledgerFile, "utf8"), /assistant content|tool_result|prompt/i);
   } finally {

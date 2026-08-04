@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   isStateBoundaryItem,
   normalizeCatalog,
@@ -8,6 +10,7 @@ import {
   resolveStateRoute,
 } from "./model-routing.mjs";
 import { StateBudgetLedger } from "./token-budget.mjs";
+import { BindingLedger } from "./local-telemetry-agent.mjs";
 
 class NotificationQueue {
   constructor() {
@@ -39,6 +42,53 @@ function stateSummary(state) {
   };
 }
 
+function nativeTelemetryEndpoint() {
+  return process.env.STATEWRIGHT_TELEMETRY_URL ?? "http://127.0.0.1:4318";
+}
+
+function nativeTelemetryDataDir() {
+  return process.env.STATEWRIGHT_TELEMETRY_DIR ??
+    join(homedir(), ".statewright", "telemetry", "native-codex");
+}
+
+export function nativeOtelStateBinding({ thread, workflow, state, stateEpoch, effectiveAt }) {
+  if (!thread?.id || !state?.run_id || !state?.state || !stateEpoch) return null;
+  return {
+    conversation_id: thread.id,
+    root_session_id: thread.id,
+    run_id: state.run_id,
+    workflow,
+    state: state.state,
+    state_epoch: stateEpoch,
+    effective_at: effectiveAt,
+  };
+}
+
+export async function recordNativeOtelStateBinding(binding, {
+  endpoint = nativeTelemetryEndpoint(),
+  dataDir = nativeTelemetryDataDir(),
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (!binding) return { status: "skipped", reason: "missing_authoritative_state" };
+  try {
+    const response = await fetchImpl(`${endpoint.replace(/\/$/, "")}/v1/state-bindings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(binding),
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (response.ok) return { status: "receiver" };
+  } catch {
+    // Persist below so a temporarily unavailable local receiver cannot lose attribution.
+  }
+  try {
+    new BindingLedger(join(dataDir, "bindings.jsonl")).append(binding);
+    return { status: "durable_fallback" };
+  } catch (error) {
+    return { status: "failed", error: String(error?.message ?? error).slice(0, 240) };
+  }
+}
+
 export class StatewrightCodexOrchestrator extends EventEmitter {
   constructor({
     client,
@@ -57,6 +107,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     maxIdleTurns = 3,
     transportSessionId = null,
     telemetry = async () => {},
+    nativeOtelBinder = recordNativeOtelStateBinding,
     deliveryController = null,
     deliveryBootstrap = null,
     runtimeUsageControlToken = process.env.STATEWRIGHT_USAGE_CONTROL_TOKEN ?? null,
@@ -80,6 +131,7 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     this.maxIdleTurns = maxIdleTurns;
     this.transportSessionId = transportSessionId;
     this.telemetry = telemetry;
+    this.nativeOtelBinder = nativeOtelBinder;
     this.deliveryController = deliveryController;
     this.deliveryBootstrap = deliveryBootstrap;
     this.runtimeUsageControlToken = runtimeUsageControlToken;
@@ -351,10 +403,27 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
   async observeStateBudget(state) {
     if (this.budgetLedger.state === (state?.state ?? null)) return;
     const snapshot = this.budgetLedger.enterState(state);
+    const nativeBinding = nativeOtelStateBinding({
+      thread: this.thread,
+      workflow: this.workflow,
+      state,
+      stateEpoch: snapshot.state_epoch,
+      effectiveAt: new Date().toISOString(),
+    });
+    const nativeBindingResult = await this.nativeOtelBinder(nativeBinding);
     await this.telemetry("state_budget_started", {
       thread_id: this.thread.id,
       state: state?.state ?? null,
       state_budget: snapshot,
+    });
+    await this.telemetry("native_otel_state_binding", {
+      thread_id: this.thread.id,
+      run_id: state?.run_id ?? null,
+      state: state?.state ?? null,
+      state_epoch: snapshot.state_epoch,
+      status: nativeBindingResult.status,
+      reason: nativeBindingResult.reason ?? null,
+      error: nativeBindingResult.error ?? null,
     });
     try {
       const stateUsage = await this.getUsage();

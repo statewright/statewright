@@ -24,18 +24,21 @@ class FakeClient extends EventEmitter {
     this.states = [
       {
         state: "discover",
+        run_id: "run-1",
         is_final: false,
         model: "openai-codex/gpt-5.6-sol",
         thinking_level: "max",
       },
       {
         state: "build",
+        run_id: "run-1",
         is_final: false,
         model: "openai-codex/gpt-5.6-luna",
         thinking_level: "medium",
       },
       {
         state: "done",
+        run_id: "run-1",
         is_final: true,
         model: null,
         thinking_level: null,
@@ -184,6 +187,7 @@ class FakeClient extends EventEmitter {
 test("the adapter cuts turns at state transitions and applies each state route", async () => {
   const client = new FakeClient();
   const telemetry = [];
+  const nativeBindings = [];
   const stdout = new BufferWriter();
   const stderr = new BufferWriter();
   const orchestrator = new StatewrightCodexOrchestrator({
@@ -194,6 +198,10 @@ test("the adapter cuts turns at state transitions and applies each state route",
     fallbackModel: "luna",
     fallbackEffort: "medium",
     telemetry: async (event, fields) => telemetry.push({ event, ...fields }),
+    nativeOtelBinder: async (binding) => {
+      nativeBindings.push(binding);
+      return { status: "receiver" };
+    },
     runtimeUsageControlToken: "test-control-token",
     transportSessionId: "br_codex_test",
     stdout,
@@ -216,6 +224,31 @@ test("the adapter cuts turns at state transitions and applies each state route",
   );
   assert.equal(telemetry.filter((entry) => entry.event === "state_boundary").length, 3);
   assert.equal(telemetry.filter((entry) => entry.event === "state_budget_started").length, 2);
+  assert.deepEqual(nativeBindings, [
+    {
+      conversation_id: "thread-1",
+      root_session_id: "thread-1",
+      run_id: "run-1",
+      workflow: "rugged-sdlc",
+      state: "discover",
+      state_epoch: 1,
+      effective_at: nativeBindings[0].effective_at,
+    },
+    {
+      conversation_id: "thread-1",
+      root_session_id: "thread-1",
+      run_id: "run-1",
+      workflow: "rugged-sdlc",
+      state: "build",
+      state_epoch: 2,
+      effective_at: nativeBindings[1].effective_at,
+    },
+  ]);
+  assert.ok(nativeBindings.every((binding) => !Number.isNaN(Date.parse(binding.effective_at))));
+  assert.equal(
+    telemetry.filter((entry) => entry.event === "native_otel_state_binding" && entry.status === "receiver").length,
+    2,
+  );
   const usage = telemetry.filter((entry) => entry.event === "token_usage");
   assert.equal(usage.length, 2);
   assert.equal(usage.at(-1).state_budget.session_token_usage.total_tokens, 30);

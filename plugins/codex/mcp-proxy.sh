@@ -32,9 +32,37 @@ PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 KEY_FILE="${HOME}/.statewright/api_key"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
+TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
+
+# This is intentionally opt-in through .statewright/config.json. Codex reads
+# its OTel configuration at startup, so a newly created exporter applies after
+# the next Codex restart. Existing user-owned [otel] configuration is untouched.
+bootstrap_native_token_telemetry() {
+  command -v node >/dev/null 2>&1 || return 0
+  [ -f "$TELEMETRY_BOOTSTRAP" ] || return 0
+  mkdir -p "$TELEMETRY_DIR"
+  local result action
+  result=$(node "$TELEMETRY_BOOTSTRAP" 2>/dev/null || true)
+  action=$(printf '%s' "$result" | jq -r '.action // empty' 2>/dev/null || true)
+  case "$action" in
+    created)
+      printf '%s\n' 'restart-required' > "$TELEMETRY_DIR/otel-restart-required"
+      chmod 600 "$TELEMETRY_DIR/otel-restart-required"
+      ;;
+    already_enabled|disabled)
+      rm -f "$TELEMETRY_DIR/otel-restart-required"
+      ;;
+    conflict)
+      printf '%s\n' 'user-otel-config-conflict' > "$TELEMETRY_DIR/otel-config-conflict"
+      chmod 600 "$TELEMETRY_DIR/otel-config-conflict"
+      ;;
+  esac
+}
+
+bootstrap_native_token_telemetry
 
 CLIENT_ID=$(statewright_client_id codex)
 SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")

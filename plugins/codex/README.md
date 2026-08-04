@@ -44,10 +44,19 @@ Codex does not propagate parent environment variables to MCP child processes by 
 
 ### Exact native token telemetry
 
-Native Codex hooks expose tool metadata but not provider token totals. To add
-exact per-response totals, merge
-[`config/otel-token-telemetry.toml`](config/otel-token-telemetry.toml) into
-`~/.codex/config.toml`, then restart Codex.
+Native Codex hooks expose tool metadata but not provider token totals. Exact
+per-response totals are explicitly enabled per project in
+`.statewright/config.json`:
+
+```json
+{
+  "telemetry": { "codex": { "native_tokens": true } }
+}
+```
+
+At the next Statewright MCP startup, the plugin creates its loopback-only OTel
+exporter if Codex has no existing `[otel]` table. Restart Codex once to apply
+the exporter. Statewright never overwrites an existing user-owned OTel setup.
 
 The MCP proxy supervises a loopback-only OTLP/HTTP JSON receiver at
 `127.0.0.1:4318`. Codex sends no API key to that receiver. The receiver keeps

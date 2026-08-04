@@ -186,7 +186,11 @@ export class StatewrightCodexOrchestrator extends EventEmitter {
     if (gate) return gate;
     this.route = await this.selectRoute(state);
 
-    let nextPrompt = this.prompt;
+    let nextPrompt =
+      "Statewright has already activated this workflow through the launcher-owned MCP server. " +
+      "Do not infer its status from the surrounding session. First call statewright_get_state, then follow " +
+      "that state and use its allowed transition tools.\n\n" +
+      this.prompt;
     let idleTurns = 0;
     while (true) {
       this.reportRoute(state, this.route);

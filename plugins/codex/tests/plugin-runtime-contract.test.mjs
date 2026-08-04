@@ -11,16 +11,17 @@ async function readJson(path) {
 }
 
 test("plugin hooks resolve commands from the Codex-provided plugin root", async () => {
-  for (const path of ["hooks.json", "hooks/hooks.json"]) {
-    const config = await readJson(path);
-    const commands = Object.values(config.hooks)
-      .flatMap((entries) => entries)
-      .flatMap((entry) => entry.hooks)
-      .map((hook) => hook.command);
-    assert.ok(commands.length > 0);
-    assert.ok(commands.every((command) => command.includes("$PLUGIN_ROOT/")));
-    assert.ok(commands.every((command) => !command.includes("dirname $0")));
-  }
+  const manifest = await readJson(".codex-plugin/plugin.json");
+  assert.equal(manifest.hooks, "./hooks/hooks.json");
+
+  const config = await readJson(manifest.hooks);
+  const commands = Object.values(config.hooks)
+    .flatMap((entries) => entries)
+    .flatMap((entry) => entry.hooks)
+    .map((hook) => hook.command);
+  assert.ok(commands.length > 0);
+  assert.ok(commands.every((command) => command.includes("$PLUGIN_ROOT/")));
+  assert.ok(commands.every((command) => !command.includes("dirname $0")));
 });
 
 test("plugin MCP transport receives the executor bridge identity", async () => {

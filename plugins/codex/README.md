@@ -45,8 +45,9 @@ Codex does not propagate parent environment variables to MCP child processes by 
 ### Exact native token telemetry
 
 Native Codex hooks expose tool metadata but not provider token totals. Exact
-per-response totals are explicitly enabled per project in
-`.statewright/config.json`:
+per-response totals are explicitly enabled in Statewright configuration. Put
+this in `~/.statewright/config.json` (or in a project
+`.statewright/config.json` when the adapter is launched from that project):
 
 ```json
 {

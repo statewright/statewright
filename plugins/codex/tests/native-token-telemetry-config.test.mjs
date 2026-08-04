@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   bootstrapCodexOtelConfig,
@@ -17,14 +19,14 @@ async function projectConfig(root, value) {
 
 test("native Codex telemetry is dormant without explicit Statewright configuration", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-otel-config-"));
-  const result = await nativeCodexTokenTelemetryEnabled(root);
+  const result = await nativeCodexTokenTelemetryEnabled(root, { homeDirectory: root });
   assert.deepEqual(result, { enabled: false, configPath: null });
 });
 
 test("native Codex telemetry inherits an explicit project opt-in", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-otel-config-"));
   await projectConfig(root, { telemetry: { codex: { native_tokens: true } } });
-  const result = await nativeCodexTokenTelemetryEnabled(join(root, "src", "nested"));
+  const result = await nativeCodexTokenTelemetryEnabled(join(root, "src", "nested"), { homeDirectory: root });
   assert.equal(result.enabled, true);
   assert.match(result.configPath, /[.]statewright[\\/]config[.]json$/);
 });
@@ -49,10 +51,27 @@ test("explicit project opt-in bootstraps Codex configuration once", async () => 
   const root = await mkdtemp(join(tmpdir(), "statewright-otel-config-"));
   const codexConfigPath = join(root, "codex", "config.toml");
   await projectConfig(root, { telemetry: { codex: { native_tokens: true } } });
-  const created = await bootstrapCodexOtelConfig({ projectDirectory: root, codexConfigPath });
+  const created = await bootstrapCodexOtelConfig({ projectDirectory: root, codexConfigPath, homeDirectory: root });
   assert.equal(created.action, "created");
   assert.equal(created.restart_required, true);
-  const repeated = await bootstrapCodexOtelConfig({ projectDirectory: root, codexConfigPath });
+  const repeated = await bootstrapCodexOtelConfig({ projectDirectory: root, codexConfigPath, homeDirectory: root });
   assert.equal(repeated.action, "already_enabled");
   assert.equal((await readFile(codexConfigPath, "utf8")).includes("log_user_prompt = false"), true);
+});
+
+test("bootstrap CLI never prints the Codex configuration body", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-otel-config-"));
+  const codexConfigPath = join(root, "codex", "config.toml");
+  await projectConfig(root, { telemetry: { codex: { native_tokens: true } } });
+  await mkdir(join(root, "codex"), { recursive: true });
+  await writeFile(codexConfigPath, 'model = "sentinel-private-setting"\n');
+  const output = execFileSync(process.execPath, [
+    fileURLToPath(new URL("../scripts/bootstrap-native-token-telemetry.mjs", import.meta.url)),
+  ], {
+    cwd: root,
+    env: { ...process.env, CODEX_CONFIG_PATH: codexConfigPath, HOME: root },
+    encoding: "utf8",
+  });
+  assert.equal(output.includes("sentinel-private-setting"), false);
+  assert.equal(JSON.parse(output).action, "created");
 });

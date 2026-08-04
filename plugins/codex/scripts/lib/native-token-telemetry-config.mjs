@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 
 export const STATEWRIGHT_CONFIG_RELATIVE_PATH = join(".statewright", "config.json");
 export const CODEX_OTEL_FRAGMENT = `# Managed by Statewright. Set .statewright/config.json telemetry.codex.native_tokens to false to stop managing this exporter.\n[otel]\nenvironment = "statewright"\nlog_user_prompt = false\nexporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = {} } }\ntrace_exporter = "none"\nmetrics_exporter = "none"\n`;
@@ -16,19 +17,21 @@ async function isFile(path) {
   }
 }
 
-export async function findStatewrightConfig(startDirectory) {
+export async function findStatewrightConfig(startDirectory, { homeDirectory = homedir() } = {}) {
   let directory = resolve(startDirectory);
   while (true) {
     const configPath = join(directory, STATEWRIGHT_CONFIG_RELATIVE_PATH);
     if (await isFile(configPath)) return configPath;
     const parent = dirname(directory);
-    if (parent === directory) return null;
+    if (parent === directory) break;
     directory = parent;
   }
+  const userConfigPath = join(homeDirectory, ".statewright", "config.json");
+  return (await isFile(userConfigPath)) ? userConfigPath : null;
 }
 
-export async function nativeCodexTokenTelemetryEnabled(startDirectory) {
-  const configPath = await findStatewrightConfig(startDirectory);
+export async function nativeCodexTokenTelemetryEnabled(startDirectory, options) {
+  const configPath = await findStatewrightConfig(startDirectory, options);
   if (!configPath) return { enabled: false, configPath: null };
   try {
     const raw = JSON.parse(await readFile(configPath, "utf8"));
@@ -63,8 +66,8 @@ export function planCodexOtelConfig(existing, enabled) {
   return { action: "conflict", content: existing };
 }
 
-export async function bootstrapCodexOtelConfig({ projectDirectory, codexConfigPath }) {
-  const configuration = await nativeCodexTokenTelemetryEnabled(projectDirectory);
+export async function bootstrapCodexOtelConfig({ projectDirectory, codexConfigPath, homeDirectory }) {
+  const configuration = await nativeCodexTokenTelemetryEnabled(projectDirectory, { homeDirectory });
   if (!configuration.enabled) return { ...configuration, action: "disabled" };
 
   let existing = "";

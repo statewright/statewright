@@ -71,7 +71,17 @@ impl Gateway {
     /// lookup after activation.
     fn current_state_snapshot(&self, capture_output: bool) -> Option<serde_json::Value> {
         let session = self.session_manager.get(&self.session_id)?;
-        let mut state = custom_tools::handle_get_state(&session);
+        Some(self.enrich_state_snapshot(custom_tools::handle_get_state(&session), capture_output))
+    }
+
+    /// Attach gateway-owned metadata to every state response. Plugins use this
+    /// as the authoritative identity for telemetry and must not infer it from
+    /// host-specific tool payloads.
+    fn enrich_state_snapshot(
+        &self,
+        mut state: serde_json::Value,
+        capture_output: bool,
+    ) -> serde_json::Value {
         if let Some(run_id) = &self.current_run_id {
             state["run_id"] = json!(run_id);
         }
@@ -79,7 +89,7 @@ impl Gateway {
             state["workflow"] = json!(workflow);
         }
         state["capture_output"] = json!(capture_output);
-        Some(state)
+        state
     }
 
     /// Set the API key fingerprint for session ownership verification.
@@ -1459,6 +1469,12 @@ impl Gateway {
                         return JsonRpcResponse::error(id, -32600, "No active session");
                     }
                 };
+                let capture = session
+                    .definition
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.capture_output)
+                    .unwrap_or(false);
 
                 // Fork awareness: if _fork active, return current branch state
                 if let Some(fork) = session.context.get("_fork") {
@@ -1496,6 +1512,7 @@ impl Gateway {
                     if let Some(branch_session) = self.session_manager.get(branch_key) {
                         let mut state = custom_tools::handle_get_state(&branch_session);
                         state["fork"] = fork_info;
+                        let state = self.enrich_state_snapshot(state, capture);
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -1513,6 +1530,7 @@ impl Gateway {
                         );
                         let mut state = custom_tools::handle_get_state(&session);
                         state["fork"] = fork_info;
+                        let state = self.enrich_state_snapshot(state, capture);
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -1523,17 +1541,8 @@ impl Gateway {
                     }
                 }
 
-                let mut state = custom_tools::handle_get_state(&session);
-                if let Some(ref run_id) = self.current_run_id {
-                    state["run_id"] = json!(run_id);
-                }
-                let capture = session
-                    .definition
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.capture_output)
-                    .unwrap_or(false);
-                state["capture_output"] = json!(capture);
+                let state =
+                    self.enrich_state_snapshot(custom_tools::handle_get_state(&session), capture);
 
                 JsonRpcResponse::success(
                     id,
@@ -2884,7 +2893,9 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let result = resp.result.unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("planning"));
+        let state: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(state["state"], "planning");
+        assert_eq!(state["workflow"], "test");
     }
 
     #[tokio::test]

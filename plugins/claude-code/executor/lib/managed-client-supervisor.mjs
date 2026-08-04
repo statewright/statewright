@@ -83,9 +83,9 @@ export function buildRoutedArgs({ host, originalArgs, request }) {
       "resume", request.session_id, CONTINUATION_PROMPT];
   }
   if (host === "claude") {
-    // Plain --resume retains the previous model. A fork retains history but
-    // starts a fresh session, so its explicit --model is authoritative.
-    return [...base, "--resume", request.session_id, "--fork-session", "--model", model, CONTINUATION_PROMPT];
+    // Claude supports an explicit model override while resuming. Preserve the
+    // session so its plugin/MCP registration survives a routed model change.
+    return [...base, "--resume", request.session_id, "--model", model, CONTINUATION_PROMPT];
   }
   throw new Error(`Unsupported managed client host '${host}'.`);
 }

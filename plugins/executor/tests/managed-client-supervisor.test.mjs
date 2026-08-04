@@ -43,9 +43,9 @@ test("Codex restart replaces an existing resume invocation", () => {
   ]);
 });
 
-test("Claude restart forks history because plain resume preserves its old model", () => {
+test("Claude restart resumes the session with the requested model", () => {
   const args = buildRoutedArgs({ host: "claude", originalArgs: ["--permission-mode", "auto", "--model", "sonnet"], request: { session_id: "session-2", model: "anthropic/claude-opus-4-6", effort: "high" } });
-  assert.deepEqual(args.slice(0, 8), ["--permission-mode", "auto", "--resume", "session-2", "--fork-session", "--model", "claude-opus-4-6", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
+  assert.deepEqual(args.slice(0, 7), ["--permission-mode", "auto", "--resume", "session-2", "--model", "claude-opus-4-6", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
   assert.ok(!args.includes("--effort"));
 });
 
@@ -61,7 +61,7 @@ test("managed supervisor consumes Claude route requests and restarts the same ch
     }), 0);
     const callsText = await readFile(calls, "utf8");
     assert.match(callsText, /^--permission-mode auto/m);
-    assert.match(callsText, /--permission-mode auto --resume claude-session-3 --fork-session --model claude-opus-4-6/);
+    assert.match(callsText, /--permission-mode auto --resume claude-session-3 --model claude-opus-4-6/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

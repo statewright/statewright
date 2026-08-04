@@ -65,6 +65,19 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     assert.deepEqual(requests[1].events[0].state_budget.token_usage, {
       input_tokens: 18, cached_input_tokens: 4, output_tokens: 7, reasoning_output_tokens: 0, total_tokens: 31,
     });
+
+    await writeFile(stateFile, JSON.stringify({
+      run_id: "run-1", workflow: "agentic-engineering-default-v1", state: "completed", context_budget_bytes: 64000,
+    }));
+    await writeFile(epochFile, "4\n");
+    await writeFile(transcript, `${transcriptRecord("message-3", 2, 0, 0, 1, "2026-08-04T00:02:00.000Z")}\n`, { flag: "a" });
+    const terminal = await projectClaudeTranscriptUsage(options);
+    assert.equal(terminal.projected, true);
+    assert.equal(requests[2].events[0].state, "completed");
+    assert.equal(requests[2].events[0].state_budget.state_epoch, 4);
+    assert.deepEqual(requests[2].events[0].token_usage_delta, {
+      input_tokens: 2, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0, total_tokens: 3,
+    });
     assert.doesNotMatch(await readFile(ledgerFile, "utf8"), /assistant content|tool_result|prompt/i);
   } finally {
     globalThis.fetch = originalFetch;

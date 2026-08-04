@@ -102,6 +102,10 @@ project_claude_transcript_usage() {
       >/dev/null 2>>"$STATEWRIGHT_DIR/logs/claude-telemetry.log" || true
 }
 
+clear_session_telemetry_state() {
+  rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
+}
+
 # ============================================================
 # HOOK HANDLERS
 # ============================================================
@@ -190,7 +194,9 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
+      mkdir -p "$STATEWRIGHT_DIR/logs"
+      project_claude_transcript_usage
+      clear_session_telemetry_state
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
@@ -621,7 +627,8 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
+            # Keep the final state cache until Stop. Claude writes its final
+            # assistant message after this hook, and it belongs to this epoch.
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -663,6 +670,13 @@ case "$ENDPOINT" in
     fi
     mkdir -p "$STATEWRIGHT_DIR/logs"
     project_claude_transcript_usage
+
+    if [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ]; then
+      STOP_FINAL=$(jq -r '.is_final // false' "$CACHE_FILE" 2>/dev/null || true)
+      if [ "$STOP_FINAL" = "true" ]; then
+        clear_session_telemetry_state
+      fi
+    fi
 
     # Review gates are surfaced from PostToolUse. Stop must not suppress the
     # host UI's prompt or an external review integration.

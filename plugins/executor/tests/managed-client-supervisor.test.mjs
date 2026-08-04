@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { bindManagedClientIdentity, resolveManagedClientIdentity } from "../lib/managed-client-identity.mjs";
-import { bootstrapManagedClients, buildRoutedArgs, managedClientEnabled, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "../lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, buildRoutedArgs, managedClientEnabled, routeClaudeModel, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -47,6 +47,14 @@ test("Claude restart resumes the session with the requested model", () => {
   const args = buildRoutedArgs({ host: "claude", originalArgs: ["--permission-mode", "auto", "--model", "sonnet"], request: { session_id: "session-2", model: "anthropic/claude-opus-4-6", effort: "high" } });
   assert.deepEqual(args.slice(0, 7), ["--permission-mode", "auto", "--resume", "session-2", "--model", "claude-opus-4-6", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
   assert.ok(!args.includes("--effort"));
+});
+
+test("Claude translates semantic OpenAI routes to native Claude aliases", () => {
+  assert.equal(routeClaudeModel("openai/gpt-5.6-sol"), "opus");
+  assert.equal(routeClaudeModel("openai-codex/gpt-5.6-terra"), "sonnet");
+  assert.equal(routeClaudeModel("openai/gpt-5.6-luna"), "haiku");
+  assert.equal(routeClaudeModel("anthropic/claude-opus-4-6"), "claude-opus-4-6");
+  assert.throws(() => routeClaudeModel("openai/gpt-5.7"), /cannot translate OpenAI model/);
 });
 
 test("managed supervisor consumes Claude route requests and restarts the same child only", async () => {

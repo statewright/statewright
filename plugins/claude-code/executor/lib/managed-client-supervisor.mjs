@@ -36,6 +36,18 @@ function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "");
 }
 
+export function routeClaudeModel(model) {
+  const value = String(model ?? "").trim();
+  if (!value) throw new Error("Statewright Claude routing request is missing model.");
+  if (/^anthropic\//i.test(value)) return routeModel(value);
+  const semantic = value.toLowerCase().match(/(?:^|[-_/])(sol|terra|luna)$/)?.[1];
+  if (semantic) return { sol: "opus", terra: "sonnet", luna: "haiku" }[semantic];
+  if (/^(?:openai|openai-codex)\//i.test(value)) {
+    throw new Error(`Statewright cannot translate OpenAI model '${value}' to Claude; use a sol, terra, or luna route.`);
+  }
+  return value;
+}
+
 async function createManagedMcpBridge({ environment, clientId, bridgeFactory }) {
   const apiKey = await resolveApiKey(environment);
   const bridge = await bridgeFactory({
@@ -74,7 +86,7 @@ function stripRouteArgs(args, host) {
 
 export function buildRoutedArgs({ host, originalArgs, request }) {
   const base = stripRouteArgs(originalArgs, host);
-  const model = routeModel(request.model);
+  const model = host === "claude" ? routeClaudeModel(request.model) : routeModel(request.model);
   if (!request.session_id) throw new Error("Statewright routing request is missing session_id.");
   if (!model) throw new Error("Statewright routing request is missing model.");
   if (host === "codex") {

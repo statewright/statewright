@@ -124,15 +124,20 @@ The executor owns the remote credential and MCP session. Claude Code receives an
 The plugin setup installs the managed Claude client automatically. Restart the
 terminal once after installing or updating the plugin, then keep using `claude`
 normally. The shim stays dormant unless a workflow is loaded. At a route boundary it owns
-and restarts only its own CLI child, forks the saved conversation, and starts
-the fork with the workflow model. Forking is required because the
-[Claude model configuration reference](https://code.claude.com/docs/en/model-config)
-documents that plain `--resume` preserves the prior session model; the
-[CLI reference](https://code.claude.com/docs/en/cli-usage) documents both
-`--fork-session` and `--model`. Claude does not expose a documented CLI
+and restarts only its own CLI child, resumes the same conversation with the workflow
+model, and preserves the plugin MCP session. Claude does not expose a documented CLI
 reasoning-effort flag, so Statewright applies the state model and records the
 effort as advisory for this host. Disable with
 `statewright-managed-client --disable --host claude`.
+
+### Model translation
+
+Claude routes semantic model tiers across providers so a workflow can remain
+portable. The Claude adapter translates `sol` to `opus`, `terra` to `sonnet`,
+and `luna` to `haiku`. For example, `openai/gpt-5.6-sol` launches Claude with
+the native `opus` alias. Native `anthropic/...` model IDs pass through unchanged.
+An OpenAI model without one of these semantic suffixes is rejected rather than
+silently sent to Claude as an invalid model name.
 
 To remove managed routing entirely, run
 `statewright-managed-client --uninstall`. It removes only Statewright's shims

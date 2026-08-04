@@ -93,6 +93,23 @@ is reported as unattributed rather than mislabeled as reasoning.
 
 ## Usage
 
+### Interactive model routing
+
+For a terminal Codex session that must enforce per-state model and reasoning
+routes, start the Statewright-owned supervisor instead of `codex` directly:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-codex-tui.mjs \
+  --workflow agentic-engineering-default-v1 -- "Implement the task."
+```
+
+It starts the initial session, observes every successful Statewright boundary,
+then terminates and resumes the same Codex session with the next state's
+configured `--model` and `model_reasoning_effort`. This is intentionally a
+process boundary: Codex cannot change a model inside an already-running TUI
+turn. Regular plugin activation continues to enforce state and tools, but does
+not claim to switch the current TUI's model.
+
 Start a workflow via MCP tool:
 
 ```

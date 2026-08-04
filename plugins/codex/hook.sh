@@ -269,6 +269,27 @@ emit_native_telemetry() {
     -d "$payload" >/dev/null 2>&1 || true
 }
 
+# A Statewright-owned interactive supervisor watches this directory. The hook
+# never kills Codex itself; it only persists the authoritative next route.
+request_interactive_route_restart() {
+  local state_json="$1"
+  local control_dir model effort request_path
+  control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
+  [ -n "$control_dir" ] || return 0
+  model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
+  effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
+  mkdir -p "$control_dir" || return 0
+  request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.json"
+  jq -n \
+    --arg session_id "$HOOK_SESSION" \
+    --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" \
+    --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    '{session_id: $session_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' \
+    > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
+}
+
 reset_native_telemetry_state() {
   local epoch="$1"
   local effective_at
@@ -608,6 +629,7 @@ case "$ENDPOINT" in
         [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
         [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
         emit_native_telemetry "workflow_loaded" "$STATE_JSON"
+        request_interactive_route_restart "$STATE_JSON"
         # Tell the agent to start working immediately
         INIT_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
         INIT_TOOLS=$(echo "$STATE_JSON" | jq -r '.allowed_tools | join(", ")' 2>/dev/null || true)
@@ -643,6 +665,7 @@ case "$ENDPOINT" in
             emit_native_telemetry "workflow_completed" "$STATE_JSON"
           else
             emit_native_telemetry "state_boundary" "$STATE_JSON"
+            request_interactive_route_restart "$STATE_JSON"
           fi
 
           if [ "$IS_FORK" = "true" ]; then

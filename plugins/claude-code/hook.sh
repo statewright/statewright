@@ -23,6 +23,7 @@ API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || 
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRANSCRIPT_TELEMETRY="${SCRIPT_DIR}/scripts/transcript-telemetry.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
@@ -79,6 +80,26 @@ adapter_call() {
     args+=(-H 'Content-Type: application/json' --data-binary "$body")
   fi
   curl "${args[@]}" 2>/dev/null
+}
+
+# Project only provider-exact assistant usage metadata from Claude's local
+# transcript. Transcript text, prompts, arguments, and tool results stay local.
+project_claude_transcript_usage() {
+  [ -n "$API_KEY" ] || return 0
+  [ -n "$HOOK_SESSION" ] || return 0
+  [ -f "$CACHE_FILE" ] || return 0
+  [ -f "$PROJECT_DIR/.state_epoch" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  [ -f "$TRANSCRIPT_TELEMETRY" ] || return 0
+  STATEWRIGHT_TELEMETRY_API_KEY="$API_KEY" \
+    STATEWRIGHT_PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}" \
+    node "$TRANSCRIPT_TELEMETRY" \
+      --session-id "$HOOK_SESSION" \
+      --thread-id "$CLIENT_ID" \
+      --state-file "$CACHE_FILE" \
+      --epoch-file "$PROJECT_DIR/.state_epoch" \
+      --ledger-file "$PROJECT_DIR/.claude_transcript_usage.json" \
+      >/dev/null 2>>"$STATEWRIGHT_DIR/logs/claude-telemetry.log" || true
 }
 
 # ============================================================
@@ -169,7 +190,7 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
@@ -410,6 +431,13 @@ case "$ENDPOINT" in
       *statewright_get_state*) SW_ACTION="refresh_cache" ;;
     esac
 
+    # Attribute already-written assistant transcript entries before a control
+    # transition changes the authoritative state cache.
+    if [ -z "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ]; then
+      mkdir -p "$STATEWRIGHT_DIR/logs"
+      project_claude_transcript_usage
+    fi
+
     if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -z "$SW_ACTION" ]; then
       TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
       IS_ERROR=$(echo "$HOOK_INPUT" | jq -r '.is_error // false' 2>/dev/null || echo false)
@@ -502,13 +530,16 @@ case "$ENDPOINT" in
       start)
         # Activate enforcement
         mkdir -p "$PROJECT_DIR"
-        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
         echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
         # Fetch and cache initial state
         STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
         if [ -n "$STATE_JSON" ]; then
           echo "$STATE_JSON" > "$CACHE_FILE"
+          echo "1" > "$PROJECT_DIR/.state_epoch"
         fi
+        mkdir -p "$STATEWRIGHT_DIR/logs"
+        project_claude_transcript_usage
         # Check for capture_output + run_id from tool result
         if [ -n "$TOOL_RESULT" ]; then
           # tool_response is an array of content objects; extract the text, parse as JSON
@@ -531,7 +562,7 @@ case "$ENDPOINT" in
         ;;
       stop)
         # Deactivate enforcement
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
         ;;
       transition)
         # Read previous state before refreshing
@@ -553,6 +584,9 @@ case "$ENDPOINT" in
           echo "$STATE_JSON" > "$CACHE_FILE"
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
+          PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
+          case "$PREV_EPOCH" in ''|*[!0-9]*) PREV_EPOCH=0 ;; esac
+          echo $((PREV_EPOCH + 1)) > "$PROJECT_DIR/.state_epoch"
 
           if [ "$IS_FORK" = "true" ]; then
             # Fork transition — show branches and agent coordination instructions
@@ -587,7 +621,7 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -627,6 +661,9 @@ case "$ENDPOINT" in
       fi
       exit 0
     fi
+    mkdir -p "$STATEWRIGHT_DIR/logs"
+    project_claude_transcript_usage
+
     # Review gates are surfaced from PostToolUse. Stop must not suppress the
     # host UI's prompt or an external review integration.
     exit 0
@@ -659,7 +696,7 @@ case "$ENDPOINT" in
 
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
       exit 0
     fi
 

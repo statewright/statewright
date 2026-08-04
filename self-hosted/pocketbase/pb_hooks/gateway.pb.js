@@ -93,7 +93,13 @@ function telemetryTokenUsage(value) {
   }
 }
 
-function findOrCreateTelemetryRun(app, sessionId, workflow) {
+function findOrCreateTelemetryRun(app, sessionId, workflow, requestedRunId) {
+  if (requestedRunId) {
+    try {
+      var requested = app.findRecordById('workflow_runs', requestedRunId)
+      if (requested.get('session_id') === sessionId) return requested
+    } catch (_) {}
+  }
   try {
     return app.findFirstRecordByFilter('workflow_runs', 'session_id = {:session}', { session: sessionId })
   } catch (_) {
@@ -169,7 +175,7 @@ routerAdd('POST', '/api/gateway/telemetry/events', function (e) {
     var sessionId = telemetryText(event.thread_id, 255)
     if (!eventId || !sessionId) continue
     try { e.app.findFirstRecordByFilter('workflow_usage_events', 'event_id = {:id}', { id: eventId }); continue } catch (_) {}
-    var run = findOrCreateTelemetryRun(e.app, sessionId, event.workflow)
+    var run = findOrCreateTelemetryRun(e.app, sessionId, event.workflow, telemetryText(event.run_id, 255))
     var snapshots = Array.isArray(event.state_usage) ? event.state_usage : [event.state_budget]
     var stateUsage = null
     for (var j = 0; j < snapshots.length; j++) {

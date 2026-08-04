@@ -671,13 +671,6 @@ case "$ENDPOINT" in
     mkdir -p "$STATEWRIGHT_DIR/logs"
     project_claude_transcript_usage
 
-    if [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ]; then
-      STOP_FINAL=$(jq -r '.is_final // false' "$CACHE_FILE" 2>/dev/null || true)
-      if [ "$STOP_FINAL" = "true" ]; then
-        clear_session_telemetry_state
-      fi
-    fi
-
     # Review gates are surfaced from PostToolUse. Stop must not suppress the
     # host UI's prompt or an external review integration.
     exit 0
@@ -868,6 +861,16 @@ case "$ENDPOINT" in
     # Non-Bash tool that IS in allowed_tools — auto-allow
     # (Read, Edit, Write, Grep, Glob, etc.)
     jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+    exit 0
+    ;;
+
+  session-end)
+    # Claude appends its terminal assistant transcript record after Stop.
+    # SessionEnd is the first lifecycle hook where that provider-exact usage
+    # can be projected before session-scoped bookkeeping is removed.
+    mkdir -p "$STATEWRIGHT_DIR/logs"
+    project_claude_transcript_usage
+    clear_session_telemetry_state
     exit 0
     ;;
 

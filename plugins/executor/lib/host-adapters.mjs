@@ -71,10 +71,16 @@ export function buildHostLaunch(options, state, continuation = false) {
       return { command: options.hostBin ?? "claude", args: withPrompt([...args, ...extra], prompt) };
     }
     case "opencode": {
-      const args = [options.cwd];
+      // The default TUI command hands control to a background server and its
+      // launcher exits. The executor owns the adapter bridge, so use the
+      // foreground interactive runner and keep process lifetime authoritative.
+      const args = ["run", "--interactive", "--dir", options.cwd];
       if (route.model) args.push("--model", route.model);
-      if (prompt) args.push("--prompt", prompt);
-      return { command: options.hostBin ?? "opencode", args: [...args, ...extra] };
+      if (route.effort) args.push("--variant", route.effort);
+      return {
+        command: options.hostBin ?? "opencode",
+        args: withPrompt([...args, ...extra], prompt),
+      };
     }
     case "cursor": {
       const args = [

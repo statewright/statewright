@@ -24,11 +24,29 @@ test("plugin hooks resolve commands from the Codex-provided plugin root", async 
   assert.ok(commands.every((command) => !command.includes("dirname $0")));
 });
 
-test("plugin MCP transport receives the executor bridge identity", async () => {
+test("plugin MCP transport launches from the installed plugin root", async () => {
   const config = await readJson(".mcp.json");
-  assert.deepEqual(config.mcpServers.statewright.env, {
-    STATEWRIGHT_MCP_SESSION_ID: "${STATEWRIGHT_MCP_SESSION_ID}",
-    STATEWRIGHT_ADAPTER_URL: "${STATEWRIGHT_ADAPTER_URL}",
-    STATEWRIGHT_ADAPTER_TOKEN: "${STATEWRIGHT_ADAPTER_TOKEN}",
-  });
+  const server = config.mcpServers.statewright;
+
+  assert.equal(server.command, "bash");
+  assert.deepEqual(server.args, ["./mcp-proxy.sh"]);
+  assert.equal(server.cwd, ".");
+  assert.deepEqual(server.env_vars, [
+    "STATEWRIGHT_GATEWAY_URL",
+    "STATEWRIGHT_PB_URL",
+    "STATEWRIGHT_API_KEY",
+    "STATEWRIGHT_CLIENT_ID",
+    "STATEWRIGHT_BRANCH_SESSION_ID",
+    "STATEWRIGHT_TELEMETRY_DIR",
+    "STATEWRIGHT_TELEMETRY_PORT",
+    "STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY",
+    "STATEWRIGHT_MCP_SESSION_ID",
+    "STATEWRIGHT_ADAPTER_URL",
+    "STATEWRIGHT_ADAPTER_TOKEN",
+  ]);
+  assert.equal(server.env, undefined);
+  assert.ok(
+    !JSON.stringify(server).includes("${"),
+    "Codex does not expand hook-style placeholders in MCP launch fields",
+  );
 });

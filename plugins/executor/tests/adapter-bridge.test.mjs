@@ -75,6 +75,24 @@ test("bridge authenticates adapters and preserves one executor identity", async 
   try {
     assert.equal((await fetch(`${bridge.url}/hooks/state`)).status, 401);
     const headers = { Authorization: "Bearer test-token" };
+    const wrongHost = await fetch(`${bridge.url}/hooks/ready`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin_name: "opencode", plugin_version: "0.3.0" }),
+    });
+    assert.equal(wrongHost.status, 409);
+    assert.equal(bridge.adapterReady, false);
+    const ready = await (await fetch(`${bridge.url}/hooks/ready`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ plugin_name: "pi", plugin_version: "0.3.0" }),
+    })).json();
+    assert.equal(ready.ready, true);
+    assert.equal(await bridge.waitForReady({ timeoutMs: 20 }), true);
+    assert.deepEqual(bridge.adapterIdentity, {
+      pluginName: "pi",
+      pluginVersion: "0.3.0",
+    });
     const state = await (await fetch(`${bridge.url}/hooks/state`, { headers })).json();
     assert.deepEqual(state.executor, {
       active: true,
@@ -107,6 +125,14 @@ test("bridge authenticates adapters and preserves one executor identity", async 
       },
     });
     assert.deepEqual(telemetry, [
+      {
+        event: "executor_adapter_ready",
+        fields: {
+          host: "pi",
+          plugin_name: "pi",
+          plugin_version: "0.3.0",
+        },
+      },
       {
         event: "executor_adapter_pre_tool",
         fields: {
@@ -157,6 +183,46 @@ test("bridge authenticates adapters and preserves one executor identity", async 
     });
     assert.equal(proxied.status, 0, proxied.stderr);
     assert.equal(JSON.parse(proxied.stdout).result.tools[0].name, "statewright_transition");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("bridge reports a bounded, redacted upstream cause instead of a blind 502", async () => {
+  const telemetry = [];
+  const client = {
+    async call() {
+      throw new Error("gateway rejected Bearer secret-token and sw_live_private");
+    },
+  };
+  const bridge = await new AdapterBridge(client, {
+    token: "test-token",
+    host: "opencode",
+    telemetry: async (event, fields) => telemetry.push({ event, fields }),
+  }).start();
+
+  try {
+    const response = await fetch(`${bridge.url}/hooks/pre-tool`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-token",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ tool_name: "read", tool_input: {} }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), {
+      error: "gateway rejected Bearer [redacted] and sw_[redacted]",
+    });
+    assert.deepEqual(telemetry, [{
+      event: "executor_adapter_error",
+      fields: {
+        host: "opencode",
+        method: "POST",
+        route: "/hooks/pre-tool",
+        error: "gateway rejected Bearer [redacted] and sw_[redacted]",
+      },
+    }]);
   } finally {
     await bridge.close();
   }

@@ -2,6 +2,7 @@
   "name": "statewright-opencode",
   "version": "0.3.0",
   "description": "Statewright state machine guardrails for opencode",
+  "type": "module",
   "main": "src/index.ts",
   "license": "Apache-2.0",
   "scripts": {
@@ -11,8 +12,5 @@
   "devDependencies": {
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"
-  },
-  "dependencies": {
-    "@sentry/node": "^10.69.0"
   }
 }

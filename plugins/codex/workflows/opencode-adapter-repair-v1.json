@@ -1,0 +1,71 @@
+{
+  "id": "opencode-adapter-repair-v1",
+  "initial": "triage",
+  "meta": {
+    "version": 1,
+    "task_type": "bugfix",
+    "danger_level": "moderate",
+    "capture_output": true,
+    "immutable": true,
+    "failure_states": ["blocked"]
+  },
+  "states": {
+    "triage": {
+      "instructions": "Reproduce or characterize the intermittent OpenCode adapter pre-tool HTTP 502 from existing evidence and focused tests. Inspect the OpenCode hook, executor bridge, remote client, and gateway dispatch path. Do not edit. Produce a compact evidence packet that distinguishes the primary defect from downstream symptoms.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
+      "allowed_commands": ["git status", "git log", "git show", "git diff", "rg", "sed", "node --test plugins/executor/tests/adapter-bridge.test.mjs", "npm --prefix plugins/opencode test"],
+      "model": "openai/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "context_budget_bytes": 24000,
+      "max_iterations": 10,
+      "safe_next": "blocked",
+      "on": {"EVIDENCE_READY": "diagnose", "BLOCKED": "blocked"}
+    },
+    "diagnose": {
+      "instructions": "Analyze only the compact triage evidence. Identify the causal defect, explain why the successful isolated probe does not disprove the observed OpenCode failure, and produce one bounded implementation plan with regression tests. Do not edit or broaden discovery.",
+      "allowed_tools": ["Read", "Grep"],
+      "model": "openai/gpt-5.6-sol",
+      "thinking_level": "high",
+      "context_budget_bytes": 16000,
+      "max_iterations": 6,
+      "safe_next": "blocked",
+      "on": {"PLAN_READY": "implement", "BLOCKED": "blocked"}
+    },
+    "implement": {
+      "instructions": "Implement only the accepted causal fix and its focused regression tests. Preserve explicit failures; do not add retries, silent fallbacks, weakened policy, or success-after-error behavior. Run focused tests and inspect the diff. If the context budget warning appears, stop discovery, finish the smallest coherent patch, record remaining uncertainty, and transition.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
+      "allowed_commands": ["git status", "git diff", "node --test plugins/executor/tests/adapter-bridge.test.mjs", "node --test plugins/executor/tests/*.test.mjs", "npm --prefix plugins/opencode test"],
+      "model": "openai/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "context_budget_bytes": 32000,
+      "max_iterations": 18,
+      "safe_next": "blocked",
+      "on": {"READY_TO_VERIFY": "verify", "SCOPE_CHANGED": "diagnose", "BLOCKED": "blocked"}
+    },
+    "verify": {
+      "instructions": "Independently run the focused executor and OpenCode plugin tests, inspect the final diff, and verify that a failed pre-tool hook cannot be mistaken for a successful native tool result. Failed or unavailable validation is not success. If the context budget warning appears, stop additional inspection, report the exact completed checks and gaps, and transition.",
+      "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
+      "allowed_commands": ["git status", "git diff", "node --test plugins/executor/tests/adapter-bridge.test.mjs", "node --test plugins/executor/tests/*.test.mjs", "npm --prefix plugins/opencode test"],
+      "model": "openai/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "context_budget_bytes": 24000,
+      "max_iterations": 10,
+      "safe_next": "blocked",
+      "on": {"PASS": "review", "REPAIR": "implement", "BLOCKED": "blocked"}
+    },
+    "review": {
+      "instructions": "Review the bounded diff and validation evidence for causal correctness, session isolation, fail-open behavior, telemetry loss, and accidental weakening of Statewright enforcement. Do not edit. Approve only if the original failure is covered directly. If the context budget warning appears, stop discovery and issue a concise approve, repair, or blocked decision with cited evidence.",
+      "allowed_tools": ["Read", "Grep", "Bash"],
+      "allowed_commands": ["git status", "git diff"],
+      "model": "openai/gpt-5.6-sol",
+      "thinking_level": "high",
+      "context_budget_bytes": 16000,
+      "max_iterations": 6,
+      "safe_next": "blocked",
+      "on": {"APPROVED": "completed", "REPAIR": "implement", "BLOCKED": "blocked"}
+    },
+    "completed": {"type": "final"},
+    "blocked": {"type": "final"}
+  },
+  "guards": {}
+}

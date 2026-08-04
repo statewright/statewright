@@ -3,13 +3,6 @@
  */
 
 import { describe, it, expect, vi } from "vitest"
-import * as Sentry from "@sentry/node"
-
-vi.mock("@sentry/node", () => ({
-  init: vi.fn(),
-  setTag: vi.fn(),
-  setUser: vi.fn(),
-}))
 
 import {
   StatewrightPlugin,
@@ -64,6 +57,26 @@ describe("enforceBeforeTool", () => {
       args: { command: "ghpr list" },
     })).rejects.toThrow("command prefix collision")
     vi.unstubAllGlobals()
+  })
+
+  it("preserves a bounded, redacted adapter failure cause", async () => {
+    vi.stubEnv("STATEWRIGHT_ADAPTER_URL", "http://127.0.0.1:4321")
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => JSON.stringify({
+        error: "upstream rejected Bearer secret-token and sw_live_private",
+      }),
+    }))
+
+    await expect(enforceBeforeTool("4321", {
+      tool: "read",
+      args: { filePath: "README.md" },
+    })).rejects.toThrow(
+      "Adapter pre-tool hook failed with HTTP 502: upstream rejected Bearer [redacted] and sw_[redacted]",
+    )
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   })
 })
 
@@ -155,6 +168,63 @@ describe("OpenCode host contract", () => {
       variant: "medium",
     })
     vi.unstubAllGlobals()
+  })
+
+  it("attests plugin readiness before returning native tool hooks", async () => {
+    vi.stubEnv("STATEWRIGHT_ADAPTER_URL", "http://127.0.0.1:4321")
+    vi.stubEnv("STATEWRIGHT_ADAPTER_TOKEN", "adapter-token")
+    vi.stubEnv("STATEWRIGHT_NO_UPDATE_CHECK", "1")
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ready: true }),
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const hooks = await StatewrightPlugin({
+      client: { tui: { showToast: vi.fn().mockResolvedValue(undefined) } },
+    } as any)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4321/hooks/ready",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ Authorization: "Bearer adapter-token" }),
+        body: JSON.stringify({
+          plugin_name: "opencode",
+          plugin_version: "0.3.0",
+        }),
+      }),
+    )
+    expect(hooks).toHaveProperty("tool.execute.before")
+    expect(hooks).toHaveProperty("tool.execute.after")
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+  })
+
+  it("blocks turns and native tools when executor attestation fails", async () => {
+    vi.stubEnv("STATEWRIGHT_ADAPTER_URL", "http://127.0.0.1:4321")
+    vi.stubEnv("STATEWRIGHT_ADAPTER_TOKEN", "adapter-token")
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: async () => JSON.stringify({ error: "bridge unavailable" }),
+    }))
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+
+    const hooks = await StatewrightPlugin({
+      client: { tui: { showToast: vi.fn().mockResolvedValue(undefined) } },
+    } as any)
+
+    await expect(hooks["chat.message"]({}, {} as any)).rejects.toThrow(
+      "refusing an unguarded OpenCode turn",
+    )
+    await expect(hooks["tool.execute.before"](
+      { tool: "read" } as any,
+      { args: { filePath: "README.md" } },
+    )).rejects.toThrow("refusing an unguarded OpenCode turn")
+    consoleError.mockRestore()
+    vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
   })
 
   it("continues a non-final executor workflow in the same OpenCode session", async () => {
@@ -253,21 +323,5 @@ describe("OpenCode host contract", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(String(fetchMock.mock.calls[0][0])).toContain("/hooks/state")
     vi.unstubAllGlobals()
-  })
-})
-
-describe("Sentry initialization", () => {
-  it("calls Sentry.init with the plugins DSN on module load", () => {
-    expect(Sentry.init).toHaveBeenCalledWith(
-      expect.objectContaining({
-        dsn: expect.stringContaining("glitch.enhasa.cloud/12"),
-        release: expect.stringMatching(/^statewright-opencode@\d+\.\d+\.\d+$/),
-      })
-    )
-  })
-
-  it("sets plugin and platform tags", () => {
-    expect(Sentry.setTag).toHaveBeenCalledWith("plugin", "opencode")
-    expect(Sentry.setTag).toHaveBeenCalledWith("platform", expect.stringMatching(/.+-.+/))
   })
 })

@@ -149,8 +149,14 @@ function sanitizedAgentEnvironment(environment) {
   return safe;
 }
 
-function opencodeEnvironment(environment, pluginsRoot) {
-  const pluginUrl = pathToFileURL(resolve(pluginsRoot, "opencode", "src", "index.ts")).href;
+function opencodeIsolationRoot(executorId) {
+  return join(tmpdir(), `statewright-opencode-${executorId}`);
+}
+
+function opencodeEnvironment(environment, session) {
+  const pluginUrl = pathToFileURL(
+    resolve(session.pluginsRoot, "opencode", "src", "index.ts"),
+  ).href;
   const proxyPath = resolve(EXECUTOR_ROOT, "mcp-proxy.sh");
   let inline = {};
   if (environment.OPENCODE_CONFIG_CONTENT) {
@@ -160,14 +166,49 @@ function opencodeEnvironment(environment, pluginsRoot) {
       throw new Error("OPENCODE_CONFIG_CONTENT must contain valid JSON.");
     }
   }
-  const plugins = Array.isArray(inline.plugin) ? inline.plugin : [];
+
+  // Executor-owned runs must not inherit user/project agents, plugins, prompts,
+  // or routes. Provider and permission settings remain available when callers
+  // deliberately supply them through OPENCODE_CONFIG_CONTENT.
+  const {
+    plugin: _plugin,
+    plugins: _plugins,
+    mcp: _mcp,
+    agent: _agent,
+    mode: _mode,
+    command: _command,
+    instructions: _instructions,
+    default_agent: _defaultAgent,
+    model: _model,
+    small_model: _smallModel,
+    share: _share,
+    autoshare: _autoshare,
+    ...inlineRuntimeConfig
+  } = inline;
+  const isolationRoot = opencodeIsolationRoot(session.executorId);
+  const result = { ...environment };
+  delete result.OPENCODE_CONFIG;
+  delete result.OPENCODE_CONFIG_DIR;
+  delete result.OPENCODE_PURE;
+  // OpenCode's built-in OpenAI auth plugin reads the separate auth store, so
+  // keep default plugins enabled while isolating external config directories.
+  delete result.OPENCODE_DISABLE_DEFAULT_PLUGINS;
+
   return {
-    ...environment,
+    ...result,
+    XDG_CONFIG_HOME: join(isolationRoot, "xdg-config"),
+    OPENCODE_TEST_HOME: join(isolationRoot, "home"),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_DISABLE_CLAUDE_CODE: "1",
+    OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
+    OPENCODE_AUTO_SHARE: "false",
+    STATEWRIGHT_OPENCODE_ISOLATION_ROOT: isolationRoot,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
-      ...inline,
-      plugin: [...new Set([...plugins, pluginUrl])],
+      ...inlineRuntimeConfig,
+      share: "disabled",
+      autoshare: false,
+      plugin: [pluginUrl],
       mcp: {
-        ...(inline.mcp ?? {}),
         statewright: {
           type: "local",
           command: ["bash", proxyPath],
@@ -195,7 +236,7 @@ export function executorAgentEnvironment(environment, session) {
     result.STATEWRIGHT_DELIVERY_MANIFEST = session.workspaceSession.manifestPath;
     result.STATEWRIGHT_EXECUTOR_LEASE = session.leasePath;
   }
-  if (session.host === "opencode") result = opencodeEnvironment(result, session.pluginsRoot);
+  if (session.host === "opencode") result = opencodeEnvironment(result, session);
   return result;
 }
 
@@ -206,6 +247,15 @@ async function waitForChild(child) {
   });
 }
 
+export function assertHostAdapterContract(options) {
+  if (
+    options.host === "opencode"
+    && typeof options.adapterBridge?.waitForReady !== "function"
+  ) {
+    throw new Error("OpenCode execution requires an adapter bridge readiness contract.");
+  }
+}
+
 function stopChild(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGINT");
@@ -214,6 +264,7 @@ function stopChild(child) {
 }
 
 async function observeHost(options) {
+  assertHostAdapterContract(options);
   const {
     client,
     deliveryController,
@@ -239,6 +290,25 @@ async function observeHost(options) {
       env: options.environment,
       stdio: "inherit",
     });
+    const childResult = waitForChild(child);
+
+    if (options.host === "opencode") {
+      const ready = await Promise.race([
+        options.adapterBridge.waitForReady({ timeoutMs: 5_000 }),
+        childResult.then(() => false),
+      ]);
+      if (!ready) {
+        await telemetry("executor_adapter_ready_timeout", {
+          host: options.host,
+          state: state.state,
+        });
+        stopChild(child);
+        await childResult;
+        throw new Error(
+          "OpenCode started without attesting that the Statewright native-tool adapter loaded.",
+        );
+      }
+    }
 
     let observerError = null;
     let polling = false;
@@ -282,7 +352,7 @@ async function observeHost(options) {
       }
     };
     const timer = setInterval(() => poll(), 500);
-    const result = await waitForChild(child);
+    const result = await childResult;
     clearInterval(timer);
     await poll();
     if (observerError) throw observerError;
@@ -360,6 +430,10 @@ export async function main(argv = process.argv.slice(2)) {
 
   try {
     await client.initialize();
+    await telemetry("executor_gateway_connected", {
+      gateway_origin: client.gatewayOrigin,
+    });
+    process.stderr.write(`[statewright] Gateway: ${client.gatewayOrigin}\n`);
     await client.call("statewright_load_workflow", {
       name: options.workflow,
       resume: Boolean(options.resumeWorkflow),
@@ -419,6 +493,7 @@ export async function main(argv = process.argv.slice(2)) {
       hostSessionId,
       initialState,
       client,
+      adapterBridge,
       deliveryController,
       telemetry,
       environment,
@@ -446,6 +521,9 @@ export async function main(argv = process.argv.slice(2)) {
     await adapterBridge?.close();
     lease?.stop();
     if (!workspaceSession) await rm(leasePath, { force: true }).catch(() => {});
+    if (options.host === "opencode") {
+      await rm(opencodeIsolationRoot(executorId), { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 

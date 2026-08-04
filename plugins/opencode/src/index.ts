@@ -9,18 +9,9 @@
  * mcp config, or in --hook-only mode).
  */
 
-import * as Sentry from "@sentry/node"
-
 const PLUGIN_NAME = "opencode"
 const PLUGIN_VERSION = "0.3.0"
-
-Sentry.init({
-  dsn: "https://3c30b803a5b44d74bf9657db7a89f033@glitch.enhasa.cloud/12",
-  release: `statewright-${PLUGIN_NAME}@${PLUGIN_VERSION}`,
-  environment: process.env.NODE_ENV || "production",
-})
-Sentry.setTag("plugin", PLUGIN_NAME)
-Sentry.setTag("platform", `${process.platform}-${process.arch}`)
+const MAX_ADAPTER_ERROR_BYTES = 4 * 1024
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { readFileSync } from "fs"
@@ -35,6 +26,7 @@ interface HookResponse {
   statusMessage?: string
   transition?: string
   completed?: boolean
+  ready?: boolean
 }
 
 export interface StateResponse {
@@ -177,6 +169,23 @@ function adapterBase(value: string): string {
   return /^\d+$/.test(value) ? `http://localhost:${value}` : value.replace(/\/$/, "")
 }
 
+function sanitizeAdapterError(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/\bsw_(?:live|test)_[A-Za-z0-9_-]+\b/g, "sw_[redacted]")
+    .slice(0, MAX_ADAPTER_ERROR_BYTES)
+}
+
+async function adapterErrorDetail(resp: Response): Promise<string | null> {
+  const raw = await resp.text().catch(() => "")
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (typeof parsed?.error === "string") return sanitizeAdapterError(parsed.error)
+  } catch {}
+  return sanitizeAdapterError(raw)
+}
+
 async function hookRequest(
   adapter: string,
   endpoint: string,
@@ -203,7 +212,11 @@ async function hookRequest(
     const resp = await fetch(url, opts)
     if (!resp.ok) {
       if (process.env.STATEWRIGHT_ADAPTER_URL) {
-        throw new Error(`[statewright] Adapter pre/post hook failed with HTTP ${resp.status}.`)
+        const detail = await adapterErrorDetail(resp)
+        throw new Error(
+          `[statewright] Adapter ${endpoint} hook failed with HTTP ${resp.status}`
+          + `${detail ? `: ${detail}` : "."}`,
+        )
       }
       return null
     }
@@ -225,7 +238,11 @@ async function getState(
     })
     if (!resp.ok) {
       if (process.env.STATEWRIGHT_ADAPTER_URL) {
-        throw new Error(`[statewright] Adapter state lookup failed with HTTP ${resp.status}.`)
+        const detail = await adapterErrorDetail(resp)
+        throw new Error(
+          `[statewright] Adapter state lookup failed with HTTP ${resp.status}`
+          + `${detail ? `: ${detail}` : "."}`,
+        )
       }
       return null
     }
@@ -264,7 +281,6 @@ function reportPluginEvent(event = "connect") {
   try {
     const apiKey = readFileSync(join(homedir(), ".statewright", "api_key"), "utf8").trim()
     const pbUrl = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
-    Sentry.setUser({ id: apiKey.slice(0, 8) })
     fetch(`${pbUrl}/api/telemetry/plugin-event`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -397,6 +413,20 @@ function createStatewrightHooks(
   }
 }
 
+function createUnavailableHooks(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  const reject = async () => {
+    throw new Error(
+      `[statewright] Native-tool adapter unavailable; refusing an unguarded OpenCode turn: ${message}`,
+    )
+  }
+  return {
+    "chat.message": reject,
+    "tool.execute.before": reject,
+    "tool.execute.after": async () => {},
+  }
+}
+
 const pluginFactory: Plugin = async ({ client }) => {
   const connection = getAdapterConnection()
   if (!connection) {
@@ -405,6 +435,20 @@ const pluginFactory: Plugin = async ({ client }) => {
   }
 
   console.log("[statewright] Connected to adapter", connection.baseUrl)
+  if (process.env.STATEWRIGHT_ADAPTER_URL) {
+    try {
+      const ready = await hookRequest(connection.baseUrl, "ready", {
+        plugin_name: PLUGIN_NAME,
+        plugin_version: PLUGIN_VERSION,
+      }, connection.token)
+      if (!ready?.ready) {
+        throw new Error("[statewright] Executor adapter did not acknowledge plugin readiness.")
+      }
+    } catch (error) {
+      console.error(error)
+      return createUnavailableHooks(error)
+    }
+  }
   reportPluginEvent("connect")
   return createStatewrightHooks(
     connection.baseUrl,

@@ -46,7 +46,9 @@ test("hosts use the strongest available workflow routing boundary", () => {
   assert.ok(pi.args.includes("/statewright/plugins/pi/src/index.ts"));
 
   const opencode = buildHostLaunch({ ...base, host: "opencode" }, state);
+  assert.deepEqual(opencode.args.slice(0, 4), ["run", "--interactive", "--dir", "/repo"]);
   assert.ok(opencode.args.includes("openai/gpt-5.6-terra"));
+  assert.ok(opencode.args.includes("medium"));
 
   const claude = buildHostLaunch({ ...base, host: "claude" }, state, true);
   assert.ok(claude.args.includes("--resume"));

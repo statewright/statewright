@@ -2,6 +2,14 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MAX_ERROR_BYTES = 4 * 1024;
+
+function boundedError(error) {
+  return String(error?.message ?? error ?? "unknown adapter error")
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/\bsw_(?:live|test)_[A-Za-z0-9_-]+\b/g, "sw_[redacted]")
+    .slice(0, MAX_ERROR_BYTES);
+}
 
 function camelState(raw, executor) {
   return {
@@ -92,6 +100,8 @@ export class AdapterBridge {
     this.activeRequests = 0;
     this.lastRequestAt = 0;
     this.terminalStopObserved = false;
+    this.adapterReady = false;
+    this.adapterIdentity = null;
   }
 
   async record(event, fields = {}) {
@@ -126,6 +136,28 @@ export class AdapterBridge {
           return;
         }
         const body = await requestBody(request);
+        if (url.pathname === "/hooks/ready") {
+          const pluginName = typeof body.plugin_name === "string" ? body.plugin_name : "";
+          const pluginVersion = typeof body.plugin_version === "string" ? body.plugin_version : "";
+          if (!pluginName || !pluginVersion) {
+            json(response, 400, { error: "plugin_name and plugin_version are required" });
+            return;
+          }
+          if (pluginName !== this.host) {
+            json(response, 409, {
+              error: `plugin '${pluginName}' cannot attest for executor host '${this.host}'`,
+            });
+            return;
+          }
+          this.adapterIdentity = { pluginName, pluginVersion };
+          this.adapterReady = true;
+          await this.record("executor_adapter_ready", {
+            plugin_name: pluginName,
+            plugin_version: pluginVersion,
+          });
+          json(response, 200, { ready: true });
+          return;
+        }
         if (url.pathname === "/mcp") {
           const method = body.method;
           const id = body.id ?? null;
@@ -208,7 +240,13 @@ export class AdapterBridge {
         }
         json(response, 404, { error: "not found" });
       } catch (error) {
-        json(response, 502, { error: error.message });
+        const message = boundedError(error);
+        await this.record("executor_adapter_error", {
+          method: request.method ?? null,
+          route: new URL(request.url ?? "/", "http://localhost").pathname,
+          error: message,
+        });
+        json(response, 502, { error: message });
       } finally {
         this.activeRequests -= 1;
         this.lastRequestAt = Date.now();
@@ -243,6 +281,17 @@ export class AdapterBridge {
       await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
     }
     return false;
+  }
+
+  async waitForReady(options = {}) {
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    const pollMs = options.pollMs ?? 25;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (this.adapterReady) return true;
+      await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
+    }
+    return this.adapterReady;
   }
 
   async close() {

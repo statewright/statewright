@@ -164,8 +164,10 @@ start_local_telemetry_agent() {
   release_telemetry_lock
 }
 
-start_local_telemetry_agent
-[ "${STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY:-false}" = "true" ] && exit 0
+if [ "${STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY:-false}" = "true" ]; then
+  start_local_telemetry_agent
+  exit 0
+fi
 
 # --- Tool discovery (defined before main loop) ---
 upload_client_tools() {
@@ -276,16 +278,21 @@ upload_client_tools() {
 while IFS= read -r line; do
   [ -z "$line" ] && continue
 
+  METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
+  ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
+
+  # The stdio proxy owns the MCP transport handshake. Do not make Codex
+  # startup depend on gateway reachability or telemetry supervision.
+  if [ "$METHOD" = "initialize" ]; then
+    echo '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":'"$ID"'}'
+    continue
+  fi
+
   API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 
   if [ -z "$API_KEY" ]; then
-    METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
-    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
-
-    if [ "$METHOD" = "initialize" ]; then
-      echo '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":'"$ID"'}'
-    elif [ "$METHOD" = "tools/list" ]; then
+    if [ "$METHOD" = "tools/list" ]; then
       echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_start","description":"Activate a statewright workflow for this session. Tools will be restricted per state.","inputSchema":{"type":"object","properties":{"workflow":{"type":"string","description":"Workflow name (e.g. bugfix, etl-pipeline, code-review)"}},"required":["workflow"]}},{"name":"statewright_stop","description":"Deactivate the current workflow. All tools become available again.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_state","description":"Get the current workflow state, allowed tools, and available transitions.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_transition","description":"Transition to the next state in the workflow.","inputSchema":{"type":"object","properties":{"event":{"type":"string","description":"Transition event name (e.g. READY, DONE, PASS, FAIL)"}},"required":["event"]}},{"name":"statewright_list_workflows","description":"List all available workflows for this user.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}},{"name":"statewright_pause","description":"Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_status","description":"Get gateway status: active workflow, current state, available workflows.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true in the workflow.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "notifications/initialized" ]; then
       : # notification, no response
@@ -295,11 +302,10 @@ while IFS= read -r line; do
     continue
   fi
 
-  METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
-
   # Notifications: no response needed, trigger side effects
   if [ "$METHOD" = "notifications/initialized" ]; then
     if [ -n "$API_KEY" ]; then
+      start_local_telemetry_agent >/dev/null 2>&1 &
       (upload_client_tools "$API_KEY" &)
     fi
     continue
@@ -308,7 +314,7 @@ while IFS= read -r line; do
   # Handle statewright_search_docs locally (no gateway round-trip)
   TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
   if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
-    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
+    ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
     QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
     if [ -z "$QUERY" ]; then
       echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Missing required parameter: query"}]},"id":'"$ID"'}'
@@ -353,7 +359,7 @@ while IFS= read -r line; do
 
   # Repository artifacts stay local; only bounded index hits are returned.
   if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_references" ]; then
-    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
+    ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
     QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
     LIMIT=$(echo "$line" | jq -r '.params.arguments.limit // 8' 2>/dev/null)
     RESULT=$(node "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
@@ -384,7 +390,7 @@ while IFS= read -r line; do
     fi
     echo "$RESPONSE"
   else
-    ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
+    ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
     echo '{"jsonrpc":"2.0","error":{"code":-2,"message":"Gateway unreachable"},"id":'"$ID"'}'
   fi
 

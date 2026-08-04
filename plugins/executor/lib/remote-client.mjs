@@ -2,6 +2,28 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const MAX_GATEWAY_ERROR_BYTES = 4 * 1024;
+
+function sanitizeGatewayError(value) {
+  return String(value)
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/\bsw_(?:live|test)_[A-Za-z0-9_-]+\b/g, "sw_[redacted]")
+    .slice(0, MAX_GATEWAY_ERROR_BYTES);
+}
+
+async function gatewayErrorDetail(response) {
+  const raw = await response.text().catch(() => "");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.error === "string") return sanitizeGatewayError(parsed.error);
+    if (typeof parsed?.error?.message === "string") {
+      return sanitizeGatewayError(parsed.error.message);
+    }
+  } catch {}
+  return sanitizeGatewayError(raw);
+}
+
 function gatewayEndpoint(value) {
   const base = value.replace(/\/+$/, "");
   return base.endsWith("/mcp") ? base : `${base}/mcp`;
@@ -17,6 +39,7 @@ export async function resolveApiKey(environment = process.env) {
 export class RemoteStatewrightClient {
   constructor(options) {
     this.endpoint = gatewayEndpoint(options.gatewayUrl);
+    this.gatewayOrigin = new URL(this.endpoint).origin;
     this.apiKey = options.apiKey;
     this.clientId = options.clientId;
     this.sessionId = options.sessionId;
@@ -72,7 +95,11 @@ export class RemoteStatewrightClient {
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
-      throw new Error(`Statewright gateway ${method} failed with HTTP ${response.status}.`);
+      const detail = await gatewayErrorDetail(response);
+      throw new Error(
+        `Statewright gateway ${method} failed with HTTP ${response.status}`
+        + `${detail ? `: ${detail}` : "."}`,
+      );
     }
     const payload = await response.json();
     if (payload.error) {

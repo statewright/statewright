@@ -78,6 +78,7 @@ test("native Codex hook unwraps structured MCP workflow-load results", async () 
     JSON.stringify(loadedState),
     [{ type: "text", text: JSON.stringify(loadedState) }],
     { content: [{ type: "text", text: JSON.stringify(loadedState) }] },
+    { result: { content: [{ type: "text", text: JSON.stringify(loadedState) }] } },
   ];
 
   for (const [index, tool_response] of responses.entries()) {

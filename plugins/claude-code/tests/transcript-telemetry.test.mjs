@@ -28,6 +28,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
   const session = "session-1";
   const project = join(home, ".claude", "projects", "-tmp-project");
   const stateFile = join(home, "state.json");
+  const runIdFile = join(home, "run-id");
   const epochFile = join(home, "epoch");
   const ledgerFile = join(home, "ledger.json");
   const requests = [];
@@ -48,7 +49,8 @@ test("projects deduplicated exact Claude transcript usage into the active state 
       transcriptRecord("message-1", 11, 2, 3, 5, "2026-08-04T00:00:01.000Z"),
     ].join("\n") + "\n");
 
-    const options = { home, sessionId: session, threadId: "swc_session", stateFile, epochFile, ledgerFile, pbUrl: "http://example.test", apiKey: "key" };
+    const options = { home, sessionId: session, threadId: "swc_session", stateFile, runIdFile, epochFile, ledgerFile, pbUrl: "http://example.test", apiKey: "key" };
+    await writeFile(runIdFile, "run-1\n");
     const first = await projectClaudeTranscriptUsage(options);
     assert.equal(first.projected, true);
     assert.equal(requests.length, 1);
@@ -67,12 +69,13 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     });
 
     await writeFile(stateFile, JSON.stringify({
-      run_id: "run-1", workflow: "agentic-engineering-default-v1", state: "completed", context_budget_bytes: 64000,
+      workflow: "agentic-engineering-default-v1", state: "completed", context_budget_bytes: 64000,
     }));
     await writeFile(epochFile, "4\n");
     await writeFile(transcript, `${transcriptRecord("message-3", 2, 0, 0, 1, "2026-08-04T00:02:00.000Z")}\n`, { flag: "a" });
     const terminal = await projectClaudeTranscriptUsage(options);
     assert.equal(terminal.projected, true);
+    assert.equal(requests[2].events[0].run_id, "run-1");
     assert.equal(requests[2].events[0].state, "completed");
     assert.equal(requests[2].events[0].state_budget.state_epoch, 4);
     assert.deepEqual(requests[2].events[0].token_usage_delta, {

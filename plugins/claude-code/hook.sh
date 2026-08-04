@@ -97,6 +97,7 @@ project_claude_transcript_usage() {
       --session-id "$HOOK_SESSION" \
       --thread-id "$CLIENT_ID" \
       --state-file "$CACHE_FILE" \
+      --run-id-file "$PROJECT_DIR/.run_id" \
       --epoch-file "$PROJECT_DIR/.state_epoch" \
       --ledger-file "$PROJECT_DIR/.claude_transcript_usage.json" \
       >>"$STATEWRIGHT_DIR/logs/claude-telemetry.log" 2>&1 || true

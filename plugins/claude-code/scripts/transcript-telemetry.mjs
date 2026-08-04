@@ -115,8 +115,11 @@ function eventId(runId, epoch, sequence, usage) {
 
 export async function projectClaudeTranscriptUsage(options) {
   const state = await readJson(options.stateFile, null);
+  const runId = state?.run_id || (options.runIdFile
+    ? (await readFile(options.runIdFile, "utf8").catch(() => "")).trim()
+    : "");
   const epoch = Number.parseInt(await readFile(options.epochFile, "utf8").catch(() => "0"), 10);
-  if (!state?.run_id || !state?.state || !Number.isInteger(epoch) || epoch < 1 || !options.sessionId) {
+  if (!runId || !state?.state || !Number.isInteger(epoch) || epoch < 1 || !options.sessionId) {
     return { projected: false, reason: "no_active_state" };
   }
   const transcript = await findTranscript(options.home, options.sessionId);
@@ -147,7 +150,7 @@ export async function projectClaudeTranscriptUsage(options) {
   await writeJson(options.ledgerFile, ledger);
 
   const budget = {
-    run_id: state.run_id,
+    run_id: runId,
     state: state.state,
     state_epoch: epoch,
     provider: "anthropic",
@@ -159,8 +162,8 @@ export async function projectClaudeTranscriptUsage(options) {
     context_budget_bytes: number(state.context_budget_bytes),
   };
   const event = {
-    event_id: eventId(state.run_id, epoch, ledger.sequence, cumulative),
-    run_id: state.run_id,
+    event_id: eventId(runId, epoch, ledger.sequence, cumulative),
+    run_id: runId,
     thread_id: options.threadId,
     workflow: state.workflow ?? "",
     event: "provider_token_usage",
@@ -187,7 +190,7 @@ function parseArgs(argv) {
   const options = { home: process.env.HOME, pbUrl: process.env.STATEWRIGHT_PB_URL, apiKey: process.env.STATEWRIGHT_TELEMETRY_API_KEY };
   const flags = new Map([
     ["--session-id", "sessionId"], ["--thread-id", "threadId"], ["--state-file", "stateFile"],
-    ["--epoch-file", "epochFile"], ["--ledger-file", "ledgerFile"],
+    ["--epoch-file", "epochFile"], ["--ledger-file", "ledgerFile"], ["--run-id-file", "runIdFile"],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const key = flags.get(argv[index]);

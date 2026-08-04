@@ -37,7 +37,7 @@ TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/nativ
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
-# This is intentionally opt-in through .statewright/config.json. Codex reads
+# This is intentionally opt-in through Statewright configuration. Codex reads
 # its OTel configuration at startup, so a newly created exporter applies after
 # the next Codex restart. Existing user-owned [otel] configuration is untouched.
 bootstrap_native_token_telemetry() {
@@ -51,11 +51,13 @@ bootstrap_native_token_telemetry() {
     created)
       printf '%s\n' 'restart-required' > "$TELEMETRY_DIR/otel-restart-required"
       chmod 600 "$TELEMETRY_DIR/otel-restart-required"
+      rm -f "$TELEMETRY_DIR/otel-config-conflict"
       ;;
     already_enabled|disabled)
-      rm -f "$TELEMETRY_DIR/otel-restart-required"
+      rm -f "$TELEMETRY_DIR/otel-restart-required" "$TELEMETRY_DIR/otel-config-conflict"
       ;;
     conflict)
+      rm -f "$TELEMETRY_DIR/otel-restart-required"
       printf '%s\n' 'user-otel-config-conflict' > "$TELEMETRY_DIR/otel-config-conflict"
       chmod 600 "$TELEMETRY_DIR/otel-config-conflict"
       ;;

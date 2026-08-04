@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 
 export const STATEWRIGHT_CONFIG_RELATIVE_PATH = join(".statewright", "config.json");
-export const CODEX_OTEL_FRAGMENT = `# Managed by Statewright. Set .statewright/config.json telemetry.codex.native_tokens to false to stop managing this exporter.\n[otel]\nenvironment = "statewright"\nlog_user_prompt = false\nexporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = {} } }\ntrace_exporter = "none"\nmetrics_exporter = "none"\n`;
+export const CODEX_OTEL_FRAGMENT = `# Managed by Statewright. Set telemetry.codex.native_tokens to false in Statewright config to stop managing this exporter.\n[otel]\nenvironment = "statewright"\nlog_user_prompt = false\nexporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json", headers = {} } }\ntrace_exporter = "none"\nmetrics_exporter = "none"\n`;
 
 function enabledFromRawConfig(raw) {
   return raw?.telemetry?.codex?.native_tokens === true;

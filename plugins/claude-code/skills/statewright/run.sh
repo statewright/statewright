@@ -16,7 +16,7 @@ mcp_call() {
     -H "Authorization: Bearer $API_KEY" \
     -d "$1" 2>/dev/null)
   if [ -n "$RESP" ]; then
-    echo "$RESP" | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // .error.message // empty' 2>/dev/null
+    echo "$RESP" | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // .error.message // empty' 2>/dev/null
   else
     echo "Gateway unreachable at $GW_URL"
   fi

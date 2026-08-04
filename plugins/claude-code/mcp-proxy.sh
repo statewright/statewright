@@ -91,7 +91,7 @@ upload_client_tools() {
             echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":2}'; \
             sleep 2; \
           } | $server_cmd $server_args 2>/dev/null
-        " 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' \
+        " 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' \
           | jq -s '[.[] | select(.id == 2) | .result.tools[]? | {name: .name, source: "MCP:'"$server"'", category: "MCP", description: (.description // "")[:120]}]' 2>/dev/null)
       fi
 

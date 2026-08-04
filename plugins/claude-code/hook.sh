@@ -68,7 +68,7 @@ mcp_call() {
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
     "${SESSION_HEADER_ARGS[@]}" \
-    -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+    -d "$1" 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
 adapter_call() {

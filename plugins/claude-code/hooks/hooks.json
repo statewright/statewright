@@ -73,7 +73,8 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hook.sh session-end",
-            "timeout": 10000
+            "timeout": 10000,
+            "async": true
           }
         ]
       }

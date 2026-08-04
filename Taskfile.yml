@@ -32,6 +32,13 @@ tasks:
     cmds:
       - bash plugins/claude-code/tests/setup.test.sh
 
+  test:telemetry-contract:
+    desc: "Verify gateway run binding, opt-in legacy logs, and provider token telemetry"
+    cmds:
+      - bash plugins/executor/tests/legacy-capture-contract.test.sh
+      - node --test plugins/claude-code/tests/transcript-telemetry.test.mjs plugins/codex/tests/local-telemetry-agent.test.mjs plugins/codex/tests/orchestrator.test.mjs
+      - "{{.CARGO}} test -p statewright-mcp-gateway state_snapshot_exposes_gateway_run_session_identity"
+
   test:
     desc: "Run all workspace tests"
     cmds:

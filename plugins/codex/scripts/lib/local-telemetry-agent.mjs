@@ -244,6 +244,7 @@ export class BindingLedger {
         conversation_id: input.conversation_id,
         root_session_id: input.root_session_id,
         run_id: input.run_id,
+        run_session_id: input.run_session_id,
         state: input.state,
         state_epoch: input.state_epoch,
         effective_at: input.effective_at,
@@ -251,6 +252,7 @@ export class BindingLedger {
       conversation_id: text(input.conversation_id, 255),
       root_session_id: text(input.root_session_id, 255) || null,
       run_id: text(input.run_id, 64),
+      run_session_id: text(input.run_session_id, 255) || null,
       workflow: text(input.workflow, 100),
       state: text(input.state, 255),
       state_epoch: count(input.state_epoch),
@@ -383,6 +385,7 @@ export class DurableOutbox {
     const event = {
       event_id: normalized.event_id,
       run_id: identity?.run_id ?? null,
+      run_session_id: identity?.run_session_id ?? null,
       workflow: identity?.workflow ?? null,
       thread_id: normalized.conversation_id,
       provider_session_id: normalized.conversation_id,

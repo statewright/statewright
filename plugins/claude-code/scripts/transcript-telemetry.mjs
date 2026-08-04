@@ -164,6 +164,7 @@ export async function projectClaudeTranscriptUsage(options) {
   const event = {
     event_id: eventId(runId, epoch, ledger.sequence, cumulative),
     run_id: runId,
+    run_session_id: state.run_session_id ?? "",
     thread_id: options.threadId,
     workflow: state.workflow ?? "",
     event: "provider_token_usage",

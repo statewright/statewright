@@ -128,12 +128,13 @@ emit_native_telemetry() {
   local event_type="$1"
   local state_json="$2"
   local run_id state epoch seq event_id timestamp effective_at model tool_bytes tool_count current_tool_bytes
-  local prior_bytes prior_count is_tool=false payload session_id conversation_id child_id
+  local prior_bytes prior_count is_tool=false payload session_id conversation_id child_id run_session_id
   local binding_payload propagate_children=false
 
   [ -z "$API_KEY" ] && return 0
   [ -z "$state_json" ] && return 0
   run_id=$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)
+  run_session_id=$(echo "$state_json" | jq -r '.run_session_id // empty' 2>/dev/null || true)
   state=$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)
   [ -z "$run_id" ] || [ -z "$state" ] && return 0
 
@@ -181,6 +182,7 @@ emit_native_telemetry() {
     --arg conversation_id "$conversation_id" \
     --arg root_session_id "$session_id" \
     --arg run_id "$run_id" \
+    --arg run_session_id "$run_session_id" \
     --arg workflow "$(echo "$state_json" | jq -r '.workflow // empty' 2>/dev/null || true)" \
     --arg state "$state" \
     --arg effective_at "$effective_at" \
@@ -190,6 +192,7 @@ emit_native_telemetry() {
       conversation_id: $conversation_id,
       root_session_id: $root_session_id,
       run_id: $run_id,
+      run_session_id: $run_session_id,
       workflow: $workflow,
       state: $state,
       state_epoch: $state_epoch,
@@ -209,6 +212,7 @@ emit_native_telemetry() {
   payload=$(jq -n \
     --arg event_id "$event_id" \
     --arg run_id "$run_id" \
+    --arg run_session_id "$run_session_id" \
     --arg session_id "$conversation_id" \
     --arg root_session_id "$session_id" \
     --arg workflow "$(echo "$state_json" | jq -r '.workflow // empty' 2>/dev/null || true)" \
@@ -224,6 +228,7 @@ emit_native_telemetry() {
     '{events: [{
       event_id: $event_id,
       run_id: $run_id,
+      run_session_id: $run_session_id,
       thread_id: $session_id,
       provider_session_id: $session_id,
       root_session_id: $root_session_id,

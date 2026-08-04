@@ -88,6 +88,10 @@ impl Gateway {
         if let Some(workflow) = &self.active_workflow {
             state["workflow"] = json!(workflow);
         }
+        // Remote clients report provider-native thread IDs. Preserve the
+        // gateway session separately so adapters can bind telemetry to the
+        // exact run without conflating the two identity domains.
+        state["run_session_id"] = json!(self.session_id);
         state["capture_output"] = json!(capture_output);
         state
     }
@@ -2482,6 +2486,18 @@ mod tests {
             String::new(),
             None,
         )
+    }
+
+    #[test]
+    fn state_snapshot_exposes_gateway_run_session_identity() {
+        let mut gateway = test_gateway();
+        gateway.current_run_id = Some("run-1".into());
+
+        let snapshot = gateway.enrich_state_snapshot(json!({ "state": "planning" }), true);
+
+        assert_eq!(snapshot["run_id"], "run-1");
+        assert_eq!(snapshot["run_session_id"], "test-session");
+        assert_eq!(snapshot["capture_output"], true);
     }
 
     #[tokio::test]

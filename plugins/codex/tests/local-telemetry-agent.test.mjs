@@ -296,6 +296,7 @@ test("pre-binding usage is durable and reconciles when workflow identity arrives
     const binding = restarted.bind({
       conversation_id: "thread-root",
       run_id: "run-1",
+      run_session_id: "gateway-session-1",
       workflow: "workflow",
       state: "implement",
       state_epoch: 1,
@@ -306,6 +307,7 @@ test("pre-binding usage is durable and reconciles when workflow identity arrives
     const [event] = restarted.outbox.pending();
     assert.equal(event.binding_status, "bound");
     assert.equal(event.run_id, "run-1");
+    assert.equal(event.run_session_id, "gateway-session-1");
     assert.equal(event.state_budget.token_usage.total_tokens, 100);
 
     const afterReconcile = new LocalTelemetryService({

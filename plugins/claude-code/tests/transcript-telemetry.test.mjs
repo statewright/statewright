@@ -40,7 +40,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
   try {
     await mkdir(project, { recursive: true });
     await writeFile(stateFile, JSON.stringify({
-      run_id: "run-1", workflow: "agentic-engineering-default-v1", state: "baseline", context_budget_bytes: 64000,
+      run_id: "run-1", run_session_id: "gateway-session-1", workflow: "agentic-engineering-default-v1", state: "baseline", context_budget_bytes: 64000,
     }));
     await writeFile(epochFile, "3\n");
     const transcript = join(project, `${session}.jsonl`);
@@ -59,6 +59,7 @@ test("projects deduplicated exact Claude transcript usage into the active state 
     });
     assert.equal(requests[0].events[0].state_budget.state_epoch, 3);
     assert.equal(requests[0].events[0].thread_id, "swc_session");
+    assert.equal(requests[0].events[0].run_session_id, "gateway-session-1");
 
     assert.equal((await projectClaudeTranscriptUsage(options)).projected, false);
     await writeFile(transcript, `${transcriptRecord("message-2", 7, 0, 1, 2, "2026-08-04T00:01:00.000Z")}\n`, { flag: "a" });

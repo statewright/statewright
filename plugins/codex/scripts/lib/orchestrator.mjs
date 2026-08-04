@@ -57,6 +57,7 @@ export function nativeOtelStateBinding({ thread, workflow, state, stateEpoch, ef
     conversation_id: thread.id,
     root_session_id: thread.id,
     run_id: state.run_id,
+    run_session_id: state.run_session_id ?? "",
     workflow,
     state: state.state,
     state_epoch: stateEpoch,

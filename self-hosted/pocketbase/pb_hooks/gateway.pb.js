@@ -176,7 +176,8 @@ routerAdd('POST', '/api/gateway/telemetry/events', function (e) {
     var sessionId = telemetryText(event.thread_id, 255)
     if (!eventId || !sessionId) continue
     try { e.app.findFirstRecordByFilter('workflow_usage_events', 'event_id = {:id}', { id: eventId }); continue } catch (_) {}
-    var run = findOrCreateTelemetryRun(e.app, sessionId, event.workflow, telemetryText(event.run_id, 255))
+    var runSessionId = telemetryText(event.run_session_id, 255) || sessionId
+    var run = findOrCreateTelemetryRun(e.app, runSessionId, event.workflow, telemetryText(event.run_id, 255))
     var snapshots = Array.isArray(event.state_usage) ? event.state_usage : [event.state_budget]
     var stateUsage = null
     for (var j = 0; j < snapshots.length; j++) {
@@ -230,6 +231,37 @@ function projectToolUsage(app, stateUsage, fingerprint, invocationId, toolData, 
     app.save(tool)
   } catch (_) {}
 }
+
+function projectWorkflowLog(app, run, log) {
+  var phase = telemetryText(log.phase, 255)
+  var toolName = telemetryText(log.tool_name, 255)
+  if (!phase || !toolName) return null
+  var collection = app.findCollectionByNameOrId('workflow_logs')
+  var record = new Record(collection)
+  record.set('run_id', run.id)
+  record.set('phase', phase)
+  record.set('tool_name', toolName)
+  record.set('tool_input', log.tool_input || {})
+  record.set('tool_output', telemetryText(log.tool_output, 102400))
+  record.set('sequence', telemetryNumber(log.sequence))
+  record.set('duration_ms', telemetryNumber(log.duration_ms))
+  app.save(record)
+  return record
+}
+
+// Raw tool logs are opt-in (`capture_output`). Their run binding follows the
+// same authenticated, session-checked resolver as structured usage telemetry.
+routerAdd('POST', '/api/gateway/logs', function (e) {
+  if (!gatewayKeyFingerprint(e)) return e.json(401, { error: 'Invalid API key' })
+  var log
+  try { log = JSON.parse(toString(e.request.body)) } catch (_) { return e.json(400, { error: 'Invalid JSON body' }) }
+  var sessionId = telemetryText(log.run_session_id, 255) || telemetryText(log.thread_id || log.session_id, 255)
+  if (!sessionId) return e.json(400, { error: 'run_session_id or thread_id is required' })
+  var run = findOrCreateTelemetryRun(e.app, sessionId, log.workflow, telemetryText(log.run_id, 255))
+  var record = projectWorkflowLog(e.app, run, log)
+  if (!record) return e.json(400, { error: 'phase and tool_name are required' })
+  return e.json(201, { id: record.id, run_id: run.id })
+})
 
 routerAdd('GET', '/api/gateway/runs/{runId}/usage', function (e) {
   var fingerprint = gatewayKeyFingerprint(e)

@@ -4,6 +4,10 @@
 
 command -v jq &>/dev/null || exit 0
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=client-id.sh
+source "$SCRIPT_DIR/client-id.sh"
+
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
@@ -14,9 +18,10 @@ HOOK_INPUT=$(cat 2>/dev/null || true)
 [ -z "$HOOK_INPUT" ] && exit 0
 
 # Check if capture is enabled for this session (opt-in via workflow meta.capture_output)
-HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
-SESSION_KEY="${SESSION_KEY:0:12}"
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.thread_id // .session_id // empty' 2>/dev/null || true)
+CLIENT_ID=$(statewright_client_id codex "$HOOK_SESSION")
+SESSION_KEY="${CLIENT_ID#swc_}"
+SESSION_KEY="${SESSION_KEY:0:16}"
 [ ! -f "$HOME/.statewright/sessions/$SESSION_KEY/.capture_enabled" ] && exit 0
 
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
@@ -60,18 +65,24 @@ PAYLOAD=$(jq -n \
   --argjson duration_ms "${DURATION:-0}" \
   --argjson sequence "$SEQ" \
   --arg run_id "$RUN_ID" \
+  --arg thread_id "$CLIENT_ID" \
+  --arg run_session_id "$(cat "$SESSION_DIR/.state_cache" 2>/dev/null | jq -r '.run_session_id // empty' 2>/dev/null || true)" \
+  --arg workflow "$(cat "$SESSION_DIR/.state_cache" 2>/dev/null | jq -r '.workflow // empty' 2>/dev/null || true)" \
   '{
     phase: $phase,
     tool_name: $tool_name,
     tool_input: $tool_input,
     tool_output: $tool_output,
     sequence: $sequence,
-    duration_ms: $duration_ms
+    duration_ms: $duration_ms,
+    thread_id: $thread_id,
+    run_session_id: $run_session_id,
+    workflow: $workflow
   } + (if $run_id != "" then {run_id: $run_id} else {} end)' 2>/dev/null)
 
 [ -z "$PAYLOAD" ] && exit 0
 
-RESP=$(curl -s --max-time 5 -X POST "$PB_URL/api/collections/workflow_logs/records" \
+RESP=$(curl -s --max-time 5 -X POST "$PB_URL/api/gateway/logs" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $API_KEY" \
   -d "$PAYLOAD" 2>&1)

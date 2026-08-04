@@ -21,7 +21,10 @@ fi
 STATEWRIGHT_DIR="${HOME}/.statewright"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
-GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
+GATEWAY_FILE="$STATEWRIGHT_DIR/gateway_url"
+GW_URL="${STATEWRIGHT_GATEWAY_URL:-}"
+[ -n "$GW_URL" ] || GW_URL=$(cat "$GATEWAY_FILE" 2>/dev/null || true)
+GW_URL="${GW_URL:-https://mcp.statewright.ai}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRANSCRIPT_TELEMETRY="${SCRIPT_DIR}/scripts/transcript-telemetry.mjs"
 # shellcheck source=client-id.sh
@@ -32,6 +35,13 @@ HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || 
 SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
 SESSION_KEY="${SESSION_KEY:0:12}"
 CLIENT_ID=$(statewright_client_id "$HOOK_SESSION")
+HOOK_OWNER_FILE="$STATEWRIGHT_DIR/claude-hook-owner"
+HOOK_OWNER=$(cat "$HOOK_OWNER_FILE" 2>/dev/null || true)
+if [ -n "$HOOK_OWNER" ] && [ "$HOOK_OWNER" != "$SCRIPT_DIR/hook.sh" ]; then
+  # Claude runs plugin-declared hooks in addition to setup-installed hooks.
+  # The setup-selected hook owns local state and route writes for this client.
+  exit 0
+fi
 SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
   SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")

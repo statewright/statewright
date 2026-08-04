@@ -10,6 +10,8 @@ set -e
 SETTINGS="$HOME/.claude/settings.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK_SCRIPT="$SCRIPT_DIR/hook.sh"
+STATEWRIGHT_DIR="$HOME/.statewright"
+GATEWAY_URL="${STATEWRIGHT_GATEWAY_URL:-}"
 
 # Fall back to finding it
 if [ ! -f "$HOOK_SCRIPT" ]; then
@@ -20,6 +22,23 @@ if [ ! -f "$HOOK_SCRIPT" ]; then
   echo "Error: Could not find statewright hook.sh. Run /plugin install statewright first."
   exit 1
 fi
+
+# A local directory marketplace can outlive its source checkout. Reconcile the
+# runtime files before registering this plugin as the active hook owner.
+RUNTIME_SYNC="$SCRIPT_DIR/scripts/sync-runtime.mjs"
+if [ -f "$RUNTIME_SYNC" ] && command -v node >/dev/null 2>&1; then
+  node "$RUNTIME_SYNC" --sync >/dev/null
+fi
+
+if [ -z "$GATEWAY_URL" ] && [ -f "$STATEWRIGHT_DIR/gateway_url" ]; then
+  GATEWAY_URL=$(cat "$STATEWRIGHT_DIR/gateway_url")
+fi
+GATEWAY_URL="${GATEWAY_URL:-https://mcp.statewright.ai}"
+mkdir -p "$STATEWRIGHT_DIR"
+printf '%s\n' "$GATEWAY_URL" > "$STATEWRIGHT_DIR/gateway_url"
+chmod 600 "$STATEWRIGHT_DIR/gateway_url"
+printf '%s\n' "$HOOK_SCRIPT" > "$STATEWRIGHT_DIR/claude-hook-owner"
+chmod 600 "$STATEWRIGHT_DIR/claude-hook-owner"
 
 # Ensure settings.json exists
 mkdir -p "$(dirname "$SETTINGS")"
@@ -33,8 +52,6 @@ import json, os, sys
 
 settings_path = "$SETTINGS"
 hook_script = "$HOOK_SCRIPT"
-gateway_url = os.environ.get("STATEWRIGHT_GATEWAY_URL", "https://mcp.statewright.ai")
-mcp_proxy = os.path.join(os.path.dirname(hook_script), "mcp-proxy.sh")
 
 with open(settings_path) as f:
     settings = json.load(f)
@@ -82,28 +99,23 @@ if os.path.isdir(plugin_agents):
             shutil.copy2(src, dst)
             print(f"Installed agent: {agent_file}")
 
-# Generate MCP config with auth from saved API key
-key_path = os.path.expanduser("~/.statewright/api_key")
-if os.path.exists(key_path):
-    with open(key_path) as kf:
-        api_key = kf.read().strip()
-    if api_key:
-        mcp_path = os.path.expanduser("~/.claude/.mcp.json")
-        existing_mcp = {}
-        if os.path.exists(mcp_path):
-            try:
-                with open(mcp_path) as mf:
-                    existing_mcp = json.load(mf)
-            except: pass
-        existing_mcp.setdefault("mcpServers", {})["statewright"] = {
-            "type": "stdio",
-            "command": "bash",
-            "args": [mcp_proxy],
-            "env": {"STATEWRIGHT_GATEWAY_URL": gateway_url}
-        }
-        with open(mcp_path, "w") as mf:
-            json.dump(existing_mcp, mf, indent=2)
-        print(f"MCP server configured in {mcp_path}")
+# The plugin-provided .mcp.json is the one authoritative Statewright MCP
+# transport. Retire the legacy user-level duplicate without touching other
+# user-configured servers.
+mcp_path = os.path.expanduser("~/.claude/.mcp.json")
+if os.path.exists(mcp_path):
+    try:
+        with open(mcp_path) as mf:
+            existing_mcp = json.load(mf)
+        servers = existing_mcp.get("mcpServers", {})
+        if "statewright" in servers:
+            del servers["statewright"]
+            existing_mcp["mcpServers"] = servers
+            with open(mcp_path, "w") as mf:
+                json.dump(existing_mcp, mf, indent=2)
+            print(f"Removed legacy Statewright MCP entry from {mcp_path}")
+    except Exception:
+        pass
 
 print("Run /reload-plugins to activate.")
 PYEOF

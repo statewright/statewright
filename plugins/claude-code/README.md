@@ -22,7 +22,8 @@ exec zsh
 ```
 
 The setup command installs Claude hooks, configures the Statewright MCP
-server, installs the managed `claude` shim, and enables transparent model
+server, installs the managed `claude` shim, reconciles any active Claude
+plugin cache or local directory marketplace, and enables transparent model
 routing. The `exec zsh` reloads `PATH`; it is required only once after the
 initial setup or a plugin update.
 
@@ -53,6 +54,21 @@ cache path is needed:
 
 ```bash
 claude
+```
+
+After updating a checkout or local directory marketplace, rerun setup and
+reload Claude plugins. This updates only Statewright runtime files in the
+active install locations and keeps the plugin MCP proxy as the sole
+Statewright transport:
+
+```bash
+bash plugins/claude-code/setup.sh
+```
+
+To diagnose or reconcile runtime drift without changing Claude settings:
+
+```bash
+task plugins:sync-claude-runtime
 ```
 
 ### Claude routing canary

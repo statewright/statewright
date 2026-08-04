@@ -3,10 +3,13 @@
 # Used as `type: "command"` MCP server in plugin .mcp.json
 # No OAuth, no static auth headers — reads key dynamically from ~/.statewright/api_key
 
-GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
-PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
-KEY_FILE="${HOME}/.statewright/api_key"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATEWRIGHT_DIR="${HOME}/.statewright"
+GW_URL="${STATEWRIGHT_GATEWAY_URL:-}"
+[ -n "$GW_URL" ] || GW_URL=$(cat "$STATEWRIGHT_DIR/gateway_url" 2>/dev/null || true)
+GW_URL="${GW_URL:-https://mcp.statewright.ai}"
+PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
+KEY_FILE="$STATEWRIGHT_DIR/api_key"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 

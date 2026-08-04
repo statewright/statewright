@@ -67,7 +67,6 @@ export function buildHostLaunch(options, state, continuation = false) {
       if (continuation) args.push("--resume", options.hostSessionId);
       else args.push("--session-id", options.hostSessionId);
       if (route.model) args.push("--model", route.model.split("/").at(-1));
-      if (route.effort) args.push("--effort", route.effort);
       return { command: options.hostBin ?? "claude", args: withPrompt([...args, ...extra], prompt) };
     }
     case "opencode": {

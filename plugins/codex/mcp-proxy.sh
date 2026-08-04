@@ -5,6 +5,28 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# A managed client owns this loopback bridge for the lifetime of the terminal
+# session. The bridge keeps MCP identity stable while the supervisor replaces
+# the Codex child at a routed model boundary.
+if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
+      --data-binary "$line" 2>/dev/null || true)
+    case "$method" in notifications/*) continue ;; esac
+    if [ -n "$response" ]; then
+      printf '%s\n' "$response"
+    else
+      id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
+      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright managed MCP bridge unavailable."},"id":%s}\n' "$id"
+    fi
+  done
+  exit 0
+fi
+
 # Executor-owned runs keep the remote credential and workflow session in the
 # host-neutral executor. Forward MCP before starting standalone telemetry or
 # deriving an independent client identity.
@@ -34,6 +56,7 @@ REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
+MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/../executor/statewright-managed-client.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
@@ -65,6 +88,12 @@ bootstrap_native_token_telemetry() {
 }
 
 bootstrap_native_token_telemetry
+
+# This prepares transparent shims for the next terminal launch. It is quiet,
+# idempotent, and only touches a shell profile when a supported client exists.
+if command -v node >/dev/null 2>&1 && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
+  node "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
+fi
 
 CLIENT_ID=$(statewright_client_id codex)
 SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")

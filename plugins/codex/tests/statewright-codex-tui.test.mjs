@@ -57,13 +57,16 @@ test("workflow load emits an atomic route restart request only for a supervised 
     assert.equal(result.status, 0, result.stderr);
     const entries = await readdir(controlDir);
     assert.equal(entries.length, 1);
-    assert.deepEqual(JSON.parse(await readFile(resolve(controlDir, entries[0]), "utf8")), {
+    const route = JSON.parse(await readFile(resolve(controlDir, entries[0]), "utf8"));
+    assert.deepEqual(route, {
       session_id: "session-1",
+      client_id: route.client_id,
       run_id: "run-1",
       state: "baseline",
       model: "openai-codex/gpt-5.6-sol",
       effort: "high",
     });
+    assert.match(route.client_id, /^swc_[0-9a-f]{32}$/);
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(controlDir, { recursive: true, force: true });

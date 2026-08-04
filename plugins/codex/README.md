@@ -96,19 +96,24 @@ is reported as unattributed rather than mislabeled as reasoning.
 ### Interactive model routing
 
 For a terminal Codex session that must enforce per-state model and reasoning
-routes, start the Statewright-owned supervisor instead of `codex` directly:
+routes, Statewright installs its transparent managed client during plugin setup.
+Restart the terminal once after installing or updating the plugin, then continue
+launching `codex` normally. The shim is dormant until a
+workflow is loaded. At an authoritative Statewright boundary it resumes the
+same session with that state's `--model` and `model_reasoning_effort`; it owns
+only that terminal's child process group. Other terminals are never signalled.
 
-```bash
-node /path/to/statewright/plugins/codex/scripts/statewright-codex-tui.mjs \
-  --workflow agentic-engineering-default-v1 -- "Implement the task."
-```
+This is a process boundary, not a hot swap inside a turn. A session started
+before the plugin bootstrap runs continues to receive tool enforcement but
+cannot change its current model automatically. Disable with
+`statewright-managed-client --disable --host codex`.
 
-It starts the initial session, observes every successful Statewright boundary,
-then terminates and resumes the same Codex session with the next state's
-configured `--model` and `model_reasoning_effort`. This is intentionally a
-process boundary: Codex cannot change a model inside an already-running TUI
-turn. Regular plugin activation continues to enforce state and tools, but does
-not claim to switch the current TUI's model.
+To remove managed routing entirely, run
+`statewright-managed-client --uninstall`. It removes only Statewright's shims
+and marked shell-path block.
+
+The explicit `statewright-codex-tui.mjs` launcher remains available for scripts
+that want to name the workflow and bootstrap route up front.
 
 Start a workflow via MCP tool:
 

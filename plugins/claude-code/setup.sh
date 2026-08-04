@@ -8,7 +8,8 @@
 set -e
 
 SETTINGS="$HOME/.claude/settings.json"
-HOOK_SCRIPT="$HOME/.claude/plugins/cache/statewright/statewright/0.1.0/hook.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOOK_SCRIPT="$SCRIPT_DIR/hook.sh"
 
 # Fall back to finding it
 if [ ! -f "$HOOK_SCRIPT" ]; then
@@ -103,3 +104,10 @@ if os.path.exists(key_path):
 
 print("Run /reload-plugins to activate.")
 PYEOF
+
+# The shared executor may be bundled beside the plugin. Bootstrap silently so
+# subsequent normal `claude` and `codex` launches inherit managed routing.
+MANAGED_CLIENT="${SCRIPT_DIR}/executor/statewright-managed-client.mjs"
+if [ -f "$MANAGED_CLIENT" ] && command -v node >/dev/null 2>&1; then
+  node "$MANAGED_CLIENT" --bootstrap >/dev/null 2>&1 || true
+fi

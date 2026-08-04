@@ -1,7 +1,7 @@
 {
   "name": "statewright",
   "displayName": "Statewright",
-  "version": "0.3.0",
+  "version": "0.2.0",
   "description": "State-machine workflow enforcement and isolated delivery for Cursor Agent.",
   "author": { "name": "Statewright" },
   "homepage": "https://statewright.ai",

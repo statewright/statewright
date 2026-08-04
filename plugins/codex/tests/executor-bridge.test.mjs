@@ -142,6 +142,8 @@ test("Codex hooks and MCP join the executor-owned bridge", async () => {
   const environment = {
     STATEWRIGHT_ADAPTER_URL: bridge.url,
     STATEWRIGHT_ADAPTER_TOKEN: "bridge-token",
+    STATEWRIGHT_MANAGED_MCP_URL: "",
+    STATEWRIGHT_MANAGED_MCP_TOKEN: "",
     STATEWRIGHT_API_KEY: "must-not-be-used",
   };
   try {

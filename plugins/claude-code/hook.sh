@@ -107,6 +107,22 @@ clear_session_telemetry_state() {
   rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
 }
 
+# A managed supervisor owns a dedicated Claude process group. Hooks only write
+# the authoritative route; they never signal the surrounding terminal client.
+request_interactive_route_restart() {
+  local state_json="$1" control_dir model effort request_path
+  control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
+  [ -n "$control_dir" ] || return 0
+  model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
+  [ -n "$model" ] || return 0
+  effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
+  mkdir -p "$control_dir" || return 0
+  # The managed supervisor reserves other JSON files in this directory for
+  # session identity and only consumes explicit route requests.
+  request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.route.json"
+  jq -n --arg session_id "$HOOK_SESSION" --arg client_id "$CLIENT_ID" --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" --arg model "$model" --arg effort "$effort" '{session_id: $session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
+}
+
 # ============================================================
 # HOOK HANDLERS
 # ============================================================
@@ -565,6 +581,7 @@ case "$ENDPOINT" in
         INIT_MODEL=$(echo "$STATE_JSON" | jq -r '.model // empty' 2>/dev/null || true)
         INIT_MODEL_NOTE=""
         [ -n "$INIT_MODEL" ] && INIT_MODEL_NOTE=" Recommended model: $INIT_MODEL."
+        request_interactive_route_restart "$STATE_JSON"
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}.${INIT_MODEL_NOTE} KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
         ;;
       stop)
@@ -591,6 +608,7 @@ case "$ENDPOINT" in
           echo "$STATE_JSON" > "$CACHE_FILE"
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
+          [ "$IS_FINAL" = "true" ] || request_interactive_route_restart "$STATE_JSON"
           PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
           case "$PREV_EPOCH" in ''|*[!0-9]*) PREV_EPOCH=0 ;; esac
           echo $((PREV_EPOCH + 1)) > "$PROJECT_DIR/.state_epoch"

@@ -16,7 +16,7 @@ Then install:
 
 Your browser opens. Sign up. Generate a key. Paste it. Done.
 
-For executor-owned isolated delivery and state model routing, launch Claude Code through the shared executor:
+For executor-owned isolated delivery, launch Claude Code through the shared executor:
 
 ```bash
 node plugins/executor/statewright-exec.mjs \
@@ -24,7 +24,26 @@ node plugins/executor/statewright-exec.mjs \
   "Fix the failing tests"
 ```
 
-The executor owns the remote credential and MCP session. Claude Code receives an authenticated loopback bridge. When a workflow state changes its model or effort route, the executor stops the CLI and resumes the same Claude session with the new route.
+The executor owns the remote credential and MCP session. Claude Code receives an authenticated loopback bridge.
+
+### Transparent Model Routing
+
+The plugin setup installs the managed Claude client automatically. Restart the
+terminal once after installing or updating the plugin, then keep using `claude`
+normally. The shim stays dormant unless a workflow is loaded. At a route boundary it owns
+and restarts only its own CLI child, forks the saved conversation, and starts
+the fork with the workflow model. Forking is required because the
+[Claude model configuration reference](https://code.claude.com/docs/en/model-config)
+documents that plain `--resume` preserves the prior session model; the
+[CLI reference](https://code.claude.com/docs/en/cli-usage) documents both
+`--fork-session` and `--model`. Claude does not expose a documented CLI
+reasoning-effort flag, so Statewright applies the state model and records the
+effort as advisory for this host. Disable with
+`statewright-managed-client --disable --host claude`.
+
+To remove managed routing entirely, run
+`statewright-managed-client --uninstall`. It removes only Statewright's shims
+and marked shell-path block.
 
 ## What happens
 

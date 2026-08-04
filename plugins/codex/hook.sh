@@ -54,8 +54,9 @@ source "${SCRIPT_DIR}/tool-policy.sh"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
-# Session-scoped state shared with the MCP proxy.
-HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
+# Thread identity is durable across resumed Codex turns. `session_id` may be a
+# turn-local hook invocation, so use it only for older hosts that omit a thread.
+HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.thread_id // .session_id // empty' 2>/dev/null || true)
 CLIENT_ID=$(statewright_client_id codex "$HOOK_SESSION")
 SESSION_KEY="${CLIENT_ID#swc_}"
 SESSION_KEY="${SESSION_KEY:0:16}"
@@ -279,14 +280,15 @@ request_interactive_route_restart() {
   model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
   effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
   mkdir -p "$control_dir" || return 0
-  request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.json"
+  request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.route.json"
   jq -n \
     --arg session_id "$HOOK_SESSION" \
+    --arg client_id "$CLIENT_ID" \
     --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" \
     --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" \
     --arg model "$model" \
     --arg effort "$effort" \
-    '{session_id: $session_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' \
+    '{session_id: $session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' \
     > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
 }
 

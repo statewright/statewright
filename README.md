@@ -205,16 +205,16 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 ## Supported agents
 
-**Hard** enforcement means tool calls are intercepted before execution. **Live**, **resume**, and **startup** describe when a host can apply a state model route. Launch non-Codex hosts through [`statewright-exec`](plugins/executor/) when the workflow requires isolated delivery or executor-owned routing.
+**Hard** enforcement means tool calls are intercepted before execution. **Live**, **resume**, and **startup** describe when a host can apply a state model route. The managed `codex` and `claude` shims provide transparent terminal routing after a one-time opt-in; each boundary resumes the managed CLI process, so it is not a hot swap inside an existing model turn. Launch other hosts through [`statewright-exec`](plugins/executor/) when the workflow requires isolated delivery or executor-owned routing.
 
-| Agent | Executor integration | Tool enforcement | Route boundary |
-|-------|----------------------|------------------|----------------|
-| [Claude Code](plugins/claude-code/) | Hooks + executor MCP bridge | Hard | Resume same session |
-| [Codex](plugins/codex/) | App server + hooks + shared delivery core | Hard | Live per turn |
-| [Oh My Codex](plugins/omx/) | Native hooks + executor MCP bridge | Hard | Startup |
-| [Pi](plugins/pi/) | Native extension + executor MCP bridge | Hard* | Live |
-| [OpenCode](plugins/opencode/) | Native plugin + executor MCP bridge | Hard | Live |
-| [Cursor](plugins/cursor/) | Native hooks + executor MCP bridge | Hard in executor mode | Resume same chat |
+| Agent | Release line | Executor integration | Tool enforcement | Route boundary |
+|-------|--------------|----------------------|------------------|----------------|
+| [Claude Code](plugins/claude-code/) | 0.3.0 pending | Hooks + executor MCP bridge | Hard | Managed restart with forked session |
+| [Codex](plugins/codex/) | 0.3.0 pending | App server + hooks + shared delivery core | Hard | Managed restart of the same thread |
+| [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
+| [Pi](plugins/pi/) | 0.2.0 | Native extension + executor MCP bridge | Hard* | Live |
+| [OpenCode](plugins/opencode/) | 0.2.0 | Native plugin + executor MCP bridge | Hard | Live |
+| [Cursor](plugins/cursor/) | 0.2.0 | Native hooks + executor MCP bridge | Hard in executor mode | Resume same chat |
 
 *\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
 

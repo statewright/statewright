@@ -10,6 +10,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+# A managed client owns this loopback bridge across CLI child restarts. Use it
+# before deriving a standalone identity or opening direct gateway traffic.
+if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
+      --data-binary "$line" 2>/dev/null || true)
+    case "$method" in notifications/*) continue ;; esac
+    if [ -n "$response" ]; then
+      printf '%s\n' "$response"
+    else
+      id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
+      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright managed MCP bridge unavailable."},"id":%s}\n' "$id"
+    fi
+  done
+  exit 0
+fi
+
 if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   exec bash "${SCRIPT_DIR}/../executor/mcp-proxy.sh"
 fi

@@ -53,6 +53,7 @@ test("hosts use the strongest available workflow routing boundary", () => {
   const claude = buildHostLaunch({ ...base, host: "claude" }, state, true);
   assert.ok(claude.args.includes("--resume"));
   assert.ok(!claude.args.includes("--session-id"));
+  assert.ok(!claude.args.includes("--effort"));
 
   const cursor = buildHostLaunch({ ...base, host: "cursor" }, state);
   assert.deepEqual(

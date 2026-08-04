@@ -17,6 +17,20 @@ statewright_hash_client_material() {
   printf '%s' "$digest"
 }
 
+# A managed supervisor owns a stable identity across CLI restarts. Its control
+# file is the source of truth for hooks; hashing STATEWRIGHT_CLIENT_ID would
+# produce a different identity and make the supervisor reject the route.
+statewright_managed_client_id() {
+  local control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
+  local identity_file client_id
+  [ -n "$control_dir" ] || return 1
+  identity_file="$control_dir/identity.json"
+  [ -r "$identity_file" ] || return 1
+  client_id=$(jq -r 'if (.client_id | type) == "string" and (.client_id | test("^swc_[0-9a-f]{32}$")) then .client_id else empty end' "$identity_file" 2>/dev/null || true)
+  [ -n "$client_id" ] || return 1
+  printf '%s' "$client_id"
+}
+
 statewright_host_process_material() {
   local pid="${PPID:-0}"
   local depth=0
@@ -42,7 +56,13 @@ statewright_host_process_material() {
 
 statewright_client_id() {
   local hook_session="${1:-}"
-  local material="${STATEWRIGHT_CLIENT_ID:-${STATEWRIGHT_MCP_SESSION_ID:-}}"
+  local managed_id material="${STATEWRIGHT_CLIENT_ID:-${STATEWRIGHT_MCP_SESSION_ID:-}}"
+
+  managed_id=$(statewright_managed_client_id || true)
+  if [ -n "$managed_id" ]; then
+    printf '%s' "$managed_id"
+    return 0
+  fi
 
   if [ -z "$material" ]; then
     material="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"

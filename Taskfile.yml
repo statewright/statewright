@@ -10,6 +10,12 @@ tasks:
       - node plugins/codex/scripts/sync-executor-core.mjs
       - node plugins/codex/scripts/sync-executor-core.mjs --check
 
+  plugins:sync-claude-managed-client:
+    desc: "Refresh the Claude marketplace bundle for transparent managed routing"
+    cmds:
+      - node plugins/claude-code/scripts/sync-managed-client.mjs
+      - node plugins/claude-code/scripts/sync-managed-client.mjs --check
+
   test:
     desc: "Run all workspace tests"
     cmds:

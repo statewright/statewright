@@ -16,6 +16,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace
+      - name: Verify plugin release artifacts
+        run: |
+          node --test plugins/executor/tests/*.test.mjs plugins/claude-code/tests/*.test.mjs plugins/codex/tests/*.test.mjs
+          node plugins/codex/scripts/sync-executor-core.mjs --check
+          node plugins/claude-code/scripts/sync-managed-client.mjs --check
+          bash -n plugins/claude-code/hook.sh plugins/claude-code/client-id.sh plugins/claude-code/mcp-proxy.sh plugins/claude-code/setup.sh
+          bash -n plugins/codex/hook.sh plugins/codex/client-id.sh plugins/codex/mcp-proxy.sh
 
   publish:
     needs: test

@@ -44,20 +44,29 @@ export class ManagedMcpBridge {
           return;
         }
         const body = await readBody(request);
+        const forwardedHeaders = {
+          "Content-Type": request.headers["content-type"] ?? "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+          "X-Statewright-Client-Id": this.clientId,
+        };
+        for (const name of ["accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]) {
+          if (request.headers[name]) forwardedHeaders[name] = request.headers[name];
+        }
         const upstream = await this.fetch(this.gatewayUrl, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
-            "X-Statewright-Client-Id": this.clientId,
-          },
+          headers: forwardedHeaders,
           body,
           signal: AbortSignal.timeout(15_000),
         });
         const responseBody = await upstream.arrayBuffer();
-        response.writeHead(upstream.status, {
+        const responseHeaders = {
           "Content-Type": upstream.headers.get("content-type") ?? "application/json",
-        });
+        };
+        for (const name of ["mcp-session-id", "mcp-protocol-version", "last-event-id", "retry"]) {
+          const value = upstream.headers.get(name);
+          if (value) responseHeaders[name] = value;
+        }
+        response.writeHead(upstream.status, responseHeaders);
         response.end(Buffer.from(responseBody));
       } catch {
         response.writeHead(502, { "Content-Type": "application/json" });

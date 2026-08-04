@@ -53,12 +53,17 @@ test("Claude workflow load emits a route request only for a managed client", asy
 
 test("Claude MCP proxy forwards managed sessions through the supervisor bridge", async () => {
   const seen = [];
+  let requestCount = 0;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    seen.push({ path: request.url, authorization: request.headers.authorization, body: Buffer.concat(chunks).toString("utf8") });
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end('{"jsonrpc":"2.0","result":{"ok":true},"id":1}\n');
+    seen.push({ path: request.url, authorization: request.headers.authorization, session_id: request.headers["mcp-session-id"], body: Buffer.concat(chunks).toString("utf8") });
+    requestCount += 1;
+    response.writeHead(200, {
+      "Content-Type": "application/json",
+      ...(requestCount === 1 ? { "Mcp-Session-Id": "session-from-gateway" } : {}),
+    });
+    response.end(`{"jsonrpc":"2.0","result":{"ok":true},"id":${requestCount}}\n`);
   });
   await new Promise((resolveStart, rejectStart) => {
     server.once("error", rejectStart);
@@ -78,17 +83,19 @@ test("Claude MCP proxy forwards managed sessions through the supervisor bridge",
     });
     let output = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk; });
-    child.stdin.end('{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}\n');
+    child.stdin.write('{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}\n');
+    await new Promise((resolveOutput) => setTimeout(resolveOutput, 100));
+    child.stdin.end('{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}\n');
     await new Promise((resolveExit, rejectExit) => {
       child.once("error", rejectExit);
       child.once("exit", resolveExit);
     });
-    assert.deepEqual(seen, [{
-      path: "/mcp",
-      authorization: "Bearer bridge-token",
-      body: '{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}',
-    }]);
-    assert.match(output, /"ok":true/);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0].authorization, "Bearer bridge-token");
+    assert.equal(seen[1].authorization, "Bearer bridge-token");
+    assert.equal(seen[1].session_id, "session-from-gateway");
+    assert.match(output, /"id":1/);
+    assert.match(output, /"id":2/);
   } finally {
     await new Promise((resolveClose) => server.close(resolveClose));
     await rm(root, { recursive: true, force: true });

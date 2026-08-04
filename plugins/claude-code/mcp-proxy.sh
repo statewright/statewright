@@ -16,13 +16,27 @@ source "${SCRIPT_DIR}/client-id.sh"
 # A managed client owns this loopback bridge across CLI child restarts. Use it
 # before deriving a standalone identity or opening direct gateway traffic.
 if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+  managed_session_id="${STATEWRIGHT_MANAGED_MCP_SESSION_ID:-}"
+  managed_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/statewright-claude-mcp.XXXXXX")
+  trap 'rm -rf "$managed_tmpdir"' EXIT
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
-    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
-      -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
-      --data-binary "$line" 2>/dev/null || true)
+    request_headers=(
+      -H 'Content-Type: application/json'
+      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
+    )
+    [ -n "$managed_session_id" ] && request_headers+=(-H "Mcp-Session-Id: ${managed_session_id}")
+    response_headers="$managed_tmpdir/headers"
+    response_body="$managed_tmpdir/body"
+    if curl -sS --max-time 15 -D "$response_headers" -o "$response_body" -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+      "${request_headers[@]}" --data-binary "$line" 2>/dev/null; then
+      response=$(cat "$response_body")
+      response_session_id=$(awk 'BEGIN { IGNORECASE=1 } /^Mcp-Session-Id:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[\r\n]/, ""); print; exit }' "$response_headers")
+      [ -n "$response_session_id" ] && managed_session_id="$response_session_id"
+    else
+      response=""
+    fi
     case "$method" in notifications/*) continue ;; esac
     if [ -n "$response" ]; then
       printf '%s\n' "$response"

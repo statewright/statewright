@@ -34,6 +34,7 @@ import json, os, sys
 settings_path = "$SETTINGS"
 hook_script = "$HOOK_SCRIPT"
 gateway_url = os.environ.get("STATEWRIGHT_GATEWAY_URL", "https://mcp.statewright.ai")
+mcp_proxy = os.path.join(os.path.dirname(hook_script), "mcp-proxy.sh")
 
 with open(settings_path) as f:
     settings = json.load(f)
@@ -95,9 +96,10 @@ if os.path.exists(key_path):
                     existing_mcp = json.load(mf)
             except: pass
         existing_mcp.setdefault("mcpServers", {})["statewright"] = {
-            "type": "http",
-            "url": gateway_url,
-            "headers": {"Authorization": f"Bearer {api_key}"}
+            "type": "stdio",
+            "command": "bash",
+            "args": [mcp_proxy],
+            "env": {"STATEWRIGHT_GATEWAY_URL": gateway_url}
         }
         with open(mcp_path, "w") as mf:
             json.dump(existing_mcp, mf, indent=2)

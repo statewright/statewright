@@ -627,8 +627,9 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            # Keep the final state cache until Stop. Claude writes its final
-            # assistant message after this hook, and it belongs to this epoch.
+            # Keep the final state cache until SessionEnd. Claude writes its
+            # final assistant message after this hook, and it belongs to this
+            # epoch for provider-exact terminal usage projection.
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -703,7 +704,9 @@ case "$ENDPOINT" in
 
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json"
+      # Claude persists the terminal assistant record after Stop. Retain this
+      # final epoch until SessionEnd projects exact provider usage and clears
+      # the session-scoped telemetry files.
       exit 0
     fi
 

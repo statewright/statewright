@@ -14,7 +14,60 @@ Then install:
 /plugin install statewright
 ```
 
-Your browser opens. Sign up. Generate a key. Paste it. Done.
+Then run the local bootstrap once from the repository checkout:
+
+```bash
+bash plugins/claude-code/setup.sh
+exec zsh
+```
+
+The setup command installs Claude hooks, configures the Statewright MCP
+server, installs the managed `claude` shim, and enables transparent model
+routing. The `exec zsh` reloads `PATH`; it is required only once after the
+initial setup or a plugin update.
+
+Verify the install:
+
+```bash
+command -v claude
+cat ~/.statewright/config.json
+```
+
+The first command should resolve to `~/.statewright/bin/claude`. The config
+should contain `routing.managed_clients.enabled: true` and
+`routing.managed_clients.hosts.claude: true`.
+
+After that, use Claude normally. No wrapper command, shell alias, or plugin
+cache path is needed:
+
+```bash
+claude
+```
+
+Your existing Claude sessions can be tested through the managed client by
+starting a fresh terminal and resuming the session normally:
+
+```bash
+claude --resume SESSION_ID
+```
+
+At a Statewright model boundary, the managed client preserves the conversation
+by forking the session and starts the fork with the routed model.
+
+To disable only managed Claude routing while leaving Statewright installed:
+
+```bash
+node plugins/executor/statewright-managed-client.mjs --disable --host claude
+```
+
+To remove the managed shims and the Statewright shell-path block:
+
+```bash
+node plugins/executor/statewright-managed-client.mjs --uninstall
+```
+
+Your browser opens during plugin installation. Sign up, generate a key, and
+paste it when prompted. The local setup command reuses the saved key.
 
 For executor-owned isolated delivery, launch Claude Code through the shared executor:
 

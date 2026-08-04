@@ -26,6 +26,14 @@ server, installs the managed `claude` shim, and enables transparent model
 routing. The `exec zsh` reloads `PATH`; it is required only once after the
 initial setup or a plugin update.
 
+The MCP client and hook gateway are configured as one endpoint. For a
+self-hosted or staging gateway, set `STATEWRIGHT_GATEWAY_URL` when running
+setup; otherwise the public gateway is used:
+
+```bash
+STATEWRIGHT_GATEWAY_URL=https://mcp.statewright.ai bash plugins/claude-code/setup.sh
+```
+
 Verify the install:
 
 ```bash

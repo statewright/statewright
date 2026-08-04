@@ -29,10 +29,11 @@ fi
 
 # Inject hooks using python (available on macOS + most Linux)
 python3 << PYEOF
-import json, sys
+import json, os, sys
 
 settings_path = "$SETTINGS"
 hook_script = "$HOOK_SCRIPT"
+gateway_url = os.environ.get("STATEWRIGHT_GATEWAY_URL", "https://mcp.statewright.ai")
 
 with open(settings_path) as f:
     settings = json.load(f)
@@ -67,7 +68,7 @@ with open(settings_path, "w") as f:
 print(f"Statewright hooks + MCP permissions installed in {settings_path}")
 
 # Install agent definitions (fork-branch-worker etc.)
-import os, shutil
+import shutil
 agents_dir = os.path.expanduser("~/.claude/agents")
 os.makedirs(agents_dir, exist_ok=True)
 plugin_cache = os.path.dirname(hook_script)
@@ -95,7 +96,7 @@ if os.path.exists(key_path):
             except: pass
         existing_mcp.setdefault("mcpServers", {})["statewright"] = {
             "type": "http",
-            "url": "https://mcp.statewright.ai",
+            "url": gateway_url,
             "headers": {"Authorization": f"Bearer {api_key}"}
         }
         with open(mcp_path, "w") as mf:

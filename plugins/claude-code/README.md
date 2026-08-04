@@ -44,6 +44,19 @@ cache path is needed:
 claude
 ```
 
+### Claude routing canary
+
+Use the Claude-specific canary, which routes between Claude model annotations
+instead of Codex model names:
+
+```text
+Load the `claude-model-routing-canary` workflow and follow its instructions exactly. Confirm the current Statewright phase, then emit the required transition.
+```
+
+The canary starts on `anthropic/claude-sonnet-4-6` and routes to
+`anthropic/claude-opus-4-6`. Do not use the Codex-only `model-routing-canary`
+workflow from Claude.
+
 Your existing Claude sessions can be tested through the managed client by
 starting a fresh terminal and resuming the session normally:
 

@@ -1,0 +1,28 @@
+{
+  "id": "claude-model-routing-canary",
+  "initial": "triage",
+  "states": {
+    "triage": {
+      "allowed_tools": [
+        "mcp__statewright__statewright_transition",
+        "mcp__statewright__statewright_get_state"
+      ],
+      "model": "anthropic/claude-sonnet-4-6",
+      "thinking_level": "medium",
+      "instructions": "Confirm the initial Claude-routed state, then emit ESCALATE.",
+      "on": { "ESCALATE": "analysis" }
+    },
+    "analysis": {
+      "allowed_tools": [
+        "mcp__statewright__statewright_transition",
+        "mcp__statewright__statewright_get_state"
+      ],
+      "model": "anthropic/claude-opus-4-6",
+      "thinking_level": "high",
+      "instructions": "Confirm the Claude model route changed to Opus, then emit COMPLETE.",
+      "on": { "COMPLETE": "completed" }
+    },
+    "completed": { "type": "final" }
+  },
+  "guards": {}
+}

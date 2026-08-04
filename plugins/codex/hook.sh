@@ -98,6 +98,28 @@ mcp_call() {
     -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
+# Codex has emitted MCP results as a raw text value, a ContentBlock array, and
+# a {content:[ContentBlock]} envelope. Normalize those transport forms before
+# interpreting Statewright's JSON payload.
+extract_mcp_result_text() {
+  local response="$1"
+  [ -n "$response" ] || return 0
+  printf '%s' "$response" | jq -r '
+    def first_text:
+      [ .[]? | select(.type? == "text") | .text? | strings ][0] // empty;
+    if type == "string" then .
+    elif type == "array" then first_text
+    elif type == "object" then
+      if (.content? | type) == "array" then (.content | first_text)
+      elif (.result?.content? | type) == "array" then (.result.content | first_text)
+      elif (.text? | type) == "string" then .text
+      else tojson
+      end
+    else empty
+    end
+  ' 2>/dev/null || true
+}
+
 # Emit sanitized native-hook telemetry for an already-authoritative workflow
 # state. Hooks do not receive provider token counts, so those remain explicitly
 # unavailable; tool-result byte and token estimates are kept separate.
@@ -565,10 +587,7 @@ case "$ENDPOINT" in
         # A workflow load returns its authoritative post-load state. Never
         # re-query here: that can target a stale gateway session and activate
         # enforcement with the wrong phase.
-        PARSED=""
-        if [ -n "$TOOL_RESULT" ]; then
-          PARSED=$(echo "$TOOL_RESULT" | jq -r 'if type == "array" then .[0].text // empty else . end' 2>/dev/null || true)
-        fi
+        PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
         STATE_JSON=$(echo "$PARSED" | jq -c '.state_snapshot // empty' 2>/dev/null || true)
         if [ -z "$STATE_JSON" ] || [ "$STATE_JSON" = "null" ]; then
           jq -n \
@@ -605,10 +624,7 @@ case "$ENDPOINT" in
         PREV_STATE=$(cat "$CACHE_FILE" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
 
         # Check for fork/join results in tool output
-        PARSED_RESULT=""
-        if [ -n "$TOOL_RESULT" ]; then
-          PARSED_RESULT=$(echo "$TOOL_RESULT" | jq -r 'if type == "array" then .[0].text // empty else . end' 2>/dev/null || true)
-        fi
+        PARSED_RESULT=$(extract_mcp_result_text "$TOOL_RESULT")
 
         IS_FORK=$(echo "$PARSED_RESULT" | jq -r '.forked // false' 2>/dev/null || true)
         IS_JOIN=$(echo "$PARSED_RESULT" | jq -r '.joined // false' 2>/dev/null || true)

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -60,6 +62,79 @@ async function invoke(command, args, input, environment) {
     child.stdin.end(`${JSON.stringify(input)}\n`);
   });
 }
+
+const loadedState = {
+  state_snapshot: {
+    state: "intake",
+    allowed_tools: ["Read"],
+    transitions: [{ event: "EVIDENCE_READY", target: "design" }],
+    run_id: "native-hook-test-run",
+    capture_output: true,
+  },
+};
+
+test("native Codex hook unwraps structured MCP workflow-load results", async () => {
+  const responses = [
+    JSON.stringify(loadedState),
+    [{ type: "text", text: JSON.stringify(loadedState) }],
+    { content: [{ type: "text", text: JSON.stringify(loadedState) }] },
+  ];
+
+  for (const [index, tool_response] of responses.entries()) {
+    const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+    const environment = {
+      HOME: home,
+      STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+      STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+    };
+    const session_id = `native-structured-response-${index}`;
+
+    try {
+      const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+        session_id,
+        tool_name: "mcp__statewright__statewright_load_workflow",
+        tool_response,
+      }, environment);
+      assert.equal(post.status, 0, post.stderr);
+      const context = JSON.parse(post.stdout).hookSpecificOutput.additionalContext;
+      assert.match(context, /Workflow loaded\. Phase: intake/);
+      assert.doesNotMatch(context, /did not return an authoritative state snapshot/);
+
+      const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id,
+        tool_name: "Read",
+        tool_input: { file_path: "README.md" },
+      }, environment);
+      assert.equal(pre.status, 0, pre.stderr);
+      assert.equal(pre.stdout, "");
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test("native Codex hook leaves malformed workflow-load results inactive", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const environment = {
+    HOME: home,
+    STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+    STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+  };
+  try {
+    const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id: "native-malformed-response",
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: { content: [{ type: "text", text: "not workflow JSON" }] },
+    }, environment);
+    assert.equal(post.status, 0, post.stderr);
+    assert.match(
+      JSON.parse(post.stdout).hookSpecificOutput.additionalContext,
+      /did not return an authoritative state snapshot/,
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test("Codex hooks and MCP join the executor-owned bridge", async () => {
   const bridge = await startBridge();

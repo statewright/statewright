@@ -640,10 +640,11 @@ function findSessionFile(root, conversationId) {
 }
 
 class CodexJsonlToolTailer {
-  constructor({ sessionsDir, cursorPath, onEvent }) {
+  constructor({ sessionsDir, cursorPath, onEvent, onDiagnostic }) {
     this.sessionsDir = sessionsDir;
     this.cursorPath = cursorPath;
     this.onEvent = onEvent;
+    this.onDiagnostic = onDiagnostic;
     this.cursors = existsSync(cursorPath) ? JSON.parse(readFileSync(cursorPath, "utf8")) : {};
     this.paths = new Map();
     this.calls = new Map();
@@ -681,14 +682,23 @@ class CodexJsonlToolTailer {
     }
     const data = bytes.subarray(0, read);
     const completeEnd = data.lastIndexOf(0x0A);
-    if (completeEnd < 0) return { records: [], nextOffset: offset };
+    // A single transcript record can exceed the bounded window. Advance over
+    // the window so that a later poll can find its trailing newline; the
+    // malformed tail fragment is ignored and later records remain observable.
+    if (completeEnd < 0) {
+      return {
+        records: [],
+        nextOffset: offset + read,
+        skippedOversizedRecord: read === length,
+      };
+    }
     const records = data.subarray(0, completeEnd + 1).toString("utf8")
       .split("\n")
       .filter(Boolean)
       .flatMap((line) => {
         try { return [JSON.parse(line)]; } catch { return []; }
       });
-    return { records, nextOffset: offset + completeEnd + 1 };
+    return { records, nextOffset: offset + completeEnd + 1, skippedOversizedRecord: false };
   }
 
   poll(conversationIds) {
@@ -701,7 +711,7 @@ class CodexJsonlToolTailer {
       if (this.#prime(path, size)) continue;
       const offset = Math.min(Number(this.cursors[path] || 0), size);
       if (offset === size) continue;
-      const { records, nextOffset } = this.#readCompleteLines(path, offset, size);
+      const { records, nextOffset, skippedOversizedRecord } = this.#readCompleteLines(path, offset, size);
       if (nextOffset === offset) continue;
       const calls = this.calls.get(conversationId) ?? new Map();
       for (const event of inspectCodexCustomToolRecords(records, conversationId, calls)) {
@@ -711,6 +721,11 @@ class CodexJsonlToolTailer {
       this.calls.set(conversationId, calls);
       this.cursors[path] = nextOffset;
       this.#save();
+      if (skippedOversizedRecord) {
+        this.onDiagnostic?.(
+          `Skipped an oversized Codex JSONL record after reading ${MAX_CODEX_JSONL_READ_BYTES} bytes.`,
+        );
+      }
     }
     return observed;
   }
@@ -886,6 +901,7 @@ export class LocalTelemetryService {
         sessionsDir: codexSessionsDir,
         cursorPath: join(dataDir, "codex-jsonl-cursors.json"),
         onEvent: (event) => this.ingestCodexTool(event),
+        onDiagnostic: (message) => { this.receiver.last_protocol_error = `Codex JSONL tailer: ${message}`; },
       })
       : null;
   }

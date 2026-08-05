@@ -155,6 +155,40 @@ test("Code Mode tailer primes large existing transcripts and consumes only new c
   });
 });
 
+test("Code Mode tailer skips an oversized record and resumes at the following record", async () => {
+  await withTempDir(async (directory) => {
+    const sessions = join(directory, "sessions", "2026", "08", "05");
+    mkdirSync(sessions, { recursive: true });
+    const transcript = join(sessions, "rollout-thread-root.jsonl");
+    writeFileSync(transcript, "");
+    const service = new LocalTelemetryService({
+      dataDir: join(directory, "telemetry"),
+      codexSessionsDir: join(directory, "sessions"),
+      pocketbaseUrl: "https://statewright.invalid",
+    });
+    service.bind({
+      conversation_id: "thread-root", run_id: "run-1", workflow: "workflow",
+      state: "implement", state_epoch: 1, effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    await service.maintain();
+    appendFileSync(transcript, `${JSON.stringify({ payload: { ignored: "x".repeat(1_100_000) } })}\n`);
+    await service.maintain();
+    appendFileSync(transcript, `${JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
+      type: "custom_tool_call", call_id: "call-after-large", name: "exec", input: "after large",
+    } })}\n`);
+    appendFileSync(transcript, `${JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:02.000Z", payload: {
+      type: "custom_tool_call_output", call_id: "call-after-large", output: [{ type: "input_text", text: "ok\nExit code: 0" }],
+    } })}\n`);
+    await service.maintain();
+
+    const [event] = service.outbox.pending();
+    assert.equal(event.tool.tool, "exec");
+    assert.equal(event.tool.exit_code, 0);
+    const cursors = JSON.parse(readFileSync(join(directory, "telemetry", "codex-jsonl-cursors.json"), "utf8"));
+    assert.equal(cursors[transcript], statSync(transcript).size);
+  });
+});
+
 test("Code Mode tool telemetry preserves raw output only for capture-enabled staging", async () => {
   await withTempDir(async (directory) => {
     const requests = [];

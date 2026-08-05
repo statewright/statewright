@@ -121,9 +121,9 @@ The executor owns the remote credential and MCP session. Claude Code receives an
 
 ### Transparent Model Routing
 
-The plugin setup installs the managed Claude client automatically. Restart the
-terminal once after installing or updating the plugin, then keep using `claude`
-normally. The shim stays dormant unless a workflow is loaded. At a route boundary it owns
+The plugin setup installs the managed Claude client automatically. After setup,
+start `claude` from the terminal so the shim can load. It stays dormant unless
+a workflow is loaded. At a route boundary it owns
 and restarts only its own CLI child, resumes the same conversation with the workflow
 model, and preserves the plugin MCP session. Claude does not expose a documented CLI
 reasoning-effort flag, so Statewright applies the state model and records the
@@ -188,4 +188,5 @@ When no workflow is running, just the brand pill shows. Append the statewright s
 
 ## License
 
-Apache 2.0. Cloud at [statewright.ai](https://statewright.ai).
+FSL-1.1-ALv2 (see [`../LICENSE.md`](../LICENSE.md)). Cloud at
+[statewright.ai](https://statewright.ai).

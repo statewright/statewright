@@ -63,11 +63,14 @@ The `statewright_run_agent` MCP tool bridges the two: the gateway spawns `sw-age
 
 ## Technology Stack
 
-All components are permissively licensed. No copyleft. No bait-and-switch licenses.
+The repository uses Apache 2.0 and MIT for the core/self-hosted components and
+FSL-1.1-ALv2 for the gateway and plugins. See the component license files for
+the applicable terms.
 
 | Component | Technology | License | Role |
 |-----------|-----------|---------|------|
-| Gateway + Agent | Rust | MIT/Apache 2.0 | MCP proxy, CLI agent |
+| Gateway | Rust | FSL-1.1-ALv2 | MCP proxy and hook server |
+| Agent | Rust | Apache 2.0 | CLI agent |
 | HTTP layer | axum 0.8 | MIT | Gateway HTTP server |
 | LLM inference | Ollama | MIT | Local model serving |
 | State persistence | In-memory (SessionManager) | N/A | Session state |
@@ -82,5 +85,5 @@ All components are permissively licensed. No copyleft. No bait-and-switch licens
 | State model | Explicit FSM (JSON configs) | Explicit FSM (JS) | Implicit (event history) | Implicit (journal) |
 | Human-in-the-loop | First-class (state parking) | Possible but not primary | Signal-based (bolted on) | Not primary |
 | Debugging | JSONL events + TUI | API + dashboard | Event history replay | Journal replay |
-| License | Apache 2.0 | Proprietary SaaS | MIT (server), Proprietary (cloud) | Proprietary |
+| License | Apache 2.0 core / FSL-1.1-ALv2 gateway and plugins | Proprietary SaaS | MIT (server), Proprietary (cloud) | Proprietary |
 | LLM agent focus | Primary use case | Not targeted | Emerging use case | Not targeted |

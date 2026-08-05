@@ -138,7 +138,7 @@ export async function acquireManagedTelemetry({ environment = process.env, home 
     await removeStaleTelemetryLeases(leasesDir);
     let health = await telemetryHealth(port);
     if (health?.listener_status === "healthy" && health?.config_identity !== expectedIdentity) {
-      throw new Error("Statewright telemetry listener identity conflicts with the managed client configuration.");
+      throw new Error("Statewright telemetry listener identity conflicts with the managed client configuration. Close the stale managed client and restart it so the listener reloads its configuration; also verify that STATEWRIGHT_API_KEY is current and valid.");
     }
     if (!health) {
       const child = spawn(process.execPath, [agentPath], {

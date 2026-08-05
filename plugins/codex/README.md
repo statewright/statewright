@@ -178,7 +178,7 @@ node plugins/codex/scripts/statewright-delivery.mjs recover \
 
 ## Agent decision record
 
-Set `meta.agent-decision-record` to `true` to make the gateway invoke the
+Set `meta.agent-decision-record` to `true` so the gateway invokes the
 built-in `adr-record` child before the parent workflow begins. The gateway
 derives `.statewright/adr/<workflow>-<run-id>.md`, passes it as `adr_path`, and
 resumes the parent only after the child records the decision. The child must

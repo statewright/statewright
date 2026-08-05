@@ -2,6 +2,7 @@
   "name": "statewright-codex",
   "version": "0.3.0",
   "private": true,
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "dependencies": {
     "@sentry/node": "^10.69.0"

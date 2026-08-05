@@ -122,4 +122,5 @@ Each fork branch runs as a separate Pi subprocess with its own MCP session (`br_
 
 This means during parallel fork execution, a branch worker could theoretically use a tool allowed by another branch but not by its own. For workflows where branches have different tool restrictions and this matters, use sequential execution or the Pi plugin.
 
-Per-branch MCP session isolation for Claude Code is planned — see the internal design spec for details.
+Per-branch MCP session isolation for Claude Code is not yet supported. Use
+sequential forks when independent branch enforcement is required.

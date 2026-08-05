@@ -146,8 +146,8 @@ do not present a local prompt. Statewright does not currently ship a Telegram,
 Slack, or Discord dispatcher; an external integration must resolve the pending
 approval through the gateway callback/API.
 
-Codex, OMX, and Claude Code hooks all refresh their cached workflow state after
-a transition. When that cache contains a pending local approval, their
+Codex, OMX, and Claude Code hooks refresh their cached workflow state after a
+transition. When that cache contains a pending local approval, those hooks
 PostToolUse hook asks the host UI to present the review message. Their Stop
 hooks deliberately pass through: they must not hide or replace the host's
 approval prompt. An `external` approval mode leaves that prompt to the
@@ -209,8 +209,8 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 | Agent | Release line | Executor integration | Tool enforcement | Route boundary |
 |-------|--------------|----------------------|------------------|----------------|
-| [Claude Code](plugins/claude-code/) | 0.3.0 pending | Hooks + executor MCP bridge | Hard | Managed restart with forked session |
-| [Codex](plugins/codex/) | 0.3.0 pending | App server + hooks + shared delivery core | Hard | Managed restart of the same thread |
+| [Claude Code](plugins/claude-code/) | 0.3.0 candidate | Hooks + executor MCP bridge | Hard | Managed restart with forked session |
+| [Codex](plugins/codex/) | 0.3.0 candidate | App-server hooks + shared executor bridge | Hard | Managed restart of the same thread |
 | [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
 | [Pi](plugins/pi/) | 0.2.0 | Native extension + executor MCP bridge | Hard* | Live |
 | [OpenCode](plugins/opencode/) | 0.2.0 | Native plugin + executor MCP bridge | Hard | Live |

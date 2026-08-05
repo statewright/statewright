@@ -16,7 +16,8 @@ TIMEOUT=${TIMEOUT:-1200}
 
 # Staging gateway
 export STATEWRIGHT_GATEWAY_URL="https://statewright-mcp.casa.enhasa.cloud"
-export STATEWRIGHT_API_KEY="sw_live_56662ab8feb1e019c77de0b89744af0f"
+: "${STATEWRIGHT_API_KEY:?Set STATEWRIGHT_API_KEY to the staging API key before running this experiment}"
+export STATEWRIGHT_API_KEY
 export STATEWRIGHT_PB_URL="https://statewright.casa.enhasa.cloud"
 
 # Fixtures with failing tests (skip kvstore — no tests)

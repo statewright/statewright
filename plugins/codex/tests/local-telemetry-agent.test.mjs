@@ -435,6 +435,37 @@ test("outbox deduplicates, survives restart, and acknowledges only after deliver
   });
 });
 
+test("outbox keeps delayed usage on its source-time workflow binding", async () => {
+  await withTempDir(async (directory) => {
+    const outbox = new DurableOutbox(join(directory, "outbox.jsonl"));
+    const [normalized] = normalizeOtlpLogs(otlpFixture());
+    const sourceBinding = {
+      conversation_id: "thread-root",
+      root_session_id: "thread-root",
+      run_id: "run-source",
+      run_session_id: "session-source",
+      workflow: "source-workflow",
+      state: "analysis",
+      state_epoch: 2,
+    };
+    const laterIdentity = {
+      conversation_id: "thread-root",
+      root_session_id: "thread-root",
+      run_id: "run-later",
+      run_session_id: "session-later",
+      workflow: "later-workflow",
+      state: "triage",
+      state_epoch: 1,
+    };
+
+    const { event } = outbox.appendUsage(normalized, sourceBinding, laterIdentity);
+    assert.equal(event.run_id, "run-source");
+    assert.equal(event.run_session_id, "session-source");
+    assert.equal(event.workflow, "source-workflow");
+    assert.equal(event.state_budget.run_id, "run-source");
+  });
+});
+
 test("service uploads bound events once and keeps provider data sanitized", async () => {
   await withTempDir(async (directory) => {
     const requests = [];

@@ -497,14 +497,18 @@ export class DurableOutbox {
       };
       this.stateTotals.set(key, { sequence, usage: cumulative });
     }
+    // A delayed provider event must remain attached to the binding active when
+    // it was emitted. `identity` is the latest binding for the conversation
+    // and can belong to a later workflow run after a routed restart.
+    const eventIdentity = binding ?? identity;
     const event = {
       event_id: normalized.event_id,
-      run_id: identity?.run_id ?? null,
-      run_session_id: identity?.run_session_id ?? null,
-      workflow: identity?.workflow ?? null,
+      run_id: eventIdentity?.run_id ?? null,
+      run_session_id: eventIdentity?.run_session_id ?? null,
+      workflow: eventIdentity?.workflow ?? null,
       thread_id: normalized.conversation_id,
       provider_session_id: normalized.conversation_id,
-      root_session_id: identity?.root_session_id ?? normalized.conversation_id,
+      root_session_id: eventIdentity?.root_session_id ?? normalized.conversation_id,
       event: "provider_token_usage",
       source: normalized.source,
       provider: normalized.provider,

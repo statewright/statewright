@@ -106,6 +106,14 @@ function toolOutputText(output) {
   return typeof output === "string" ? output.slice(0, 102_400) : compactJson(output);
 }
 
+function reportedExitCode(output) {
+  const value = toolOutputText(output);
+  const match = value.match(/(?:exit[_ ]?code|exit)\s*[:=]\s*(-?\d+)/i);
+  if (!match) return null;
+  const code = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(code) ? code : null;
+}
+
 // TODO(telemetry-redaction): support configurable Sentry-style scrubbing rules
 // before preserving opt-in raw tool output outside the local session JSONL.
 export function inspectCodexCustomToolRecords(records, conversationId, calls = new Map()) {
@@ -138,6 +146,7 @@ export function inspectCodexCustomToolRecords(records, conversationId, calls = n
       tool: call.tool,
       tool_input: call.tool_input,
       tool_output: output,
+      exit_code: reportedExitCode(payload.output),
       result_bytes: Buffer.byteLength(output, "utf8"),
       is_error: false,
       source_event_at: timestamp(record.timestamp, call.source_event_at),
@@ -935,9 +944,11 @@ export class LocalTelemetryService {
         run_session_id: binding.run_session_id,
         workflow: binding.workflow,
         phase: binding.state,
+        source: "codex_jsonl",
         tool_name: normalized.tool,
         tool_input: normalized.tool_input,
         tool_output: normalized.tool_output,
+        exit_code: normalized.exit_code,
         sequence: Number.isSafeInteger(sequence) ? sequence : 0,
         duration_ms: 0,
       });

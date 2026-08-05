@@ -32,11 +32,6 @@
             "type": "command",
             "command": "bash \"$PLUGIN_ROOT/hook.sh\" post-tool",
             "timeout": 5000
-          },
-          {
-            "type": "command",
-            "command": "bash \"$PLUGIN_ROOT/capture.sh\"",
-            "timeout": 3000
           }
         ]
       }

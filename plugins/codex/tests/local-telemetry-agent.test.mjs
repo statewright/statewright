@@ -107,14 +107,15 @@ test("Code Mode custom tool pairs normalize to a stable compact event", () => {
       type: "custom_tool_call", call_id: "call-1", name: "exec", input: "tool input",
     } },
     { type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
-      type: "custom_tool_call_output", call_id: "call-1", output: [{ type: "input_text", text: "tool output" }],
+      type: "custom_tool_call_output", call_id: "call-1", output: [{ type: "input_text", text: "tool output\nExit code: 17" }],
     } },
   ];
   const [event] = inspectCodexCustomToolRecords(records, "thread-root");
   assert.equal(event.invocation_id, "call-1");
   assert.equal(event.tool, "exec");
   assert.deepEqual(event.tool_input, { input: "tool input" });
-  assert.equal(event.tool_output, "tool output");
+  assert.equal(event.tool_output, "tool output\nExit code: 17");
+  assert.equal(event.exit_code, 17);
   assert.equal(event.event_id, inspectCodexCustomToolRecords(records, "thread-root")[0].event_id);
 });
 
@@ -151,6 +152,8 @@ test("Code Mode tool telemetry preserves raw output only for capture-enabled sta
       "https://statewright.casa.enhasa.cloud/api/gateway/logs",
     ]);
     assert.equal(JSON.parse(requests[1].request.body).event_id, event.event_id);
+    assert.equal(JSON.parse(requests[1].request.body).source, "codex_jsonl");
+    assert.equal(JSON.parse(requests[1].request.body).exit_code, null);
 
     const production = new LocalTelemetryService({
       dataDir: join(directory, "production"),

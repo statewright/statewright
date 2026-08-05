@@ -53,4 +53,6 @@ run_case() {
 run_case codex dispatch-codex '{"thread_id":"dispatch-codex","tool_name":"Read","tool_input":{"path":"README.md"},"tool_response":"ok"}'
 run_case claude-code dispatch-claude '{"session_id":"dispatch-claude","tool_name":"Read","tool_input":{"file_path":"README.md"},"tool_response":"ok"}'
 
+jq -e '(.hooks.PostToolUse[0].hooks | length) == 1 and (.hooks.PostToolUse[0].hooks[0].command | contains("hook.sh"))' "$REPO_ROOT/plugins/codex/hooks/hooks.json" >/dev/null
+
 echo "hook capture dispatch tests: ok"

@@ -33,6 +33,10 @@ case "$TOOL_NAME" in *statewright_*) exit 0 ;; esac
 TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
 TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_response // .tool_response // empty' 2>/dev/null || true)
 DURATION=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0' 2>/dev/null || echo '0')
+EXIT_CODE=$(echo "$HOOK_INPUT" | jq -r '[.exit_code, .exitCode, .tool_response.exit_code, .tool_response.exitCode] | map(select(type == "number")) | first // empty' 2>/dev/null || true)
+if [ -z "$EXIT_CODE" ]; then
+  EXIT_CODE=$(printf '%s' "$TOOL_OUTPUT" | sed -nE 's/.*([Ee]xit[ _]?[Cc]ode|[Ee]xit)[[:space:]]*[:=][[:space:]]*(-?[0-9]+).*/\2/p' | head -1)
+fi
 
 # Read current phase from state cache
 PHASE=$(cat "$HOME/.statewright/sessions/$SESSION_KEY/.state_cache" 2>/dev/null | jq -r '.state // empty' 2>/dev/null || true)
@@ -55,6 +59,7 @@ SEQ_FILE="$SESSION_DIR/.log_seq"
 SEQ=$(cat "$SEQ_FILE" 2>/dev/null || echo "0")
 SEQ=$((SEQ + 1))
 echo "$SEQ" > "$SEQ_FILE" 2>/dev/null
+EVENT_ID=$(printf '%s' "${CLIENT_ID}:${RUN_ID}:${SEQ}:${TOOL_NAME}" | shasum -a 256 | cut -c1-32)
 
 # POST to server
 PAYLOAD=$(jq -n \
@@ -68,6 +73,9 @@ PAYLOAD=$(jq -n \
   --arg thread_id "$CLIENT_ID" \
   --arg run_session_id "$(cat "$SESSION_DIR/.state_cache" 2>/dev/null | jq -r '.run_session_id // empty' 2>/dev/null || true)" \
   --arg workflow "$(cat "$SESSION_DIR/.state_cache" 2>/dev/null | jq -r '.workflow // empty' 2>/dev/null || true)" \
+  --arg source "native_codex_hook" \
+  --arg event_id "$EVENT_ID" \
+  --arg exit_code "$EXIT_CODE" \
   '{
     phase: $phase,
     tool_name: $tool_name,
@@ -77,8 +85,11 @@ PAYLOAD=$(jq -n \
     duration_ms: $duration_ms,
     thread_id: $thread_id,
     run_session_id: $run_session_id,
-    workflow: $workflow
-  } + (if $run_id != "" then {run_id: $run_id} else {} end)' 2>/dev/null)
+    workflow: $workflow,
+    source: $source
+  } + (if $run_id != "" then {run_id: $run_id} else {} end)
+    + (if ($exit_code | test("^-?[0-9]+$")) then {exit_code: ($exit_code | tonumber)} else {} end)
+    + {event_id: $event_id}' 2>/dev/null)
 
 [ -z "$PAYLOAD" ] && exit 0
 

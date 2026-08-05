@@ -96,10 +96,33 @@ function telemetryTokenUsage(value) {
 
 function findOrCreateTelemetryRun(app, sessionId, workflow, requestedRunId) {
   if (requestedRunId) {
+    var existing = null
     try {
-      var requested = app.findRecordById('workflow_runs', requestedRunId)
-      if (requested.get('session_id') === sessionId) return requested
+      existing = app.findFirstRecordByFilter(
+        'workflow_runs',
+        'external_run_id = {:run}',
+        { run: requestedRunId },
+      )
     } catch (_) {}
+    if (existing) {
+      // Route changes restart the client process, so a valid workflow run
+      // can legitimately acquire a new session ID. The external run ID is
+      // the stable attribution boundary.
+      if (sessionId && existing.get('session_id') !== sessionId) {
+        existing.set('session_id', telemetryText(sessionId, 255))
+        app.save(existing)
+      }
+      return existing
+    }
+    var requestedCollection = app.findCollectionByNameOrId('workflow_runs')
+    var requested = new Record(requestedCollection)
+    requested.set('workflow_name', telemetryText(workflow, 100) || 'telemetry')
+    requested.set('status', 'running')
+    requested.set('started_at', new Date().toISOString())
+    requested.set('session_id', telemetryText(sessionId, 255))
+    requested.set('external_run_id', telemetryText(requestedRunId, 64))
+    app.save(requested)
+    return requested
   }
   try {
     return app.findFirstRecordByFilter('workflow_runs', 'session_id = {:session}', { session: sessionId })
@@ -267,6 +290,19 @@ routerAdd('GET', '/api/gateway/runs/{runId}/usage', function (e) {
   var fingerprint = gatewayKeyFingerprint(e)
   if (!fingerprint) return e.json(401, { error: 'Invalid API key' })
   var runId = e.request.pathValue('runId')
+  try {
+    e.app.findRecordById('workflow_runs', runId)
+  } catch (_) {
+    try {
+      runId = e.app.findFirstRecordByFilter(
+        'workflow_runs',
+        'external_run_id = {:run}',
+        { run: runId },
+      ).id
+    } catch (_) {
+      return e.json(404, { error: 'Workflow run not found' })
+    }
+  }
   var states = e.app.findRecordsByFilter(
     'workflow_state_usage',
     'run_id = {:run} && api_key_fingerprint = {:fingerprint}',

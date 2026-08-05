@@ -299,18 +299,35 @@ export class BindingLedger {
     this.path = path;
     this.bindings = [];
     this.eventIds = new Set();
-    this.refresh();
+    this.byConversation = new Map();
+    this.activeAt = new Map();
+    this.lastSignature = null;
+    this.refresh({ activateNew: false });
   }
 
-  refresh() {
-    for (const record of readJsonLines(this.path)) this.#remember(record);
+  refresh({ activateNew = true } = {}) {
+    let signature = "missing";
+    try {
+      const stat = statSync(this.path);
+      signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      // A missing ledger is a valid empty ledger until the first binding arrives.
+    }
+    if (signature === this.lastSignature) return false;
+    this.lastSignature = signature;
+    for (const record of readJsonLines(this.path)) this.#remember(record, activateNew);
+    return true;
   }
 
-  #remember(record) {
+  #remember(record, activate = true) {
     if (record?.kind !== "binding" || !record.binding?.event_id) return;
     if (this.eventIds.has(record.binding.event_id)) return;
     this.eventIds.add(record.binding.event_id);
     this.bindings.push(record.binding);
+    const entries = this.byConversation.get(record.binding.conversation_id) ?? [];
+    entries.push(record.binding);
+    this.byConversation.set(record.binding.conversation_id, entries);
+    if (activate) this.activeAt.set(record.binding.conversation_id, Date.now());
   }
 
   append(input) {
@@ -364,22 +381,40 @@ export class BindingLedger {
     return { binding, duplicate: false };
   }
 
-  knows(conversationId) {
-    this.refresh();
-    return this.bindings.some((binding) => binding.conversation_id === conversationId);
+  knows(conversationId, { refresh = true } = {}) {
+    if (refresh) this.refresh();
+    return this.byConversation.has(conversationId);
   }
 
-  conversationIds() {
-    this.refresh();
-    return [...new Set(this.bindings.map((binding) => binding.conversation_id))];
+  conversationIds({ refresh = true } = {}) {
+    if (refresh) this.refresh();
+    return [...this.byConversation.keys()];
   }
 
-  resolve(conversationId, sourceEventAt) {
-    this.refresh();
+  activeConversationIds(since, { refresh = true } = {}) {
+    if (refresh) this.refresh();
+    const threshold = Number(since);
+    const active = new Set(
+      [...this.activeAt.entries()]
+        .filter(([, observedAt]) => observedAt >= threshold)
+        .map(([conversationId]) => conversationId),
+    );
+    // A collector may restart mid-state. A recent effective boundary is the
+    // durable signal that lets it resume that active transcript without
+    // re-scanning the full historical binding ledger.
+    for (const [conversationId, bindings] of this.byConversation) {
+      if (bindings.some((binding) => new Date(binding.effective_at).getTime() >= threshold)) {
+        active.add(conversationId);
+      }
+    }
+    return [...active];
+  }
+
+  resolve(conversationId, sourceEventAt, { refresh = true } = {}) {
+    if (refresh) this.refresh();
     const at = new Date(sourceEventAt).getTime();
     let match = null;
-    for (const binding of this.bindings) {
-      if (binding.conversation_id !== conversationId) continue;
+    for (const binding of this.byConversation.get(conversationId) ?? []) {
       const effective = new Date(binding.effective_at).getTime();
       if (!Number.isFinite(effective) || effective > at) continue;
       if (!match || effective >= new Date(match.effective_at).getTime()) match = binding;
@@ -387,11 +422,10 @@ export class BindingLedger {
     return match;
   }
 
-  identity(conversationId) {
-    this.refresh();
+  identity(conversationId, { refresh = true } = {}) {
+    if (refresh) this.refresh();
     let match = null;
-    for (const binding of this.bindings) {
-      if (binding.conversation_id !== conversationId) continue;
+    for (const binding of this.byConversation.get(conversationId) ?? []) {
       if (!match || new Date(binding.effective_at) >= new Date(match.effective_at)) {
         match = binding;
       }
@@ -648,6 +682,8 @@ class CodexJsonlToolTailer {
     this.cursors = existsSync(cursorPath) ? JSON.parse(readFileSync(cursorPath, "utf8")) : {};
     this.paths = new Map();
     this.calls = new Map();
+    this.missingPaths = new Map();
+    this.missingPathRetryMs = 60_000;
   }
 
   #save() {
@@ -704,8 +740,14 @@ class CodexJsonlToolTailer {
   poll(conversationIds) {
     let observed = 0;
     for (const conversationId of conversationIds) {
-      const path = this.paths.get(conversationId) ?? findSessionFile(this.sessionsDir, conversationId);
-      if (!path) continue;
+      const retryAt = this.missingPaths.get(conversationId) ?? 0;
+      const path = this.paths.get(conversationId) ??
+        (retryAt > Date.now() ? null : findSessionFile(this.sessionsDir, conversationId));
+      if (!path) {
+        this.missingPaths.set(conversationId, Date.now() + this.missingPathRetryMs);
+        continue;
+      }
+      this.missingPaths.delete(conversationId);
       this.paths.set(conversationId, path);
       const size = statSync(path).size;
       if (this.#prime(path, size)) continue;
@@ -849,6 +891,7 @@ export class LocalTelemetryService {
     correlationWindowMs = 5_000,
     unboundRetentionMs = 24 * 60 * 60 * 1_000,
     maxUnboundRecords = 10_000,
+    activeBindingWindowMs = 6 * 60 * 60 * 1_000,
   }) {
     this.bindings = new BindingLedger(join(dataDir, "bindings.jsonl"));
     this.outbox = new DurableOutbox(join(dataDir, "outbox.jsonl"));
@@ -863,12 +906,12 @@ export class LocalTelemetryService {
     );
     this.pocketbaseUrl = pocketbaseUrl.replace(/\/$/, "");
     this.apiKey = apiKey;
-    // Raw Code Mode capture is presently authorized only for the staging
-    // tenant. Production support must add explicit redaction and a separate
-    // destination-approval contract first.
-    this.rawCaptureEnabled = this.pocketbaseUrl === "https://statewright.casa.enhasa.cloud" &&
-      rawCaptureDestination.replace(/\/$/, "") === this.pocketbaseUrl;
+    // `capture_output` is the workflow-level opt-in. Raw Code Mode capture is
+    // accepted only by the staging tenant; production needs redaction before
+    // this transport can be enabled there.
+    this.rawCaptureEnabled = this.pocketbaseUrl === "https://statewright.casa.enhasa.cloud";
     this.fetchImpl = fetchImpl;
+    this.activeBindingWindowMs = activeBindingWindowMs;
     this.flushing = false;
     this.identity = telemetryIdentity({
       pocketbaseUrl,
@@ -918,13 +961,15 @@ export class LocalTelemetryService {
 
   reconcilePendingBindings(now = Date.now()) {
     let reconciled = 0;
+    this.bindings.refresh();
     for (const normalized of this.pendingBindings.pending()) {
       if (!this.pendingBindings.isMature(normalized, now)) continue;
-      const identity = this.bindings.identity(normalized.conversation_id);
+      const identity = this.bindings.identity(normalized.conversation_id, { refresh: false });
       if (!identity) continue;
       const binding = this.bindings.resolve(
         normalized.conversation_id,
         normalized.source_event_at,
+        { refresh: false },
       );
       this.outbox.appendUsage(normalized, binding, identity);
       this.pendingBindings.release(normalized.event_id);
@@ -1008,7 +1053,9 @@ export class LocalTelemetryService {
     let customTools = 0;
     try {
       customTools = this.jsonlTailer
-        ? this.jsonlTailer.poll(this.bindings.conversationIds())
+        ? this.jsonlTailer.poll(this.bindings.activeConversationIds(
+          Date.now() - this.activeBindingWindowMs,
+        ))
         : 0;
     } catch (error) {
       this.receiver.last_protocol_error = `Codex JSONL tailer: ${text(error?.message || error, 240)}`;

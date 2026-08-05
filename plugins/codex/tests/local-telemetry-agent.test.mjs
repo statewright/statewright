@@ -195,7 +195,6 @@ test("Code Mode tool telemetry preserves raw output only for capture-enabled sta
     const service = new LocalTelemetryService({
       dataDir: directory,
       pocketbaseUrl: "https://statewright.casa.enhasa.cloud",
-      rawCaptureDestination: "https://statewright.casa.enhasa.cloud",
       apiKey: "local-secret",
       fetchImpl: async (url, request) => {
         requests.push({ url, request });
@@ -228,7 +227,6 @@ test("Code Mode tool telemetry preserves raw output only for capture-enabled sta
     const production = new LocalTelemetryService({
       dataDir: join(directory, "production"),
       pocketbaseUrl: "https://statewright.ai",
-      rawCaptureDestination: "https://statewright.ai",
       apiKey: "local-secret",
     });
     production.bind({
@@ -259,7 +257,6 @@ test("persistent collector tails a bound Code Mode session exactly once", async 
       dataDir: directory,
       codexSessionsDir: join(directory, "sessions"),
       pocketbaseUrl: "https://statewright.casa.enhasa.cloud",
-      rawCaptureDestination: "https://statewright.casa.enhasa.cloud",
       apiKey: "local-secret",
       fetchImpl: async (url, request) => {
         requests.push({ url, request });
@@ -354,6 +351,46 @@ test("bindings resolve by source time and root transitions propagate to known ch
     assert.equal(
       ledger.resolve("thread-child", "2026-07-27T12:01:00.000Z").state,
       "validate",
+    );
+  });
+});
+
+test("binding ledger indexes live conversations and refreshes external bindings once", async () => {
+  await withTempDir((directory) => {
+    const path = join(directory, "bindings.jsonl");
+    const recentBoundary = new Date().toISOString();
+    appendFileSync(path, `${JSON.stringify({ kind: "binding", binding: {
+      event_id: "historic-binding", conversation_id: "old-thread", run_id: "run-0",
+      workflow: "workflow", state: "completed", state_epoch: 1,
+      effective_at: "2026-08-01T05:00:00.000Z", capture_output: false, propagated: false,
+    } })}\n`);
+    const ledger = new BindingLedger(path);
+    ledger.append({
+      conversation_id: "active-thread", run_id: "run-1", workflow: "workflow",
+      state: "implement", state_epoch: 1, effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    assert.deepEqual(
+      ledger.activeConversationIds(Date.now() - 1_000),
+      ["active-thread"],
+    );
+
+    appendFileSync(path, `${JSON.stringify({ kind: "binding", binding: {
+      event_id: "external-binding", conversation_id: "external-thread", run_id: "run-2",
+      workflow: "workflow", state: "validate", state_epoch: 2,
+      effective_at: recentBoundary, capture_output: false, propagated: false,
+    } })}\n`);
+    assert.equal(
+      ledger.resolve("external-thread", new Date(Date.now() + 60_000).toISOString()).state,
+      "validate",
+    );
+    assert.deepEqual(
+      ledger.activeConversationIds(Date.now() - 1_000),
+      ["active-thread", "external-thread"],
+    );
+    const restarted = new BindingLedger(path);
+    assert.deepEqual(
+      restarted.activeConversationIds(Date.now() - 1_000),
+      ["external-thread"],
     );
   });
 });

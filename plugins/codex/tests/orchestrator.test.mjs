@@ -237,6 +237,7 @@ test("the adapter cuts turns at state transitions and applies each state route",
       state: "discover",
       state_epoch: 1,
       effective_at: nativeBindings[0].effective_at,
+      capture_output: false,
     },
     {
       conversation_id: "thread-1",
@@ -247,6 +248,7 @@ test("the adapter cuts turns at state transitions and applies each state route",
       state: "build",
       state_epoch: 2,
       effective_at: nativeBindings[1].effective_at,
+      capture_output: false,
     },
   ]);
   assert.ok(nativeBindings.every((binding) => !Number.isNaN(Date.parse(binding.effective_at))));

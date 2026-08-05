@@ -27,6 +27,11 @@ tasks:
     cmds:
       - node --test plugins/claude-code/tests/managed-routing.test.mjs plugins/executor/tests/managed-mcp-bridge.test.mjs
 
+  test:plugin-transport-parity:
+    desc: "Verify client-local MCP features survive direct, managed, and adapter transports"
+    cmds:
+      - node --test plugins/executor/tests/proxy-feature-parity.test.mjs
+
   test:claude-setup:
     desc: "Verify Claude setup preserves endpoint selection and removes only legacy Statewright MCP"
     cmds:

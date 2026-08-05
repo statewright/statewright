@@ -76,6 +76,7 @@ test("Claude MCP proxy forwards managed sessions through the supervisor bridge",
       env: {
         ...process.env,
         HOME: root,
+        STATEWRIGHT_MANAGED_CLIENT_HOST: "claude",
         STATEWRIGHT_MANAGED_MCP_URL: `http://127.0.0.1:${address.port}`,
         STATEWRIGHT_MANAGED_MCP_TOKEN: "bridge-token",
       },

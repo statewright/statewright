@@ -13,15 +13,34 @@ KEY_FILE="$STATEWRIGHT_DIR/api_key"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+inject_claude_local_tools() {
+  local response="$1"
+  local search='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}'
+  printf '%s' "$response" | jq -c --argjson s "$search" '
+    .result.tools = ([.result.tools[] | select(.name != "statewright_search_docs")] + [$s])
+  ' 2>/dev/null || printf '%s' "$response"
+}
+
+run_claude_local_tool() {
+  local line="$1" tool_name
+  tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
+  [ "$tool_name" = "statewright_search_docs" ] || return 1
+  env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN \
+    -u STATEWRIGHT_ADAPTER_URL -u STATEWRIGHT_ADAPTER_TOKEN "$0" <<<"$line"
+}
+
 # A managed client owns this loopback bridge across CLI child restarts. Use it
 # before deriving a standalone identity or opening direct gateway traffic.
-if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-claude}" = "claude" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
   managed_session_id="${STATEWRIGHT_MANAGED_MCP_SESSION_ID:-}"
   managed_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/statewright-claude-mcp.XXXXXX")
   trap 'rm -rf "$managed_tmpdir"' EXIT
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    if [ "$method" = "tools/call" ] && run_claude_local_tool "$line"; then
+      continue
+    fi
     request_headers=(
       -H 'Content-Type: application/json'
       -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
@@ -39,17 +58,36 @@ if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
     fi
     case "$method" in notifications/*) continue ;; esac
     if [ -n "$response" ]; then
+      [ "$method" = "tools/list" ] && response=$(inject_claude_local_tools "$response")
       printf '%s\n' "$response"
     else
-      id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
-      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright managed MCP bridge unavailable."},"id":%s}\n' "$id"
+      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN "$0" <<<"$line"
     fi
   done
   exit 0
 fi
 
 if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
-  exec bash "${SCRIPT_DIR}/../executor/mcp-proxy.sh"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    if [ "$method" = "tools/call" ] && run_claude_local_tool "$line"; then
+      continue
+    fi
+    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
+      -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
+      --data-binary "$line" 2>/dev/null || true)
+    case "$method" in notifications/*) continue ;; esac
+    if [ -n "$response" ]; then
+      [ "$method" = "tools/list" ] && response=$(inject_claude_local_tools "$response")
+      printf '%s\n' "$response"
+    else
+      id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
+      printf '{"jsonrpc":"2.0","error":{"code":-32603,"message":"Statewright executor bridge unavailable."},"id":%s}\n' "$id"
+    fi
+  done
+  exit 0
 fi
 
 CLIENT_ID=$(statewright_client_id)

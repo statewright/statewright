@@ -26,7 +26,7 @@ statewright_managed_client_id() {
   [ -n "$control_dir" ] || return 1
   identity_file="$control_dir/identity.json"
   [ -r "$identity_file" ] || return 1
-  client_id=$(jq -r 'if (.client_id | type) == "string" and (.client_id | test("^swc_[0-9a-f]{32}$")) then .client_id else empty end' "$identity_file" 2>/dev/null || true)
+  client_id=$(jq -r 'if .host == "claude" and (.client_id | type) == "string" and (.client_id | test("^swc_[0-9a-f]{32}$")) then .client_id else empty end' "$identity_file" 2>/dev/null || true)
   [ -n "$client_id" ] || return 1
   printf '%s' "$client_id"
 }
@@ -56,7 +56,13 @@ statewright_host_process_material() {
 
 statewright_client_id() {
   local hook_session="${1:-}"
-  local managed_id material="${STATEWRIGHT_CLIENT_ID:-${STATEWRIGHT_MCP_SESSION_ID:-}}"
+  local managed_id material=""
+
+  # Do not inherit another TUI's managed transport identity when Claude is
+  # launched from a shell that was itself started by Codex (or vice versa).
+  if [ -z "${STATEWRIGHT_MANAGED_CLIENT_HOST:-}" ] || [ "$STATEWRIGHT_MANAGED_CLIENT_HOST" = "claude" ]; then
+    material="${STATEWRIGHT_CLIENT_ID:-${STATEWRIGHT_MCP_SESSION_ID:-}}"
+  fi
 
   managed_id=$(statewright_managed_client_id || true)
   if [ -n "$managed_id" ]; then

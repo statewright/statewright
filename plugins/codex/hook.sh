@@ -129,7 +129,7 @@ emit_native_telemetry() {
   local state_json="$2"
   local run_id state epoch seq event_id timestamp effective_at model tool_bytes tool_count current_tool_bytes
   local prior_bytes prior_count is_tool=false payload session_id conversation_id child_id run_session_id
-  local binding_payload propagate_children=false
+  local binding_payload propagate_children=false capture_output=false
 
   [ -z "$API_KEY" ] && return 0
   [ -z "$state_json" ] && return 0
@@ -177,6 +177,7 @@ emit_native_telemetry() {
   effective_at=$(cat "$PROJECT_DIR/.state_effective_at" 2>/dev/null || true)
   [ -z "$effective_at" ] && effective_at="$timestamp"
   model=$(echo "$HOOK_INPUT" | jq -r '.model // empty' 2>/dev/null || true)
+  [ "$(echo "$state_json" | jq -r '.capture_output // false' 2>/dev/null || true)" = "true" ] && capture_output=true
 
   binding_payload=$(jq -n \
     --arg conversation_id "$conversation_id" \
@@ -187,6 +188,7 @@ emit_native_telemetry() {
     --arg state "$state" \
     --arg effective_at "$effective_at" \
     --argjson state_epoch "$epoch" \
+    --argjson capture_output "$capture_output" \
     --argjson propagate_children "$propagate_children" \
     '{
       conversation_id: $conversation_id,
@@ -196,6 +198,7 @@ emit_native_telemetry() {
       workflow: $workflow,
       state: $state,
       state_epoch: $state_epoch,
+      capture_output: $capture_output,
       effective_at: $effective_at,
       propagate_children: $propagate_children
     }')

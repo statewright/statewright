@@ -80,6 +80,7 @@ fi
 
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
+RAW_CAPTURE_DESTINATION="${STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION:-}"
 KEY_FILE="${HOME}/.statewright/api_key"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
@@ -199,6 +200,7 @@ start_local_telemetry_agent() {
   fi
   expected=$(STATEWRIGHT_API_KEY="$key" \
     STATEWRIGHT_PB_URL="$PB_URL" \
+    STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
     node "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
   if [ -z "$expected" ]; then
@@ -229,6 +231,7 @@ start_local_telemetry_agent() {
 
   STATEWRIGHT_API_KEY="$key" \
     STATEWRIGHT_PB_URL="$PB_URL" \
+    STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
     nohup node "$TELEMETRY_AGENT" \
       >>"$TELEMETRY_DIR/agent.log" 2>&1 &

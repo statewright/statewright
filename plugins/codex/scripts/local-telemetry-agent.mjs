@@ -15,6 +15,9 @@ const dataDir = process.env.STATEWRIGHT_TELEMETRY_DIR ||
   join(homedir(), ".statewright", "telemetry", "native-codex");
 const pocketbaseUrl = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai";
 const apiKey = process.env.STATEWRIGHT_API_KEY || "";
+const rawCaptureDestination = process.env.STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION || "";
+const codexSessionsDir = process.env.STATEWRIGHT_CODEX_SESSIONS_DIR ||
+  join(homedir(), ".codex", "sessions");
 const host = "127.0.0.1";
 const port = Number(process.env.STATEWRIGHT_TELEMETRY_PORT || 4318);
 const buildId = process.env.STATEWRIGHT_TELEMETRY_BUILD_ID ||
@@ -41,6 +44,7 @@ if (process.argv.includes("--identity")) {
     host,
     port,
     dataDir,
+    rawCaptureDestination,
   }))}\n`);
   process.exit(0);
 }
@@ -52,6 +56,8 @@ const service = new LocalTelemetryService({
   buildId,
   host,
   port,
+  rawCaptureDestination,
+  codexSessionsDir,
 });
 const listener = createLocalTelemetryServer(service, { host, port });
 

@@ -62,6 +62,7 @@ export function nativeOtelStateBinding({ thread, workflow, state, stateEpoch, ef
     state: state.state,
     state_epoch: stateEpoch,
     effective_at: effectiveAt,
+    capture_output: state.capture_output === true,
   };
 }
 

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +16,7 @@ import {
   createLocalTelemetryServer,
   DurableOutbox,
   LocalTelemetryService,
+  inspectCodexCustomToolRecords,
   normalizeOtlpLogs,
   telemetryIdentity,
 } from "../scripts/lib/local-telemetry-agent.mjs";
@@ -96,6 +99,109 @@ test("OTLP response.completed is normalized as an exact delta without raw fields
   assert.equal(serialized.includes("must-not-persist"), false);
   assert.equal(serialized.includes("raw body"), false);
   assert.equal(events[0].precision, "exact");
+});
+
+test("Code Mode custom tool pairs normalize to a stable compact event", () => {
+  const records = [
+    { type: "response_item", timestamp: "2026-08-05T05:00:00.000Z", payload: {
+      type: "custom_tool_call", call_id: "call-1", name: "exec", input: "tool input",
+    } },
+    { type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
+      type: "custom_tool_call_output", call_id: "call-1", output: [{ type: "input_text", text: "tool output" }],
+    } },
+  ];
+  const [event] = inspectCodexCustomToolRecords(records, "thread-root");
+  assert.equal(event.invocation_id, "call-1");
+  assert.equal(event.tool, "exec");
+  assert.deepEqual(event.tool_input, { input: "tool input" });
+  assert.equal(event.tool_output, "tool output");
+  assert.equal(event.event_id, inspectCodexCustomToolRecords(records, "thread-root")[0].event_id);
+});
+
+test("Code Mode tool telemetry preserves raw output only for capture-enabled staging", async () => {
+  await withTempDir(async (directory) => {
+    const requests = [];
+    const service = new LocalTelemetryService({
+      dataDir: directory,
+      pocketbaseUrl: "https://statewright.casa.enhasa.cloud",
+      rawCaptureDestination: "https://statewright.casa.enhasa.cloud",
+      apiKey: "local-secret",
+      fetchImpl: async (url, request) => {
+        requests.push({ url, request });
+        return { ok: true, status: 202 };
+      },
+    });
+    service.bind({
+      conversation_id: "thread-root", run_id: "run-1", workflow: "workflow",
+      state: "implement", state_epoch: 1, capture_output: true,
+      effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    const [event] = inspectCodexCustomToolRecords([
+      { type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
+        type: "custom_tool_call", call_id: "call-1", name: "exec", input: "tool input",
+      } },
+      { type: "response_item", timestamp: "2026-08-05T05:00:02.000Z", payload: {
+        type: "custom_tool_call_output", call_id: "call-1", output: [{ type: "input_text", text: "tool output" }],
+      } },
+    ], "thread-root");
+    assert.deepEqual(service.ingestCodexTool(event), { accepted: 1, raw_queued: 1, ignored: 0 });
+    await service.flush();
+    assert.deepEqual(requests.map(({ url }) => url), [
+      "https://statewright.casa.enhasa.cloud/api/gateway/telemetry/events",
+      "https://statewright.casa.enhasa.cloud/api/gateway/logs",
+    ]);
+    assert.equal(JSON.parse(requests[1].request.body).event_id, event.event_id);
+
+    const production = new LocalTelemetryService({
+      dataDir: join(directory, "production"),
+      pocketbaseUrl: "https://statewright.ai",
+      rawCaptureDestination: "https://statewright.ai",
+      apiKey: "local-secret",
+    });
+    production.bind({
+      conversation_id: "thread-root", run_id: "run-2", workflow: "workflow",
+      state: "implement", state_epoch: 1, capture_output: true,
+      effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    assert.equal(production.ingestCodexTool(event).raw_queued, 0);
+  });
+});
+
+test("persistent collector tails a bound Code Mode session exactly once", async () => {
+  await withTempDir(async (directory) => {
+    const sessions = join(directory, "sessions", "2026", "08", "05");
+    mkdirSync(sessions, { recursive: true });
+    const sessionPath = join(sessions, "rollout-test-thread-root.jsonl");
+    writeFileSync(sessionPath, [
+      JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
+        type: "custom_tool_call", call_id: "call-1", name: "exec", input: "tool input",
+      } }),
+      JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:02.000Z", payload: {
+        type: "custom_tool_call_output", call_id: "call-1", output: [{ type: "input_text", text: "tool output" }],
+      } }),
+      "",
+    ].join("\n"));
+    const requests = [];
+    const service = new LocalTelemetryService({
+      dataDir: directory,
+      codexSessionsDir: join(directory, "sessions"),
+      pocketbaseUrl: "https://statewright.casa.enhasa.cloud",
+      rawCaptureDestination: "https://statewright.casa.enhasa.cloud",
+      apiKey: "local-secret",
+      fetchImpl: async (url, request) => {
+        requests.push({ url, request });
+        return { ok: true, status: 202 };
+      },
+    });
+    service.bind({
+      conversation_id: "thread-root", run_id: "run-1", workflow: "workflow",
+      state: "implement", state_epoch: 1, capture_output: true,
+      effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    assert.equal((await service.maintain()).custom_tools, 1);
+    assert.equal((await service.maintain()).custom_tools, 0);
+    assert.equal(requests.length, 2);
+  });
 });
 
 test("collector identity changes with credentials and endpoint configuration", () => {

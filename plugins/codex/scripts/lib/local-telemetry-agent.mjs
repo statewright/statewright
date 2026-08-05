@@ -7,8 +7,10 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
@@ -86,6 +88,66 @@ function emptyUsage() {
   return Object.fromEntries(TOKEN_FIELDS.map((field) => [field, 0]));
 }
 
+function compactJson(value, max = 102_400) {
+  try {
+    return JSON.stringify(value).slice(0, max);
+  } catch {
+    return "[unserializable tool output]";
+  }
+}
+
+function toolOutputText(output) {
+  if (Array.isArray(output)) {
+    return output
+      .map((part) => typeof part?.text === "string" ? part.text : compactJson(part, 16_384))
+      .join("\n")
+      .slice(0, 102_400);
+  }
+  return typeof output === "string" ? output.slice(0, 102_400) : compactJson(output);
+}
+
+// TODO(telemetry-redaction): support configurable Sentry-style scrubbing rules
+// before preserving opt-in raw tool output outside the local session JSONL.
+export function inspectCodexCustomToolRecords(records, conversationId, calls = new Map()) {
+  const events = [];
+  for (const record of records) {
+    const payload = record?.payload;
+    if (record?.type !== "response_item" || !payload?.call_id) continue;
+    if (payload.type === "custom_tool_call") {
+      calls.set(payload.call_id, {
+        call_id: text(payload.call_id, 255),
+        tool: text(payload.name, 255) || "custom_tool",
+        tool_input: { input: text(payload.input, 102_400) },
+        source_event_at: timestamp(record.timestamp),
+      });
+      continue;
+    }
+    if (payload.type !== "custom_tool_call_output") continue;
+    const call = calls.get(payload.call_id);
+    if (!call) continue;
+    const output = toolOutputText(payload.output);
+    events.push({
+      event_id: stableId("codex-jsonl-custom-tool", {
+        conversation_id: conversationId,
+        call_id: call.call_id,
+      }),
+      invocation_id: call.call_id,
+      conversation_id: text(conversationId, 255),
+      source: "codex_jsonl",
+      provider: "codex",
+      tool: call.tool,
+      tool_input: call.tool_input,
+      tool_output: output,
+      result_bytes: Buffer.byteLength(output, "utf8"),
+      is_error: false,
+      source_event_at: timestamp(record.timestamp, call.source_event_at),
+      received_at: new Date().toISOString(),
+    });
+    calls.delete(payload.call_id);
+  }
+  return events;
+}
+
 export function telemetryIdentity({
   pocketbaseUrl,
   apiKey,
@@ -93,6 +155,7 @@ export function telemetryIdentity({
   host = "127.0.0.1",
   port = 4318,
   dataDir = "",
+  rawCaptureDestination = "",
 }) {
   return {
     protocol_version: TELEMETRY_PROTOCOL_VERSION,
@@ -103,6 +166,7 @@ export function telemetryIdentity({
       host: String(host),
       port: count(port),
       data_dir: String(dataDir),
+      raw_capture_destination: String(rawCaptureDestination || "").replace(/\/$/, ""),
     }),
   };
 }
@@ -257,6 +321,7 @@ export class BindingLedger {
       state: text(input.state, 255),
       state_epoch: count(input.state_epoch),
       effective_at: timestamp(input.effective_at),
+      capture_output: input.capture_output === true,
       propagated: input.propagated === true,
     };
     if (!binding.conversation_id || !binding.run_id || !binding.state || !binding.state_epoch) {
@@ -291,6 +356,11 @@ export class BindingLedger {
   knows(conversationId) {
     this.refresh();
     return this.bindings.some((binding) => binding.conversation_id === conversationId);
+  }
+
+  conversationIds() {
+    this.refresh();
+    return [...new Set(this.bindings.map((binding) => binding.conversation_id))];
   }
 
   resolve(conversationId, sourceEventAt) {
@@ -410,6 +480,50 @@ export class DurableOutbox {
     return { event, duplicate: false };
   }
 
+  appendTool(normalized, binding, identity = binding) {
+    if (this.seenEventIds.has(normalized.event_id)) {
+      return { event: this.events.get(normalized.event_id) ?? null, duplicate: true };
+    }
+    const sequence = ++this.sequence;
+    const event = {
+      event_id: normalized.event_id,
+      run_id: identity?.run_id ?? null,
+      run_session_id: identity?.run_session_id ?? null,
+      workflow: identity?.workflow ?? null,
+      thread_id: normalized.conversation_id,
+      provider_session_id: normalized.conversation_id,
+      root_session_id: identity?.root_session_id ?? normalized.conversation_id,
+      event: "tool_completed",
+      source: normalized.source,
+      provider: normalized.provider,
+      precision: "estimated",
+      state: binding?.state ?? null,
+      binding_status: binding ? "bound" : "unbound",
+      timestamp: normalized.source_event_at,
+      received_at: normalized.received_at,
+      sequence,
+      state_budget: binding ? {
+        run_id: binding.run_id,
+        state: binding.state,
+        state_epoch: binding.state_epoch,
+        provider: normalized.provider,
+        precision: "estimated",
+      } : null,
+      tool: {
+        invocation_id: normalized.invocation_id,
+        tool: normalized.tool,
+        tool_type: "codex_custom",
+        result_bytes: normalized.result_bytes,
+        estimated_input_tokens: Math.floor(normalized.result_bytes / 4),
+        is_error: normalized.is_error,
+      },
+    };
+    appendDurably(this.path, { kind: "event", event });
+    this.events.set(event.event_id, event);
+    this.seenEventIds.add(event.event_id);
+    return { event, duplicate: false };
+  }
+
   has(eventId) {
     return this.seenEventIds.has(eventId);
   }
@@ -457,6 +571,108 @@ export class DurableOutbox {
     chmodSync(this.path, 0o600);
     this.events = new Map(pending.map((event) => [event.event_id, event]));
     this.acked.clear();
+  }
+}
+
+class DurableLogOutbox {
+  constructor(path) {
+    this.path = path;
+    this.events = new Map();
+    this.acked = new Set();
+    this.seenEventIds = new Set();
+    for (const record of readJsonLines(path)) {
+      if (record?.kind === "event" && record.event?.event_id) {
+        this.events.set(record.event.event_id, record.event);
+        this.seenEventIds.add(record.event.event_id);
+      } else if (record?.kind === "ack" && record.event_id) {
+        this.acked.add(record.event_id);
+      } else if (record?.kind === "checkpoint") {
+        for (const eventId of record.seen_event_ids ?? []) this.seenEventIds.add(eventId);
+      }
+    }
+  }
+
+  append(event) {
+    if (this.seenEventIds.has(event.event_id)) return { event: this.events.get(event.event_id) ?? null, duplicate: true };
+    appendDurably(this.path, { kind: "event", event });
+    this.events.set(event.event_id, event);
+    this.seenEventIds.add(event.event_id);
+    return { event, duplicate: false };
+  }
+
+  pending() {
+    return [...this.events.values()].filter((event) => !this.acked.has(event.event_id));
+  }
+
+  acknowledge(eventId) {
+    if (this.acked.has(eventId)) return false;
+    appendDurably(this.path, { kind: "ack", event_id: eventId, acknowledged_at: new Date().toISOString() });
+    this.acked.add(eventId);
+    return true;
+  }
+}
+
+function findSessionFile(root, conversationId) {
+  if (!existsSync(root)) return null;
+  const suffix = `${conversationId}.jsonl`;
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const candidate = join(directory, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && entry.name.endsWith(suffix)) return candidate;
+    }
+  }
+  return null;
+}
+
+class CodexJsonlToolTailer {
+  constructor({ sessionsDir, cursorPath, onEvent }) {
+    this.sessionsDir = sessionsDir;
+    this.cursorPath = cursorPath;
+    this.onEvent = onEvent;
+    this.cursors = existsSync(cursorPath) ? JSON.parse(readFileSync(cursorPath, "utf8")) : {};
+    this.paths = new Map();
+    this.calls = new Map();
+  }
+
+  #save() {
+    const temporary = `${this.cursorPath}.tmp-${process.pid}`;
+    mkdirSync(dirname(this.cursorPath), { recursive: true, mode: 0o700 });
+    writeFileSync(temporary, JSON.stringify(this.cursors));
+    renameSync(temporary, this.cursorPath);
+    chmodSync(this.cursorPath, 0o600);
+  }
+
+  poll(conversationIds) {
+    let observed = 0;
+    for (const conversationId of conversationIds) {
+      const path = this.paths.get(conversationId) ?? findSessionFile(this.sessionsDir, conversationId);
+      if (!path) continue;
+      this.paths.set(conversationId, path);
+      const size = statSync(path).size;
+      const offset = Math.min(Number(this.cursors[path] || 0), size);
+      if (offset === size) continue;
+      const data = readFileSync(path);
+      const completeEnd = data.lastIndexOf(0x0A);
+      if (completeEnd < offset) continue;
+      const records = data.subarray(offset, completeEnd + 1).toString("utf8")
+        .split("\n")
+        .filter(Boolean)
+        .flatMap((line) => {
+          try { return [JSON.parse(line)]; } catch { return []; }
+        });
+      const calls = this.calls.get(conversationId) ?? new Map();
+      for (const event of inspectCodexCustomToolRecords(records, conversationId, calls)) {
+        this.onEvent(event);
+        observed++;
+      }
+      this.calls.set(conversationId, calls);
+      this.cursors[path] = completeEnd + 1;
+      this.#save();
+    }
+    return observed;
   }
 }
 
@@ -573,12 +789,15 @@ export class LocalTelemetryService {
     buildId = TELEMETRY_AGENT_BUILD_ID,
     host = "127.0.0.1",
     port = 4318,
+    rawCaptureDestination = "",
+    codexSessionsDir = "",
     correlationWindowMs = 5_000,
     unboundRetentionMs = 24 * 60 * 60 * 1_000,
     maxUnboundRecords = 10_000,
   }) {
     this.bindings = new BindingLedger(join(dataDir, "bindings.jsonl"));
     this.outbox = new DurableOutbox(join(dataDir, "outbox.jsonl"));
+    this.logOutbox = new DurableLogOutbox(join(dataDir, "tool-logs.jsonl"));
     this.pendingBindings = new PendingBindingLedger(
       join(dataDir, "pending-bindings.jsonl"),
       {
@@ -589,6 +808,11 @@ export class LocalTelemetryService {
     );
     this.pocketbaseUrl = pocketbaseUrl.replace(/\/$/, "");
     this.apiKey = apiKey;
+    // Raw Code Mode capture is presently authorized only for the staging
+    // tenant. Production support must add explicit redaction and a separate
+    // destination-approval contract first.
+    this.rawCaptureEnabled = this.pocketbaseUrl === "https://statewright.casa.enhasa.cloud" &&
+      rawCaptureDestination.replace(/\/$/, "") === this.pocketbaseUrl;
     this.fetchImpl = fetchImpl;
     this.flushing = false;
     this.identity = telemetryIdentity({
@@ -598,6 +822,7 @@ export class LocalTelemetryService {
       host,
       port,
       dataDir,
+      rawCaptureDestination,
     });
     this.receiver = {
       requests: 0,
@@ -616,6 +841,13 @@ export class LocalTelemetryService {
       last_error: null,
       next_attempt_at: null,
     };
+    this.jsonlTailer = codexSessionsDir
+      ? new CodexJsonlToolTailer({
+        sessionsDir: codexSessionsDir,
+        cursorPath: join(dataDir, "codex-jsonl-cursors.json"),
+        onEvent: (event) => this.ingestCodexTool(event),
+      })
+      : null;
   }
 
   bind(input) {
@@ -687,17 +919,47 @@ export class LocalTelemetryService {
     return result;
   }
 
+  ingestCodexTool(normalized) {
+    const binding = this.bindings.resolve(
+      normalized.conversation_id,
+      normalized.source_event_at,
+    );
+    if (!binding) return { accepted: 0, ignored: 1 };
+    const usage = this.outbox.appendTool(normalized, binding, binding);
+    let rawQueued = 0;
+    if (this.rawCaptureEnabled && binding.capture_output) {
+      const sequence = Number.parseInt(normalized.event_id.slice(0, 12), 16);
+      const raw = this.logOutbox.append({
+        event_id: normalized.event_id,
+        run_id: binding.run_id,
+        run_session_id: binding.run_session_id,
+        workflow: binding.workflow,
+        phase: binding.state,
+        tool_name: normalized.tool,
+        tool_input: normalized.tool_input,
+        tool_output: normalized.tool_output,
+        sequence: Number.isSafeInteger(sequence) ? sequence : 0,
+        duration_ms: 0,
+      });
+      rawQueued = raw.duplicate ? 0 : 1;
+    }
+    return { accepted: usage.duplicate ? 0 : 1, raw_queued: rawQueued, ignored: 0 };
+  }
+
   async maintain() {
+    const customTools = this.jsonlTailer
+      ? this.jsonlTailer.poll(this.bindings.conversationIds())
+      : 0;
     const reconciled = this.reconcilePendingBindings();
     if (reconciled > 0) {
       this.receiver.reconciled += reconciled;
       this.receiver.last_reconciled_at = new Date().toISOString();
     }
-    return this.flush();
+    return { ...(await this.flush()), custom_tools: customTools };
   }
 
   async flush() {
-    const pending = this.outbox.pending().length;
+    const pending = this.outbox.pending().length + this.logOutbox.pending().length;
     if (this.flushing || !this.apiKey) return { delivered: 0, pending };
     const nextAttemptAt = this.delivery.next_attempt_at
       ? new Date(this.delivery.next_attempt_at).getTime()
@@ -738,7 +1000,37 @@ export class LocalTelemetryService {
         this.outbox.acknowledge(event.event_id);
         delivered += 1;
       }
-      if (delivered > 0 && this.outbox.pending().length === 0) {
+      for (const log of this.logOutbox.pending()) {
+        try {
+          const response = await this.fetchImpl(
+            `${this.pocketbaseUrl}/api/gateway/logs`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${this.apiKey}`,
+              },
+              body: JSON.stringify(log),
+            },
+          );
+          if (!response.ok) {
+            throw new Error(`PocketBase workflow-log upload returned HTTP ${response.status}`);
+          }
+        } catch (error) {
+          const failures = this.delivery.consecutive_failures + 1;
+          const delayMs = Math.min(60_000, 1_000 * (2 ** Math.min(6, failures - 1)));
+          this.delivery = {
+            status: "degraded",
+            consecutive_failures: failures,
+            last_error: text(error?.message || error, 240),
+            next_attempt_at: new Date(Date.now() + delayMs).toISOString(),
+          };
+          break;
+        }
+        this.logOutbox.acknowledge(log.event_id);
+        delivered += 1;
+      }
+      if (delivered > 0 && this.outbox.pending().length === 0 && this.logOutbox.pending().length === 0) {
         this.delivery = {
           status: "healthy",
           consecutive_failures: 0,
@@ -746,7 +1038,7 @@ export class LocalTelemetryService {
           next_attempt_at: null,
         };
       }
-      return { delivered, pending: this.outbox.pending().length };
+      return { delivered, pending: this.outbox.pending().length + this.logOutbox.pending().length };
     } finally {
       this.flushing = false;
     }

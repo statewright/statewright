@@ -30,7 +30,14 @@ run_codex_local_tool() {
 # A managed client owns this loopback bridge for the lifetime of the terminal
 # session. The bridge keeps MCP identity stable while the supervisor replaces
 # the Codex child at a routed model boundary.
-if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+# A supervision-only invocation intentionally reaches the shared bootstrap
+# below instead of forwarding to the managed bridge.
+if [ "${STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY:-false}" != "true" ] && \
+    [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
+    [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ]; then
+  # The managed branch otherwise returns before the normal collector startup
+  # path. Run that same single-owner supervisor before proxying MCP traffic.
+  STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY=true "$0" >/dev/null 2>&1 || true
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)

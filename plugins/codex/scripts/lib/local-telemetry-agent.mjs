@@ -7,6 +7,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -17,6 +18,7 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const MAX_CODEX_JSONL_READ_BYTES = 1024 * 1024;
 export const TELEMETRY_PROTOCOL_VERSION = 1;
 export const TELEMETRY_AGENT_BUILD_ID = "native-codex-otel-v1";
 const TOKEN_FIELDS = [
@@ -524,6 +526,7 @@ export class DurableOutbox {
         tool_type: "codex_custom",
         result_bytes: normalized.result_bytes,
         estimated_input_tokens: Math.floor(normalized.result_bytes / 4),
+        exit_code: normalized.exit_code,
         is_error: normalized.is_error,
       },
     };
@@ -654,6 +657,40 @@ class CodexJsonlToolTailer {
     chmodSync(this.cursorPath, 0o600);
   }
 
+  #prime(path, size) {
+    if (Object.hasOwn(this.cursors, path)) return false;
+    // Preserve a small pre-existing tail for a collector that starts just
+    // after its state boundary. Long-lived transcripts begin at EOF: replaying
+    // their historical session would be stale telemetry and unbounded I/O.
+    const cursor = size <= MAX_CODEX_JSONL_READ_BYTES ? 0 : size;
+    this.cursors[path] = cursor;
+    this.#save();
+    return cursor === size;
+  }
+
+  #readCompleteLines(path, offset, size) {
+    const length = Math.min(size - offset, MAX_CODEX_JSONL_READ_BYTES);
+    if (length <= 0) return { records: [], nextOffset: offset };
+    const bytes = Buffer.allocUnsafe(length);
+    const descriptor = openSync(path, "r");
+    let read = 0;
+    try {
+      read = readSync(descriptor, bytes, 0, length, offset);
+    } finally {
+      closeSync(descriptor);
+    }
+    const data = bytes.subarray(0, read);
+    const completeEnd = data.lastIndexOf(0x0A);
+    if (completeEnd < 0) return { records: [], nextOffset: offset };
+    const records = data.subarray(0, completeEnd + 1).toString("utf8")
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+    return { records, nextOffset: offset + completeEnd + 1 };
+  }
+
   poll(conversationIds) {
     let observed = 0;
     for (const conversationId of conversationIds) {
@@ -661,24 +698,18 @@ class CodexJsonlToolTailer {
       if (!path) continue;
       this.paths.set(conversationId, path);
       const size = statSync(path).size;
+      if (this.#prime(path, size)) continue;
       const offset = Math.min(Number(this.cursors[path] || 0), size);
       if (offset === size) continue;
-      const data = readFileSync(path);
-      const completeEnd = data.lastIndexOf(0x0A);
-      if (completeEnd < offset) continue;
-      const records = data.subarray(offset, completeEnd + 1).toString("utf8")
-        .split("\n")
-        .filter(Boolean)
-        .flatMap((line) => {
-          try { return [JSON.parse(line)]; } catch { return []; }
-        });
+      const { records, nextOffset } = this.#readCompleteLines(path, offset, size);
+      if (nextOffset === offset) continue;
       const calls = this.calls.get(conversationId) ?? new Map();
       for (const event of inspectCodexCustomToolRecords(records, conversationId, calls)) {
         this.onEvent(event);
         observed++;
       }
       this.calls.set(conversationId, calls);
-      this.cursors[path] = completeEnd + 1;
+      this.cursors[path] = nextOffset;
       this.#save();
     }
     return observed;
@@ -958,9 +989,14 @@ export class LocalTelemetryService {
   }
 
   async maintain() {
-    const customTools = this.jsonlTailer
-      ? this.jsonlTailer.poll(this.bindings.conversationIds())
-      : 0;
+    let customTools = 0;
+    try {
+      customTools = this.jsonlTailer
+        ? this.jsonlTailer.poll(this.bindings.conversationIds())
+        : 0;
+    } catch (error) {
+      this.receiver.last_protocol_error = `Codex JSONL tailer: ${text(error?.message || error, 240)}`;
+    }
     const reconciled = this.reconcilePendingBindings();
     if (reconciled > 0) {
       this.receiver.reconciled += reconciled;

@@ -3,8 +3,10 @@ import { execFileSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
+  appendFileSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -117,6 +119,40 @@ test("Code Mode custom tool pairs normalize to a stable compact event", () => {
   assert.equal(event.tool_output, "tool output\nExit code: 17");
   assert.equal(event.exit_code, 17);
   assert.equal(event.event_id, inspectCodexCustomToolRecords(records, "thread-root")[0].event_id);
+});
+
+test("Code Mode tailer primes large existing transcripts and consumes only new complete lines", async () => {
+  await withTempDir(async (directory) => {
+    const sessions = join(directory, "sessions", "2026", "08", "05");
+    mkdirSync(sessions, { recursive: true });
+    const transcript = join(sessions, "rollout-thread-root.jsonl");
+    writeFileSync(transcript, `${JSON.stringify({ type: "event_msg", payload: { ignored: true } })}\n`.repeat(25_000));
+    const service = new LocalTelemetryService({
+      dataDir: join(directory, "telemetry"),
+      codexSessionsDir: join(directory, "sessions"),
+      pocketbaseUrl: "https://statewright.invalid",
+    });
+    service.bind({
+      conversation_id: "thread-root", run_id: "run-1", workflow: "workflow",
+      state: "implement", state_epoch: 1, effective_at: "2026-08-05T05:00:00.000Z",
+    });
+    await service.maintain();
+    assert.equal(service.outbox.pending().length, 0);
+
+    appendFileSync(transcript, `${JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:01.000Z", payload: {
+      type: "custom_tool_call", call_id: "call-new", name: "exec", input: "new input",
+    } })}\n`);
+    appendFileSync(transcript, `${JSON.stringify({ type: "response_item", timestamp: "2026-08-05T05:00:02.000Z", payload: {
+      type: "custom_tool_call_output", call_id: "call-new", output: [{ type: "input_text", text: "new output\nExit code: 0" }],
+    } })}\n`);
+    await service.maintain();
+
+    const [event] = service.outbox.pending();
+    assert.equal(event.tool.tool, "exec");
+    assert.equal(event.tool.exit_code, 0);
+    const cursors = JSON.parse(readFileSync(join(directory, "telemetry", "codex-jsonl-cursors.json"), "utf8"));
+    assert.equal(cursors[transcript], statSync(transcript).size);
+  });
 });
 
 test("Code Mode tool telemetry preserves raw output only for capture-enabled staging", async () => {

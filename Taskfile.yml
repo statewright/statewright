@@ -41,6 +41,7 @@ tasks:
     desc: "Verify gateway run binding, opt-in legacy logs, and provider token telemetry"
     cmds:
       - bash plugins/executor/tests/legacy-capture-contract.test.sh
+      - bash plugins/executor/tests/hook-capture-dispatch.test.sh
       - node --test plugins/claude-code/tests/transcript-telemetry.test.mjs plugins/codex/tests/local-telemetry-agent.test.mjs plugins/codex/tests/orchestrator.test.mjs
       - "{{.CARGO}} test -p statewright-mcp-gateway state_snapshot_exposes_gateway_run_session_identity"
 

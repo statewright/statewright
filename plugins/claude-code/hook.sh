@@ -464,6 +464,13 @@ case "$ENDPOINT" in
       *statewright_get_state*) SW_ACTION="refresh_cache" ;;
     esac
 
+    # capture.sh is deliberately opt-in and skips Statewright control tools.
+    # Dispatch ordinary tool completions here; merely creating
+    # .capture_enabled does not persist a log by itself.
+    if [ -f "$PROJECT_DIR/.capture_enabled" ] && [ -z "$SW_ACTION" ]; then
+      printf '%s' "$HOOK_INPUT" | bash "${STATEWRIGHT_CAPTURE_SCRIPT:-$SCRIPT_DIR/capture.sh}" >/dev/null 2>&1 &
+    fi
+
     # Attribute already-written assistant transcript entries before a control
     # transition changes the authoritative state cache.
     if [ -z "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ]; then

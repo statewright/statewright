@@ -17,8 +17,9 @@ trap cleanup EXIT
 mkdir -p "$TMP/home/.statewright"
 printf '%s\n' 'test-key' > "$TMP/home/.statewright/api_key"
 
-# The bridge is deliberately unreachable. The proxy may fail over the one
-# notification, but it must still start the managed-session collector first.
+# The bridge is deliberately unreachable. Managed proxy handling must remain
+# side-effect free: the persistent supervisor starts telemetry before it launches
+# this disposable proxy, so no child-owned collector may appear here.
 printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' |
   HOME="$TMP/home" \
   STATEWRIGHT_MANAGED_CLIENT_HOST=codex \
@@ -29,8 +30,6 @@ printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}
   STATEWRIGHT_TELEMETRY_PORT="$PORT" \
   bash "$SCRIPT_DIR/mcp-proxy.sh" >/dev/null
 
-PID=$(cat "$TELEMETRY_DIR/agent.pid")
-case "$PID" in ''|*[!0-9]*) exit 1 ;; esac
-curl -sf "http://127.0.0.1:$PORT/health" | jq -e '.listener_status == "healthy"' >/dev/null
+test ! -e "$TELEMETRY_DIR/agent.pid"
 
-echo "managed telemetry supervision tests passed"
+echo "managed proxy telemetry ownership tests passed"

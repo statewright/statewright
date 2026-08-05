@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,18 @@ function fakeBridgeFactory() {
     async start() { return this; },
     async close() {},
   };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+async function waitFor(condition, attempts = 40) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await condition()) return true;
+    await delay(25);
+  }
+  return false;
 }
 
 test("managed identity persists a fresh session for a later Codex resume", async () => {
@@ -103,6 +115,52 @@ test("managed supervisor preserves its own identity across a routed restart", as
     assert.equal(identities[0], identities[1]);
     assert.match(identities[0], /^swc_[a-f0-9]{32}$/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("managed Codex telemetry survives a routed child restart and stops after its supervisor exits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-telemetry-lifecycle-"));
+  const fake = join(root, "fake-codex.mjs");
+  const calls = join(root, "calls.log");
+  const port = 32000 + (process.pid % 10000);
+  const telemetryDir = join(root, "telemetry");
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nappendFileSync(${JSON.stringify(calls)}, process.argv.join(" ") + "\\n");\nconst marker = join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "once");\nif (!existsSync(marker)) { writeFileSync(marker, ""); writeFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "route.json"), JSON.stringify({session_id:"telemetry-session",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"openai-codex/gpt-5.6-sol",effort:"high"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\nsetTimeout(() => process.exit(0), 500);\n`);
+    await chmod(fake, 0o755);
+    const running = runManagedClient({
+      host: "codex",
+      command: fake,
+      args: [],
+      environment: {
+        PATH: process.env.PATH,
+        STATEWRIGHT_API_KEY: "test",
+        STATEWRIGHT_NATIVE_TOKEN_TELEMETRY: "true",
+        STATEWRIGHT_TELEMETRY_PORT: String(port),
+        STATEWRIGHT_TELEMETRY_DIR: telemetryDir,
+      },
+      home: root,
+      cwd: root,
+      pollMs: 5,
+      bridgeFactory: fakeBridgeFactory,
+    });
+    assert.equal(await waitFor(async () => {
+      try { return (await readFile(calls, "utf8")).trim().split("\n").length === 2; } catch { return false; }
+    }), true);
+    const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+    assert.equal(health.listener_status, "healthy");
+    const marker = JSON.parse(await readFile(join(telemetryDir, "managed-service.json"), "utf8"));
+    assert.match(String(marker.pid), /^\d+$/);
+    assert.equal(await running, 0);
+    assert.equal(await waitFor(async () => {
+      try {
+        await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(100) });
+        return false;
+      } catch { return true; }
+    }), true);
+    await assert.rejects(readFile(join(telemetryDir, "managed-service.json"), "utf8"));
+  } finally {
+    await unlink(join(telemetryDir, "managed-service.json")).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("managed supervisor rejects a route that attempts to rebind its identity", async () => {

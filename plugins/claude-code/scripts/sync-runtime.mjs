@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { managedClientBundleDrift, syncManagedClientBundle } from "./sync-managed-client.mjs";
 
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
 export const CLAUDE_ROOT = resolve(SCRIPT_ROOT, "..");
@@ -90,6 +91,26 @@ export async function syncRuntime({ sourceRoot = CLAUDE_ROOT, targetRoots } = {}
   return roots;
 }
 
+export async function syncRuntimeWithManagedBundle({
+  sourceRoot = CLAUDE_ROOT,
+  targetRoots,
+  syncManagedBundle = syncManagedClientBundle,
+} = {}) {
+  await syncManagedBundle();
+  return syncRuntime({ sourceRoot, targetRoots });
+}
+
+export async function assertRuntimeCurrent({
+  sourceRoot = CLAUDE_ROOT,
+  targetRoots,
+  managedBundleDrift = managedClientBundleDrift,
+} = {}) {
+  const bundleDrift = await managedBundleDrift();
+  if (bundleDrift.length) throw new Error(`Claude managed-client bundle is stale: ${bundleDrift.join(", ")}`);
+  const drift = await runtimeDrift({ sourceRoot, targetRoots });
+  if (drift.length) throw new Error(`Claude plugin runtime is stale: ${JSON.stringify(drift)}`);
+}
+
 function parseArgs(argv) {
   const options = { sync: false, check: false };
   for (const argument of argv) {
@@ -104,11 +125,10 @@ function parseArgs(argv) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const options = parseArgs(process.argv.slice(2));
   if (options.sync) {
-    const roots = await syncRuntime();
+    const roots = await syncRuntimeWithManagedBundle();
     process.stdout.write(`${JSON.stringify({ synced: roots })}\n`);
   } else {
-    const drift = await runtimeDrift();
-    if (drift.length) throw new Error(`Claude plugin runtime is stale: ${JSON.stringify(drift)}`);
+    await assertRuntimeCurrent();
     process.stdout.write("Claude plugin runtime is current.\n");
   }
 }

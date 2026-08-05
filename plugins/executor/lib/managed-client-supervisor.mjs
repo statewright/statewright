@@ -1,13 +1,183 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
+const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_TELEMETRY_AGENT = resolve(EXECUTOR_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
+
+function telemetryDirectory(environment, home) {
+  return environment.STATEWRIGHT_TELEMETRY_DIR ?? join(home, ".statewright", "telemetry", "native-codex");
+}
+
+function telemetryPort(environment) {
+  const value = Number(environment.STATEWRIGHT_TELEMETRY_PORT ?? 4318);
+  return Number.isInteger(value) && value > 0 && value < 65536 ? value : 4318;
+}
+
+function telemetryAgentPath(environment) {
+  return environment.STATEWRIGHT_TELEMETRY_AGENT ?? DEFAULT_TELEMETRY_AGENT;
+}
+
+function telemetryEnvironment(environment, dataDir) {
+  return {
+    ...environment,
+    STATEWRIGHT_TELEMETRY_DIR: dataDir,
+  };
+}
+
+async function telemetryHealth(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForTelemetry(port, expectedIdentity, attempts = 20) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const health = await telemetryHealth(port);
+    if (health?.listener_status === "healthy" && health?.config_identity === expectedIdentity) return health;
+    await delay(100);
+  }
+  return null;
+}
+
+async function removeStaleTelemetryLeases(leasesDir) {
+  let entries = [];
+  try { entries = await readdir(leasesDir); } catch { return; }
+  await Promise.all(entries.map(async (entry) => {
+    const path = join(leasesDir, entry);
+    try {
+      const lease = JSON.parse(await readFile(path, "utf8"));
+      if (!processAlive(Number(lease?.supervisor_pid))) await unlink(path);
+    } catch {
+      await unlink(path).catch(() => {});
+    }
+  }));
+}
+
+async function acquireTelemetryLock(lockDir) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      return;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await delay(20);
+    }
+  }
+  throw new Error("Timed out acquiring Statewright telemetry service lock.");
+}
+
+async function withTelemetryLock(dataDir, operation) {
+  const lockDir = join(dataDir, "managed-service.lock");
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await acquireTelemetryLock(lockDir);
+  try {
+    return await operation();
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+async function localTelemetryIdentity({ agentPath, environment, dataDir }) {
+  const result = spawnSync(process.execPath, [agentPath, "--identity"], {
+    env: telemetryEnvironment(environment, dataDir),
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(`Statewright telemetry identity failed: ${result.stderr || result.error?.message || "unknown error"}`);
+  const identity = JSON.parse(result.stdout);
+  if (!identity?.config_identity) throw new Error("Statewright telemetry identity was empty.");
+  return identity.config_identity;
+}
+
+async function nativeTelemetryEnabled({ environment, home, cwd }) {
+  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "true") return true;
+  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return false;
+  for (const path of [join(cwd, ".statewright", "config.json"), join(home, ".statewright", "config.json")]) {
+    try {
+      const config = JSON.parse(await readFile(path, "utf8"));
+      if (config?.telemetry?.codex?.native_tokens === true) return true;
+    } catch { /* absent or malformed config is not an opt-in */ }
+  }
+  return false;
+}
+
+export async function acquireManagedTelemetry({ environment = process.env, home = homedir(), cwd = process.cwd(), supervisorId = `${process.pid}-${randomUUID()}`, agentPath = telemetryAgentPath(environment) } = {}) {
+  if (!await nativeTelemetryEnabled({ environment, home, cwd })) return null;
+  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return null;
+  if (!existsSync(agentPath)) return null;
+  const dataDir = telemetryDirectory(environment, home);
+  const port = telemetryPort(environment);
+  const markerPath = join(dataDir, "managed-service.json");
+  const leasesDir = join(dataDir, "managed-service-leases");
+  const expectedIdentity = await localTelemetryIdentity({ agentPath, environment, dataDir });
+  let leasePath = null;
+  await withTelemetryLock(dataDir, async () => {
+    await mkdir(leasesDir, { recursive: true, mode: 0o700 });
+    await removeStaleTelemetryLeases(leasesDir);
+    let health = await telemetryHealth(port);
+    if (health?.listener_status === "healthy" && health?.config_identity !== expectedIdentity) {
+      throw new Error("Statewright telemetry listener identity conflicts with the managed client configuration.");
+    }
+    if (!health) {
+      const child = spawn(process.execPath, [agentPath], {
+        env: telemetryEnvironment(environment, dataDir),
+        stdio: "ignore",
+        detached: process.platform !== "win32",
+      });
+      child.unref();
+      health = await waitForTelemetry(port, expectedIdentity);
+      if (!health) {
+        if (processAlive(child.pid)) child.kill("SIGTERM");
+        throw new Error("Statewright managed telemetry listener did not become healthy.");
+      }
+      await writeFile(markerPath, `${JSON.stringify({ pid: child.pid, config_identity: expectedIdentity })}\n`, { mode: 0o600 });
+    }
+    leasePath = join(leasesDir, `${supervisorId}.json`);
+    await writeFile(leasePath, `${JSON.stringify({ supervisor_pid: process.pid, acquired_at: new Date().toISOString() })}\n`, { mode: 0o600 });
+  });
+  return {
+    dataDir,
+    port,
+    leasePath,
+    async release() {
+      await withTelemetryLock(dataDir, async () => {
+        if (leasePath) await unlink(leasePath).catch(() => {});
+        await removeStaleTelemetryLeases(leasesDir);
+        let leases = [];
+        try { leases = await readdir(leasesDir); } catch { /* absent is empty */ }
+        if (leases.length) return;
+        let marker = null;
+        try { marker = JSON.parse(await readFile(markerPath, "utf8")); } catch { /* foreign listener */ }
+        if (marker?.config_identity === expectedIdentity && processAlive(Number(marker.pid))) {
+          process.kill(Number(marker.pid), "SIGTERM");
+        }
+        await unlink(markerPath).catch(() => {});
+      });
+    },
+  };
+}
 
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -121,16 +291,21 @@ export async function runManagedClient({ host, command, args, environment = proc
   const consumed = new Set();
   let nextArgs = args;
   let bridge = null;
+  let telemetry = null;
   try {
     const identity = await resolveManagedClientIdentity({ host, args, home });
     const routedClientId = identity.clientId;
     await writeManagedControlIdentity(controlDir, { host, clientId: routedClientId });
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
+    telemetry = host === "codex"
+      ? await acquireManagedTelemetry({ environment, home, cwd, supervisorId: `${host}-${process.pid}-${randomUUID()}` })
+      : null;
     while (true) {
       const childEnvironment = {
         ...environment,
         STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
         STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+        STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
       };
       if (routedClientId) childEnvironment.STATEWRIGHT_CLIENT_ID = routedClientId;
       if (bridge) {
@@ -176,6 +351,7 @@ export async function runManagedClient({ host, command, args, environment = proc
       if (!restart) return result.code ?? 1;
     }
   } finally {
+    await telemetry?.release();
     await bridge?.close();
     await rm(controlDir, { recursive: true, force: true });
   }

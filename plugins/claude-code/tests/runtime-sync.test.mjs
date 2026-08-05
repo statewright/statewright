@@ -3,7 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { CLAUDE_ROOT, RUNTIME_FILES, discoverRuntimeRoots, runtimeDrift, syncRuntime } from "../scripts/sync-runtime.mjs";
+import { CLAUDE_ROOT, RUNTIME_FILES, assertRuntimeCurrent, discoverRuntimeRoots, runtimeDrift, syncRuntime, syncRuntimeWithManagedBundle } from "../scripts/sync-runtime.mjs";
 
 async function copyRuntime(sourceRoot, targetRoot) {
   for (const path of RUNTIME_FILES) {
@@ -42,6 +42,30 @@ test("runtime sync discovers the installed cache and local directory marketplace
     await syncRuntime({ sourceRoot: CLAUDE_ROOT, targetRoots: [cache, directoryPlugin] });
     assert.deepEqual(await runtimeDrift({ sourceRoot: CLAUDE_ROOT, targetRoots: [cache, directoryPlugin] }), []);
     assert.deepEqual(await readFile(join(directoryPlugin, "mcp-proxy.sh")), await readFile(join(CLAUDE_ROOT, "mcp-proxy.sh")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime sync refreshes the managed bundle before publishing and rejects stale generated sources", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-claude-runtime-managed-"));
+  const target = join(root, "target");
+  let synchronized = 0;
+  try {
+    await syncRuntimeWithManagedBundle({
+      sourceRoot: CLAUDE_ROOT,
+      targetRoots: [target],
+      async syncManagedBundle() { synchronized += 1; },
+    });
+    assert.equal(synchronized, 1);
+    await assert.rejects(
+      assertRuntimeCurrent({
+        sourceRoot: CLAUDE_ROOT,
+        targetRoots: [target],
+        async managedBundleDrift() { return ["executor/lib/managed-client-supervisor.mjs"]; },
+      }),
+      /managed-client bundle is stale/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

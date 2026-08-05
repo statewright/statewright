@@ -59,8 +59,11 @@ At the next Statewright MCP startup, the plugin creates its loopback-only OTel
 exporter if Codex has no existing `[otel]` table. Restart Codex once to apply
 the exporter. Statewright never overwrites an existing user-owned OTel setup.
 
-The MCP proxy supervises a loopback-only OTLP/HTTP JSON receiver at
-`127.0.0.1:4318`. Codex sends no API key to that receiver. The receiver keeps
+For ordinary Codex sessions, the MCP proxy supervises a loopback-only
+OTLP/HTTP JSON receiver at `127.0.0.1:4318`. For managed routed sessions, the
+durable managed-client supervisor owns the same receiver before it launches a
+disposable Codex child, so a model-route restart cannot kill telemetry. Codex
+sends no API key to that receiver. The receiver keeps
 the Statewright API key locally, discards raw OTLP records after parsing, and
 durably stores only sanitized token counts and correlation identifiers before
 upload. `log_user_prompt` must remain `false`.

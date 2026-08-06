@@ -18,6 +18,8 @@ jobs:
         run: |
           go install github.com/go-task/task/v3/cmd/task@v3.39.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install plugin dependencies
+        run: npm ci --ignore-scripts --prefix plugins/codex
       - name: Run tests
         run: cargo test --workspace
       - name: Verify plugin release artifacts

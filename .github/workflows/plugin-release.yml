@@ -43,6 +43,9 @@ jobs:
             actual=$(node -p "require('./$DIRECTORY/plugin.json').version")
           fi
           test "$actual" = "$EXPECTED"
+      - name: Install plugin dependencies
+        if: steps.plugin.outputs.directory == 'plugins/codex'
+        run: npm ci --ignore-scripts --prefix plugins/codex
       - name: Run plugin contract tests
         env:
           DIRECTORY: ${{ steps.plugin.outputs.directory }}

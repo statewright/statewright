@@ -23,12 +23,12 @@ jobs:
             codex-v*)
               echo 'directory=plugins/codex' >> "$GITHUB_OUTPUT"
               echo 'artifact=statewright-codex' >> "$GITHUB_OUTPUT"
-              echo "version=${TAG#codex-v}" >> "$GITHUB_OUTPUT"
+              raw=${TAG#codex-v}; echo "version=${raw%%-r*}" >> "$GITHUB_OUTPUT"
               ;;
             claude-v*)
               echo 'directory=plugins/claude-code' >> "$GITHUB_OUTPUT"
               echo 'artifact=statewright-claude-code' >> "$GITHUB_OUTPUT"
-              echo "version=${TAG#claude-v}" >> "$GITHUB_OUTPUT"
+              raw=${TAG#claude-v}; echo "version=${raw%%-r*}" >> "$GITHUB_OUTPUT"
               ;;
             *) exit 1 ;;
           esac
@@ -46,6 +46,10 @@ jobs:
       - name: Install plugin dependencies
         if: steps.plugin.outputs.directory == 'plugins/codex'
         run: npm ci --ignore-scripts --prefix plugins/codex
+      - name: Install Task
+        run: |
+          go install github.com/go-task/task/v3/cmd/task@v3.39.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Run plugin contract tests
         env:
           DIRECTORY: ${{ steps.plugin.outputs.directory }}

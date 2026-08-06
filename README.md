@@ -4,7 +4,7 @@
 
 State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://docs.statewright.ai)
 
-> **Statewright Plugin 0.3.0 for Claude and Codex is released:** model routing now works natively in both TUIs. Assign a model, reasoning level, tool policy, and budget to each workflow phase while staying in the interface you already use. [Learn more at statewright.ai →](https://statewright.ai)
+> **Statewright plugin 0.3.0 for [Claude](https://github.com/statewright/statewright/releases/tag/claude-v0.3.0-r1) and [Codex](https://github.com/statewright/statewright/releases/tag/codex-v0.3.0-r1) is released:** model routing now works natively in both TUIs. Assign a model, reasoning level, tool policy, and budget to each workflow phase while staying in the interface you already use. [Learn more at statewright.ai →](https://statewright.ai)
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 

@@ -4044,7 +4044,10 @@ mod tests {
             ),
         ];
         unsafe {
-            std::env::set_var("SW_EVAL_IMAGE", "1");
+            // This probe tests streamed failure detection, not the eval-image
+            // Conda wrapper. Keeping it off avoids measuring environment
+            // teardown latency instead of the early-stop path in CI.
+            std::env::set_var("SW_EVAL_IMAGE", "0");
             std::env::set_var("SW_TEST_CMD", "./probe.sh");
             std::env::set_var("SW_TEST_UNSCOPED_PROBE", "1");
             std::env::set_var("SW_TEST_TIMEOUT_SECONDS", "30");

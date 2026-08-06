@@ -91,7 +91,7 @@ tasks:
       - echo "buggy-calc fixture reset"
 
   release:
-    desc: "Tag and push a release (triggers CI: tests, cargo publish, cross-arch binaries)"
+    desc: "Tag and push a gateway release (triggers gateway CI, crate publish, and cross-arch binaries)"
     preconditions:
       - sh: '[ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]'
         msg: "Releases must be from main branch"
@@ -100,8 +100,13 @@ tasks:
     vars:
       NEXT_VERSION:
         sh: |
-          LATEST=$(git tag -l 'v[0-9]*' | sed 's/v//' | sort -n | tail -1)
-          if [ -z "$LATEST" ]; then echo "v1"; else echo "v$((LATEST + 1))"; fi
+          LATEST=$(git tag -l 'gateway-v[0-9]*' | sed 's/gateway-v//' | sort -V | tail -1)
+          if [ -z "$LATEST" ]; then echo "gateway-v1.0.0"; else
+            IFS=. read -r major minor patch <<EOF
+$LATEST
+EOF
+            echo "gateway-v${major}.${minor}.$((patch + 1))"
+          fi
     cmds:
       - "{{.CARGO}} test --workspace"
       - echo "Tagging {{.NEXT_VERSION}}..."

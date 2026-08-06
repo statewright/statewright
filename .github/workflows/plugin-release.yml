@@ -1,0 +1,68 @@
+name: Plugin Release
+
+on:
+  push:
+    tags:
+      - "codex-v*"
+      - "claude-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve plugin
+        id: plugin
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          case "$TAG" in
+            codex-v*)
+              echo 'directory=plugins/codex' >> "$GITHUB_OUTPUT"
+              echo 'artifact=statewright-codex' >> "$GITHUB_OUTPUT"
+              echo "version=${TAG#codex-v}" >> "$GITHUB_OUTPUT"
+              ;;
+            claude-v*)
+              echo 'directory=plugins/claude-code' >> "$GITHUB_OUTPUT"
+              echo 'artifact=statewright-claude-code' >> "$GITHUB_OUTPUT"
+              echo "version=${TAG#claude-v}" >> "$GITHUB_OUTPUT"
+              ;;
+            *) exit 1 ;;
+          esac
+      - name: Verify plugin version matches tag
+        env:
+          DIRECTORY: ${{ steps.plugin.outputs.directory }}
+          EXPECTED: ${{ steps.plugin.outputs.version }}
+        run: |
+          if [ "$DIRECTORY" = "plugins/codex" ]; then
+            actual=$(node -p "require('./$DIRECTORY/.codex-plugin/plugin.json').version.split('+')[0]")
+          else
+            actual=$(node -p "require('./$DIRECTORY/plugin.json').version")
+          fi
+          test "$actual" = "$EXPECTED"
+      - name: Run plugin contract tests
+        env:
+          DIRECTORY: ${{ steps.plugin.outputs.directory }}
+        run: |
+          if [ "$DIRECTORY" = "plugins/codex" ]; then
+            node --test plugins/codex/tests/*.test.mjs
+            bash -n plugins/codex/hook.sh plugins/codex/client-id.sh plugins/codex/mcp-proxy.sh
+          else
+            node --test plugins/claude-code/tests/*.test.mjs
+            bash -n plugins/claude-code/hook.sh plugins/claude-code/client-id.sh plugins/claude-code/mcp-proxy.sh plugins/claude-code/setup.sh
+          fi
+      - name: Package plugin
+        env:
+          DIRECTORY: ${{ steps.plugin.outputs.directory }}
+          ARTIFACT: ${{ steps.plugin.outputs.artifact }}
+          VERSION: ${{ steps.plugin.outputs.version }}
+        run: zip -r "$ARTIFACT-$VERSION.zip" "$DIRECTORY" -x '*/node_modules/*' '*/.DS_Store'
+      - name: Publish plugin release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ steps.plugin.outputs.artifact }} ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: "${{ steps.plugin.outputs.artifact }}-${{ steps.plugin.outputs.version }}.zip"

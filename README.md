@@ -4,6 +4,8 @@
 
 State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://docs.statewright.ai)
 
+> **Statewright Plugin 0.3.0 for Claude and Codex is released:** model routing now works natively in both TUIs. Assign a model, reasoning level, tool policy, and budget to each workflow phase while staying in the interface you already use. [Learn more at statewright.ai →](https://statewright.ai)
+
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
 ## The problem
@@ -22,12 +24,38 @@ Works on frontier and local models alike. Below 13GB, models can produce tool ca
 
 ## Quickstart
 
-Install into Claude Code:
+<details open>
+<summary><strong>Codex</strong></summary>
+
+```
+npx statewright-codex@latest init
+```
+</details>
+
+<details>
+<summary><strong>Claude Code</strong></summary>
 
 ```
 /plugin marketplace add statewright/statewright
 /plugin install statewright
 ```
+</details>
+
+<details>
+<summary><strong>opencode</strong></summary>
+
+```
+npx statewright-opencode@latest init
+```
+</details>
+
+<details>
+<summary><strong>Cursor</strong></summary>
+
+```
+npx statewright-cursor@latest init
+```
+</details>
 
 Your browser opens → sign up at [statewright.ai](https://statewright.ai) → generate a key → paste it → done.
 
@@ -251,7 +279,7 @@ The managed cloud at [statewright.ai](https://statewright.ai) handles workflow s
 | Plan | Workflows | Transitions/mo | Run History | Price |
 |------|-----------|-------------|----------------|-------|
 | Free | 3 | 200 | 72 hours | $0 |
-| Pro | 10 | 2500 | 7 days | $29/mo |
+| Pro | 10 | 2500 | 7 days | $19/mo |
 | Team | 30 | 10000 | 90 days | $99/mo |
 | Enterprise | Unlimited | Unlimited | to Specification | [Contact us](mailto:sales@statewright.ai) |
 

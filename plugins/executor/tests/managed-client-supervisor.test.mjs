@@ -85,6 +85,24 @@ test("managed supervisor consumes Claude route requests and restarts the same ch
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("managed Claude supervisor defers a native child route instead of replacing the parent session", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-claude-fork-"));
+  const fake = join(root, "fake-claude.mjs");
+  const calls = join(root, "calls.log");
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\nconst control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;\nconst rootMarker = join(control, "root");\nif (!existsSync(rootMarker)) { writeFileSync(rootMarker, ""); writeFileSync(join(control, "root.route.json"), JSON.stringify({session_id:"claude-root",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"anthropic/claude-sonnet-4-6",effort:"medium"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); } else { writeFileSync(join(control, "child.route.json"), JSON.stringify({session_id:"claude-child",root_session_id:"claude-root",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"anthropic/claude-opus-4-6",effort:"high"})); setTimeout(() => process.exit(0), 40); }\n`);
+    await chmod(fake, 0o755);
+    assert.equal(await runManagedClient({
+      host: "claude", command: fake, args: ["--permission-mode", "auto"], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
+    }), 0);
+    const callsText = await readFile(calls, "utf8");
+    const callLines = callsText.trim().split("\n");
+    assert.equal(callLines.length, 2);
+    assert.match(callLines[1], /--resume claude-root --model claude-sonnet-4-6/);
+    assert.doesNotMatch(callsText, /claude-child/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("managed supervisor only restarts its own child after a route request", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-managed-client-"));
   const fake = join(root, "fake-codex.mjs");

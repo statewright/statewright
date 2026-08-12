@@ -290,6 +290,11 @@ export async function runManagedClient({ host, command, args, environment = proc
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
   const consumed = new Set();
   let nextArgs = args;
+  // A managed Claude process can spawn native child agents. Those children
+  // inherit the bridge identity, but they are not safe restart targets: a
+  // process-group signal would tear down the parent/child handoff that Claude
+  // owns. Lock routing to the first session that loaded the workflow.
+  let claudeRootSessionId = null;
   let bridge = null;
   let telemetry = null;
   try {
@@ -308,6 +313,9 @@ export async function runManagedClient({ host, command, args, environment = proc
         STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
       };
       if (routedClientId) childEnvironment.STATEWRIGHT_CLIENT_ID = routedClientId;
+      if (host === "claude" && claudeRootSessionId) {
+        childEnvironment.STATEWRIGHT_MANAGED_CLAUDE_ROOT_SESSION_ID = claudeRootSessionId;
+      }
       if (bridge) {
         childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
@@ -328,6 +336,15 @@ export async function runManagedClient({ host, command, args, environment = proc
           if (request.client_id !== routedClientId) {
             process.stderr.write("[statewright] rejected route request with a mismatched managed client identity.\n");
             continue;
+          }
+          if (host === "claude") {
+            const declaredRoot = String(request.root_session_id ?? "").trim();
+            const requestSessionId = String(request.session_id ?? "").trim();
+            if (!claudeRootSessionId) claudeRootSessionId = declaredRoot || requestSessionId || null;
+            if (!requestSessionId || requestSessionId !== claudeRootSessionId) {
+              process.stderr.write("[statewright] deferred Claude model route from a native fork; the parent session remains authoritative.\n");
+              continue;
+            }
           }
           await bindManagedClientIdentity({
             host,

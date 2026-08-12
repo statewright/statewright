@@ -120,17 +120,18 @@ clear_session_telemetry_state() {
 # A managed supervisor owns a dedicated Claude process group. Hooks only write
 # the authoritative route; they never signal the surrounding terminal client.
 request_interactive_route_restart() {
-  local state_json="$1" control_dir model effort request_path
+  local state_json="$1" control_dir model effort request_path root_session_id
   control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
   [ -n "$control_dir" ] || return 0
   model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
   [ -n "$model" ] || return 0
   effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
+  root_session_id="${STATEWRIGHT_MANAGED_CLAUDE_ROOT_SESSION_ID:-}"
   mkdir -p "$control_dir" || return 0
   # The managed supervisor reserves other JSON files in this directory for
   # session identity and only consumes explicit route requests.
   request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.route.json"
-  jq -n --arg session_id "$HOOK_SESSION" --arg client_id "$CLIENT_ID" --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" --arg model "$model" --arg effort "$effort" '{session_id: $session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
+  jq -n --arg session_id "$HOOK_SESSION" --arg root_session_id "$root_session_id" --arg client_id "$CLIENT_ID" --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" --arg model "$model" --arg effort "$effort" '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
 }
 
 # ============================================================

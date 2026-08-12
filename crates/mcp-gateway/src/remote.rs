@@ -205,7 +205,9 @@ async fn handle_sse(
         UpstreamManager::empty(),
         session_id.clone(),
         result.workflows,
-        Some(result.default),
+        // A remote client must explicitly load a workflow. Inheriting the
+        // account default here leaks unrelated workflow state into new TUIs.
+        None,
         result.owner_id,
         state.db_pool.clone(),
     );
@@ -320,7 +322,9 @@ async fn handle_streamable_http(
             UpstreamManager::empty(),
             session_id,
             result.workflows,
-            Some(result.default),
+            // Keep the machine definition available for `load_workflow`, but
+            // do not activate it until this client explicitly asks.
+            None,
             result.owner_id,
             state.db_pool.clone(),
         );
@@ -633,6 +637,69 @@ mod tests {
             .insert(session_id.into(), RemoteSession { gateway, tx });
 
         state
+    }
+
+    #[tokio::test]
+    async fn fresh_remote_session_starts_inactive_until_workflow_is_loaded() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "default-workflow",
+            "initial": "planning",
+            "context": {},
+            "states": {
+                "planning": { "on": { "READY": "completed" } },
+                "completed": { "type": "final" }
+            }
+        }))
+        .unwrap();
+        let session_manager = SessionManager::new();
+        session_manager.create("fresh-client".into(), definition.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("default-workflow".into(), definition);
+        let mut gateway = Gateway::new(
+            session_manager,
+            UpstreamManager::empty(),
+            "fresh-client".into(),
+            workflows,
+            None,
+            "owner".into(),
+            None,
+        );
+
+        let get_state = || JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_get_state",
+                "arguments": {}
+            })),
+            id: Some(json!(1)),
+        };
+
+        let response = gateway.handle_message(get_state()).await.unwrap();
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            text,
+            "No active workflow. Load a workflow before requesting state."
+        );
+
+        let load = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_load_workflow",
+                "arguments": { "name": "default-workflow" }
+            })),
+            id: Some(json!(2)),
+        };
+        gateway.handle_message(load).await.unwrap();
+
+        let response = gateway.handle_message(get_state()).await.unwrap();
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let state: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(state["workflow"], "default-workflow");
+        assert_eq!(state["state"], "planning");
     }
 
     // --- Health endpoint ---

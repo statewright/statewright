@@ -1,5 +1,6 @@
 {
   "id": "claude-model-routing-canary",
+  "meta": { "capture_output": true },
   "initial": "triage",
   "states": {
     "triage": {

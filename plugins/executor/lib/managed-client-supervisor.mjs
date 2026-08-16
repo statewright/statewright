@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
+import { codexAppServerTransportEnabled, runCodexAppServerTransport } from "./codex-app-server-transport.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -305,6 +306,40 @@ export async function runManagedClient({ host, command, args, environment = proc
     telemetry = host === "codex"
       ? await acquireManagedTelemetry({ environment, home, cwd, supervisorId: `${host}-${process.pid}-${randomUUID()}` })
       : null;
+    if (host === "codex" && codexAppServerTransportEnabled({
+      environment,
+      config: await managedClientConfig(home),
+    })) {
+      const appServerEnvironment = {
+        ...environment,
+        STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
+        STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+        STATEWRIGHT_CLIENT_ID: routedClientId,
+        STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+        STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
+        STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+      };
+      const nextOwnedRoute = async () => {
+        const request = await nextRouteRequest(controlDir, consumed);
+        if (!request) return null;
+        if (request.client_id !== routedClientId) {
+          process.stderr.write("[statewright] rejected route request with a mismatched managed client identity.\n");
+          return null;
+        }
+        return request;
+      };
+      return await runCodexAppServerTransport({
+        command,
+        args,
+        environment: appServerEnvironment,
+        cwd,
+        home,
+        clientId: routedClientId,
+        controlDir,
+        nextRouteRequest: nextOwnedRoute,
+        pollMs,
+      });
+    }
     while (true) {
       const childEnvironment = {
         ...environment,
@@ -378,17 +413,21 @@ function configPath(home = homedir()) {
   return join(home, ".statewright", "config.json");
 }
 
-export async function managedClientEnabled(host, home = homedir()) {
+async function managedClientConfig(home = homedir()) {
   try {
-    const config = JSON.parse(await readFile(configPath(home), "utf8"));
-    const managed = config?.routing?.managed_clients;
-    if (managed?.enabled !== true) return false;
-    // An omitted hosts object enables every supported managed client. Once a
-    // host-specific choice exists, only explicit true values are enabled.
-    return !managed.hosts || managed.hosts[host] === true;
+    return JSON.parse(await readFile(configPath(home), "utf8"));
   } catch {
-    return false;
+    return {};
   }
+}
+
+export async function managedClientEnabled(host, home = homedir()) {
+  const config = await managedClientConfig(home);
+  const managed = config?.routing?.managed_clients;
+  if (managed?.enabled !== true) return false;
+  // An omitted hosts object enables every supported managed client. Once a
+  // host-specific choice exists, only explicit true values are enabled.
+  return !managed.hosts || managed.hosts[host] === true;
 }
 
 export async function setManagedClientEnabled(host, enabled, home = homedir()) {

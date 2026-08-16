@@ -27,6 +27,37 @@ changing the workflow state used for routing.
 This cannot hot-swap the model inside an already-running Codex TUI turn. Use the adapter as the
 session owner for workflows that need model routing.
 
+## Experimental: persistent native Codex TUI
+
+The managed `codex` shim also has an experimental App Server transport for normal native TUI
+sessions. It keeps one local App Server alive, connects the unmodified Codex TUI with `--remote`,
+and applies a Statewright route only after the current turn completes. The next turn gets the new
+model and reasoning effort without an interrupt, a `resume`, or a model websocket reconnect.
+
+It is off by default. Enable it in `~/.statewright/config.json`:
+
+```json
+{
+  "routing": {
+    "managed_clients": {
+      "enabled": true,
+      "hosts": { "codex": true },
+      "codex_transport": "app-server"
+    }
+  }
+}
+```
+
+For a one-session rollback, launch Codex with
+`STATEWRIGHT_CODEX_TRANSPORT=restart codex`. An explicit
+`STATEWRIGHT_CODEX_TRANSPORT=app-server` enables the experimental transport without changing the
+file.
+
+The App Server receives an isolated temporary `CODEX_HOME`: its `config.toml` is copied and is the
+only file hot-reloaded for route changes; authentication, plugins, and other runtime state are
+shared by local symlink. Statewright removes that temporary directory when the managed TUI exits.
+The normal `~/.codex/config.toml` is never changed.
+
 ## Run
 
 From the Statewright checkout:

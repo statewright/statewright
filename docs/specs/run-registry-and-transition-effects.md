@@ -108,6 +108,168 @@ the legacy `GuardDef.field`:
 `field` continues to mean a top-level context field for existing machines.
 The schema rejects a guard that combines `field` with `source` or `path`.
 
+## Executable guards and script profiles
+
+Declarative guards remain the fast default, but some policies are too rich for
+field comparison: a release gate may need to reconcile a bounded set of test
+results, an issue-state policy may need project-specific logic, or a proof may
+need to inspect a structured artifact. Statewright therefore gains an opt-in
+**executable guard profile**. It supports both inline code blocks and pinned
+repository scripts without making the workflow definition an unrestricted host
+shell.
+
+Every executable guard receives a read-only, redacted input projection:
+
+```json
+{
+  "schema_version": 1,
+  "workflow": { "id": "release", "definition_digest": "sha256:..." },
+  "transition": { "state": "validate", "event": "COMPLETE" },
+  "context": { "commit": "abc123" },
+  "registry": { "revision": 17, "values": { "validation": { "coverage": 86 } } },
+  "artifacts": [{
+    "name": "coverage_report",
+    "ref": "artifact://coverage.json",
+    "digest": "sha256:...",
+    "path": "/summary",
+    "value": { "coverage": 86 }
+  }]
+}
+```
+
+The projection contains only declared context fields, registry paths, and
+bounded artifact views. An artifact view names one artifact, selects an
+allowed JSON Pointer or text range, and carries a byte limit and redaction
+policy. It excludes secrets, ambient environment variables, unbounded
+transcripts, credentials, and undeclared registry keys. Snapshot construction
+records its projection and redaction policy in the guard ledger.
+
+Two profile forms are supported:
+
+```json
+{
+  "guard_executors": {
+    "release_policy_v1": {
+      "kind": "inline_code",
+      "runtime": "quickjs-v1",
+      "code": "function guard(input) { return { pass: input.registry.values.validation.coverage >= 80, reason_code: 'coverage_threshold' }; }",
+      "code_digest": "sha256:...",
+      "input_projection": {
+        "context_paths": ["/commit"],
+        "registry_paths": ["/validation/coverage"],
+        "artifact_views": [{
+          "artifact": "coverage_report",
+          "path": "/summary",
+          "max_bytes": 4096,
+          "redaction": "default-v1"
+        }]
+      },
+      "limits": { "cpu_ms": 50, "memory_bytes": 1048576, "output_bytes": 8192 },
+      "capabilities": {
+        "network": "deny",
+        "filesystem": { "read": [], "write": [] },
+        "environment": [],
+        "imports": "deny",
+        "clock": "fixed",
+        "random": "deny"
+      }
+    },
+    "repo_release_policy_v1": {
+      "kind": "script",
+      "runtime_profile": "node-22-guard-v1",
+      "path": "scripts/guards/release_policy.js",
+      "content_digest": "sha256:...",
+      "sandbox": "guard-readonly-v1",
+      "input_projection": { "registry_paths": ["/validation/coverage"] },
+      "transport": {
+        "stdin": "guard_input_json",
+        "stdout": "guard_result_json",
+        "stderr": "redacted_evidence"
+      },
+      "limits": { "wall_ms": 500, "output_bytes": 8192 },
+      "capabilities": {
+        "network": "deny",
+        "filesystem": { "read": ["repo:scripts/guards/release_policy.js"], "write": [] },
+        "environment": ["LANG", "LC_ALL"]
+      }
+    }
+  }
+}
+```
+
+A named guard references a profile rather than embedding an executable payload
+in a transition branch:
+
+```json
+{
+  "guards": {
+    "release_policy": { "executor": "release_policy_v1" }
+  },
+  "states": {
+    "validate": {
+      "on": {
+        "COMPLETE": {
+          "target": "release",
+          "guards": ["release_policy"]
+        }
+      }
+    }
+  }
+}
+```
+
+This preserves the existing named-guard model, gives validation one place to
+resolve profile identities, and makes the profile digest visible wherever the
+guard is used.
+
+`quickjs-v1` is the first proposed inline runtime, with no host bindings,
+module loading, clock, randomness, filesystem, environment, or network. Its
+runtime instance is fresh per evaluation and must enforce CPU, memory, stack,
+and output limits. The executor registry is intentionally extensible: a future
+WASM runtime may offer a more strongly deterministic profile with fuel-based
+execution, but no workflow may select a runtime the controller has not
+registered and capability-tested. `code_digest` is computed from the canonical
+UTF-8 source bytes and the source declares a global `guard(input)` function;
+the runner does not infer entrypoints from arbitrary code.
+
+A script profile is arbitrary repository logic only in the bounded sense that
+its language/runtime is selected by the profile. `runtime_profile` resolves to
+a controller-owned fixed interpreter, image/binary digest, argument template,
+and sandbox adapter; a workflow cannot supply an executable path or arbitrary
+arguments. The source path is relative to the approved workspace, its digest
+is pinned, and the script receives its `GuardInput` only on stdin. Stdout must
+contain exactly one `GuardResult` JSON document; bounded, redacted stderr is
+evidence rather than a second result channel. The sandbox profile—not the
+script—grants filesystem, environment, or network access. A source edit
+invalidates the profile until its digest is deliberately updated. Scripts never
+inherit the controller process environment or the current user shell.
+
+Both forms must emit a small JSON `GuardResult`:
+
+```json
+{
+  "pass": true,
+  "reason_code": "coverage_threshold",
+  "message": "coverage is 86; minimum is 80",
+  "evidence_refs": ["artifact://coverage.json"]
+}
+```
+
+`pass` is the only branch-controlling value. `reason_code`, message, and
+evidence references are audit material subject to schema, size, and redaction
+limits. An executor timeout, trap, non-zero exit, malformed result, digest
+mismatch, denied capability, or stale snapshot is a typed guard failure, not a
+false result and not a fallback to another branch.
+
+An executable guard cannot mutate context, the registry, artifacts, workflow
+definition, or state. When code needs to calculate and store values before a
+guard runs, it uses the same registered runtime through a separately declared
+`pre_transition` **script effect**. That effect may return a validated patch
+only to its declared registry write paths; it then follows the existing
+prepared-effect CAS and `record_and_abort` rules. Keeping "compute and write"
+separate from "evaluate and branch" prevents repeated guard evaluation from
+creating hidden side effects.
+
 ## Guard snapshot and transition order
 
 The run lock linearizes the transition, but it must never be held while a
@@ -152,10 +314,27 @@ Its default is legacy context-only evaluation. Workflow-level defaults may be
 introduced later, but only with an explicit per-transition override so an
 upgrade never silently changes an existing branch.
 
+An executable guard is evaluated after pre-transition effects have formed the
+immutable snapshot. It uses the same prepared/CAS discipline as an external
+effect:
+
+```text
+lock: capture state, registry revision, snapshot digest, and guard intent id
+  -> unlock: run bounded code or script against the read-only snapshot
+  -> lock: require captured state and registry revision (CAS)
+  -> apply GuardResult to the declared branch selection
+```
+
+This keeps the run lock out of arbitrary runtime execution. If another event
+or registry patch wins first, the result is discarded as
+`stale_guard_snapshot`; Statewright does not retry it automatically. The guard
+ledger records profile id, runtime, code/script digest, input snapshot digest,
+capability policy digest, limits, elapsed time, result, and evidence refs.
+
 ## Safe effects
 
-Effects are declarative and registered, not arbitrary shell or embedded
-JavaScript. The initial set is:
+Effects are declarative and registered; they are not an unrestricted shell or
+script surface. The initial set is:
 
 - `set`: assign a literal, schema-validated registry value.
 - `extract`: select a bounded JSON value from a named artifact or prior tool
@@ -166,13 +345,18 @@ JavaScript. The initial set is:
   output cap, and result schema.
 - `mcp_read`: call an explicitly registered read-only MCP operation with an
   input/output schema and redacted evidence reference.
+- `script`: invoke a registered inline-code or pinned-script profile as an
+  effect, with declared registry write paths and the same sandbox/capability
+  contract used by executable guards.
 
 Effects may run on `on_entry`, `pre_transition`, `on_transition`, or
 `post_transition`. The first implementation only needs `pre_transition` and
-`on_entry`. State transition itself remains controller-owned: a registry update
-can re-evaluate a declared guard, but it cannot autonomously advance an agent
-state. A future `auto_event` is allowed only for a declared deterministic
-controller event with an audit record and no model turn in flight.
+`on_entry`; script effects arrive only after the executable-guard sandbox
+contract is validated. State transition itself remains controller-owned: a
+registry update can re-evaluate a declared guard, but it cannot autonomously
+advance an agent state. A future `auto_event` is allowed only for a declared
+deterministic controller event with an audit record and no model turn in
+flight.
 
 The first release exposes one explicit effect-failure behavior:
 
@@ -259,14 +443,18 @@ avoids accidental behavior changes in currently deployed proof machines.
    explicit source and JSON Pointer paths; preserve legacy top-level
    context-field behavior. Add tests for same-transition quantitative branches
    and stale revisions.
-4. **Named pre-transition effects.** Start with `set`, `assert`, and bounded
-   `extract` under the run lock and `record_and_abort`. Introduce external
-   command/MCP profiles only after prepared-effect CAS, capability-policy, and
-   artifact-redaction tests exist.
-5. **Typed subflow input/output.** Add the opt-in object form without changing
+4. **Executable guard foundation.** Add the profile schema, projection builder,
+   `GuardResult` validation, ledger, QuickJS isolated-runtime spike, and the
+   prepared/CAS execution path. Prove timeout, memory, import, environment,
+   network, malformed-result, digest-mismatch, and stale-snapshot behavior.
+5. **Named pre-transition effects.** Start with `set`, `assert`, and bounded
+   `extract` under the run lock and `record_and_abort`. Add script effects and
+   external command/MCP profiles only after prepared-effect CAS,
+   capability-policy, artifact-redaction, and executable-guard tests exist.
+6. **Typed subflow input/output.** Add the opt-in object form without changing
    legacy `input`; migrate the Magent proof machines and verify blocked proofs
    reach `on_fail`.
-6. **Durable backing store.** Reuse the operator roadmap's transactional
+7. **Durable backing store.** Reuse the operator roadmap's transactional
    state/context/log persistence for registry values and effect ledgers. Add a
    project-shared namespace only as a separately versioned capability.
 
@@ -282,6 +470,24 @@ avoids accidental behavior changes in currently deployed proof machines.
   `record_and_abort` result.
 - An external effect whose state or revision changes before CAS is discarded;
   it cannot apply output to a later state.
+- Inline-code guards cannot import modules or access filesystem, environment,
+  network, wall clock, or randomness; timeout, memory, stack, malformed output,
+  and runtime traps fail closed with typed records.
+- Artifact views are limited to declared artifacts, paths, byte caps, and
+  redaction policies; an executor cannot dereference arbitrary artifact refs or
+  obtain a full transcript through its input projection.
+- Script guards receive only their declared JSON projection, run with a pinned
+  source digest, registered runtime profile, and sandbox profile, and cannot
+  inherit controller credentials or mutate the workspace, registry, context,
+  or state.
+- Script profiles reject arbitrary executable paths/arguments and require the
+  single-document stdin/stdout transport; logs on stdout, malformed JSON, or
+  an unregistered runtime profile fail closed.
+- A script effect can patch only its declared registry paths; the same script
+  cannot return a patch when configured as a guard.
+- A stale executable-guard result is discarded after CAS rather than steering
+  a later transition; repeated execution with the same fixed snapshot yields
+  the same branch result for deterministic profiles.
 - Legacy context-only guards retain their existing pre-event behavior.
 - Outcome precedence tests cover explicit outcome, `meta.failure_states`, the
   `failed` literal, and an unclassified legacy final warning.
@@ -305,6 +511,9 @@ unbounded effects. Default limits should be declared per effect profile:
 | Registry patch size | 16 KiB |
 | Artifact payload in registry | reference only |
 | CAS retries | 0; caller resamples explicitly |
+| Inline guard CPU / memory / output | 50 ms / 1 MiB / 8 KiB |
+| Script guard wall time / output | 500 ms / 8 KiB |
+| Executable guard attempts per transition | 1 |
 
 The normal design/review path is seven states (five Terra/high and two
 Sol/high); a bounded repair path is eleven (eight Terra/high and three
@@ -314,7 +523,10 @@ handoff rather than broad rediscovery.
 
 ## Non-goals
 
-- Arbitrary JavaScript, shell snippets, or user-provided code in guards.
+- Unprofiled arbitrary JavaScript, shell snippets, or user-provided code in
+  guards.
+- Unprofiled inline code or scripts, inherited shell environments, ambient
+  credentials, implicit network access, or writable guard sandboxes.
 - A hidden global variable bag shared across projects or sessions.
 - Storing secrets, full tool transcripts, contact data, or unredacted command
   output in the registry.
@@ -334,3 +546,13 @@ handoff rather than broad rediscovery.
 - `docs/future/operator-design.md` and
   `docs/future/k8s-operator-architecture.md`: declarative actions and atomic
   state/context/transition logging are already the stated operator direction.
+- [Wasmtime fuel-based interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html)
+  (accessed 2026-08-16): a future WASM executor can use deterministic fuel
+  limits; it is not an excuse to expose unrestricted WASI capabilities.
+- [Wasmtime execution configuration](https://docs.wasmtime.dev/api/wasmtime/struct.Config.html)
+  (accessed 2026-08-16): fuel and epochs do not cancel blocking host calls, so
+  any subprocess or host capability still needs its own wall-clock timeout.
+- [rquickjs](https://github.com/delskayn/rquickjs) (accessed 2026-08-16): a
+  QuickJS binding is a candidate for the proposed isolated inline JavaScript
+  executor, subject to a platform/dependency spike and the limits specified
+  above.

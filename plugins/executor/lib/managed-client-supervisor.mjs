@@ -9,6 +9,7 @@ import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { codexAppServerTransportEnabled, runCodexAppServerTransport } from "./codex-app-server-transport.mjs";
+import { createTelemetryWriter } from "./telemetry.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -32,6 +33,15 @@ function telemetryEnvironment(environment, dataDir) {
     ...environment,
     STATEWRIGHT_TELEMETRY_DIR: dataDir,
   };
+}
+
+function managedRouteTelemetry(environment) {
+  const explicit = environment.STATEWRIGHT_TELEMETRY_URL?.trim();
+  const pocketbase = environment.STATEWRIGHT_PB_URL?.replace(/\/$/, "");
+  return createTelemetryWriter(undefined, {
+    endpoint: explicit || (pocketbase ? `${pocketbase}/api/gateway/telemetry/events` : null),
+    apiKey: environment.STATEWRIGHT_API_KEY ?? null,
+  });
 }
 
 async function telemetryHealth(port) {
@@ -338,6 +348,7 @@ export async function runManagedClient({ host, command, args, environment = proc
         controlDir,
         nextRouteRequest: nextOwnedRoute,
         pollMs,
+        telemetry: managedRouteTelemetry(environment),
       });
     }
     while (true) {

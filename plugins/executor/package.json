@@ -9,5 +9,8 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
 }

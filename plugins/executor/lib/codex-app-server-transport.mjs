@@ -3,6 +3,7 @@ import { createServer } from "node:net";
 import { chmod, cp, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 
@@ -20,90 +21,6 @@ async function reserveLoopbackPort() {
   await new Promise((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
   if (!address || typeof address === "string") throw new Error("Unable to reserve a loopback App Server port.");
   return address.port;
-}
-
-function waitForWebSocket(url, timeoutMs = DEFAULT_READY_TIMEOUT_MS) {
-  return new Promise((resolveOpen, rejectOpen) => {
-    const socket = new WebSocket(url);
-    const timer = setTimeout(() => {
-      socket.close();
-      rejectOpen(new Error("Timed out connecting to the local Codex App Server."));
-    }, timeoutMs);
-    socket.addEventListener("open", () => {
-      clearTimeout(timer);
-      resolveOpen(socket);
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
-      rejectOpen(new Error("Could not connect to the local Codex App Server."));
-    }, { once: true });
-  });
-}
-
-class AppServerControl {
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.listeners = new Set();
-    socket.addEventListener("message", (event) => this.accept(event.data));
-    socket.addEventListener("close", () => this.rejectAll(new Error("Codex App Server control connection closed.")));
-    socket.addEventListener("error", () => this.rejectAll(new Error("Codex App Server control connection failed.")));
-  }
-
-  accept(raw) {
-    let message;
-    try { message = JSON.parse(String(raw)); } catch { return; }
-    if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
-      const request = this.pending.get(String(message.id));
-      if (!request) return;
-      this.pending.delete(String(message.id));
-      clearTimeout(request.timer);
-      if (message.error) request.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
-      else request.resolve(message.result);
-      return;
-    }
-    if (message.method) {
-      for (const listener of this.listeners) listener(message);
-    }
-  }
-
-  rejectAll(error) {
-    for (const request of this.pending.values()) {
-      clearTimeout(request.timer);
-      request.reject(error);
-    }
-    this.pending.clear();
-  }
-
-  onNotification(listener) {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  request(method, params = undefined) {
-    const id = this.nextId++;
-    const payload = { id, method };
-    if (params !== undefined) payload.params = params;
-    return new Promise((resolveRequest, rejectRequest) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(String(id));
-        rejectRequest(new Error(`Timed out waiting for Codex App Server '${method}'.`));
-      }, 10_000);
-      this.pending.set(String(id), { resolve: resolveRequest, reject: rejectRequest, timer });
-      this.socket.send(JSON.stringify(payload));
-    });
-  }
-
-  notify(method, params = undefined) {
-    const payload = { method };
-    if (params !== undefined) payload.params = params;
-    this.socket.send(JSON.stringify(payload));
-  }
-
-  close() {
-    this.socket.close();
-  }
 }
 
 export function codexAppServerTransportEnabled({ environment = process.env, config = {} } = {}) {
@@ -178,8 +95,8 @@ async function waitForReady(url, appServer) {
 }
 
 /**
- * Runs the native Codex TUI against one local App Server. Routes are applied by
- * hot-reloading a disposable profile only after the current turn completes.
+ * Runs the native Codex TUI against one local App Server. A loopback proxy
+ * applies a pending route directly to the next native turn/start request.
  */
 export async function runCodexAppServerTransport({
   command,
@@ -192,11 +109,12 @@ export async function runCodexAppServerTransport({
   nextRouteRequest,
   pollMs = 100,
   stderr = process.stderr,
+  telemetry = async () => {},
 }) {
   const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
-  const { appServerHome, configPath } = await prepareAppServerHome(codexHome, clientId);
+  const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
 
   const appServer = spawn(command, ["app-server", "--listen", url], {
     cwd,
@@ -206,42 +124,29 @@ export async function runCodexAppServerTransport({
   appServer.stderr.on("data", (chunk) => stderr.write(chunk));
   appServer.stdout.resume();
 
-  let control;
+  let routeProxy;
   let tui;
   let pendingRoute = null;
-  let turnActive = false;
-  let applying = false;
   try {
     await waitForReady(url, appServer);
-    control = new AppServerControl(await waitForWebSocket(url));
-    await control.request("initialize", { clientInfo: { name: "statewright-native-routing", version: "0.1.0" } });
-    control.notify("initialized");
-    control.onNotification((message) => {
-      if (message.method === "turn/started") turnActive = true;
-      if (message.method === "turn/completed") turnActive = false;
+    routeProxy = await startCodexAppServerRouteProxy({
+      upstreamUrl: url,
+      takePendingRoute: async () => {
+        const route = pendingRoute;
+        pendingRoute = null;
+        return route;
+      },
+      onRouteInjected: async (receipt) => {
+        await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
+        stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);
+      },
+      onRouteConfirmed: async (receipt) => {
+        await telemetry(receipt.confirmed ? "app_server_route_confirmed" : "app_server_route_mismatch", { client_id: clientId, ...receipt });
+        stderr.write(`[statewright] App Server ${receipt.confirmed ? "confirmed" : "reported a mismatch for"} ${receipt.actualModel}${receipt.actualEffort ? ` (${receipt.actualEffort})` : ""}.\n`);
+      },
     });
 
-    async function applyPendingRoute() {
-      if (!pendingRoute || turnActive || applying) return;
-      applying = true;
-      const route = pendingRoute;
-      pendingRoute = null;
-      try {
-        await control.request("config/batchWrite", {
-          filePath: configPath,
-          reloadUserConfig: true,
-          edits: routeConfigEdits(route),
-        });
-        stderr.write(`[statewright] applied next-turn route ${route.model}${route.effort ? ` (${route.effort})` : ""} without restarting Codex.\n`);
-      } catch (error) {
-        pendingRoute = route;
-        stderr.write(`[statewright] could not apply App Server route: ${error.message}\n`);
-      } finally {
-        applying = false;
-      }
-    }
-
-    tui = spawn(command, [...stripRemoteArgs(args), "--remote", url], {
+    tui = spawn(command, [...stripRemoteArgs(args), "--remote", routeProxy.url], {
       cwd,
       env: environment,
       stdio: "inherit",
@@ -254,13 +159,15 @@ export async function runCodexAppServerTransport({
     tui.once("exit", () => { exited = true; });
     while (!exited) {
       const request = await nextRouteRequest(controlDir).catch(() => null);
-      if (request) pendingRoute = request;
-      await applyPendingRoute();
+      if (request) {
+        pendingRoute = request;
+        await telemetry("app_server_route_requested", { client_id: clientId, route: request });
+      }
       await delay(pollMs);
     }
     return await tuiExit;
   } finally {
-    control?.close();
+    await routeProxy?.close();
     if (tui && tui.exitCode === null) tui.kill("SIGTERM");
     if (appServer.exitCode === null) appServer.kill("SIGTERM");
     await rm(appServerHome, { recursive: true, force: true });

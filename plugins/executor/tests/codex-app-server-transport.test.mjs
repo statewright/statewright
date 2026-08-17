@@ -7,7 +7,7 @@ import {
   routeConfigEdits,
 } from "../lib/codex-app-server-transport.mjs";
 import { residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, hydrateBoundedResumeTurns, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -97,6 +97,18 @@ test("compact resume requests server-supported metadata and bounded recent histo
   assert.equal(applyCompactResumeRequest(readRequest), readRequest);
 });
 
+test("bounded resume pages are normalized for the native Codex transcript surface", () => {
+  const response = {
+    id: 4,
+    result: {
+      thread: { id: "thread-1", turns: [] },
+      initialTurnsPage: { data: [{ id: "newest" }, { id: "older" }] },
+    },
+  };
+  assert.deepEqual(hydrateBoundedResumeTurns(response).result.thread.turns, [{ id: "older" }, { id: "newest" }]);
+  assert.equal(hydrateBoundedResumeTurns({ result: { thread: { turns: [{ id: "existing" }] } } }).result.thread.turns[0].id, "existing");
+});
+
 test("App Server route proxy injects one pending route and records the server receipt", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -151,9 +163,9 @@ test("App Server route proxy injects one pending route and records the server re
   const compactResumeResponse = new Promise((resolveMessage) => client.once("message", (raw, isBinary) => {
     resolveMessage({ message: JSON.parse(String(raw)), isBinary });
   }));
-  upstreamSocket.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-proxy", turns: [] }, initialTurnsPage: { data: [] } } }));
+  upstreamSocket.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-proxy", turns: [] }, initialTurnsPage: { data: [{ id: "newest" }, { id: "older" }] } } }));
   assert.deepEqual(await compactResumeResponse, {
-    message: { id: 2, result: { thread: { id: "thread-proxy", turns: [] }, initialTurnsPage: { data: [] } } },
+    message: { id: 2, result: { thread: { id: "thread-proxy", turns: [{ id: "older" }, { id: "newest" }] }, initialTurnsPage: { data: [{ id: "newest" }, { id: "older" }] } } },
     isBinary: false,
   });
   client.close();

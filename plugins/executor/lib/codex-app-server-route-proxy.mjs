@@ -57,6 +57,21 @@ export function applyCompactResumeRequest(message, enabled = true, historyLimit 
   return { ...message, params };
 }
 
+export function hydrateBoundedResumeTurns(message) {
+  if (message?.result?.thread?.turns?.length || !Array.isArray(message?.result?.initialTurnsPage?.data)) return message;
+  // Codex 0.144.x resumes from legacy `thread.turns` and does not render the
+  // documented `initialTurnsPage`. Expose the bounded page in that legacy
+  // surface without rebuilding or mutating the complete stored rollout.
+  const turns = [...message.result.initialTurnsPage.data].reverse();
+  return {
+    ...message,
+    result: {
+      ...message.result,
+      thread: { ...message.result.thread, turns },
+    },
+  };
+}
+
 function forwardWhenOpen(socket, payload) {
   if (socket.readyState === WebSocket.OPEN) socket.send(payload);
   else socket.once("open", () => socket.send(payload));
@@ -124,9 +139,13 @@ export async function startCodexAppServerRouteProxy({
     upstream.on("message", async (raw) => {
       let payload = String(raw);
       try {
-        const notification = JSON.parse(payload);
+        let notification = JSON.parse(payload);
         const responseTo = notification.id !== undefined ? requestMethods.get(String(notification.id)) : null;
         if (responseTo) requestMethods.delete(String(notification.id));
+        if (responseTo === "thread/resume") {
+          notification = hydrateBoundedResumeTurns(notification);
+          payload = JSON.stringify(notification);
+        }
         void onConnection({
           direction: "upstream_to_native",
           method: notification.method ?? (responseTo ? `response:${responseTo}` : null),

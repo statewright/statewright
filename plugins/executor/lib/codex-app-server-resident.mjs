@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,19 +84,22 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   const existing = await readManifest(manifestPath);
   if (await ready(existing)) return existing;
   await mkdir(root, { recursive: true, mode: 0o700 });
+  const logHandle = await open(join(root, "resident.log"), "a", 0o600);
   const child = spawn(process.execPath, [RESIDENT_ENTRYPOINT, "--client-id", clientId, "--command", command, "--cwd", cwd, "--home", home], {
     cwd,
     env: { ...environment, STATEWRIGHT_CODEX_RESIDENT_ROOT: root },
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", logHandle.fd, logHandle.fd],
   });
+  await logHandle.close();
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
     if (await ready(manifest)) return manifest;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
-  throw new Error("Timed out waiting for the resident Statewright Codex App Server.");
+  const log = await readFile(join(root, "resident.log"), "utf8").catch(() => "");
+  throw new Error(`Timed out waiting for the resident Statewright Codex App Server. ${log.slice(-1200).trim()}`);
 }
 
 async function main() {

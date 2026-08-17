@@ -115,6 +115,11 @@ test("App Server route proxy injects one pending route and records the server re
   }));
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
   assert.deepEqual(confirmed.map(({ confirmed: value }) => value), [true]);
+  const nativeResponse = new Promise((resolveMessage) => client.once("message", (raw, isBinary) => {
+    resolveMessage({ message: JSON.parse(String(raw)), isBinary });
+  }));
+  upstreamSocket.send(JSON.stringify({ id: 1, result: { ok: true } }));
+  assert.deepEqual(await nativeResponse, { message: { id: 1, result: { ok: true } }, isBinary: false });
   client.close();
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));

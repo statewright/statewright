@@ -54,6 +54,8 @@ export async function startCodexAppServerRouteProxy({
   takePendingRoute,
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
+  onConnection = async () => {},
+  onTransportError = async () => {},
 }) {
   const healthServer = createServer((request, response) => {
     if (request.url === "/readyz" || request.url === "/healthz") {
@@ -77,10 +79,12 @@ export async function startCodexAppServerRouteProxy({
 
   server.on("connection", (downstream) => {
     const upstream = new WebSocket(upstreamUrl);
+    void onConnection({ upstreamUrl });
     downstream.on("message", async (raw) => {
       let payload = String(raw);
       try {
         const message = JSON.parse(payload);
+        void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
         if (message.method === "turn/start") {
           const route = await takePendingRoute();
           const applied = applyRouteToTurnStart(message, route);
@@ -99,6 +103,7 @@ export async function startCodexAppServerRouteProxy({
     upstream.on("message", async (raw) => {
       try {
         const notification = JSON.parse(String(raw));
+        void onConnection({ direction: "upstream_to_native", method: notification.method ?? null });
         const receipt = settingsConfirmRoute(receipts.get(String(notification?.params?.threadId ?? "")), notification);
         if (receipt) {
           receipts.delete(receipt.threadId);
@@ -108,16 +113,32 @@ export async function startCodexAppServerRouteProxy({
         // Protocol traffic is still forwarded; receipt telemetry must never
         // interfere with a native Codex session.
       }
-      forwardWhenOpen(downstream, raw);
+      // App Server WebSocket mode specifies one JSON-RPC text frame per
+      // message. `ws` exposes received text as a Buffer by default; sending
+      // that buffer would silently convert it into a binary frame, which the
+      // native Codex TUI rejects during its initialize handshake.
+      forwardWhenOpen(downstream, String(raw));
     });
     const closePeer = () => {
       if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
       if (downstream.readyState === WebSocket.OPEN || downstream.readyState === WebSocket.CONNECTING) downstream.close();
     };
-    downstream.on("close", closePeer);
-    downstream.on("error", closePeer);
-    upstream.on("close", closePeer);
-    upstream.on("error", closePeer);
+    downstream.on("close", (code, reason) => {
+      void onTransportError({ side: "native_close", message: `${code} ${String(reason)}`.trim() });
+      closePeer();
+    });
+    downstream.on("error", (error) => {
+      void onTransportError({ side: "native", message: error.message });
+      closePeer();
+    });
+    upstream.on("close", (code, reason) => {
+      void onTransportError({ side: "upstream_close", message: `${code} ${String(reason)}`.trim() });
+      closePeer();
+    });
+    upstream.on("error", (error) => {
+      void onTransportError({ side: "upstream", message: error.message });
+      closePeer();
+    });
   });
 
   return {

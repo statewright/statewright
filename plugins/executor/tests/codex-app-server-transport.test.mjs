@@ -93,6 +93,8 @@ test("App Server route proxy injects one pending route and records the server re
   const client = new WebSocket(proxy.url);
   await once(client, "open");
   await upstreamConnection;
+  assert.equal((await fetch(`${proxy.url.replace("ws:", "http:")}/readyz`)).status, 200);
+  assert.equal((await fetch(`${proxy.url.replace("ws:", "http:")}/healthz`)).status, 200);
   const forwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: 1, method: "turn/start", params: { threadId: "thread-proxy", input: [] } }));
   const request = await forwarded;

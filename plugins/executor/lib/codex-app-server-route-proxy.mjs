@@ -1,4 +1,5 @@
 import { WebSocket, WebSocketServer } from "ws";
+import { createServer } from "node:http";
 
 function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "").trim();
@@ -54,12 +55,22 @@ export async function startCodexAppServerRouteProxy({
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
 }) {
-  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  const healthServer = createServer((request, response) => {
+    if (request.url === "/readyz" || request.url === "/healthz") {
+      response.writeHead(200, { "Content-Type": "text/plain" });
+      response.end("ok\n");
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  const server = new WebSocketServer({ server: healthServer });
   const receipts = new Map();
   const listening = new Promise((resolveListening, rejectListening) => {
-    server.once("listening", resolveListening);
-    server.once("error", rejectListening);
+    healthServer.once("listening", resolveListening);
+    healthServer.once("error", rejectListening);
   });
+  healthServer.listen(0, "127.0.0.1");
   await listening;
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Could not allocate a Statewright App Server route proxy port.");
@@ -113,7 +124,7 @@ export async function startCodexAppServerRouteProxy({
     url: `ws://127.0.0.1:${address.port}`,
     async close() {
       for (const client of server.clients) client.terminate();
-      await new Promise((resolveClose) => server.close(() => resolveClose()));
+      await new Promise((resolveClose) => server.close(() => healthServer.close(() => resolveClose())));
     },
   };
 }

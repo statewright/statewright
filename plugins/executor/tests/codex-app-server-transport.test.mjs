@@ -6,7 +6,7 @@ import {
   codexAppServerTransportEnabled,
   routeConfigEdits,
 } from "../lib/codex-app-server-transport.mjs";
-import { residentControlDir, residentRoot } from "../lib/codex-app-server-resident.mjs";
+import { residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyRouteToTurnStart, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
@@ -37,6 +37,14 @@ test("resident App Server state is stable per managed client and keeps routes ou
   const root = residentRoot(home, "swc_abc:unsafe/path");
   assert.equal(root, "/tmp/statewright-home/.statewright/codex-app-server/swc_abc-unsafe-path");
   assert.equal(residentControlDir(home, "swc_abc:unsafe/path"), `${root}/routes`);
+});
+
+test("resident runtime revision changes reuse only when the loaded transport bundle matches", async () => {
+  const revision = await residentRuntimeRevision();
+  assert.match(revision, /^[a-f0-9]{16}$/);
+  assert.equal(residentMatchesRuntime({ runtimeRevision: revision }, revision), true);
+  assert.equal(residentMatchesRuntime({ runtimeRevision: "stale" }, revision), false);
+  assert.equal(residentMatchesRuntime({}, revision), false);
 });
 
 test("App Server transport writes only next-turn model and effort config overrides", () => {

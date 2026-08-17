@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +12,11 @@ import { createTelemetryWriter } from "./telemetry.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
+const RESIDENT_RUNTIME_FILES = [
+  RESIDENT_ENTRYPOINT,
+  join(EXECUTOR_ROOT, "codex-app-server-transport.mjs"),
+  join(EXECUTOR_ROOT, "codex-app-server-route-proxy.mjs"),
+];
 
 function safeName(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 96);
@@ -33,11 +38,33 @@ async function readManifest(path) {
   try { return JSON.parse(await readFile(path, "utf8")); } catch { return null; }
 }
 
-async function ready(manifest) {
-  if (!manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
+export async function residentRuntimeRevision() {
+  const sources = await Promise.all(RESIDENT_RUNTIME_FILES.map((path) => readFile(path, "utf8")));
+  return createHash("sha256").update(sources.join("\n--- statewright resident module ---\n")).digest("hex").slice(0, 16);
+}
+
+export function residentMatchesRuntime(manifest, runtimeRevision) {
+  return manifest?.runtimeRevision === runtimeRevision;
+}
+
+async function ready(manifest, runtimeRevision) {
+  if (!residentMatchesRuntime(manifest, runtimeRevision) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
   try {
     return (await fetch(`${manifest.proxyUrl.replace(/^ws/, "http")}/readyz`, { signal: AbortSignal.timeout(400) })).ok;
   } catch { return false; }
+}
+
+async function retireResident(manifest, manifestPath) {
+  if (manifest?.pid && processAlive(manifest.pid)) {
+    process.kill(manifest.pid, "SIGTERM");
+    for (let attempt = 0; attempt < 40 && processAlive(manifest.pid); attempt += 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+    if (processAlive(manifest.pid)) {
+      throw new Error(`Statewright Codex App Server resident ${manifest.pid} did not stop for a runtime update.`);
+    }
+  }
+  await unlink(manifestPath).catch(() => {});
 }
 
 async function writeManifest(path, value) {
@@ -81,8 +108,12 @@ async function createManagedMcpBridge({ environment, clientId }) {
 export async function ensureCodexAppServerResident({ command, cwd, environment = process.env, home = homedir(), clientId }) {
   const root = residentRoot(home, clientId);
   const manifestPath = join(root, "manifest.json");
+  const runtimeRevision = await residentRuntimeRevision();
   const existing = await readManifest(manifestPath);
-  if (await ready(existing)) return existing;
+  if (await ready(existing, runtimeRevision)) return existing;
+  if (existing?.pid && processAlive(existing.pid)) {
+    await retireResident(existing, manifestPath);
+  }
   await mkdir(root, { recursive: true, mode: 0o700 });
   const logHandle = await open(join(root, "resident.log"), "a", 0o600);
   const child = spawn(process.execPath, [RESIDENT_ENTRYPOINT, "--client-id", clientId, "--command", command, "--cwd", cwd, "--home", home], {
@@ -95,7 +126,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
-    if (await ready(manifest)) return manifest;
+    if (await ready(manifest, runtimeRevision)) return manifest;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   const log = await readFile(join(root, "resident.log"), "utf8").catch(() => "");
@@ -131,7 +162,14 @@ async function main() {
     nextRouteRequest: () => nextRouteRequest(controlDir, clientId),
     telemetry: telemetryWriter(process.env),
   });
-  await writeManifest(manifestPath, { version: 1, pid: process.pid, clientId, proxyUrl: runtime.proxyUrl, startedAt: new Date().toISOString() });
+  await writeManifest(manifestPath, {
+    version: 2,
+    pid: process.pid,
+    clientId,
+    proxyUrl: runtime.proxyUrl,
+    runtimeRevision: await residentRuntimeRevision(),
+    startedAt: new Date().toISOString(),
+  });
   const stop = async () => {
     await runtime.close();
     await bridge.close();

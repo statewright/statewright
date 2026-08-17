@@ -44,6 +44,15 @@ export function settingsConfirmRoute(receipt, notification) {
   };
 }
 
+export function applyCompactResumeRequest(message, enabled = true) {
+  if (!enabled || message?.method !== "thread/resume") return message;
+  const params = { ...(message.params ?? {}), excludeTurns: true };
+  // A TUI-provided first page would defeat metadata-only resume. The native
+  // client can request historical pages explicitly when it actually needs one.
+  delete params.initialTurnsPage;
+  return { ...message, params };
+}
+
 function forwardWhenOpen(socket, payload) {
   if (socket.readyState === WebSocket.OPEN) socket.send(payload);
   else socket.once("open", () => socket.send(payload));
@@ -56,6 +65,7 @@ export async function startCodexAppServerRouteProxy({
   onRouteConfirmed = async () => {},
   onConnection = async () => {},
   onTransportError = async () => {},
+  compactResume = true,
 }) {
   const healthServer = createServer((request, response) => {
     if (request.url === "/readyz" || request.url === "/healthz") {
@@ -68,6 +78,7 @@ export async function startCodexAppServerRouteProxy({
   });
   const server = new WebSocketServer({ server: healthServer });
   const receipts = new Map();
+  const requestMethods = new Map();
   const listening = new Promise((resolveListening, rejectListening) => {
     healthServer.once("listening", resolveListening);
     healthServer.once("error", rejectListening);
@@ -83,8 +94,13 @@ export async function startCodexAppServerRouteProxy({
     downstream.on("message", async (raw) => {
       let payload = String(raw);
       try {
-        const message = JSON.parse(payload);
+        let message = JSON.parse(payload);
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
+        if (message.id !== undefined && message.method) requestMethods.set(String(message.id), message.method);
+        const compacted = compactResume && message.method === "thread/resume";
+        message = applyCompactResumeRequest(message, compactResume);
+        payload = JSON.stringify(message);
+        if (compacted) void onConnection({ direction: "native_to_upstream", method: "thread/resume [history omitted]" });
         if (message.method === "turn/start") {
           const route = await takePendingRoute();
           const applied = applyRouteToTurnStart(message, route);
@@ -101,9 +117,17 @@ export async function startCodexAppServerRouteProxy({
       forwardWhenOpen(upstream, payload);
     });
     upstream.on("message", async (raw) => {
+      let payload = String(raw);
       try {
-        const notification = JSON.parse(String(raw));
-        void onConnection({ direction: "upstream_to_native", method: notification.method ?? null });
+        const notification = JSON.parse(payload);
+        const responseTo = notification.id !== undefined ? requestMethods.get(String(notification.id)) : null;
+        if (responseTo) requestMethods.delete(String(notification.id));
+        void onConnection({
+          direction: "upstream_to_native",
+          method: notification.method ?? (responseTo ? `response:${responseTo}` : null),
+          bytes: String(raw).length,
+          resultKeys: responseTo && notification.result && typeof notification.result === "object" ? Object.keys(notification.result) : null,
+        });
         const receipt = settingsConfirmRoute(receipts.get(String(notification?.params?.threadId ?? "")), notification);
         if (receipt) {
           receipts.delete(receipt.threadId);
@@ -117,7 +141,7 @@ export async function startCodexAppServerRouteProxy({
       // message. `ws` exposes received text as a Buffer by default; sending
       // that buffer would silently convert it into a binary frame, which the
       // native Codex TUI rejects during its initialize handshake.
-      forwardWhenOpen(downstream, String(raw));
+      forwardWhenOpen(downstream, payload);
     });
     const closePeer = () => {
       if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();

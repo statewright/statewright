@@ -7,7 +7,7 @@ import {
   routeConfigEdits,
 } from "../lib/codex-app-server-transport.mjs";
 import { residentControlDir, residentRoot } from "../lib/codex-app-server-resident.mjs";
-import { applyRouteToTurnStart, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -76,6 +76,14 @@ test("App Server routing overrides the native next turn and requires a settings 
   }).confirmed, false);
 });
 
+test("compact resume requests server-supported metadata-only history", () => {
+  const request = { id: 4, method: "thread/resume", params: { threadId: "thread-1", initialTurnsPage: { limit: 200 } } };
+  assert.deepEqual(applyCompactResumeRequest(request), { id: 4, method: "thread/resume", params: { threadId: "thread-1", excludeTurns: true } });
+  assert.equal(applyCompactResumeRequest(request, false), request);
+  const readRequest = { id: 4, method: "thread/read", params: {} };
+  assert.equal(applyCompactResumeRequest(readRequest), readRequest);
+});
+
 test("App Server route proxy injects one pending route and records the server receipt", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -120,6 +128,21 @@ test("App Server route proxy injects one pending route and records the server re
   }));
   upstreamSocket.send(JSON.stringify({ id: 1, result: { ok: true } }));
   assert.deepEqual(await nativeResponse, { message: { id: 1, result: { ok: true } }, isBinary: false });
+  const forwardedResume = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  client.send(JSON.stringify({ id: 2, method: "thread/resume", params: { threadId: "thread-proxy", initialTurnsPage: { limit: 100 } } }));
+  assert.deepEqual(await forwardedResume, {
+    id: 2,
+    method: "thread/resume",
+    params: { threadId: "thread-proxy", excludeTurns: true },
+  });
+  const compactResumeResponse = new Promise((resolveMessage) => client.once("message", (raw, isBinary) => {
+    resolveMessage({ message: JSON.parse(String(raw)), isBinary });
+  }));
+  upstreamSocket.send(JSON.stringify({ id: 2, result: { thread: { id: "thread-proxy", turns: [] }, initialTurnsPage: { data: [] } } }));
+  assert.deepEqual(await compactResumeResponse, {
+    message: { id: 2, result: { thread: { id: "thread-proxy", turns: [] }, initialTurnsPage: { data: [] } } },
+    isBinary: false,
+  });
   client.close();
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));

@@ -186,6 +186,7 @@ export async function startCodexAppServerRuntime({
     await waitForReady(url, appServer);
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
+      compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
       takePendingRoute: nextRouteRequest,
       onRouteInjected: async (receipt) => {
         await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
@@ -195,9 +196,9 @@ export async function startCodexAppServerRuntime({
         await telemetry(receipt.confirmed ? "app_server_route_confirmed" : "app_server_route_mismatch", { client_id: clientId, ...receipt });
         stderr.write(`[statewright] App Server ${receipt.confirmed ? "confirmed" : "reported a mismatch for"} ${receipt.actualModel}${receipt.actualEffort ? ` (${receipt.actualEffort})` : ""}.\n`);
       },
-      onConnection: async ({ direction, method, upstreamUrl }) => {
+      onConnection: async ({ direction, method, upstreamUrl, bytes, resultKeys }) => {
         if (!direction) stderr.write("[statewright] native Codex connected to the App Server proxy.\n");
-        else stderr.write(`[statewright] App Server proxy ${direction}: ${method ?? upstreamUrl ?? "connection"}.\n`);
+        else stderr.write(`[statewright] App Server proxy ${direction}: ${method ?? upstreamUrl ?? "connection"}${bytes ? ` (${bytes} bytes)` : ""}${resultKeys ? ` [${resultKeys.join(",")}]` : ""}.\n`);
       },
       onTransportError: async ({ side, message }) => stderr.write(`[statewright] App Server proxy ${side} transport error: ${message}.\n`),
     });

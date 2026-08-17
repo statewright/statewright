@@ -98,12 +98,21 @@ function findOrCreateTelemetryRun(app, sessionId, workflow, requestedRunId) {
   if (requestedRunId) {
     var existing = null
     try {
-      existing = app.findFirstRecordByFilter(
-        'workflow_runs',
-        'external_run_id = {:run}',
-        { run: requestedRunId },
-      )
+      // Statewright's workflow endpoint returns the PocketBase record ID. Raw
+      // tool telemetry carries that authoritative ID, while some adapters use
+      // an external run ID. Resolve the primary record first so a run does not
+      // split into a state-only record and a telemetry-only shadow record.
+      existing = app.findRecordById('workflow_runs', requestedRunId)
     } catch (_) {}
+    if (!existing) {
+      try {
+        existing = app.findFirstRecordByFilter(
+          'workflow_runs',
+          'external_run_id = {:run}',
+          { run: requestedRunId },
+        )
+      } catch (_) {}
+    }
     if (existing) {
       // Route changes restart the client process, so a valid workflow run
       // can legitimately acquire a new session ID. The external run ID is

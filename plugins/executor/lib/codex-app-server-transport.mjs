@@ -82,6 +82,11 @@ function stripRemoteArgs(args) {
   return result;
 }
 
+function resumeHistoryLimit(environment) {
+  const configured = Number.parseInt(environment.STATEWRIGHT_CODEX_RESUME_TURN_LIMIT ?? "4", 10);
+  return Number.isInteger(configured) && configured > 0 && configured <= 20 ? configured : 4;
+}
+
 async function waitForReady(url, appServer) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (appServer.exitCode !== null) throw new Error(`Codex App Server exited before it became ready (${appServer.exitCode}).`);
@@ -187,6 +192,7 @@ export async function startCodexAppServerRuntime({
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
+      resumeHistoryLimit: resumeHistoryLimit(environment),
       takePendingRoute: nextRouteRequest,
       onRouteInjected: async (receipt) => {
         await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });

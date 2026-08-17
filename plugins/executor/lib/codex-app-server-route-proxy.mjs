@@ -44,12 +44,16 @@ export function settingsConfirmRoute(receipt, notification) {
   };
 }
 
-export function applyCompactResumeRequest(message, enabled = true) {
+export function applyCompactResumeRequest(message, enabled = true, historyLimit = 4) {
   if (!enabled || message?.method !== "thread/resume") return message;
-  const params = { ...(message.params ?? {}), excludeTurns: true };
-  // A TUI-provided first page would defeat metadata-only resume. The native
-  // client can request historical pages explicitly when it actually needs one.
-  delete params.initialTurnsPage;
+  const limit = Number.isInteger(historyLimit) && historyLimit > 0 ? historyLimit : 4;
+  const params = {
+    ...(message.params ?? {}),
+    excludeTurns: true,
+    // Retain only enough recent completed work to orient the operator. The
+    // durable thread still contains the full model-visible history.
+    initialTurnsPage: { limit, sortDirection: "desc", itemsView: "summary" },
+  };
   return { ...message, params };
 }
 
@@ -66,6 +70,7 @@ export async function startCodexAppServerRouteProxy({
   onConnection = async () => {},
   onTransportError = async () => {},
   compactResume = true,
+  resumeHistoryLimit = 4,
 }) {
   const healthServer = createServer((request, response) => {
     if (request.url === "/readyz" || request.url === "/healthz") {
@@ -98,9 +103,9 @@ export async function startCodexAppServerRouteProxy({
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
         if (message.id !== undefined && message.method) requestMethods.set(String(message.id), message.method);
         const compacted = compactResume && message.method === "thread/resume";
-        message = applyCompactResumeRequest(message, compactResume);
+        message = applyCompactResumeRequest(message, compactResume, resumeHistoryLimit);
         payload = JSON.stringify(message);
-        if (compacted) void onConnection({ direction: "native_to_upstream", method: "thread/resume [history omitted]" });
+        if (compacted) void onConnection({ direction: "native_to_upstream", method: `thread/resume [last ${resumeHistoryLimit} turns]` });
         if (message.method === "turn/start") {
           const route = await takePendingRoute();
           const applied = applyRouteToTurnStart(message, route);

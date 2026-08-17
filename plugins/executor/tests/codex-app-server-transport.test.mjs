@@ -76,9 +76,14 @@ test("App Server routing overrides the native next turn and requires a settings 
   }).confirmed, false);
 });
 
-test("compact resume requests server-supported metadata-only history", () => {
+test("compact resume requests server-supported metadata and bounded recent history", () => {
   const request = { id: 4, method: "thread/resume", params: { threadId: "thread-1", initialTurnsPage: { limit: 200 } } };
-  assert.deepEqual(applyCompactResumeRequest(request), { id: 4, method: "thread/resume", params: { threadId: "thread-1", excludeTurns: true } });
+  assert.deepEqual(applyCompactResumeRequest(request), {
+    id: 4,
+    method: "thread/resume",
+    params: { threadId: "thread-1", excludeTurns: true, initialTurnsPage: { limit: 4, sortDirection: "desc", itemsView: "summary" } },
+  });
+  assert.deepEqual(applyCompactResumeRequest(request, true, 2).params.initialTurnsPage, { limit: 2, sortDirection: "desc", itemsView: "summary" });
   assert.equal(applyCompactResumeRequest(request, false), request);
   const readRequest = { id: 4, method: "thread/read", params: {} };
   assert.equal(applyCompactResumeRequest(readRequest), readRequest);
@@ -133,7 +138,7 @@ test("App Server route proxy injects one pending route and records the server re
   assert.deepEqual(await forwardedResume, {
     id: 2,
     method: "thread/resume",
-    params: { threadId: "thread-proxy", excludeTurns: true },
+    params: { threadId: "thread-proxy", excludeTurns: true, initialTurnsPage: { limit: 4, sortDirection: "desc", itemsView: "summary" } },
   });
   const compactResumeResponse = new Promise((resolveMessage) => client.once("message", (raw, isBinary) => {
     resolveMessage({ message: JSON.parse(String(raw)), isBinary });

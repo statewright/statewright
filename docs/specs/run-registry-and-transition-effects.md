@@ -244,6 +244,142 @@ script—grants filesystem, environment, or network access. A source edit
 invalidates the profile until its digest is deliberately updated. Scripts never
 inherit the controller process environment or the current user shell.
 
+## Docker guard executor and supervisor boundary
+
+Docker is the preferred runtime-profile adapter when a guard needs a specific
+language, package set, or native dependency. The image contains those
+dependencies; Statewright does not install packages while evaluating a guard.
+Every Docker profile pins an OCI image digest and a named sandbox policy:
+
+```json
+{
+  "runtime_profiles": {
+    "node-22-guard-docker-v1": {
+      "kind": "docker",
+      "image": "registry.example/statewright/guard-node22@sha256:...",
+      "image_sbom_digest": "sha256:...",
+      "entrypoint": ["node", "/opt/statewright/guard-runner.mjs"],
+      "sandbox": "guard-docker-readonly-v1",
+      "limits": {
+        "wall_ms": 5000,
+        "cpus": 0.5,
+        "memory_bytes": 134217728,
+        "pids": 64,
+        "stdout_bytes": 8192,
+        "stderr_bytes": 65536
+      },
+      "capabilities": {
+        "network": "deny",
+        "docker_socket": "deny",
+        "privileged": false,
+        "linux_capabilities": [],
+        "filesystem": { "root": "read_only", "script": "read_only", "workspace": "deny" }
+      }
+    }
+  }
+}
+```
+
+The executor image is a small, profile-specific image. The following
+Dockerfile is the normative starting point for the Node guard image; a later
+implementation must place the equivalent source under
+`containers/guard-executor/node22/Dockerfile`, build it with a digest-pinned
+base-image argument, generate an SBOM, and record the resulting OCI digest in
+the runtime profile. A tag alone is never an acceptable build input.
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+# Required build input example:
+#   --build-arg NODE_BASE_IMAGE=node:22-bookworm-slim@sha256:<verified-digest>
+ARG NODE_BASE_IMAGE
+FROM ${NODE_BASE_IMAGE} AS runtime
+
+RUN groupadd --gid 65532 statewright \
+ && useradd --uid 65532 --gid 65532 --no-create-home --shell /usr/sbin/nologin statewright
+
+WORKDIR /opt/statewright
+COPY --chown=65532:65532 guard-runner.mjs /opt/statewright/guard-runner.mjs
+
+ENV NODE_ENV=production \
+    HOME=/nonexistent \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+USER 65532:65532
+ENTRYPOINT ["node", "/opt/statewright/guard-runner.mjs"]
+```
+
+The Docker launcher, not the workflow, expands this into an allowlisted run
+policy equivalent to:
+
+```text
+docker run --rm --read-only --network none --cap-drop ALL
+  --security-opt no-new-privileges:true --pids-limit 64 --cpus 0.5
+  --memory 128m --memory-swap 128m --user 65532:65532
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m
+  --mount type=bind,src=<staged-script-dir>,dst=/guard,readonly
+  image@sha256:...
+```
+
+The exact flags are adapter-owned and captured in the execution receipt. No
+guard container receives the Docker socket, the repository checkout, the user
+home directory, a host shell, or a writable bind mount. The supervisor stages
+only the requested script and its declared read-only data into a fresh
+directory, verifies their digests, mounts that directory read-only, and removes
+it after collecting evidence.
+
+The existing resident Codex app-server/TUI owner is a good place to orchestrate
+this work, but it is not the executor. It already owns managed-client identity,
+next-turn route injection, and loopback lifecycle. Extend the trusted
+Statewright supervisor with a narrow local guard-job dispatcher and an explicit
+run/job authentication check:
+
+```text
+Codex TUI <-> app-server route proxy <-> resident Statewright supervisor
+                                              |
+                                              | authenticated GuardJob request
+                                              v
+                                  Docker launcher / immutable executor image
+                                              |
+                                              | GuardResult + JSONL diagnostics
+                                              v
+                                  Statewright transition CAS + evidence ledger
+```
+
+The supervisor authenticates the run identity, validates the declared profile,
+stages input, starts the job, enforces wall-clock cancellation, validates the
+result, and performs the final state/revision CAS. It can surface a pending or
+failed guard to the TUI/mobile attention system, but the App Server protocol is
+not used as a general container-execution API and the container cannot call
+back into it.
+
+### Guard executor social contract
+
+The contract is versioned as `statewright.guard.v1`.
+
+- **Input:** exactly one UTF-8 `GuardInput` JSON document on stdin. It is the
+  redacted immutable snapshot described above, with `run_id`, `job_id`,
+  `profile_id`, image/script digests, and a deadline.
+- **Success exit:** exit code `0` means stdout contains exactly one UTF-8 JSON
+  `GuardResult`. `pass: false` is a valid policy result and still exits `0`.
+- **Failure exits:** `20` invalid input; `21` source/image integrity mismatch;
+  `22` sandbox or denied-capability failure; `23` timeout/resource limit;
+  `24` script/runtime failure; `25` malformed stdout/protocol failure. The
+  runner maps language-specific exits to these stable Statewright codes and
+  records the original exit/signal as diagnostics.
+- **Stdout:** result only. Logs, banners, package-manager output, and stack
+  traces on stdout are a protocol violation.
+- **Stderr:** UTF-8 JSON Lines diagnostic events with `protocol`, `job_id`,
+  `level`, `event`, `message`, and optional redacted `fields`. The launcher
+  caps it at 64 KiB and appends one `log_truncated` event when it cuts output.
+- **Result receipt:** `GuardResult` includes `status`, `pass` when status is
+  `ok`, `reason_code`, `evidence_refs`, `input_digest`, `script_digest`,
+  `image_digest`, `profile_id`, elapsed time, and a redacted diagnostics
+  reference. Statewright rejects a receipt whose identity does not match the
+  submitted job.
+- **No implicit retry:** image pull, startup, timeout, exit, protocol, or CAS
+  failure follows `record_and_abort`. A workflow may explicitly resample or
+  request human review; it never reruns a guard silently.
+
 Both forms must emit a small JSON `GuardResult`:
 
 ```json
@@ -447,14 +583,20 @@ avoids accidental behavior changes in currently deployed proof machines.
    `GuardResult` validation, ledger, QuickJS isolated-runtime spike, and the
    prepared/CAS execution path. Prove timeout, memory, import, environment,
    network, malformed-result, digest-mismatch, and stale-snapshot behavior.
-5. **Named pre-transition effects.** Start with `set`, `assert`, and bounded
+5. **Docker guard-executor proof.** Build the profile-specific image from a
+   digest-pinned base, generate and attach its SBOM, and implement the typed
+   stdin/stdout runner plus trusted launcher. Prove no network, Docker socket,
+   repository, home-directory, writable bind mount, ambient credential, or
+   privileged capability reaches the container; verify protocol exits,
+   resource limits, receipt identity, and evidence capture.
+6. **Named pre-transition effects.** Start with `set`, `assert`, and bounded
    `extract` under the run lock and `record_and_abort`. Add script effects and
    external command/MCP profiles only after prepared-effect CAS,
    capability-policy, artifact-redaction, and executable-guard tests exist.
-6. **Typed subflow input/output.** Add the opt-in object form without changing
+7. **Typed subflow input/output.** Add the opt-in object form without changing
    legacy `input`; migrate the Magent proof machines and verify blocked proofs
    reach `on_fail`.
-7. **Durable backing store.** Reuse the operator roadmap's transactional
+8. **Durable backing store.** Reuse the operator roadmap's transactional
    state/context/log persistence for registry values and effect ledgers. Add a
    project-shared namespace only as a separately versioned capability.
 
@@ -483,6 +625,19 @@ avoids accidental behavior changes in currently deployed proof machines.
 - Script profiles reject arbitrary executable paths/arguments and require the
   single-document stdin/stdout transport; logs on stdout, malformed JSON, or
   an unregistered runtime profile fail closed.
+- Docker profiles require an OCI digest (never a mutable tag), a recorded SBOM
+  digest, the exact non-root run policy, and no Docker socket or undeclared
+  mount. An inspection test proves a read-only root filesystem, `network none`,
+  no added Linux capabilities, no privilege escalation, and the declared CPU,
+  memory, PID, and tmpfs limits.
+- The Docker runner accepts exactly one `GuardInput`, writes exactly one
+  `GuardResult` on stdout, maps each contract exit code, emits only bounded
+  redacted JSONL on stderr, and rejects a result with mismatched run/job,
+  input, script, image, or profile identity.
+- The trusted supervisor, not the App Server proxy or container, validates the
+  typed `GuardJob`, stages inputs, applies timeout/cancellation, and performs
+  the final CAS. A container cannot invoke the supervisor, reach a host socket,
+  or request a second job.
 - A script effect can patch only its declared registry paths; the same script
   cannot return a patch when configured as a guard.
 - A stale executable-guard result is discarded after CAS rather than steering
@@ -513,6 +668,8 @@ unbounded effects. Default limits should be declared per effect profile:
 | CAS retries | 0; caller resamples explicitly |
 | Inline guard CPU / memory / output | 50 ms / 1 MiB / 8 KiB |
 | Script guard wall time / output | 500 ms / 8 KiB |
+| Docker guard wall time / CPU / memory / PIDs | 5 s / 0.5 CPU / 128 MiB / 64 |
+| Docker guard diagnostics | 64 KiB redacted JSONL; stdout result limited to 8 KiB |
 | Executable guard attempts per transition | 1 |
 
 The normal design/review path is seven states (five Terra/high and two
@@ -527,6 +684,9 @@ handoff rather than broad rediscovery.
   guards.
 - Unprofiled inline code or scripts, inherited shell environments, ambient
   credentials, implicit network access, or writable guard sandboxes.
+- Docker socket/daemon access, `--privileged`, host networking, mutable image
+  tags, runtime package installation, or repository/home-directory mounts in a
+  guard container.
 - A hidden global variable bag shared across projects or sessions.
 - Storing secrets, full tool transcripts, contact data, or unredacted command
   output in the registry.
@@ -546,6 +706,24 @@ handoff rather than broad rediscovery.
 - `docs/future/operator-design.md` and
   `docs/future/k8s-operator-architecture.md`: declarative actions and atomic
   state/context/transition logging are already the stated operator direction.
+- `plugins/executor/lib/codex-app-server-transport.mjs`: the resident local
+  App Server owner already creates the loopback runtime, starts the TUI, and
+  owns route-injection lifecycle; this proposal extends that trusted owner with
+  a narrow typed guard-job dispatcher rather than treating App Server traffic
+  as a container protocol.
+- `plugins/executor/lib/codex-app-server-route-proxy.mjs`: the proxy forwards
+  JSON-RPC and injects a model route only at `turn/start`; it remains a TUI
+  compatibility surface, not an executor or policy boundary.
+- [Docker Engine security](https://docs.docker.com/engine/security/)
+  (accessed 2026-08-16): daemon access and bind mounts are high-authority
+  boundaries, so the executor never receives the Docker socket or broad host
+  mounts.
+- [Docker run reference](https://docs.docker.com/engine/containers/run/)
+  (accessed 2026-08-16): resource and privilege restrictions are explicit run
+  configuration, not secure defaults, motivating the profile-owned launcher.
+- [Protect Docker daemon socket](https://docs.docker.com/engine/security/protect-access/)
+  (accessed 2026-08-16): access to the daemon must stay with the trusted local
+  supervisor and is never passed through to a guard job.
 - [Wasmtime fuel-based interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html)
   (accessed 2026-08-16): a future WASM executor can use deterministic fuel
   limits; it is not an excuse to expose unrestricted WASI capabilities.

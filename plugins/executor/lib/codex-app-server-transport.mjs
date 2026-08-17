@@ -111,42 +111,24 @@ export async function runCodexAppServerTransport({
   stderr = process.stderr,
   telemetry = async () => {},
 }) {
-  const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
-  const port = await reserveLoopbackPort();
-  const url = `ws://127.0.0.1:${port}`;
-  const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
-
-  const appServer = spawn(command, ["app-server", "--listen", url], {
-    cwd,
-    env: { ...environment, CODEX_HOME: appServerHome },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  appServer.stderr.on("data", (chunk) => stderr.write(chunk));
-  appServer.stdout.resume();
-
-  let routeProxy;
-  let tui;
   let pendingRoute = null;
+  const runtime = await startCodexAppServerRuntime({
+    command,
+    environment,
+    cwd,
+    home,
+    clientId,
+    nextRouteRequest: async () => {
+      const route = pendingRoute;
+      pendingRoute = null;
+      return route;
+    },
+    stderr,
+    telemetry,
+  });
+  let tui;
   try {
-    await waitForReady(url, appServer);
-    routeProxy = await startCodexAppServerRouteProxy({
-      upstreamUrl: url,
-      takePendingRoute: async () => {
-        const route = pendingRoute;
-        pendingRoute = null;
-        return route;
-      },
-      onRouteInjected: async (receipt) => {
-        await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
-        stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);
-      },
-      onRouteConfirmed: async (receipt) => {
-        await telemetry(receipt.confirmed ? "app_server_route_confirmed" : "app_server_route_mismatch", { client_id: clientId, ...receipt });
-        stderr.write(`[statewright] App Server ${receipt.confirmed ? "confirmed" : "reported a mismatch for"} ${receipt.actualModel}${receipt.actualEffort ? ` (${receipt.actualEffort})` : ""}.\n`);
-      },
-    });
-
-    tui = spawn(command, [...stripRemoteArgs(args), "--remote", routeProxy.url], {
+    tui = spawn(command, [...stripRemoteArgs(args), "--remote", runtime.proxyUrl], {
       cwd,
       env: environment,
       stdio: "inherit",
@@ -167,9 +149,68 @@ export async function runCodexAppServerTransport({
     }
     return await tuiExit;
   } finally {
-    await routeProxy?.close();
     if (tui && tui.exitCode === null) tui.kill("SIGTERM");
+    await runtime.close();
+  }
+}
+
+/**
+ * Starts the App Server and Statewright route proxy without a terminal UI.
+ * A resident owner can keep this runtime alive while native Codex clients
+ * attach and detach through the same proxy endpoint.
+ */
+export async function startCodexAppServerRuntime({
+  command,
+  environment = process.env,
+  cwd = process.cwd(),
+  home = homedir(),
+  clientId,
+  nextRouteRequest = async () => null,
+  stderr = process.stderr,
+  telemetry = async () => {},
+}) {
+  const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
+  const port = await reserveLoopbackPort();
+  const url = `ws://127.0.0.1:${port}`;
+  const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
+
+  const appServer = spawn(command, ["app-server", "--listen", url], {
+    cwd,
+    env: { ...environment, CODEX_HOME: appServerHome },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  appServer.stderr.on("data", (chunk) => stderr.write(chunk));
+  appServer.stdout.resume();
+
+  try {
+    await waitForReady(url, appServer);
+    const routeProxy = await startCodexAppServerRouteProxy({
+      upstreamUrl: url,
+      takePendingRoute: nextRouteRequest,
+      onRouteInjected: async (receipt) => {
+        await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
+        stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);
+      },
+      onRouteConfirmed: async (receipt) => {
+        await telemetry(receipt.confirmed ? "app_server_route_confirmed" : "app_server_route_mismatch", { client_id: clientId, ...receipt });
+        stderr.write(`[statewright] App Server ${receipt.confirmed ? "confirmed" : "reported a mismatch for"} ${receipt.actualModel}${receipt.actualEffort ? ` (${receipt.actualEffort})` : ""}.\n`);
+      },
+    });
+    const ready = await fetch(`${routeProxy.url.replace(/^ws/, "http")}/readyz`);
+    if (!ready.ok) throw new Error("Statewright App Server proxy did not become ready.");
+    stderr.write(`[statewright] App Server ready at ${routeProxy.url}; upstream ${url}.\n`);
+    return {
+      proxyUrl: routeProxy.url,
+      upstreamUrl: url,
+      async close() {
+        await routeProxy.close();
+        if (appServer.exitCode === null) appServer.kill("SIGTERM");
+        await rm(appServerHome, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
     if (appServer.exitCode === null) appServer.kill("SIGTERM");
     await rm(appServerHome, { recursive: true, force: true });
+    throw error;
   }
 }

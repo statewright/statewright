@@ -6,6 +6,7 @@ import {
   codexAppServerTransportEnabled,
   routeConfigEdits,
 } from "../lib/codex-app-server-transport.mjs";
+import { residentControlDir, residentRoot } from "../lib/codex-app-server-resident.mjs";
 import { applyRouteToTurnStart, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
@@ -29,6 +30,13 @@ test("Codex App Server transport remains opt-in and supports an explicit environ
 test("App Server transport creates bounded, filesystem-safe temporary home names", () => {
   assert.equal(appServerHomePrefixForClient("swc_abc:unsafe/path"), "statewright-swc_abc-unsafe-path");
   assert.match(appServerHomePrefixForClient("x".repeat(100)), /^statewright-x{60}$/);
+});
+
+test("resident App Server state is stable per managed client and keeps routes outside the transient launcher", () => {
+  const home = "/tmp/statewright-home";
+  const root = residentRoot(home, "swc_abc:unsafe/path");
+  assert.equal(root, "/tmp/statewright-home/.statewright/codex-app-server/swc_abc-unsafe-path");
+  assert.equal(residentControlDir(home, "swc_abc:unsafe/path"), `${root}/routes`);
 });
 
 test("App Server transport writes only next-turn model and effort config overrides", () => {

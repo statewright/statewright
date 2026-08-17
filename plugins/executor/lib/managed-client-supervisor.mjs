@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
-import { codexAppServerTransportEnabled, runCodexAppServerTransport } from "./codex-app-server-transport.mjs";
-import { createTelemetryWriter } from "./telemetry.mjs";
+import { codexAppServerTransportEnabled } from "./codex-app-server-transport.mjs";
+import { ensureCodexAppServerResident, residentControlDir } from "./codex-app-server-resident.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -33,15 +33,6 @@ function telemetryEnvironment(environment, dataDir) {
     ...environment,
     STATEWRIGHT_TELEMETRY_DIR: dataDir,
   };
-}
-
-function managedRouteTelemetry(environment) {
-  const explicit = environment.STATEWRIGHT_TELEMETRY_URL?.trim();
-  const pocketbase = environment.STATEWRIGHT_PB_URL?.replace(/\/$/, "");
-  return createTelemetryWriter(undefined, {
-    endpoint: explicit || (pocketbase ? `${pocketbase}/api/gateway/telemetry/events` : null),
-    apiKey: environment.STATEWRIGHT_API_KEY ?? null,
-  });
 }
 
 async function telemetryHealth(port) {
@@ -229,7 +220,7 @@ export function routeClaudeModel(model) {
   return value;
 }
 
-async function createManagedMcpBridge({ environment, clientId, bridgeFactory }) {
+export async function createManagedMcpBridge({ environment, clientId, bridgeFactory = (options) => new ManagedMcpBridge(options) }) {
   const apiKey = await resolveApiKey(environment);
   const bridge = await bridgeFactory({
     gatewayUrl: environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
@@ -312,7 +303,6 @@ export async function runManagedClient({ host, command, args, environment = proc
     const identity = await resolveManagedClientIdentity({ host, args, home });
     const routedClientId = identity.clientId;
     await writeManagedControlIdentity(controlDir, { host, clientId: routedClientId });
-    bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
     telemetry = host === "codex"
       ? await acquireManagedTelemetry({ environment, home, cwd, supervisorId: `${host}-${process.pid}-${randomUUID()}` })
       : null;
@@ -320,37 +310,24 @@ export async function runManagedClient({ host, command, args, environment = proc
       environment,
       config: await managedClientConfig(home),
     })) {
-      const appServerEnvironment = {
-        ...environment,
-        STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
-        STATEWRIGHT_MANAGED_CLIENT_HOST: host,
-        STATEWRIGHT_CLIENT_ID: routedClientId,
-        STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
-        STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
-        STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
-      };
-      const nextOwnedRoute = async () => {
-        const request = await nextRouteRequest(controlDir, consumed);
-        if (!request) return null;
-        if (request.client_id !== routedClientId) {
-          process.stderr.write("[statewright] rejected route request with a mismatched managed client identity.\n");
-          return null;
-        }
-        return request;
-      };
-      return await runCodexAppServerTransport({
-        command,
-        args,
-        environment: appServerEnvironment,
+      if (identity.sessionId) {
+        await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home });
+      }
+      const resident = await ensureCodexAppServerResident({ command, cwd, environment, home, clientId: routedClientId });
+      const tui = spawn(command, [...args, "--remote", resident.proxyUrl], {
         cwd,
-        home,
-        clientId: routedClientId,
-        controlDir,
-        nextRouteRequest: nextOwnedRoute,
-        pollMs,
-        telemetry: managedRouteTelemetry(environment),
+        env: {
+          ...environment,
+          STATEWRIGHT_ROUTE_CONTROL_DIR: residentControlDir(home, routedClientId),
+          STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+          STATEWRIGHT_CLIENT_ID: routedClientId,
+          STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+        },
+        stdio: "inherit",
       });
+      return (await waitForExit(tui)).code ?? 1;
     }
+    bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
     while (true) {
       const childEnvironment = {
         ...environment,

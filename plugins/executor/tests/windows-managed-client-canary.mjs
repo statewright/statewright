@@ -39,6 +39,11 @@ const environment = {
 try {
   const result = await runNode([fileURLToPath(launcher), "--bootstrap"], environment);
   assert.equal(result.code, 0, result.stderr);
+  assert.notEqual(
+    result.stdout.trim(),
+    "",
+    "managed-client CLI emitted no bootstrap result on Windows; its module entrypoint guard did not invoke main()",
+  );
 
   const bootstrap = JSON.parse(result.stdout);
   assert.equal(bootstrap.installed.length, 2, "bootstrap must discover the installed codex.cmd and claude.cmd launchers");

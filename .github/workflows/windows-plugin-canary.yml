@@ -1,0 +1,51 @@
+name: Windows Plugin Canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-plugin-canary.yml"
+      - "plugins/executor/**"
+      - "plugins/codex/**"
+      - "plugins/claude-code/**"
+
+permissions:
+  contents: read
+
+jobs:
+  managed-client-bootstrap:
+    name: Codex and Claude managed-client bootstrap
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/executor/package-lock.json
+      - name: Install executor dependencies
+        run: npm ci --ignore-scripts --prefix plugins/executor
+      - name: Install native host CLIs
+        run: npm install --global @openai/codex @anthropic-ai/claude-code
+      - name: Verify native host CLIs
+        run: |
+          codex --version
+          claude --version
+          "Codex command: $((Get-Command codex).Source)"
+          "Claude command: $((Get-Command claude).Source)"
+      - name: Run managed-client bootstrap canary
+        run: node plugins/executor/tests/windows-managed-client-canary.mjs
+      - name: Record verification boundary
+        if: always()
+        run: |
+          @'
+          ## Windows plugin canary boundary
+
+          This job proves that a Windows-hosted Codex and Claude installation is discovered by the Statewright managed-client bootstrap, receives callable Windows shims, and is enabled in Statewright configuration.
+
+          It deliberately does not claim an authenticated interactive Codex or Claude session, a Statewright gateway connection, or a routed model transition. Those require an interactive self-hosted Windows canary with test credentials.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { writeManagedControlIdentity } from "./managed-client-identity.mjs";
@@ -180,6 +180,6 @@ async function main() {
   process.once("SIGINT", stop);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && resolve(process.argv[1]) === RESIDENT_ENTRYPOINT) {
   main().catch((error) => { process.stderr.write(`[statewright] resident App Server failed: ${error.message}\n`); process.exitCode = 2; });
 }

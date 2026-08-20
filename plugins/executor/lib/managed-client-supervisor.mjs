@@ -3,13 +3,11 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
-import { codexAppServerTransportEnabled } from "./codex-app-server-transport.mjs";
-import { ensureCodexAppServerResident, residentControlDir } from "./codex-app-server-resident.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -306,26 +304,32 @@ export async function runManagedClient({ host, command, args, environment = proc
     telemetry = host === "codex"
       ? await acquireManagedTelemetry({ environment, home, cwd, supervisorId: `${host}-${process.pid}-${randomUUID()}` })
       : null;
-    if (host === "codex" && codexAppServerTransportEnabled({
-      environment,
-      config: await managedClientConfig(home),
-    })) {
-      if (identity.sessionId) {
-        await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home });
+    if (host === "codex") {
+      // Claude receives a compact copy of this shared supervisor. Keep the
+      // optional Codex-only transport out of its module-load graph.
+      const { codexAppServerTransportEnabled } = await import("./codex-app-server-transport.mjs");
+      if (codexAppServerTransportEnabled({
+        environment,
+        config: await managedClientConfig(home),
+      })) {
+        const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
+        if (identity.sessionId) {
+          await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home });
+        }
+        const resident = await ensureCodexAppServerResident({ command, cwd, environment, home, clientId: routedClientId });
+        const tui = spawn(command, [...args, "--remote", resident.proxyUrl], {
+          cwd,
+          env: {
+            ...environment,
+            STATEWRIGHT_ROUTE_CONTROL_DIR: residentControlDir(home, routedClientId),
+            STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+            STATEWRIGHT_CLIENT_ID: routedClientId,
+            STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+          },
+          stdio: "inherit",
+        });
+        return (await waitForExit(tui)).code ?? 1;
       }
-      const resident = await ensureCodexAppServerResident({ command, cwd, environment, home, clientId: routedClientId });
-      const tui = spawn(command, [...args, "--remote", resident.proxyUrl], {
-        cwd,
-        env: {
-          ...environment,
-          STATEWRIGHT_ROUTE_CONTROL_DIR: residentControlDir(home, routedClientId),
-          STATEWRIGHT_MANAGED_CLIENT_HOST: host,
-          STATEWRIGHT_CLIENT_ID: routedClientId,
-          STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
-        },
-        stdio: "inherit",
-      });
-      return (await waitForExit(tui)).code ?? 1;
     }
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
     while (true) {
@@ -441,28 +445,61 @@ export async function setManagedClientEnabled(host, enabled, home = homedir()) {
   return path;
 }
 
-export function resolveRealBinary(command, { path = process.env.PATH ?? "", shimDirectory } = {}) {
-  if (command.includes("/")) return resolve(command);
-  for (const directory of path.split(delimiter).filter(Boolean)) {
-    if (shimDirectory && resolve(directory) === resolve(shimDirectory)) continue;
-    const candidate = join(directory, command);
-    if (existsSync(candidate)) return candidate;
+function windowsPlatform(platform) {
+  return platform === "win32";
+}
+
+function samePath(left, right, platform) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return windowsPlatform(platform)
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function commandCandidates(command, platform) {
+  if (!windowsPlatform(platform) || extname(command)) return [command];
+  return [command, `${command}.cmd`, `${command}.exe`, `${command}.bat`];
+}
+
+export function resolveRealBinary(command, {
+  path = process.env.PATH ?? "",
+  shimDirectory,
+  platform = process.platform,
+  pathSeparator = windowsPlatform(platform) ? ";" : delimiter,
+} = {}) {
+  if (command.includes("/") || command.includes("\\")) return resolve(command);
+  for (const directory of path.split(pathSeparator).filter(Boolean)) {
+    if (shimDirectory && samePath(directory, shimDirectory, platform)) continue;
+    for (const candidateName of commandCandidates(command, platform)) {
+      const candidate = join(directory, candidateName);
+      if (existsSync(candidate)) return candidate;
+    }
   }
   throw new Error(`Unable to resolve the real '${command}' executable outside the Statewright shim directory.`);
 }
 
-export async function installManagedClientShim({ host, launcherPath, home = homedir(), realBinary }) {
+export async function installManagedClientShim({ host, launcherPath, home = homedir(), realBinary, platform = process.platform }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const shimDirectory = join(home, ".statewright", "bin");
-  const binary = realBinary ?? resolveRealBinary(host, { shimDirectory });
+  const binary = realBinary ?? resolveRealBinary(host, { shimDirectory, platform });
   await mkdir(shimDirectory, { recursive: true });
-  const shimPath = join(shimDirectory, host);
-  await writeFile(shimPath, `#!/usr/bin/env sh\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`, { mode: 0o755 });
-  await chmod(shimPath, 0o755);
+  const shimPath = join(shimDirectory, windowsPlatform(platform) ? `${host}.cmd` : host);
+  const contents = windowsPlatform(platform)
+    ? `@echo off\r\n\"${process.execPath}\" \"${launcherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
+    : `#!/usr/bin/env sh\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
+  await writeFile(shimPath, contents, { mode: windowsPlatform(platform) ? undefined : 0o755 });
+  if (!windowsPlatform(platform)) await chmod(shimPath, 0o755);
   return { shimDirectory, shimPath, realBinary: binary };
 }
 
-function shellProfile(shell, home) {
+function shellProfile(shell, home, platform = process.platform) {
+  if (windowsPlatform(platform)) {
+    return {
+      path: join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+      line: '$env:Path = "$HOME\\.statewright\\bin;$env:Path"',
+    };
+  }
   const name = String(shell ?? "").split("/").at(-1);
   if (name === "zsh") return { path: join(home, ".zshrc"), line: 'export PATH="$HOME/.statewright/bin:$PATH"' };
   if (name === "bash") return { path: join(home, ".bashrc"), line: 'export PATH="$HOME/.statewright/bin:$PATH"' };
@@ -473,8 +510,8 @@ function shellProfile(shell, home) {
 const SHELL_BLOCK_START = "# >>> statewright managed clients >>>";
 const SHELL_BLOCK_END = "# <<< statewright managed clients <<<";
 
-async function installShellPath(shell, home) {
-  const profile = shellProfile(shell, home);
+async function installShellPath(shell, home, platform) {
+  const profile = shellProfile(shell, home, platform);
   if (!profile) return null;
   let content = "";
   try { content = await readFile(profile.path, "utf8"); } catch { /* create it below */ }
@@ -491,20 +528,27 @@ async function installShellPath(shell, home) {
   return profile.path;
 }
 
-export async function bootstrapManagedClients({ launcherPath, home = homedir(), path = process.env.PATH, shell = process.env.SHELL } = {}) {
+export async function bootstrapManagedClients({
+  launcherPath,
+  home = homedir(),
+  path = process.env.PATH,
+  shell = process.env.SHELL,
+  platform = process.platform,
+  pathSeparator = windowsPlatform(platform) ? ";" : delimiter,
+} = {}) {
   const installed = [];
   const shimDirectory = join(home, ".statewright", "bin");
   for (const host of ["codex", "claude"]) {
     let realBinary;
-    try { realBinary = resolveRealBinary(host, { path, shimDirectory }); } catch { continue; }
-    installed.push(await installManagedClientShim({ host, launcherPath, home, realBinary }));
+    try { realBinary = resolveRealBinary(host, { path, shimDirectory, platform, pathSeparator }); } catch { continue; }
+    installed.push(await installManagedClientShim({ host, launcherPath, home, realBinary, platform }));
     await setManagedClientEnabled(host, true, home);
   }
-  const profile = installed.length > 0 ? await installShellPath(shell, home) : null;
+  const profile = installed.length > 0 ? await installShellPath(shell, home, platform) : null;
   return { installed, profile, restart_required: Boolean(profile) };
 }
 
-export async function uninstallManagedClients({ home = homedir(), shell = process.env.SHELL } = {}) {
+export async function uninstallManagedClients({ home = homedir(), shell = process.env.SHELL, platform = process.platform } = {}) {
   const config = configPath(home);
   let value = {};
   try { value = JSON.parse(await readFile(config, "utf8")); } catch { /* no Statewright config */ }
@@ -519,10 +563,10 @@ export async function uninstallManagedClients({ home = homedir(), shell = proces
   await writeFile(config, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   const removed = [];
   for (const host of ["codex", "claude"]) {
-    const path = join(home, ".statewright", "bin", host);
+    const path = join(home, ".statewright", "bin", windowsPlatform(platform) ? `${host}.cmd` : host);
     try { await unlink(path); removed.push(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   }
-  const profile = shellProfile(shell, home);
+  const profile = shellProfile(shell, home, platform);
   let profileRemoved = false;
   if (profile) {
     try {

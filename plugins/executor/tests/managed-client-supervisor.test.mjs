@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { bindManagedClientIdentity, resolveManagedClientIdentity } from "../lib/managed-client-identity.mjs";
-import { bootstrapManagedClients, buildRoutedArgs, managedClientEnabled, routeClaudeModel, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "../lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, buildRoutedArgs, managedClientEnabled, resolveRealBinary, routeClaudeModel, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -260,5 +260,31 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     assert.equal(removed.profile, join(home, ".zshrc"));
     assert.doesNotMatch(await readFile(join(home, ".zshrc"), "utf8"), /statewright managed clients/);
     assert.equal(await managedClientEnabled("codex", home), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-windows-bootstrap-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const launcher = join(root, "launcher.mjs");
+  try {
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "codex.cmd"), "@echo off\r\n");
+    await writeFile(join(bin, "claude.cmd"), "@echo off\r\n");
+    await writeFile(launcher, "");
+    assert.equal(resolveRealBinary("codex", { path: bin, platform: "win32", pathSeparator: ";" }), join(bin, "codex.cmd"));
+    const first = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, platform: "win32", pathSeparator: ";" });
+    assert.equal(first.installed.length, 2);
+    assert.equal(first.restart_required, true);
+    for (const host of ["codex", "claude"]) {
+      const shimPath = join(home, ".statewright", "bin", `${host}.cmd`);
+      assert.match(await readFile(shimPath, "utf8"), /statewright-managed-client|launcher\.mjs/i);
+    }
+    const profilePath = join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
+    assert.match(await readFile(profilePath, "utf8"), /statewright managed clients/);
+    const removed = await uninstallManagedClients({ home, platform: "win32" });
+    assert.equal(removed.removed.length, 2);
+    assert.equal(removed.profile, profilePath);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

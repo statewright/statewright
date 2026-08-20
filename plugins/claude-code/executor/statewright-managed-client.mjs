@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { bootstrapManagedClients, installManagedClientShim, managedClientEnabled, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
 
 const launcherPath = fileURLToPath(import.meta.url);
@@ -43,7 +44,9 @@ async function main() {
     return;
   }
   if (options.shellInit) {
-    process.stdout.write('export PATH="$HOME/.statewright/bin:$PATH"\n');
+    process.stdout.write(process.platform === "win32"
+      ? '$env:Path = "$HOME\\.statewright\\bin;$env:Path"\n'
+      : 'export PATH="$HOME/.statewright/bin:$PATH"\n');
     return;
   }
   if (!["codex", "claude"].includes(options.host)) throw new Error("--host must be codex or claude.");
@@ -64,13 +67,18 @@ async function main() {
     process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args });
     return;
   }
-  const child = spawn(options.realBin, options.args, { stdio: "inherit", env: process.env, cwd: process.cwd() });
+  const child = spawn(options.realBin, options.args, {
+    stdio: "inherit",
+    env: process.env,
+    cwd: process.cwd(),
+    shell: process.platform === "win32",
+  });
   process.exitCode = await new Promise((resolveExit, rejectExit) => {
     child.once("error", rejectExit);
     child.once("exit", (code) => resolveExit(code ?? 1));
   });
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && resolve(process.argv[1]) === launcherPath) {
   main().catch((error) => { process.stderr.write(`[statewright] ${error.message}\n`); process.exitCode = 2; });
 }

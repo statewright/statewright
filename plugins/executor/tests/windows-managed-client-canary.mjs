@@ -59,6 +59,15 @@ try {
 
   const config = JSON.parse(await readFile(join(home, ".statewright", "config.json"), "utf8"));
   assert.deepEqual(config.routing.managed_clients.hosts, { codex: true, claude: true });
+
+  const shellInit = await runNode([fileURLToPath(launcher), "--shell-init"], environment);
+  assert.equal(shellInit.code, 0, shellInit.stderr);
+  assert.match(shellInit.stdout, /\$env:Path.*\.statewright\\bin/i);
+
+  const uninstall = await runNode([fileURLToPath(launcher), "--uninstall"], environment);
+  assert.equal(uninstall.code, 0, uninstall.stderr);
+  const removed = JSON.parse(uninstall.stdout);
+  assert.equal(removed.removed.length, 2, "uninstall must remove both managed Windows shims");
   console.log("Windows managed-client bootstrap canary passed for Codex and Claude.");
 } finally {
   await rm(root, { recursive: true, force: true });

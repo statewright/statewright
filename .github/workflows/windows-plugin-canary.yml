@@ -42,7 +42,7 @@ jobs:
           node plugins/executor/tests/windows-managed-client-canary.mjs
           node plugins/executor/tests/windows-managed-client-route-canary.mjs
       - name: Run authenticated production gateway canary
-        if: github.event_name == 'workflow_dispatch' && secrets.STATEWRIGHT_WINDOWS_CANARY_API_KEY != ''
+        if: github.event_name == 'workflow_dispatch'
         env:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_WINDOWS_CANARY_API_KEY }}
           STATEWRIGHT_GATEWAY_URL: https://mcp.statewright.ai

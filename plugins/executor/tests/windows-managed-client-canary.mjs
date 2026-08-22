@@ -34,6 +34,7 @@ const environment = {
   USERPROFILE: home,
   HOMEDRIVE: home.slice(0, 2),
   HOMEPATH: home.slice(2),
+  STATEWRIGHT_API_KEY: "windows-canary",
 };
 
 try {
@@ -59,6 +60,23 @@ try {
 
   const config = JSON.parse(await readFile(join(home, ".statewright", "config.json"), "utf8"));
   assert.deepEqual(config.routing.managed_clients.hosts, { codex: true, claude: true });
+
+  for (const host of ["codex", "claude"]) {
+    const installed = bootstrap.installed.find((entry) => entry.realBinary.toLowerCase().endsWith(`${host}.cmd`));
+    const managedVersion = await runNode([
+      fileURLToPath(launcher),
+      "--host", host,
+      "--real-bin", installed.realBinary,
+      "--",
+      "--version",
+    ], environment);
+    assert.equal(
+      managedVersion.code,
+      0,
+      `managed ${host}.cmd --version failed: ${managedVersion.stderr || managedVersion.stdout}`,
+    );
+    assert.notEqual(managedVersion.stdout.trim(), "", `managed ${host}.cmd --version emitted no version output`);
+  }
 
   const shellInit = await runNode([fileURLToPath(launcher), "--shell-init"], environment);
   assert.equal(shellInit.code, 0, shellInit.stderr);

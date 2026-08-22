@@ -44,7 +44,7 @@ jobs:
       - name: Run authenticated production gateway canary
         if: github.event_name == 'workflow_dispatch'
         env:
-          STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_WINDOWS_CANARY_API_KEY }}
+          STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
           STATEWRIGHT_GATEWAY_URL: https://mcp.statewright.ai
         run: node plugins/executor/tests/windows-managed-client-live-gateway-canary.mjs
       - name: Record verification boundary
@@ -57,7 +57,7 @@ jobs:
 
           It also proves that the managed supervisor can run a Windows .cmd launcher through a deterministic Codex route/restart cycle while preserving the quoted route configuration, full continuation prompt, bridge, managed identity, and control-directory lifecycle.
 
-          On workflow_dispatch only, when the repository-owned `STATEWRIGHT_WINDOWS_CANARY_API_KEY` secret is configured, it also authenticates the executor-owned loopback bridge to production and performs MCP initialization plus the non-mutating `statewright_get_status` call. The key is scoped to that one step and is never exposed to a child host process.
+          On workflow_dispatch only, when the repository-owned `STATEWRIGHT_PLUGIN_CANARY_API_KEY` secret is configured, it also authenticates the executor-owned loopback bridge to production and performs MCP initialization plus the non-mutating `statewright_get_status` call. The key is scoped to that one step and is never exposed to a child host process.
 
           This does not claim an authenticated interactive Codex or Claude vendor session. That would require vendor credentials and an interactive Windows canary.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

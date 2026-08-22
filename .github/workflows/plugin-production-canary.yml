@@ -1,0 +1,79 @@
+name: Plugin Production Canary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/plugin-production-canary.yml"
+      - "plugins/executor/**"
+      - "plugins/codex/**"
+      - "plugins/claude-code/**"
+      - "plugins/cursor/**"
+      - "plugins/pi/**"
+      - "plugins/opencode/**"
+      - "plugins/omx/**"
+  schedule:
+    - cron: "23 13 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  production-gateway:
+    name: ${{ matrix.plugin }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+        plugin: [codex, claude, cursor, pi, opencode, omx]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            plugins/executor/package-lock.json
+            plugins/pi/package-lock.json
+            plugins/opencode/package-lock.json
+            plugins/omx/package-lock.json
+      - name: Install executor dependencies
+        run: npm ci --ignore-scripts --prefix plugins/executor
+      - name: Install plugin dependencies
+        if: matrix.plugin == 'pi' || matrix.plugin == 'opencode' || matrix.plugin == 'omx'
+        run: npm ci --ignore-scripts --prefix plugins/${{ matrix.plugin }}
+      - name: Run production gateway canary
+        env:
+          STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
+          STATEWRIGHT_GATEWAY_URL: https://mcp.statewright.ai
+          STATEWRIGHT_PLUGIN_PRODUCTION_CANARY: "1"
+          STATEWRIGHT_NO_UPDATE_CHECK: "1"
+        run: |
+          test -n "$STATEWRIGHT_API_KEY" || { echo "STATEWRIGHT_PLUGIN_CANARY_API_KEY is required." >&2; exit 1; }
+          case "${{ matrix.plugin }}" in
+            codex|claude|cursor)
+              node plugins/executor/tests/unix-plugin-live-gateway-canary.mjs "${{ matrix.plugin }}"
+              ;;
+            pi)
+              npm test --prefix plugins/pi -- --run src/production-gateway-canary.test.ts
+              ;;
+            opencode)
+              npm test --prefix plugins/opencode -- --run src/production-gateway-canary.test.ts
+              ;;
+            omx)
+              npm test --prefix plugins/omx -- --run src/production-gateway-canary.test.ts
+              ;;
+          esac
+      - name: Record verification boundary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Plugin production canary boundary
+
+          This trusted-run-only job authenticates a dedicated isolated canary account to `mcp.statewright.ai`, then exercises a non-mutating MCP initialization and `statewright_get_status` request through each plugin's production transport. Codex, Claude Code, and Cursor use their actual stdio MCP proxies. Pi and standalone OMX use their direct gateway clients. OpenCode uses its executor-owned adapter bridge.
+
+          The secret is step-scoped and this workflow has no pull-request trigger. This proves plugin-to-gateway compatibility on macOS and Linux. It does not claim an authenticated interactive vendor Codex, Claude, Pi, OpenCode, Cursor, or OMX session.
+          EOF

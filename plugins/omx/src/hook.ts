@@ -450,6 +450,17 @@ async function gwCall(
   }
 }
 
+// A narrow transport seam used by the cross-platform production canary. It
+// does not mutate workflow state and shares OMX's normal direct MCP client.
+export async function callStatewrightGateway(
+  gwUrl: string,
+  apiKey: string,
+  toolName: string,
+  args: Record<string, unknown> = {},
+): Promise<GatewayState | null> {
+  return gwCall(gwUrl, apiKey, toolName, args)
+}
+
 async function adapterCall<T>(
   opts: HandlerOpts,
   endpoint: "state" | "pre-tool" | "post-tool" | "stop",

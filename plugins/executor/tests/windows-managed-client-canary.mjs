@@ -26,6 +26,35 @@ function runNode(args, environment) {
   });
 }
 
+function runPowerShell(script, environment) {
+  return new Promise((resolveResult, rejectResult) => {
+    const child = spawn("pwsh.exe", ["-NoLogo", "-NonInteractive", "-Command", script], {
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", rejectResult);
+    child.once("exit", (code) => resolveResult({ code, stdout, stderr }));
+  });
+}
+
+async function shellVersion(host, environment) {
+  const result = await runPowerShell([
+    "$ErrorActionPreference = 'Stop'",
+    `$command = Get-Command ${host} -CommandType Application -ErrorAction Stop`,
+    "& $command.Source --version",
+    "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
+    '[Console]::WriteLine("STATEWRIGHT_SOURCE=" + $command.Source)',
+  ].join("; "), environment);
+  assert.equal(result.code, 0, `${host} --version from a fresh PowerShell session failed: ${result.stderr || result.stdout}`);
+  const match = result.stdout.match(/^STATEWRIGHT_SOURCE=(.+)$/m);
+  assert.ok(match, `${host} PowerShell probe did not report its resolved command source: ${result.stdout}`);
+  return match[1].trim();
+}
+
 const root = await mkdtemp(join(tmpdir(), "statewright-windows-managed-client-"));
 const home = join(root, "home");
 const environment = {
@@ -76,6 +105,9 @@ try {
       `managed ${host}.cmd --version failed: ${managedVersion.stderr || managedVersion.stdout}`,
     );
     assert.notEqual(managedVersion.stdout.trim(), "", `managed ${host}.cmd --version emitted no version output`);
+
+    const source = await shellVersion(host, environment);
+    assert.equal(source.toLowerCase(), win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase());
   }
 
   const shellInit = await runNode([fileURLToPath(launcher), "--shell-init"], environment);
@@ -86,6 +118,10 @@ try {
   assert.equal(uninstall.code, 0, uninstall.stderr);
   const removed = JSON.parse(uninstall.stdout);
   assert.equal(removed.removed.length, 2, "uninstall must remove both managed Windows shims");
+  for (const host of ["codex", "claude"]) {
+    const source = await shellVersion(host, environment);
+    assert.notEqual(source.toLowerCase(), win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase());
+  }
   console.log("Windows managed-client bootstrap canary passed for Codex and Claude.");
 } finally {
   await rm(root, { recursive: true, force: true });

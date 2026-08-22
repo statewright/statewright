@@ -190,14 +190,30 @@ function waitForExit(child) {
   });
 }
 
-function signalChildGroup(child, signal) {
-  if (process.platform !== "win32" && child.pid) {
+function isWindowsCommand(command, platform = process.platform) {
+  return windowsPlatform(platform) && /\.(?:cmd|bat)$/i.test(String(command));
+}
+
+function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn } = {}) {
+  if (!windowsPlatform(platform) && child.pid) {
     try {
       process.kill(-child.pid, signal);
       return;
     } catch {
       // The child exited or the host does not permit process-group signals.
     }
+  }
+  if (windowsPlatform(platform) && child.pid && signal !== "SIGINT") {
+    // A managed .cmd launcher owns a cmd.exe child. Killing only that wrapper
+    // leaves the real CLI process behind, so escalate through taskkill's tree
+    // semantics after the initial graceful SIGINT attempt.
+    const taskkill = spawnImpl("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    taskkill.once?.("error", () => {});
+    taskkill.unref?.();
+    return;
   }
   child.kill(signal);
 }
@@ -352,6 +368,10 @@ export async function runManagedClient({ host, command, args, environment = proc
         env: childEnvironment,
         stdio: "inherit",
         detached: process.platform !== "win32",
+        // Node does not execute .cmd/.bat launchers directly on Windows.
+        // This path is only selected for the native launcher discovered during
+        // managed-client bootstrap; .exe binaries retain direct spawning.
+        shell: isWindowsCommand(command),
       });
       let exited = false;
       let restart = false;

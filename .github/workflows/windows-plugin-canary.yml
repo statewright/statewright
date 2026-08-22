@@ -37,15 +37,17 @@ jobs:
           claude --version
           "Codex command: $((Get-Command codex).Source)"
           "Claude command: $((Get-Command claude).Source)"
-      - name: Run managed-client bootstrap canary
-        run: node plugins/executor/tests/windows-managed-client-canary.mjs
+      - name: Run managed-client bootstrap and route canaries
+        run: |
+          node plugins/executor/tests/windows-managed-client-canary.mjs
+          node plugins/executor/tests/windows-managed-client-route-canary.mjs
       - name: Record verification boundary
         if: always()
         run: |
           @'
           ## Windows plugin canary boundary
 
-          This job proves that a Windows-hosted Codex and Claude installation is discovered by the Statewright managed-client bootstrap, receives callable Windows shims, and is enabled in Statewright configuration.
+          This job proves that a Windows-hosted Codex and Claude installation is discovered by the Statewright managed-client bootstrap, receives callable Windows shims, and is enabled in Statewright configuration. It also proves that the managed supervisor can run a Windows .cmd launcher through a deterministic Codex route/restart cycle.
 
-          It deliberately does not claim an authenticated interactive Codex or Claude session, a Statewright gateway connection, or a routed model transition. Those require an interactive self-hosted Windows canary with test credentials.
+          It deliberately does not claim an authenticated interactive Codex or Claude session, or a Statewright gateway connection. Those require an interactive self-hosted Windows canary with test credentials.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

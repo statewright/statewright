@@ -194,6 +194,36 @@ function isWindowsCommand(command, platform = process.platform) {
   return windowsPlatform(platform) && /\.(?:cmd|bat)$/i.test(String(command));
 }
 
+function expandWindowsCmdShimPath(value, command) {
+  const input = String(value);
+  const prefix = "%~dp0";
+  if (!input.toLowerCase().startsWith(prefix)) return input;
+  return join(dirname(command), input.slice(prefix.length).replace(/^[\\/]+/, ""));
+}
+
+async function resolveWindowsCmdShim(command, platform = process.platform) {
+  if (!isWindowsCommand(command, platform)) return null;
+  let source;
+  try {
+    source = await readFile(command, "utf8");
+  } catch {
+    return null;
+  }
+
+  // npm's Windows shims invoke Node with a JavaScript entrypoint and forward
+  // `%*`. Running that entrypoint directly removes cmd.exe's second argument
+  // parse, which otherwise corrupts quoted config values and prompt text.
+  const match = source.match(/(?:"([^"\r\n]*node(?:\.exe)?)"|([^\s"\r\n]*node(?:\.exe)?))\s+"([^"\r\n]+\.(?:[cm]?js))"\s+%\*/i);
+  if (!match) return null;
+  const nodeCandidate = expandWindowsCmdShimPath(match[1] ?? match[2], command);
+  const entrypoint = expandWindowsCmdShimPath(match[3], command);
+  if (!existsSync(entrypoint)) return null;
+  return {
+    command: existsSync(nodeCandidate) ? nodeCandidate : "node.exe",
+    prefixArgs: [entrypoint],
+  };
+}
+
 function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn } = {}) {
   if (!windowsPlatform(platform) && child.pid) {
     try {
@@ -325,6 +355,9 @@ async function nextRouteRequest(controlDir, consumed) {
 
 export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
+  const cmdShim = await resolveWindowsCmdShim(command);
+  const launchCommand = cmdShim?.command ?? command;
+  const launchPrefixArgs = cmdShim?.prefixArgs ?? [];
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
   const consumed = new Set();
   let nextArgs = args;
@@ -385,19 +418,15 @@ export async function runManagedClient({ host, command, args, environment = proc
         childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
       }
-      const launchViaWindowsShell = isWindowsCommand(command);
-      const child = spawn(command, nextArgs, {
+      const launchViaWindowsShell = isWindowsCommand(launchCommand);
+      const child = spawn(launchCommand, [...launchPrefixArgs, ...nextArgs], {
         cwd,
         env: childEnvironment,
         stdio: "inherit",
         detached: process.platform !== "win32",
-        // Node does not execute .cmd/.bat launchers directly on Windows.
-        // This path is only selected for the native launcher discovered during
-        // managed-client bootstrap; .exe binaries retain direct spawning.
+        // Non-npm .cmd/.bat launchers still need cmd.exe. npm-generated shims
+        // are resolved to their Node entrypoint above, preserving argv exactly.
         shell: launchViaWindowsShell,
-        // When a shell launches a .cmd shim, use Node's native Windows
-        // argument quoting rather than exposing raw argv to cmd.exe.
-        windowsVerbatimArguments: false,
       });
       let exited = false;
       let restart = false;
@@ -430,7 +459,7 @@ export async function runManagedClient({ host, command, args, environment = proc
           if (!request.model) continue;
           nextArgs = buildRoutedArgs({ host, originalArgs: args, request });
           restart = true;
-          await restartManagedChild(child, exit, { command });
+          await restartManagedChild(child, exit, { command: launchCommand });
           break;
         }
         await delay(pollMs);

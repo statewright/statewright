@@ -218,6 +218,28 @@ function signalChildGroup(child, signal, { platform = process.platform, spawnImp
   child.kill(signal);
 }
 
+function waitForChildExit(exit, milliseconds) {
+  return Promise.race([
+    exit.then(() => true),
+    delay(milliseconds).then(() => false),
+  ]);
+}
+
+async function restartManagedChild(child, exit, { command, platform = process.platform } = {}) {
+  // SIGINT against cmd.exe can terminate the wrapper while leaving its CLI
+  // child running. Terminate the tree first and await it before the next
+  // routed launch so the old process cannot retain the control directory.
+  if (isWindowsCommand(command, platform)) {
+    signalChildGroup(child, "SIGTERM", { platform });
+    await waitForChildExit(exit, 1_500);
+    return;
+  }
+  signalChildGroup(child, "SIGINT", { platform });
+  if (await waitForChildExit(exit, 1_500)) return;
+  signalChildGroup(child, "SIGTERM", { platform });
+  await waitForChildExit(exit, 1_500);
+}
+
 function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "");
 }
@@ -404,9 +426,7 @@ export async function runManagedClient({ host, command, args, environment = proc
           if (!request.model) continue;
           nextArgs = buildRoutedArgs({ host, originalArgs: args, request });
           restart = true;
-          signalChildGroup(child, "SIGINT");
-          setTimeout(() => signalChildGroup(child, "SIGTERM"), 1_500).unref();
-          setTimeout(() => signalChildGroup(child, "SIGKILL"), 3_000).unref();
+          await restartManagedChild(child, exit, { command });
           break;
         }
         await delay(pollMs);

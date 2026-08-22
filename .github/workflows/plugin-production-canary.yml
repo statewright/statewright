@@ -13,6 +13,9 @@ on:
       - "plugins/pi/**"
       - "plugins/opencode/**"
       - "plugins/omx/**"
+      - "crates/mcp-gateway/**"
+      - "self-hosted/pocketbase/pb_hooks/**"
+      - "self-hosted/pocketbase/pb_migrations/**"
   schedule:
     - cron: "23 13 * * 1"
 

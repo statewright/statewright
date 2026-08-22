@@ -194,6 +194,28 @@ function isWindowsCommand(command, platform = process.platform) {
   return windowsPlatform(platform) && /\.(?:cmd|bat)$/i.test(String(command));
 }
 
+function quoteWindowsCommandArgument(value) {
+  const input = String(value);
+  let quoted = '"';
+  let backslashes = 0;
+
+  for (const character of input) {
+    if (character === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (character === '"') {
+      quoted += "\\".repeat((backslashes * 2) + 1);
+    } else {
+      quoted += "\\".repeat(backslashes);
+      quoted += character;
+    }
+    backslashes = 0;
+  }
+
+  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+}
+
 function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn } = {}) {
   if (!windowsPlatform(platform) && child.pid) {
     try {
@@ -385,16 +407,21 @@ export async function runManagedClient({ host, command, args, environment = proc
         childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
       }
-      const child = spawn(command, nextArgs, {
-        cwd,
-        env: childEnvironment,
-        stdio: "inherit",
-        detached: process.platform !== "win32",
-        // Node does not execute .cmd/.bat launchers directly on Windows.
-        // This path is only selected for the native launcher discovered during
-        // managed-client bootstrap; .exe binaries retain direct spawning.
-        shell: isWindowsCommand(command),
-      });
+      const launchViaWindowsShell = isWindowsCommand(command);
+      const child = spawn(
+        launchViaWindowsShell ? quoteWindowsCommandArgument(command) : command,
+        launchViaWindowsShell ? nextArgs.map(quoteWindowsCommandArgument) : nextArgs,
+        {
+          cwd,
+          env: childEnvironment,
+          stdio: "inherit",
+          detached: process.platform !== "win32",
+          // Node does not execute .cmd/.bat launchers directly on Windows.
+          // This path is only selected for the native launcher discovered during
+          // managed-client bootstrap; .exe binaries retain direct spawning.
+          shell: launchViaWindowsShell,
+        },
+      );
       let exited = false;
       let restart = false;
       child.once("exit", () => { exited = true; });

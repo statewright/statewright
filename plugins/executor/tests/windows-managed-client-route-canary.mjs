@@ -65,7 +65,9 @@ if (!existsSync(marker)) {
   const invocations = (await readFile(calls, "utf8")).trim().split("\n");
   assert.equal(invocations.length, 2, "the .cmd launcher must run once before and once after routing");
   assert.match(invocations[0], /--full-auto/);
-  assert.match(invocations[1], /-m gpt-5\.6-sol -c model_reasoning_effort="high" --full-auto resume windows-route-session/);
+  // cmd.exe removes quoting used to preserve the original argument boundary.
+  // The receiving client still gets the same key/value argument.
+  assert.match(invocations[1], /-m gpt-5\.6-sol -c model_reasoning_effort=high --full-auto resume windows-route-session/);
   console.log("Windows managed-client route canary passed for a .cmd launcher.");
 } finally {
   await rm(root, { recursive: true, force: true });

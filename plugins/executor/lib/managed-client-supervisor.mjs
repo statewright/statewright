@@ -194,15 +194,6 @@ function isWindowsCommand(command, platform = process.platform) {
   return windowsPlatform(platform) && /\.(?:cmd|bat)$/i.test(String(command));
 }
 
-function quoteWindowsCommandArgument(value) {
-  // `shell: true` delegates tokenization to cmd.exe before the .cmd launcher
-  // forwards `%*` to the native CLI. Escape for cmd.exe here; CRT-style
-  // backslash escaping is interpreted as literal text by cmd.exe.
-  return `"${String(value)
-    .replace(/%/g, "%%")
-    .replace(/["^&|<>()]/g, "^$&")}"`;
-}
-
 function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn } = {}) {
   if (!windowsPlatform(platform) && child.pid) {
     try {
@@ -395,20 +386,19 @@ export async function runManagedClient({ host, command, args, environment = proc
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
       }
       const launchViaWindowsShell = isWindowsCommand(command);
-      const child = spawn(
-        launchViaWindowsShell ? quoteWindowsCommandArgument(command) : command,
-        launchViaWindowsShell ? nextArgs.map(quoteWindowsCommandArgument) : nextArgs,
-        {
-          cwd,
-          env: childEnvironment,
-          stdio: "inherit",
-          detached: process.platform !== "win32",
-          // Node does not execute .cmd/.bat launchers directly on Windows.
-          // This path is only selected for the native launcher discovered during
-          // managed-client bootstrap; .exe binaries retain direct spawning.
-          shell: launchViaWindowsShell,
-        },
-      );
+      const child = spawn(command, nextArgs, {
+        cwd,
+        env: childEnvironment,
+        stdio: "inherit",
+        detached: process.platform !== "win32",
+        // Node does not execute .cmd/.bat launchers directly on Windows.
+        // This path is only selected for the native launcher discovered during
+        // managed-client bootstrap; .exe binaries retain direct spawning.
+        shell: launchViaWindowsShell,
+        // When a shell launches a .cmd shim, use Node's native Windows
+        // argument quoting rather than exposing raw argv to cmd.exe.
+        windowsVerbatimArguments: false,
+      });
       let exited = false;
       let restart = false;
       child.once("exit", () => { exited = true; });

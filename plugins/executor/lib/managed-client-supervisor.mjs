@@ -195,25 +195,12 @@ function isWindowsCommand(command, platform = process.platform) {
 }
 
 function quoteWindowsCommandArgument(value) {
-  const input = String(value);
-  let quoted = '"';
-  let backslashes = 0;
-
-  for (const character of input) {
-    if (character === "\\") {
-      backslashes += 1;
-      continue;
-    }
-    if (character === '"') {
-      quoted += "\\".repeat((backslashes * 2) + 1);
-    } else {
-      quoted += "\\".repeat(backslashes);
-      quoted += character;
-    }
-    backslashes = 0;
-  }
-
-  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+  // `shell: true` delegates tokenization to cmd.exe before the .cmd launcher
+  // forwards `%*` to the native CLI. Escape for cmd.exe here; CRT-style
+  // backslash escaping is interpreted as literal text by cmd.exe.
+  return `"${String(value)
+    .replace(/%/g, "%%")
+    .replace(/["^&|<>()]/g, "^$&")}"`;
 }
 
 function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn } = {}) {

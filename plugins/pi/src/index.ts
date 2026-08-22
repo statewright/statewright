@@ -365,6 +365,10 @@ async function gwInit(): Promise<boolean> {
   }
 }
 
+export async function initializeStatewrightGateway(): Promise<boolean> {
+  return gwInit()
+}
+
 async function adapterCall(
   endpoint: "state" | "pre-tool" | "post-tool" | "stop",
   body?: Record<string, unknown>,

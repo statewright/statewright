@@ -41,6 +41,40 @@ function runPowerShell(script, environment) {
   });
 }
 
+function runCmd(command, environment) {
+  return new Promise((resolveResult, rejectResult) => {
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", command], {
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+    child.once("error", rejectResult);
+    child.once("exit", (code) => resolveResult({ code, stdout, stderr }));
+  });
+}
+
+function withWindowsPath(environment, entries) {
+  const next = Object.fromEntries(Object.entries(environment).filter(([key]) => key.toLowerCase() !== "path"));
+  return { ...next, Path: entries.filter(Boolean).join(";") };
+}
+
+async function cmdSource(host, environment) {
+  const result = await runCmd(`where ${host}`, environment);
+  assert.equal(result.code, 0, `cmd.exe could not resolve ${host}: ${result.stderr || result.stdout}`);
+  const source = result.stdout.split(/\r?\n/).find(Boolean);
+  assert.ok(source, `cmd.exe did not report a source for ${host}`);
+  return source.trim();
+}
+
+async function cmdVersion(host, environment) {
+  const result = await runCmd(`${host} --version`, environment);
+  assert.equal(result.code, 0, `${host} --version from cmd.exe failed: ${result.stderr || result.stdout}`);
+  assert.notEqual(result.stdout.trim(), "", `${host} --version from cmd.exe emitted no version output`);
+}
+
 async function shellVersion(host, environment) {
   const result = await runPowerShell([
     "$ErrorActionPreference = 'Stop'",
@@ -65,6 +99,8 @@ const environment = {
   HOMEPATH: home.slice(2),
   STATEWRIGHT_API_KEY: "windows-canary",
 };
+const nativePath = Object.entries(environment).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
+const managedPath = withWindowsPath(environment, [join(home, ".statewright", "bin"), nativePath]);
 
 try {
   const result = await runNode([fileURLToPath(launcher), "--bootstrap"], environment);
@@ -108,6 +144,12 @@ try {
 
     const source = await shellVersion(host, environment);
     assert.equal(source.toLowerCase(), win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase());
+
+    assert.equal(
+      (await cmdSource(host, managedPath)).toLowerCase(),
+      win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase(),
+    );
+    await cmdVersion(host, managedPath);
   }
 
   const shellInit = await runNode([fileURLToPath(launcher), "--shell-init"], environment);
@@ -121,6 +163,10 @@ try {
   for (const host of ["codex", "claude"]) {
     const source = await shellVersion(host, environment);
     assert.notEqual(source.toLowerCase(), win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase());
+    assert.notEqual(
+      (await cmdSource(host, managedPath)).toLowerCase(),
+      win32.join(home, ".statewright", "bin", `${host}.cmd`).toLowerCase(),
+    );
   }
   console.log("Windows managed-client bootstrap canary passed for Codex and Claude.");
 } finally {

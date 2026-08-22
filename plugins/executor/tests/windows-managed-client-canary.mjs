@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -52,7 +52,7 @@ try {
   for (const host of ["codex", "claude"]) {
     const installed = bootstrap.installed.find((entry) => entry.realBinary.toLowerCase().endsWith(`${host}.cmd`));
     assert.ok(installed, `${host}.cmd must be the real executable selected by the Windows bootstrap`);
-    assert.match(installed.shimPath, new RegExp(`\\\\${host}\\\\.cmd$`, "i"));
+    assert.equal(win32.basename(installed.shimPath).toLowerCase(), `${host}.cmd`);
     const shim = await readFile(installed.shimPath, "utf8");
     assert.match(shim, /statewright-managed-client\.mjs/i);
   }

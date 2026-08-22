@@ -47,7 +47,9 @@ jobs:
           @'
           ## Windows plugin canary boundary
 
-          This job proves that a Windows-hosted Codex and Claude installation is discovered by the Statewright managed-client bootstrap, receives callable Windows shims, and is enabled in Statewright configuration. It also proves that the managed supervisor can run a Windows .cmd launcher through a deterministic Codex route/restart cycle while preserving its bridge, managed identity, and control-directory lifecycle.
+          This job proves that a Windows-hosted Codex and Claude installation is discovered by the Statewright managed-client bootstrap, receives callable Windows shims, and is enabled in Statewright configuration. It executes the real npm-installed `codex.cmd` and `claude.cmd` launchers through the managed supervisor, then verifies fresh PowerShell profile activation, explicit cmd.exe PATH activation, and native-command restoration after uninstall.
+
+          It also proves that the managed supervisor can run a Windows .cmd launcher through a deterministic Codex route/restart cycle while preserving the quoted route configuration, full continuation prompt, bridge, managed identity, and control-directory lifecycle.
 
           It deliberately does not claim an authenticated interactive Codex or Claude session, or a Statewright gateway connection. Those require an interactive self-hosted Windows canary with test credentials.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

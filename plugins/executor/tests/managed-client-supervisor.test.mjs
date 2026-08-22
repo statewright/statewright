@@ -270,9 +270,12 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
   const launcher = join(root, "launcher.mjs");
   try {
     await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "codex"), "#!/usr/bin/env sh\nexit 0\n");
     await writeFile(join(bin, "codex.cmd"), "@echo off\r\n");
     await writeFile(join(bin, "claude.cmd"), "@echo off\r\n");
     await writeFile(launcher, "");
+    // A Windows package install can leave an extensionless launcher behind.
+    // The native .cmd command must still win.
     assert.equal(resolveRealBinary("codex", { path: bin, platform: "win32", pathSeparator: ";" }), join(bin, "codex.cmd"));
     const first = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, platform: "win32", pathSeparator: ";" });
     assert.equal(first.installed.length, 2);

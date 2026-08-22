@@ -459,7 +459,9 @@ function samePath(left, right, platform) {
 
 function commandCandidates(command, platform) {
   if (!windowsPlatform(platform) || extname(command)) return [command];
-  return [command, `${command}.cmd`, `${command}.exe`, `${command}.bat`];
+  // Windows command resolution uses executable extensions. Prefer them over an
+  // extensionless sibling left by a POSIX-oriented package installation.
+  return [`${command}.cmd`, `${command}.exe`, `${command}.bat`, command];
 }
 
 export function resolveRealBinary(command, {

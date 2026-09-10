@@ -7,7 +7,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, resumedSessionId } from "../lib/managed-client-identity.mjs";
-import { bootstrapManagedClients, buildCodexAppServerHandoffArgs, buildCodexRemoteConnection, buildRoutedArgs, CODEX_REMOTE_AUTH_TOKEN_ENV, codexAllSessionsRequested, codexOneShotInvocation, codexThreadAttachmentMatches, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, retireCodexResident, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, waitForCodexProviderHandoff, waitForCodexThreadAttachment, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -113,36 +113,6 @@ test("POSIX cleanup waits for the entire process group after its leader exits", 
     try { process.kill(-child.pid, "SIGKILL"); } catch { /* already stopped */ }
     await rm(root, { recursive: true, force: true });
   }
-});
-
-test("target-provider failure retires the exact resident before returning", {
-  skip: process.platform === "win32",
-}, async () => {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
-  await new Promise((resolveSpawn) => child.once("spawn", resolveSpawn));
-  const exited = new Promise((resolveExit) => child.once("exit", resolveExit));
-  await retireCodexResident(child.pid, 1_000);
-  await exited;
-  assert.throws(() => process.kill(child.pid, 0));
-});
-
-test("forced resident retirement also kills its separately detached App Server", {
-  skip: process.platform === "win32",
-}, async () => {
-  const resident = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
-  const appServer = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
-  await Promise.all([
-    new Promise((resolveSpawn) => resident.once("spawn", resolveSpawn)),
-    new Promise((resolveSpawn) => appServer.once("spawn", resolveSpawn)),
-  ]);
-  const exits = Promise.all([
-    new Promise((resolveExit) => resident.once("exit", resolveExit)),
-    new Promise((resolveExit) => appServer.once("exit", resolveExit)),
-  ]);
-  await retireCodexResident(resident.pid, 50, { appServerPid: appServer.pid });
-  await exits;
-  assert.throws(() => process.kill(resident.pid, 0));
-  assert.throws(() => process.kill(appServer.pid, 0));
 });
 
 for (const status of ["spawn_error", "nonzero", "timeout"]) {
@@ -280,7 +250,6 @@ test("nested Codex launches discard parent thread and managed-control identities
       STATEWRIGHT_MANAGED_MCP_TOKEN: "parent-bridge-token",
       STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: "parent-root",
       STATEWRIGHT_MANAGED_TELEMETRY_OWNER: "supervisor",
-      [CODEX_REMOTE_AUTH_TOKEN_ENV]: "parent-launch-token",
     },
     overrides: {
       STATEWRIGHT_CLIENT_ID: "swc_child",
@@ -295,7 +264,6 @@ test("nested Codex launches discard parent thread and managed-control identities
   assert.equal(child.STATEWRIGHT_MANAGED_MCP_TOKEN, undefined);
   assert.equal(child.STATEWRIGHT_MANAGED_TELEMETRY_OWNER, undefined);
   assert.equal(child.STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID, undefined);
-  assert.equal(child[CODEX_REMOTE_AUTH_TOKEN_ENV], undefined);
   assert.equal(child.STATEWRIGHT_CLIENT_ID, "swc_child");
   assert.equal(child.CODEX_HOME, undefined);
   assert.equal(child.STATEWRIGHT_ROUTE_CONTROL_DIR, "/tmp/child-control");
@@ -539,167 +507,6 @@ test("Codex restart applies a custom provider and replaces stale provider overri
     "--profile", "local", "resume", "session-local",
     "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
   ]);
-});
-
-test("App Server provider handoff resumes the same thread without submitting an automatic prompt", () => {
-  assert.deepEqual(buildCodexAppServerHandoffArgs({
-    originalArgs: ["--full-auto", "--profile", "old", "-m", "stale", "resume", "old-thread", "old prompt"],
-    handoff: { threadId: "thread-1", profile: "local", provider: "local_compatible", model: "local-model", effort: "low" },
-  }), ["--profile", "local", "-m", "local-model", "--full-auto", "resume", "thread-1"]);
-  assert.deepEqual(buildCodexAppServerHandoffArgs({
-    originalArgs: ["--full-auto"],
-    handoff: { threadId: "thread-1", profile: null, provider: "openai", model: "cloud-model", effort: "high" },
-  }), ["-m", "cloud-model", "--full-auto", "resume", "thread-1"]);
-  assert.deepEqual(buildCodexAppServerHandoffArgs({
-    originalArgs: ["--full-auto", "resume", "transient-thread"],
-    handoff: { threadId: "transient-thread", profile: "local", provider: "local_compatible", model: "local-model", effort: "low", resume: false },
-  }), ["--profile", "local", "-m", "local-model", "--full-auto"]);
-  assert.deepEqual(buildCodexAppServerHandoffArgs({
-    originalArgs: ["--full-auto", "fix the original problem"],
-    handoff: { threadId: "thread-1", profile: "local", provider: "local_compatible", model: "local-model", effort: "low" },
-  }), ["--profile", "local", "-m", "local-model", "--full-auto", "resume", "thread-1"]);
-  assert.deepEqual(buildCodexAppServerHandoffArgs({
-    originalArgs: ["-C", "/repo", "--image", "/tmp/a.png", "/tmp/b.png", "describe these"],
-    handoff: { threadId: "thread-1", profile: "local", provider: "local_compatible", model: "local-model", effort: "low", resume: false },
-  }), ["--profile", "local", "-m", "local-model", "-C", "/repo"]);
-});
-
-test("App Server supervisor observes a provider handoff before a reconnecting TUI exits", async () => {
-  let reads = 0;
-  let resolveExit;
-  const tuiExit = new Promise((resolve) => { resolveExit = resolve; });
-  const reservation = {
-    handoff: {
-      threadId: "transient-thread",
-      provider: "local_compatible",
-      model: "local-model",
-      resume: false,
-    },
-    async ack() {},
-    async release() {},
-  };
-  const outcome = await waitForCodexProviderHandoff({
-    pollMs: 1,
-    tuiExit,
-    takeHandoff: async () => (++reads < 3 ? null : reservation),
-  });
-  assert.equal(outcome.result, null);
-  assert.equal(outcome.handoff.resume, false);
-  assert.equal(outcome.reservation, reservation);
-  resolveExit({ code: 0, signal: null });
-});
-
-test("App Server supervisor performs a final handoff read when the TUI exits", async () => {
-  let reads = 0;
-  const outcome = await waitForCodexProviderHandoff({
-    pollMs: 100,
-    tuiExit: Promise.resolve({ code: 0, signal: null }),
-    takeHandoff: async () => (++reads === 2 ? {
-      threadId: "durable-thread",
-      provider: "openai",
-      model: "cloud-model",
-      resume: true,
-    } : null),
-  });
-  assert.equal(reads, 2);
-  assert.equal(outcome.result.code, 0);
-  assert.equal(outcome.handoff.threadId, "durable-thread");
-});
-
-test("App Server supervisor waits for a successful target thread attachment", async () => {
-  let reads = 0;
-  let resolveExit;
-  const tuiExit = new Promise((resolve) => { resolveExit = resolve; });
-  const outcome = await waitForCodexThreadAttachment({
-    pollMs: 1,
-    tuiExit,
-    readAttachment: async () => (++reads < 3 ? null : {
-      threadId: "thread-1",
-      provider: "local_compatible",
-      method: "thread/resume",
-    }),
-  });
-  assert.equal(outcome.result, null);
-  assert.equal(outcome.attachment.provider, "local_compatible");
-  resolveExit({ code: 0, signal: null });
-});
-
-test("App Server supervisor performs a final attachment read when the target TUI exits", async () => {
-  let reads = 0;
-  const outcome = await waitForCodexThreadAttachment({
-    pollMs: 100,
-    tuiExit: Promise.resolve({ code: 2, signal: null }),
-    readAttachment: async () => (++reads === 2 ? {
-      threadId: "thread-1",
-      provider: "local_compatible",
-      method: "thread/resume",
-    } : null),
-  });
-  assert.equal(reads, 2);
-  assert.equal(outcome.attachment.threadId, "thread-1");
-  assert.equal(outcome.result.code, 2);
-});
-
-test("App Server supervisor bounds a live target that never attaches", async () => {
-  const outcome = await waitForCodexThreadAttachment({
-    pollMs: 1,
-    timeoutMs: 5,
-    tuiExit: new Promise(() => {}),
-    readAttachment: async () => null,
-  });
-  assert.equal(outcome.attachment, null);
-  assert.equal(outcome.result, null);
-  assert.equal(outcome.timedOut, true);
-});
-
-test("App Server supervisor accepts only the exact provider launch receipt", () => {
-  const handoff = {
-    threadId: "thread-1",
-    provider: "local_compatible",
-    model: "local-model",
-    effort: "low",
-    resume: true,
-  };
-  const attachment = {
-    launchNonce: "launch-1",
-    method: "thread/resume",
-    threadId: "thread-1",
-    provider: "local_compatible",
-    model: "local-model",
-    effort: "low",
-    requestedThreadId: "thread-1",
-    requestedProvider: "local_compatible",
-    requestedModel: "local-model",
-    requestedEffort: "low",
-  };
-  assert.equal(codexThreadAttachmentMatches(attachment, handoff, "launch-1"), true);
-  assert.equal(codexThreadAttachmentMatches({ ...attachment, launchNonce: "foreign" }, handoff, "launch-1"), false);
-  assert.equal(codexThreadAttachmentMatches({ ...attachment, model: "other-model" }, handoff, "launch-1"), false);
-  assert.equal(codexThreadAttachmentMatches({ ...attachment, effort: "high" }, handoff, "launch-1"), false);
-  assert.equal(codexThreadAttachmentMatches({ ...attachment, method: "thread/start" }, handoff, "launch-1"), false);
-  const fresh = { ...handoff, resume: false };
-  assert.equal(codexThreadAttachmentMatches({
-    ...attachment,
-    method: "thread/start",
-    threadId: "new-thread",
-  }, fresh, "launch-1"), true);
-});
-
-test("App Server provider handoff uses a bare remote endpoint and bearer-token nonce", () => {
-  assert.deepEqual(buildCodexRemoteConnection({
-    proxyUrl: "ws://127.0.0.1:61234",
-    launchNonce: "launch-1",
-  }), {
-    args: ["--remote", "ws://127.0.0.1:61234", "--remote-auth-token-env", CODEX_REMOTE_AUTH_TOKEN_ENV],
-    environment: { [CODEX_REMOTE_AUTH_TOKEN_ENV]: "launch-1" },
-  });
-  assert.deepEqual(buildCodexRemoteConnection({
-    proxyUrl: "ws://127.0.0.1:61234",
-    launchNonce: null,
-  }), {
-    args: ["--remote", "ws://127.0.0.1:61234"],
-    environment: {},
-  });
 });
 
 test("Claude restart resumes the session with the requested model", () => {

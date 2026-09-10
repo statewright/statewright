@@ -1,12 +1,10 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readdir, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { join } from "node:path";
 import { startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
-import { startCodexResponsesCompatibilityProxy } from "./codex-responses-compat-proxy.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
-import { terminateWindowsProcessTree } from "./managed-client-supervisor.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 
@@ -18,68 +16,11 @@ function childStopped(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
-function ownedAppServerGroupAlive(child, platform = process.platform) {
-  if (platform === "win32" || !Number.isInteger(child.pid)) return !childStopped(child);
-  try {
-    process.kill(-child.pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function signalOwnedAppServer(child, signal, platform = process.platform) {
-  if (platform !== "win32" && Number.isInteger(child.pid)) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch (error) {
-      if (error?.code !== "ESRCH") throw error;
-    }
-  }
-  if (!childStopped(child)) child.kill(signal);
-}
-
-async function waitForOwnedAppServerStop(child, graceMs, platform = process.platform) {
-  const deadline = Date.now() + graceMs;
-  while (ownedAppServerGroupAlive(child, platform)) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return false;
-    await delay(Math.min(25, remaining));
-  }
-  return true;
-}
-
-export async function stopOwnedAppServer(child, closed, graceMs, {
-  platform = process.platform,
-  environment = process.env,
-  cleanupWindowsTree = terminateWindowsProcessTree,
-} = {}) {
-  if (platform === "win32" && childStopped(child)) {
-    await closed;
-    return;
-  }
-  if (platform === "win32") {
-    const cleanup = await cleanupWindowsTree(child, { environment });
-    if (cleanup.status !== "success") {
-      throw new Error(`Statewright could not stop the owned Codex App Server process tree (${cleanup.status}).`);
-    }
-    if (!await waitForOwnedAppServerStop(child, graceMs, platform)) {
-      throw new Error(`Statewright could not confirm that its owned Codex App Server process ${child.pid ?? "unknown"} stopped.`);
-    }
-    await closed;
-    return;
-  }
-  signalOwnedAppServer(child, "SIGTERM", platform);
-  if (await waitForOwnedAppServerStop(child, graceMs, platform)) {
-    await closed;
-    return;
-  }
-  signalOwnedAppServer(child, "SIGKILL", platform);
-  if (await waitForOwnedAppServerStop(child, graceMs, platform)) {
-    await closed;
-    return;
-  }
+async function stopOwnedAppServer(child, closed, graceMs) {
+  if (!childStopped(child)) child.kill("SIGTERM");
+  if (await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
+  if (!childStopped(child)) child.kill("SIGKILL");
+  if (await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
   throw new Error(`Statewright could not confirm that its owned Codex App Server process ${child.pid ?? "unknown"} stopped.`);
 }
 
@@ -103,179 +44,6 @@ export function codexAppServerTransportEnabled({ environment = process.env, conf
 
 export function appServerHomePrefixForClient(clientId) {
   return `statewright-${String(clientId).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 60)}`;
-}
-
-function tomlTopLevelStrings(source) {
-  const values = {};
-  let inTable = false;
-  for (const line of String(source).split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    if (trimmed.startsWith("[")) {
-      inTable = true;
-      continue;
-    }
-    if (inTable) continue;
-    const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/);
-    if (!match) continue;
-    try {
-      values[match[1]] = match[2].startsWith('"')
-        ? JSON.parse(match[2])
-        : match[2].slice(1, -1);
-    } catch { /* invalid values are left to Codex's own config diagnostics */ }
-  }
-  return values;
-}
-
-export function codexProviderBaseUrl(source, provider) {
-  const expected = String(provider ?? "").trim();
-  if (!expected) return null;
-  let activeProvider = null;
-  for (const line of String(source).split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const table = trimmed.match(/^\[model_providers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\]\s*(?:#.*)?$/);
-    if (table) {
-      activeProvider = table[1] ?? table[2] ?? table[3];
-      continue;
-    }
-    if (trimmed.startsWith("[")) {
-      activeProvider = null;
-      continue;
-    }
-    if (activeProvider !== expected) continue;
-    const setting = trimmed.match(/^base_url\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/);
-    if (!setting) continue;
-    try {
-      return setting[1].startsWith('"') ? JSON.parse(setting[1]) : setting[1].slice(1, -1);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-async function statewrightProviderSettings(codexHome, profileName) {
-  const path = join(codexHome, `${profileName}.statewright.json`);
-  const source = await readFile(path, "utf8").catch((error) => {
-    if (error?.code === "ENOENT") return "{}";
-    throw error;
-  });
-  const settings = JSON.parse(source);
-  const compatibility = settings?.responses_compatibility;
-  if (compatibility !== undefined && compatibility !== "replace_encrypted_compaction") {
-    throw new Error(`Statewright profile '${profileName}' has an unsupported responses_compatibility value.`);
-  }
-  return compatibility ? { responsesCompatibility: compatibility } : {};
-}
-
-function modelListEntry(model) {
-  const id = String(model?.slug ?? "").trim();
-  if (!id) return null;
-  return {
-    id,
-    model: id,
-    displayName: String(model.display_name ?? id),
-    description: String(model.description ?? ""),
-    hidden: !["list", "visible"].includes(String(model.visibility ?? "list")),
-    supportedReasoningEfforts: Array.isArray(model.supported_reasoning_levels)
-      ? model.supported_reasoning_levels.map((entry) => ({
-        reasoningEffort: entry.effort,
-        description: String(entry.description ?? ""),
-      })).filter((entry) => entry.reasoningEffort)
-      : [],
-    defaultReasoningEffort: model.default_reasoning_level ?? "medium",
-    inputModalities: Array.isArray(model.input_modalities) ? model.input_modalities : ["text"],
-    supportsPersonality: model.supports_personality === true,
-    multiAgentVersion: model.multi_agent_version ?? null,
-    additionalSpeedTiers: Array.isArray(model.additional_speed_tiers) ? model.additional_speed_tiers : [],
-    serviceTiers: Array.isArray(model.service_tiers) ? model.service_tiers : [],
-    defaultServiceTier: model.default_service_tier ?? null,
-    isDefault: false,
-    upgrade: model.upgrade ?? null,
-    upgradeInfo: model.upgrade_info ?? null,
-    availabilityNux: model.availability_nux ?? null,
-    modelSpecialty: model.model_specialty ?? null,
-  };
-}
-
-/**
- * Codex profile-v2 files are isolated config layers at
- * `$CODEX_HOME/<name>.config.toml`. Statewright reads only the routing keys
- * needed to expose their model catalogs; provider URLs and credentials remain
- * owned by Codex and are never copied into route state or telemetry.
- */
-export async function discoverCodexProviderProfiles(codexHome) {
-  const entries = await readdir(codexHome, { withFileTypes: true }).catch((error) => {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  });
-  const profiles = [];
-  const providerProfiles = new Map();
-  for (const entry of entries.filter((candidate) => candidate.isFile() && candidate.name.endsWith(".config.toml")).sort((a, b) => a.name.localeCompare(b.name))) {
-    const configPath = join(codexHome, entry.name);
-    const values = tomlTopLevelStrings(await readFile(configPath, "utf8"));
-    const provider = String(values.model_provider ?? "").trim();
-    const catalogSetting = String(values.model_catalog_json ?? "").trim();
-    if (!provider || !catalogSetting) continue;
-    const catalogPath = isAbsolute(catalogSetting) ? catalogSetting : resolve(dirname(configPath), catalogSetting);
-    const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
-    const models = (Array.isArray(catalog?.models) ? catalog.models : []).map(modelListEntry).filter(Boolean);
-    if (models.length === 0) continue;
-    const existingProfile = providerProfiles.get(provider);
-    if (existingProfile) {
-      throw new Error(`Codex provider '${provider}' is configured by both '${existingProfile}.config.toml' and '${entry.name}'. Use one profile-v2 catalog per provider so /model selections have an unambiguous launch profile.`);
-    }
-    const profileName = entry.name.slice(0, -".config.toml".length);
-    const statewrightSettings = await statewrightProviderSettings(codexHome, profileName);
-    providerProfiles.set(provider, profileName);
-    profiles.push({
-      profile: profileName,
-      provider,
-      model: String(values.model ?? models[0].model).trim(),
-      webSearch: values.web_search ?? null,
-      ...statewrightSettings,
-      appServerConfig: {
-        model: String(values.model ?? models[0].model).trim(),
-        model_provider: provider,
-        model_catalog_json: catalogPath,
-        ...(values.model_reasoning_effort ? { model_reasoning_effort: values.model_reasoning_effort } : {}),
-        ...(values.service_tier ? { service_tier: values.service_tier } : {}),
-        ...(values.web_search ? { web_search: values.web_search } : {}),
-      },
-      models,
-    });
-  }
-  return profiles;
-}
-
-export async function discoverCodexBaseProfile(codexHome) {
-  const values = tomlTopLevelStrings(await readFile(join(codexHome, "config.toml"), "utf8").catch((error) => {
-    if (error?.code === "ENOENT") return "";
-    throw error;
-  }));
-  const provider = String(values.model_provider ?? "openai").trim() || "openai";
-  const cache = JSON.parse(await readFile(join(codexHome, "models_cache.json"), "utf8").catch((error) => {
-    if (error?.code === "ENOENT") return '{"models":[]}';
-    throw error;
-  }));
-  const selectedModel = String(values.model ?? "").trim();
-  const models = (Array.isArray(cache?.models) ? cache.models : []).map(modelListEntry).filter(Boolean)
-    .map((entry) => ({ ...entry, isDefault: entry.model === selectedModel }));
-  return { profile: null, provider, model: selectedModel || models.find((entry) => entry.isDefault)?.model || models[0]?.model || null, webSearch: values.web_search ?? null, models };
-}
-
-function appServerConfigArgs(profile, route = null) {
-  const model = String(route?.model ?? "").replace(/^[^/]+\//, "").trim();
-  const provider = String(route?.provider ?? "").trim();
-  const effort = String(route?.effort ?? "").trim();
-  const config = {
-    ...(profile?.appServerConfig ?? {}),
-    ...(model ? { model } : {}),
-    ...(provider ? { model_provider: provider } : {}),
-    ...(effort ? { model_reasoning_effort: effort } : {}),
-  };
-  return Object.entries(config).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`]);
 }
 
 export function routeConfigEdits(route) {
@@ -418,7 +186,6 @@ export async function runCodexAppServerTransport({
  */
 export async function startCodexAppServerRuntime({
   command,
-  commandArgs = [],
   environment = process.env,
   cwd = process.cwd(),
   home = homedir(),
@@ -427,11 +194,6 @@ export async function startCodexAppServerRuntime({
   stderr = process.stderr,
   telemetry = async () => {},
   threadListCwd = null,
-  profile = null,
-  resumeRoute = null,
-  onProviderHandoff = async () => {},
-  prepareProviderHandoff = null,
-  onThreadAttached = async () => {},
   idleMs = 500,
   shutdownGraceMs = 1_500,
   onIdle = async () => {},
@@ -441,57 +203,11 @@ export async function startCodexAppServerRuntime({
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
-  const [baseProfile, providerProfiles] = await Promise.all([
-    discoverCodexBaseProfile(codexHome),
-    discoverCodexProviderProfiles(codexHome),
-  ]);
-  const profiles = [baseProfile, ...providerProfiles];
-  const selectedProfile = profile
-    ? profiles.find((candidate) => candidate.profile === profile)
-    : baseProfile;
-  if (profile && !selectedProfile) throw new Error(`Statewright could not load Codex profile '${profile}'.`);
-  const activeRoute = resumeRoute ?? (selectedProfile?.provider && selectedProfile?.model ? {
-    provider: selectedProfile.provider,
-    model: selectedProfile.model,
-  } : null);
 
-  let compatibilityProxy = null;
-  let launchProfile = selectedProfile;
-  if (selectedProfile?.responsesCompatibility === "replace_encrypted_compaction") {
-    const configSource = await readFile(join(codexHome, "config.toml"), "utf8");
-    const upstreamBaseUrl = codexProviderBaseUrl(configSource, selectedProfile.provider);
-    if (!upstreamBaseUrl) {
-      throw new Error(`Statewright could not find model_providers.${selectedProfile.provider}.base_url for the Responses compatibility adapter.`);
-    }
-    compatibilityProxy = await startCodexResponsesCompatibilityProxy({
-      upstreamBaseUrl,
-      onTranslation: async ({ translated, renamedTools }) => {
-        await telemetry("app_server_responses_compatibility_applied", {
-          client_id: clientId,
-          provider: selectedProfile.provider,
-          translated_items: translated,
-          renamed_tools: renamedTools,
-        });
-        if (translated > 0) stderr.write(`[statewright] translated ${translated} provider-incompatible encrypted compaction item${translated === 1 ? "" : "s"} into an explicit history handoff.\n`);
-        if (renamedTools > 0) stderr.write(`[statewright] mapped ${renamedTools} provider-incompatible function name${renamedTools === 1 ? "" : "s"} at the Responses boundary.\n`);
-      },
-    });
-    launchProfile = {
-      ...selectedProfile,
-      appServerConfig: {
-        ...selectedProfile.appServerConfig,
-        [`model_providers.${selectedProfile.provider}.base_url`]: compatibilityProxy.baseUrl,
-      },
-    };
-  }
-
-  const appServer = spawn(command, [...commandArgs, "app-server", ...appServerConfigArgs(launchProfile, activeRoute), "--listen", url], {
+  const appServer = spawn(command, ["app-server", "--listen", url], {
     cwd,
     env: { ...environment, CODEX_HOME: appServerHome },
     stdio: ["ignore", "pipe", "pipe"],
-    // Own the launcher and its native Codex descendant as one POSIX process
-    // group so a provider handoff cannot leave the actual App Server behind.
-    detached: process.platform !== "win32",
   });
   const appServerClosed = new Promise((resolveClosed) => appServer.once("close", resolveClosed));
   appServer.stderr.on("data", (chunk) => stderr.write(chunk));
@@ -513,12 +229,6 @@ export async function startCodexAppServerRuntime({
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
       resumeHistoryLimit: resumeHistoryLimit(environment),
       threadListCwd,
-      profiles,
-      activeProvider: activeRoute?.provider ?? selectedProfile?.provider ?? "openai",
-      resumeRoute: activeRoute,
-      onProviderHandoff,
-      prepareProviderHandoff,
-      onThreadAttached,
       idleMs,
       onIdle,
       takePendingRoute: nextRouteRequest,
@@ -552,14 +262,12 @@ export async function startCodexAppServerRuntime({
     return {
       proxyUrl: routeProxy.url,
       upstreamUrl: url,
-      appServerPid: appServer.pid,
       async close() {
         closing = true;
         await routeProxy.close().catch(async (error) => {
           await reporter.report(error, { mechanism: "shutdown", host: "codex", operation: "app_server_proxy" }).catch(() => {});
         });
         await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
-        await compatibilityProxy?.close();
         // Keep the isolated home addressable after shutdown. A native TUI can
         // still be holding the App Server URL while the owned server exits;
         // deleting the projection turns a recoverable disconnect into
@@ -570,7 +278,6 @@ export async function startCodexAppServerRuntime({
   } catch (error) {
     closing = true;
     await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
-    await compatibilityProxy?.close().catch(() => {});
     // Preserve the projection for a TUI that may still be unwinding after a
     // failed startup; see the normal close path above.
     throw error;

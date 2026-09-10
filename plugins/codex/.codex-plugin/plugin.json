@@ -1,6 +1,6 @@
 {
   "name": "statewright",
-  "version": "0.3.2+codex.20260910085521",
+  "version": "0.3.2+codex.20260909221641",
   "description": "State machine workflow enforcement \u2014 controls which tools your agent can use in each phase.",
   "author": {
     "name": "statewright.ai",
@@ -17,6 +17,7 @@
     "workflow"
   ],
   "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "statewright",
     "shortDescription": "State machine guardrails \u2014 per-state tool enforcement for coding workflows.",

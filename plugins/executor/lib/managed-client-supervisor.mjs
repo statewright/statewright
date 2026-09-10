@@ -13,11 +13,9 @@ import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
-export const CODEX_REMOTE_AUTH_TOKEN_ENV = "STATEWRIGHT_CODEX_REMOTE_AUTH_TOKEN";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TELEMETRY_AGENT = resolve(EXECUTOR_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
 const PARENT_MANAGED_IDENTITY_ENV = [
-  CODEX_REMOTE_AUTH_TOKEN_ENV,
   "STATEWRIGHT_CLIENT_ID",
   "STATEWRIGHT_MCP_SESSION_ID",
   "STATEWRIGHT_ROUTE_CONTROL_DIR",
@@ -100,46 +98,6 @@ function processAlive(pid) {
     return true;
   } catch {
     return false;
-  }
-}
-
-export async function retireCodexResident(pid, timeoutMs = 3_000, { appServerPid = null } = {}) {
-  const targets = [...new Set([pid, appServerPid].filter((candidate) => Number.isInteger(candidate) && candidate > 0))];
-  if (!targets.some(processAlive)) return;
-  const signal = (targetPid, name) => {
-    if (process.platform !== "win32") {
-      try {
-        process.kill(-targetPid, name);
-        return;
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
-      }
-    }
-    process.kill(targetPid, name);
-  };
-  try {
-    if (processAlive(pid)) signal(pid, "SIGTERM");
-    else if (processAlive(appServerPid)) signal(appServerPid, "SIGTERM");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
-  const deadline = Date.now() + timeoutMs;
-  while (targets.some(processAlive) && Date.now() < deadline) await delay(25);
-  const survivors = targets.filter(processAlive);
-  if (survivors.length > 0) {
-    if (process.platform === "win32") {
-      await Promise.all(survivors.map((targetPid) => terminateWindowsProcessTree({ pid: targetPid })));
-    } else {
-      for (const targetPid of survivors) {
-        try { signal(targetPid, "SIGKILL"); } catch (error) {
-          if (error?.code !== "ESRCH") throw error;
-        }
-      }
-    }
-    const killDeadline = Date.now() + 1_000;
-    while (targets.some(processAlive) && Date.now() < killDeadline) await delay(25);
-    const remaining = targets.filter(processAlive);
-    if (remaining.length > 0) throw new Error(`Statewright Codex App Server process(es) ${remaining.join(", ")} did not retire after target-provider failure.`);
   }
 }
 
@@ -278,48 +236,6 @@ function waitForExit(child) {
     child.once("error", rejectExit);
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
-}
-
-function waitForSpawn(child) {
-  return new Promise((resolveSpawn, rejectSpawn) => {
-    child.once("spawn", resolveSpawn);
-    child.once("error", rejectSpawn);
-  });
-}
-
-export async function waitForCodexProviderHandoff({ takeHandoff, tuiExit, pollMs = 25 }) {
-  while (true) {
-    const reservation = await takeHandoff();
-    if (reservation) return { reservation, handoff: reservation.handoff ?? reservation, result: null };
-    const exited = await Promise.race([
-      tuiExit.then((result) => ({ result })),
-      delay(pollMs).then(() => null),
-    ]);
-    if (!exited) continue;
-    // The TUI and resident can finish at nearly the same time. Check the
-    // atomic handoff one final time before treating the exit as ordinary.
-    const finalReservation = await takeHandoff();
-    return {
-      reservation: finalReservation,
-      handoff: finalReservation?.handoff ?? finalReservation,
-      result: exited.result,
-    };
-  }
-}
-
-export async function waitForCodexThreadAttachment({ readAttachment, tuiExit, pollMs = 25, timeoutMs = 30_000 }) {
-  const deadline = Date.now() + timeoutMs;
-  while (true) {
-    const attachment = await readAttachment();
-    if (attachment) return { attachment, result: null, timedOut: false };
-    if (Date.now() >= deadline) return { attachment: null, result: null, timedOut: true };
-    const exited = await Promise.race([
-      tuiExit.then((result) => ({ result })),
-      delay(Math.min(pollMs, Math.max(1, deadline - Date.now()))).then(() => null),
-    ]);
-    if (!exited) continue;
-    return { attachment: await readAttachment(), result: exited.result, timedOut: false };
-  }
 }
 
 function isWindowsCommand(command, platform = process.platform) {
@@ -479,31 +395,6 @@ function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "");
 }
 
-export function buildCodexRemoteConnection({ proxyUrl, launchNonce = null }) {
-  const args = ["--remote", String(proxyUrl)];
-  if (!launchNonce) return { args, environment: {} };
-  return {
-    args: [...args, "--remote-auth-token-env", CODEX_REMOTE_AUTH_TOKEN_ENV],
-    environment: { [CODEX_REMOTE_AUTH_TOKEN_ENV]: launchNonce },
-  };
-}
-
-export function codexThreadAttachmentMatches(attachment, handoff, launchNonce) {
-  if (!attachment || !handoff || !launchNonce) return false;
-  const expectedProvider = providerModel(`${handoff.provider}/_`).provider;
-  const expectedModel = routeModel(handoff.model).trim();
-  const expectedEffort = String(handoff.effort ?? "").trim() || null;
-  const expectedMethod = handoff.resume === false ? "thread/start" : "thread/resume";
-  return attachment.launchNonce === launchNonce
-    && attachment.method === expectedMethod
-    && attachment.provider === expectedProvider
-    && attachment.requestedProvider === expectedProvider
-    && routeModel(attachment.model).trim() === expectedModel
-    && routeModel(attachment.requestedModel).trim() === expectedModel
-    && (!expectedEffort || (attachment.effort === expectedEffort && attachment.requestedEffort === expectedEffort))
-    && (handoff.resume === false || attachment.threadId === handoff.threadId);
-}
-
 const CODEX_OPTIONS_WITH_VALUE = new Set([
   "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config",
   "--disable", "--enable", "--local-provider", "-m", "--model", "-p", "--profile", "--remote",
@@ -586,18 +477,6 @@ export function codexAllSessionsRequested(args = []) {
   return args.slice(0, boundary < 0 ? args.length : boundary).includes("--all");
 }
 
-export function codexProfileFromArgs(args = []) {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--") break;
-    if (arg === "-p" || arg === "--profile") return String(args[index + 1] ?? "").trim() || null;
-    if (arg.startsWith("--profile=")) return arg.slice("--profile=".length).trim() || null;
-    if (arg.startsWith("-p=")) return arg.slice(3).trim() || null;
-    if (arg === "resume") break;
-  }
-  return null;
-}
-
 export function routeClaudeModel(model) {
   const value = String(model ?? "").trim();
   if (!value) throw new Error("Statewright Claude routing request is missing model.");
@@ -678,39 +557,6 @@ export function buildRoutedArgs({ host, originalArgs, request }) {
   throw new Error(`Unsupported managed client host '${host}'.`);
 }
 
-export function buildCodexAppServerHandoffArgs({ originalArgs, handoff }) {
-  if (!handoff?.threadId) throw new Error("Statewright Codex provider handoff is missing threadId.");
-  if (!handoff?.model) throw new Error("Statewright Codex provider handoff is missing model.");
-  const routed = stripRouteArgs(originalArgs, "codex");
-  const base = [];
-  for (let index = 0; index < routed.length; index += 1) {
-    const arg = routed[index];
-    if (arg === "--" || !arg.startsWith("-")) break;
-    if (arg === "-p" || arg === "--profile") {
-      index += 1;
-      continue;
-    }
-    if (/^(?:-p|--profile)=/.test(arg)) continue;
-    // Images belong to the original prompt payload and must not be replayed
-    // when the same thread is relaunched under another provider.
-    if (arg === "-i" || arg === "--image") {
-      while (index + 1 < routed.length && !routed[index + 1].startsWith("-")) index += 1;
-      continue;
-    }
-    if (/^(?:-i|--image)=/.test(arg)) continue;
-    base.push(arg);
-    if (CODEX_OPTIONS_WITH_VALUE.has(arg) && index + 1 < routed.length) {
-      base.push(routed[++index]);
-    }
-  }
-  const launch = [
-    ...(handoff.profile ? ["--profile", handoff.profile] : []),
-    "-m", routeModel(handoff.model),
-    ...base,
-  ];
-  return handoff.resume === false ? launch : [...launch, "resume", handoff.threadId];
-}
-
 async function nextRouteRequest(controlDir, consumed) {
   const entries = (await readdir(controlDir))
     .filter((name) => name === "route.json" || name.endsWith(".route.json"))
@@ -779,167 +625,45 @@ export async function runManagedClient({ host, command, args, environment = proc
         environment,
         config,
       })) {
-        const {
-          clearResidentThreadAttachment,
-          ensureCodexAppServerResident,
-          readResidentThreadAttachment,
-          residentControlDir,
-          takeResidentProviderHandoff,
-        } = await import("./codex-app-server-resident.mjs");
+        const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
         if (identity.sessionId) {
           await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home, cwd });
         }
+        await preflightCodexHistory(args);
+        const resident = await ensureCodexAppServerResident({
+          command,
+          cwd,
+          environment: isolatedEnvironment,
+          home,
+          clientId: routedClientId,
+          threadListCwd: codexAllSessionsRequested(args) ? null : cwd,
+        });
         const residentRoutes = residentControlDir(home, routedClientId);
-        let residentArgsBase = args;
-        let residentProfile = codexProfileFromArgs(args);
-        let resumeRoute = null;
-        let claimedProviderHandoff = null;
-        let providerAttachFailures = 0;
+        await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
+        const residentArgs = [...args, "--remote", resident.proxyUrl];
+        const tuiEnvironment = {
+          ...isolatedEnvironment,
+          STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
+          STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+          STATEWRIGHT_CLIENT_ID: routedClientId,
+          ...(codexRootSessionId ? { STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: codexRootSessionId } : {}),
+          STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+        };
+        const tui = spawn(command, residentArgs, {
+          cwd,
+          env: tuiEnvironment,
+          stdio: "inherit",
+        });
+        const tuiExit = waitForExit(tui);
+        const stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
         try {
-          while (true) {
-          await preflightCodexHistory(residentArgsBase);
-          const resident = await ensureCodexAppServerResident({
-            command: launchCommand,
-            commandArgs: launchPrefixArgs,
-            cwd,
-            environment: isolatedEnvironment,
-            home,
-            clientId: routedClientId,
-            threadListCwd: codexAllSessionsRequested(args) ? null : cwd,
-            profile: residentProfile,
-            resumeRoute,
+          const result = await tuiExit;
+          if (!isExpectedExit(result)) await reporter.report(new Error("Native Codex connected to its resident App Server exited unexpectedly."), {
+            mechanism: "child_exit", host, operation: "resident_tui", exit_code: result.code ?? 1, signal: result.signal,
           });
-          await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
-          const launchNonce = claimedProviderHandoff ? randomUUID() : null;
-          if (claimedProviderHandoff) await clearResidentThreadAttachment(home, routedClientId, launchNonce);
-          const remoteConnection = buildCodexRemoteConnection({ proxyUrl: resident.proxyUrl, launchNonce });
-          const residentArgs = [...residentArgsBase, ...remoteConnection.args];
-          const tuiEnvironment = {
-            ...isolatedEnvironment,
-            ...remoteConnection.environment,
-            STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
-            STATEWRIGHT_MANAGED_CLIENT_HOST: host,
-            STATEWRIGHT_CLIENT_ID: routedClientId,
-            ...(codexRootSessionId ? { STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: codexRootSessionId } : {}),
-            STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
-          };
-          const tui = spawn(launchCommand, [...launchPrefixArgs, ...residentArgs], {
-            cwd,
-            env: tuiEnvironment,
-            stdio: "inherit",
-            // A provider handoff must retire the reconnecting TUI and every
-            // native descendant before the replacement provider is started.
-            detached: process.platform !== "win32",
-          });
-          const tuiStarted = waitForSpawn(tui);
-          const tuiExit = waitForExit(tui);
-          const stopForwarding = forwardManagedTermination(tui, tuiExit, { command: launchCommand, environment: tuiEnvironment });
-          let result = null;
-          let handoff = null;
-          let retryProviderTarget = false;
-          let releaseProviderTarget = false;
-          try {
-            await tuiStarted;
-            if (claimedProviderHandoff) {
-              const expectedHandoff = claimedProviderHandoff.handoff ?? claimedProviderHandoff;
-              const attached = await waitForCodexThreadAttachment({
-                readAttachment: () => readResidentThreadAttachment(home, routedClientId, resident.pid, launchNonce),
-                tuiExit,
-              });
-              const attachmentMatches = codexThreadAttachmentMatches(attached.attachment, expectedHandoff, launchNonce);
-              if (!attachmentMatches) {
-                result = attached.result;
-                if (!result) {
-                  await restartManagedChild(tui, tuiExit, { command: launchCommand, environment: tuiEnvironment });
-                  result = await tuiExit;
-                }
-                if (!attached.attachment && !attached.timedOut && isExpectedExit(result)) {
-                  releaseProviderTarget = true;
-                } else {
-                  providerAttachFailures += 1;
-                  await retireCodexResident(resident.pid, 3_000, { appServerPid: resident.appServerPid });
-                  if (providerAttachFailures >= 3) {
-                    await claimedProviderHandoff.release?.();
-                    claimedProviderHandoff = null;
-                    throw new Error(
-                      `Statewright could not attach Codex to the requested provider after ${providerAttachFailures} attempts. `
-                      + `The durable handoff remains queued for managed client '${routedClientId}'; fix the provider configuration before retrying.`,
-                    );
-                  }
-                  retryProviderTarget = true;
-                }
-              } else {
-                try {
-                  await claimedProviderHandoff.ack?.();
-                  claimedProviderHandoff = null;
-                  providerAttachFailures = 0;
-                } catch (error) {
-                  await restartManagedChild(tui, tuiExit, { command: launchCommand, environment: tuiEnvironment });
-                  throw error;
-                }
-              }
-              await clearResidentThreadAttachment(home, routedClientId, launchNonce);
-            }
-            if (!retryProviderTarget && !releaseProviderTarget) {
-              const outcome = await waitForCodexProviderHandoff({
-                takeHandoff: () => takeResidentProviderHandoff(home, routedClientId),
-                tuiExit,
-              });
-              claimedProviderHandoff = outcome.reservation;
-              handoff = outcome.handoff;
-              result = outcome.result;
-              if (handoff && !result) {
-                await restartManagedChild(tui, tuiExit, { command: launchCommand, environment: tuiEnvironment });
-                result = await tuiExit;
-              }
-            }
-          } catch (error) {
-            if (claimedProviderHandoff) await retireCodexResident(resident.pid, 3_000, { appServerPid: resident.appServerPid });
-            throw error;
-          } finally {
-            await stopForwarding();
-          }
-          if (releaseProviderTarget) {
-            await retireCodexResident(resident.pid, 3_000, { appServerPid: resident.appServerPid });
-            await claimedProviderHandoff?.release?.();
-            claimedProviderHandoff = null;
-            process.stderr.write("[statewright] preserved the pending Codex provider handoff after the target TUI exited before attachment.\n");
-            return result?.code ?? 0;
-          }
-          if (retryProviderTarget) {
-            process.stderr.write("[statewright] target Codex provider did not attach successfully; preserving the provider handoff and retrying.\n");
-            await delay(250 * (2 ** (providerAttachFailures - 1)));
-            continue;
-          }
-          if (!handoff) {
-            claimedProviderHandoff = await takeResidentProviderHandoff(home, routedClientId);
-            handoff = claimedProviderHandoff?.handoff ?? claimedProviderHandoff;
-          }
-          if (!handoff) {
-            if (!isExpectedExit(result)) await reporter.report(new Error("Native Codex connected to its resident App Server exited unexpectedly."), {
-              mechanism: "child_exit", host, operation: "resident_tui", exit_code: result.code ?? 1, signal: result.signal,
-            });
-            return result.code ?? 1;
-          }
-          if (!handoff.threadId || !handoff.model || !handoff.provider) {
-            throw new Error("Statewright rejected an incomplete Codex provider handoff.");
-          }
-          codexRootSessionId = handoff.resume === false ? null : handoff.threadId;
-          if (codexRootSessionId) {
-            await bindManagedClientIdentity({ host, sessionId: codexRootSessionId, clientId: routedClientId, home, cwd });
-          } else {
-            await resetCodexRootSession(residentRoutes, { clientId: routedClientId });
-          }
-          for (let attempt = 0; attempt < 100 && processAlive(resident.pid); attempt += 1) await delay(25);
-          if (processAlive(resident.pid)) {
-            await retireCodexResident(resident.pid, 3_000, { appServerPid: resident.appServerPid });
-          }
-          residentArgsBase = buildCodexAppServerHandoffArgs({ originalArgs: args, handoff });
-          residentProfile = handoff.profile ?? null;
-          resumeRoute = handoff;
-          }
+          return result.code ?? 1;
         } finally {
-          await claimedProviderHandoff?.release?.();
+          await stopForwarding();
         }
       }
     }

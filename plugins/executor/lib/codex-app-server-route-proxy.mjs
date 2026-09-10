@@ -14,21 +14,20 @@ function normalizeProvider(provider) {
   return providerModel(`${String(provider ?? "").trim()}/_`).provider;
 }
 
-function qualifiedModel(provider, model) {
-  const value = String(model ?? "").trim();
-  if (!value) return value;
-  if (providerModel(value).provider) return value;
-  const normalized = normalizeProvider(provider);
-  return normalized ? `${normalized}/${value}` : value;
+function bearerToken(request) {
+  const authorization = String(request?.headers?.authorization ?? "").trim();
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
 }
 
 export function mergeProviderModelList(message, { activeProvider = "openai", profiles = [] } = {}) {
   if (!Array.isArray(message?.result?.data)) return message;
+  const active = normalizeProvider(activeProvider);
   const providers = new Map();
-  providers.set(normalizeProvider(activeProvider), message.result.data);
+  providers.set(active, message.result.data);
   for (const profile of profiles) {
     const provider = normalizeProvider(profile?.provider);
-    if (provider && provider !== normalizeProvider(activeProvider) && Array.isArray(profile.models)) providers.set(provider, profile.models);
+    if (provider && provider !== active && Array.isArray(profile.models)) providers.set(provider, profile.models);
   }
   const seen = new Set();
   const data = [];
@@ -36,21 +35,24 @@ export function mergeProviderModelList(message, { activeProvider = "openai", pro
     for (const model of models) {
       const nativeModel = routeModel(model?.model ?? model?.id);
       if (!provider || !nativeModel) continue;
-      const id = `${provider}/${nativeModel}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
+      const providerModelId = `${provider}/${nativeModel}`;
+      if (seen.has(providerModelId)) continue;
+      seen.add(providerModelId);
+      const id = provider === active ? nativeModel : providerModelId;
       data.push({ ...model, id, model: id });
     }
   }
   return { ...message, result: { ...message.result, data, nextCursor: null } };
 }
 
-export function qualifyProviderMessage(message) {
+export function normalizeProviderMessage(message) {
   if (!message || typeof message !== "object") return message;
   if (message.result?.thread) {
-    const provider = message.result.modelProvider ?? message.result.thread.modelProvider;
     const result = { ...message.result };
-    if (typeof message.result.model === "string") result.model = qualifiedModel(provider, message.result.model);
+    if (typeof message.result.model === "string") result.model = routeModel(message.result.model);
+    if (typeof message.result.thread.model === "string") {
+      result.thread = { ...message.result.thread, model: routeModel(message.result.thread.model) };
+    }
     return { ...message, result };
   }
   if (message.method === "thread/settings/updated" && message.params?.threadSettings) {
@@ -61,7 +63,7 @@ export function qualifyProviderMessage(message) {
         ...message.params,
         threadSettings: {
           ...settings,
-          model: qualifiedModel(settings.modelProvider, settings.model),
+          model: routeModel(settings.model),
         },
       },
     };
@@ -351,7 +353,7 @@ export async function startCodexAppServerRouteProxy({
 
   server.on("connection", (downstream, request) => {
     const connection = Symbol("app-server-connection");
-    const launchNonce = new URL(request?.url ?? "/", "ws://127.0.0.1").searchParams.get("statewright_launch_nonce")?.trim() || null;
+    const launchNonce = bearerToken(request);
     const activeThreads = new Map();
     connectionActivities.set(connection, activeThreads);
     const activeProviders = new Map();
@@ -738,7 +740,7 @@ export async function startCodexAppServerRouteProxy({
           receipts.delete(receipt.threadId);
           await onRouteConfirmed(receipt);
         }
-        notification = qualifyProviderMessage(notification);
+        notification = normalizeProviderMessage(notification);
         payload = JSON.stringify(notification);
       } catch (error) {
         // Protocol traffic is still forwarded; receipt telemetry must never

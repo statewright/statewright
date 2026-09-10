@@ -7,7 +7,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, resolveManagedClientIdentity, resumedSessionId } from "../lib/managed-client-identity.mjs";
-import { bootstrapManagedClients, buildCodexAppServerHandoffArgs, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, codexThreadAttachmentMatches, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, retireCodexResident, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, waitForCodexProviderHandoff, waitForCodexThreadAttachment, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, buildCodexAppServerHandoffArgs, buildCodexRemoteConnection, buildRoutedArgs, CODEX_REMOTE_AUTH_TOKEN_ENV, codexAllSessionsRequested, codexOneShotInvocation, codexThreadAttachmentMatches, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, retireCodexResident, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, waitForCodexProviderHandoff, waitForCodexThreadAttachment, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -280,6 +280,7 @@ test("nested Codex launches discard parent thread and managed-control identities
       STATEWRIGHT_MANAGED_MCP_TOKEN: "parent-bridge-token",
       STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: "parent-root",
       STATEWRIGHT_MANAGED_TELEMETRY_OWNER: "supervisor",
+      [CODEX_REMOTE_AUTH_TOKEN_ENV]: "parent-launch-token",
     },
     overrides: {
       STATEWRIGHT_CLIENT_ID: "swc_child",
@@ -294,6 +295,7 @@ test("nested Codex launches discard parent thread and managed-control identities
   assert.equal(child.STATEWRIGHT_MANAGED_MCP_TOKEN, undefined);
   assert.equal(child.STATEWRIGHT_MANAGED_TELEMETRY_OWNER, undefined);
   assert.equal(child.STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID, undefined);
+  assert.equal(child[CODEX_REMOTE_AUTH_TOKEN_ENV], undefined);
   assert.equal(child.STATEWRIGHT_CLIENT_ID, "swc_child");
   assert.equal(child.CODEX_HOME, undefined);
   assert.equal(child.STATEWRIGHT_ROUTE_CONTROL_DIR, "/tmp/child-control");
@@ -681,6 +683,23 @@ test("App Server supervisor accepts only the exact provider launch receipt", () 
     method: "thread/start",
     threadId: "new-thread",
   }, fresh, "launch-1"), true);
+});
+
+test("App Server provider handoff uses a bare remote endpoint and bearer-token nonce", () => {
+  assert.deepEqual(buildCodexRemoteConnection({
+    proxyUrl: "ws://127.0.0.1:61234",
+    launchNonce: "launch-1",
+  }), {
+    args: ["--remote", "ws://127.0.0.1:61234", "--remote-auth-token-env", CODEX_REMOTE_AUTH_TOKEN_ENV],
+    environment: { [CODEX_REMOTE_AUTH_TOKEN_ENV]: "launch-1" },
+  });
+  assert.deepEqual(buildCodexRemoteConnection({
+    proxyUrl: "ws://127.0.0.1:61234",
+    launchNonce: null,
+  }), {
+    args: ["--remote", "ws://127.0.0.1:61234"],
+    environment: {},
+  });
 });
 
 test("Claude restart resumes the session with the requested model", () => {

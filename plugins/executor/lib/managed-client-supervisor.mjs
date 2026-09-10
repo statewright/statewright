@@ -13,9 +13,11 @@ import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
+export const CODEX_REMOTE_AUTH_TOKEN_ENV = "STATEWRIGHT_CODEX_REMOTE_AUTH_TOKEN";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TELEMETRY_AGENT = resolve(EXECUTOR_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
 const PARENT_MANAGED_IDENTITY_ENV = [
+  CODEX_REMOTE_AUTH_TOKEN_ENV,
   "STATEWRIGHT_CLIENT_ID",
   "STATEWRIGHT_MCP_SESSION_ID",
   "STATEWRIGHT_ROUTE_CONTROL_DIR",
@@ -477,6 +479,15 @@ function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "");
 }
 
+export function buildCodexRemoteConnection({ proxyUrl, launchNonce = null }) {
+  const args = ["--remote", String(proxyUrl)];
+  if (!launchNonce) return { args, environment: {} };
+  return {
+    args: [...args, "--remote-auth-token-env", CODEX_REMOTE_AUTH_TOKEN_ENV],
+    environment: { [CODEX_REMOTE_AUTH_TOKEN_ENV]: launchNonce },
+  };
+}
+
 export function codexThreadAttachmentMatches(attachment, handoff, launchNonce) {
   if (!attachment || !handoff || !launchNonce) return false;
   const expectedProvider = providerModel(`${handoff.provider}/_`).provider;
@@ -801,11 +812,11 @@ export async function runManagedClient({ host, command, args, environment = proc
           await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
           const launchNonce = claimedProviderHandoff ? randomUUID() : null;
           if (claimedProviderHandoff) await clearResidentThreadAttachment(home, routedClientId, launchNonce);
-          const remoteUrl = new URL(resident.proxyUrl);
-          if (launchNonce) remoteUrl.searchParams.set("statewright_launch_nonce", launchNonce);
-          const residentArgs = [...residentArgsBase, "--remote", remoteUrl.toString()];
+          const remoteConnection = buildCodexRemoteConnection({ proxyUrl: resident.proxyUrl, launchNonce });
+          const residentArgs = [...residentArgsBase, ...remoteConnection.args];
           const tuiEnvironment = {
             ...isolatedEnvironment,
+            ...remoteConnection.environment,
             STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
             STATEWRIGHT_MANAGED_CLIENT_HOST: host,
             STATEWRIGHT_CLIENT_ID: routedClientId,

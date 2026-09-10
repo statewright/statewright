@@ -88,11 +88,11 @@ web_search = "disabled"
 
 The profile file must declare both `model_provider` and `model_catalog_json`. Provider URLs and
 credentials remain in Codex configuration; Statewright reads only the profile name, routing keys,
-and model catalog. The native picker displays both `openai/<model>` and
-`local_compatible/<model>` entries. For a thread with completed work, selecting either provider
-resumes the same thread id there. A provider change before the first turn has been accepted starts
-a fresh thread because Codex has no durable rollout to resume. If a turn is active, the provider
-change is refused with guidance to wait for completion.
+and model catalog. The native picker keeps the active provider's model ids bare and qualifies only
+alternate-provider choices, such as `local_compatible/<model>`. For a thread with completed work,
+selecting either provider resumes the same thread id there. A provider change before the first turn
+has been accepted starts a fresh thread because Codex has no durable rollout to resume. If a turn
+is active, the provider change is refused with guidance to wait for completion.
 
 ## Run
 
@@ -226,6 +226,10 @@ generated App Server protocol surfaces:
 - `turn/start` and `turn/interrupt`
 - `mcpServerStatus/list` and `mcpServer/tool/call`
 - `item/completed`, `turn/completed`, `model/rerouted`, and token-usage notifications
+
+Provider handoff clients connect to the bare App Server proxy address required by Codex and carry
+their one-time launch nonce through `--remote-auth-token-env`. Provider-qualified picker ids are
+stripped before any thread, settings, turn, or compaction request reaches native Codex.
 
 Additional providers must be configured as profile-v2 files at
 `$CODEX_HOME/<name>.config.toml`, with `model_provider` and `model_catalog_json` set. Use only one

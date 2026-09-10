@@ -14,7 +14,7 @@ import {
   stopOwnedAppServer,
 } from "../lib/codex-app-server-transport.mjs";
 import { clearResidentThreadAttachment, ensureCodexAppServerResident, nextCodexResidentRouteRequest, readResidentThreadAttachment, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision, stageResidentProviderHandoff, takeResidentProviderHandoff, writeResidentProviderHandoff } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyProviderResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, mergeProviderModelList, providerHandoffForRoute, providerHandoffForSettingsUpdate, qualifyProviderMessage, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyProviderResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, mergeProviderModelList, normalizeProviderMessage, providerHandoffForRoute, providerHandoffForSettingsUpdate, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -155,7 +155,7 @@ test("App Server runtime applies a provider profile through supported config ove
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("mixed-provider catalogs use provider-qualified ids in the native picker", () => {
+test("mixed-provider catalogs keep active models native and qualify only alternate providers", () => {
   const response = {
     id: 3,
     result: {
@@ -172,22 +172,41 @@ test("mixed-provider catalogs use provider-qualified ids in the native picker", 
     }],
   });
   assert.deepEqual(merged.result.data.map(({ id, model, displayName }) => ({ id, model, displayName })), [
-    { id: "openai/cloud-model", model: "openai/cloud-model", displayName: "Cloud Model" },
+    { id: "cloud-model", model: "cloud-model", displayName: "Cloud Model" },
     { id: "local_compatible/local-model", model: "local_compatible/local-model", displayName: "Local Model" },
+  ]);
+  const switched = mergeProviderModelList({
+    id: 4,
+    result: {
+      data: [{ id: "local-model", model: "local-model", displayName: "Local Model", isDefault: true }],
+      nextCursor: null,
+    },
+  }, {
+    activeProvider: "local_compatible",
+    profiles: [{
+      provider: "openai",
+      models: [{ id: "cloud-model", model: "cloud-model", displayName: "Cloud Model", isDefault: false }],
+    }],
+  });
+  assert.deepEqual(switched.result.data.map(({ id, model }) => ({ id, model })), [
+    { id: "local-model", model: "local-model" },
+    { id: "openai/cloud-model", model: "openai/cloud-model" },
   ]);
 });
 
-test("provider-qualified thread state is reversible at the proxy boundary", () => {
+test("active-provider thread state remains native at the proxy boundary", () => {
   const response = {
     id: 4,
-    result: { thread: { id: "thread-1", modelProvider: "local_compatible" }, model: "local-model", modelProvider: "local_compatible" },
+    result: { thread: { id: "thread-1", model: "openai/gpt-5.6-sol", modelProvider: "openai" }, model: "openai/gpt-5.6-sol", modelProvider: "openai" },
   };
-  assert.equal(qualifyProviderMessage(response).result.model, "local_compatible/local-model");
-  const notification = qualifyProviderMessage({
+  const normalized = normalizeProviderMessage(response);
+  assert.equal(normalized.result.model, "gpt-5.6-sol");
+  assert.equal(normalized.result.thread.model, "gpt-5.6-sol");
+  const notification = normalizeProviderMessage({
     method: "thread/settings/updated",
-    params: { threadId: "thread-1", threadSettings: { model: "local-model", modelProvider: "local_compatible" } },
+    params: { threadId: "thread-1", threadSettings: { model: "openai/gpt-5.6-sol", modelProvider: "openai" } },
   });
-  assert.equal(notification.params.threadSettings.model, "local_compatible/local-model");
+  assert.equal(notification.params.threadSettings.model, "gpt-5.6-sol");
 });
 
 test("manual picker selection requests an idle provider handoff and same-provider updates stay in place", () => {
@@ -665,12 +684,12 @@ test("resident proxy merges provider catalogs and hands manual cross-provider se
       result: { data: [{ id: "cloud-model", model: "cloud-model", displayName: "Cloud Model", isDefault: true }], nextCursor: null },
     }));
     const listed = JSON.parse(String(await listResponse));
-    assert.deepEqual(listed.result.data.map((model) => model.model), ["openai/cloud-model", "local_compatible/local-model"]);
+    assert.deepEqual(listed.result.data.map((model) => model.model), ["cloud-model", "local_compatible/local-model"]);
     const turnForwarded = once(upstreamSocket, "message");
     client.send(JSON.stringify({
       id: 9,
       method: "turn/start",
-      params: { threadId: "thread-1", model: "openai/cloud-model", input: [] },
+      params: { threadId: "thread-1", model: "cloud-model", input: [] },
     }));
     assert.equal(JSON.parse(String(await turnForwarded)).params.model, "cloud-model");
     const turnResponse = once(client, "message");
@@ -1392,8 +1411,10 @@ test("resident proxy confirms a target thread only after its attach response is 
   await once(upstream, "listening");
   const address = upstream.address();
   let upstreamSocket;
-  const connected = new Promise((resolveConnection) => upstream.once("connection", (socket) => {
+  let upstreamAuthorization;
+  const connected = new Promise((resolveConnection) => upstream.once("connection", (socket, request) => {
     upstreamSocket = socket;
+    upstreamAuthorization = request.headers.authorization;
     resolveConnection();
   }));
   const attachments = [];
@@ -1404,10 +1425,11 @@ test("resident proxy confirms a target thread only after its attach response is 
     takePendingRoute: async () => null,
     onThreadAttached: async (attachment) => attachments.push(attachment),
   });
-  const client = new WebSocket(`${proxy.url}?statewright_launch_nonce=launch-1`);
+  const client = new WebSocket(proxy.url, { headers: { authorization: "Bearer launch-1" } });
   try {
     await once(client, "open");
     await connected;
+    assert.equal(upstreamAuthorization, undefined, "the launch bearer must terminate at the loopback proxy");
     const forwarded = once(upstreamSocket, "message");
     client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "thread-1" } }));
     await forwarded;

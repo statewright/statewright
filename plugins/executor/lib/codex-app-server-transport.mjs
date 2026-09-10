@@ -4,6 +4,7 @@ import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
+import { startCodexResponsesCompatibilityProxy } from "./codex-responses-compat-proxy.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
 import { terminateWindowsProcessTree } from "./managed-client-supervisor.mjs";
 
@@ -126,6 +127,48 @@ function tomlTopLevelStrings(source) {
   return values;
 }
 
+export function codexProviderBaseUrl(source, provider) {
+  const expected = String(provider ?? "").trim();
+  if (!expected) return null;
+  let activeProvider = null;
+  for (const line of String(source).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const table = trimmed.match(/^\[model_providers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))\]\s*(?:#.*)?$/);
+    if (table) {
+      activeProvider = table[1] ?? table[2] ?? table[3];
+      continue;
+    }
+    if (trimmed.startsWith("[")) {
+      activeProvider = null;
+      continue;
+    }
+    if (activeProvider !== expected) continue;
+    const setting = trimmed.match(/^base_url\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?$/);
+    if (!setting) continue;
+    try {
+      return setting[1].startsWith('"') ? JSON.parse(setting[1]) : setting[1].slice(1, -1);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function statewrightProviderSettings(codexHome, profileName) {
+  const path = join(codexHome, `${profileName}.statewright.json`);
+  const source = await readFile(path, "utf8").catch((error) => {
+    if (error?.code === "ENOENT") return "{}";
+    throw error;
+  });
+  const settings = JSON.parse(source);
+  const compatibility = settings?.responses_compatibility;
+  if (compatibility !== undefined && compatibility !== "replace_encrypted_compaction") {
+    throw new Error(`Statewright profile '${profileName}' has an unsupported responses_compatibility value.`);
+  }
+  return compatibility ? { responsesCompatibility: compatibility } : {};
+}
+
 function modelListEntry(model) {
   const id = String(model?.slug ?? "").trim();
   if (!id) return null;
@@ -184,12 +227,14 @@ export async function discoverCodexProviderProfiles(codexHome) {
       throw new Error(`Codex provider '${provider}' is configured by both '${existingProfile}.config.toml' and '${entry.name}'. Use one profile-v2 catalog per provider so /model selections have an unambiguous launch profile.`);
     }
     const profileName = entry.name.slice(0, -".config.toml".length);
+    const statewrightSettings = await statewrightProviderSettings(codexHome, profileName);
     providerProfiles.set(provider, profileName);
     profiles.push({
       profile: profileName,
       provider,
       model: String(values.model ?? models[0].model).trim(),
       webSearch: values.web_search ?? null,
+      ...statewrightSettings,
       appServerConfig: {
         model: String(values.model ?? models[0].model).trim(),
         model_provider: provider,
@@ -410,7 +455,35 @@ export async function startCodexAppServerRuntime({
     model: selectedProfile.model,
   } : null);
 
-  const appServer = spawn(command, [...commandArgs, "app-server", ...appServerConfigArgs(selectedProfile, activeRoute), "--listen", url], {
+  let compatibilityProxy = null;
+  let launchProfile = selectedProfile;
+  if (selectedProfile?.responsesCompatibility === "replace_encrypted_compaction") {
+    const configSource = await readFile(join(codexHome, "config.toml"), "utf8");
+    const upstreamBaseUrl = codexProviderBaseUrl(configSource, selectedProfile.provider);
+    if (!upstreamBaseUrl) {
+      throw new Error(`Statewright could not find model_providers.${selectedProfile.provider}.base_url for the Responses compatibility adapter.`);
+    }
+    compatibilityProxy = await startCodexResponsesCompatibilityProxy({
+      upstreamBaseUrl,
+      onTranslation: async ({ translated }) => {
+        await telemetry("app_server_compaction_compatibility_applied", {
+          client_id: clientId,
+          provider: selectedProfile.provider,
+          translated_items: translated,
+        });
+        stderr.write(`[statewright] translated ${translated} provider-incompatible encrypted compaction item${translated === 1 ? "" : "s"} into an explicit history handoff.\n`);
+      },
+    });
+    launchProfile = {
+      ...selectedProfile,
+      appServerConfig: {
+        ...selectedProfile.appServerConfig,
+        [`model_providers.${selectedProfile.provider}.base_url`]: compatibilityProxy.baseUrl,
+      },
+    };
+  }
+
+  const appServer = spawn(command, [...commandArgs, "app-server", ...appServerConfigArgs(launchProfile, activeRoute), "--listen", url], {
     cwd,
     env: { ...environment, CODEX_HOME: appServerHome },
     stdio: ["ignore", "pipe", "pipe"],
@@ -484,6 +557,7 @@ export async function startCodexAppServerRuntime({
           await reporter.report(error, { mechanism: "shutdown", host: "codex", operation: "app_server_proxy" }).catch(() => {});
         });
         await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
+        await compatibilityProxy?.close();
         // Keep the isolated home addressable after shutdown. A native TUI can
         // still be holding the App Server URL while the owned server exits;
         // deleting the projection turns a recoverable disconnect into
@@ -494,6 +568,7 @@ export async function startCodexAppServerRuntime({
   } catch (error) {
     closing = true;
     await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
+    await compatibilityProxy?.close().catch(() => {});
     // Preserve the projection for a TUI that may still be unwinding after a
     // failed startup; see the normal close path above.
     throw error;

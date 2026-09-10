@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   appServerHomePrefixForClient,
+  codexProviderBaseUrl,
   codexAppServerTransportEnabled,
   discoverCodexProviderProfiles,
   routeConfigEdits,
@@ -39,6 +40,19 @@ test("App Server transport creates bounded, filesystem-safe temporary home names
   assert.match(appServerHomePrefixForClient("x".repeat(100)), /^statewright-x{60}$/);
 });
 
+test("Codex provider base URLs are read only from the exact configured provider table", () => {
+  const source = [
+    '[model_providers.openai_compatible]',
+    'base_url = "https://example.invalid/v1"',
+    '[model_providers.local_history_limited]',
+    'base_url = "https://qwen.invalid/v1"',
+    '[model_providers.after]',
+    'base_url = "https://after.invalid/v1"',
+  ].join("\n");
+  assert.equal(codexProviderBaseUrl(source, "local_history_limited"), "https://qwen.invalid/v1");
+  assert.equal(codexProviderBaseUrl(source, "missing"), null);
+});
+
 test("Codex profile-v2 discovery exposes only provider catalogs without leaking endpoint config", async () => {
   const codexHome = await mkdtemp(join(tmpdir(), "statewright-provider-profiles-"));
   try {
@@ -50,6 +64,9 @@ test("Codex profile-v2 discovery exposes only provider catalogs without leaking 
       'web_search = "disabled"',
       '',
     ].join("\n"));
+    await writeFile(join(codexHome, "local.statewright.json"), JSON.stringify({
+      responses_compatibility: "replace_encrypted_compaction",
+    }));
     await writeFile(join(codexHome, "ignored.config.toml"), 'model = "another-cloud-model"\n');
     await writeFile(join(codexHome, "catalog.json"), JSON.stringify({ models: [{
       slug: "local-model",
@@ -66,6 +83,7 @@ test("Codex profile-v2 discovery exposes only provider catalogs without leaking 
       provider: "local_compatible",
       model: "local-model",
       webSearch: "disabled",
+      responsesCompatibility: "replace_encrypted_compaction",
       appServerConfig: {
         model: "local-model",
         model_provider: "local_compatible",

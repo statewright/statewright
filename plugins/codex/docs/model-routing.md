@@ -94,6 +94,24 @@ selecting either provider resumes the same thread id there. A provider change be
 has been accepted starts a fresh thread because Codex has no durable rollout to resume. If a turn
 is active, the provider change is refused with guidance to wait for completion.
 
+Some Responses-compatible providers cannot accept the opaque `compaction` items produced by a
+different provider. Opt one profile into Statewright's bounded compatibility adapter with a
+same-named `$CODEX_HOME/local.statewright.json` sidecar:
+
+```json
+{
+  "responses_compatibility": "replace_encrypted_compaction"
+}
+```
+
+For that profile only, Statewright reads its `base_url`, routes Codex through a loopback HTTP
+adapter, and replaces each undecodable `compaction` or `context_compaction` item with an explicit
+developer handoff note. Retained user/developer items and all post-checkpoint history stay in their
+original order. The adapter cannot recover the encrypted assistant summary; the inserted note
+tells the target model to reconstruct and verify prior state. Authorization headers are forwarded
+without being written to telemetry. Profiles without the sidecar, including the built-in OpenAI
+provider, keep Codex's direct request path.
+
 ## Run
 
 From the Statewright checkout:

@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { annotateToolsListResponse } from "./tool-annotations.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
@@ -67,7 +68,9 @@ export class ManagedMcpBridge {
           if (value) responseHeaders[name] = value;
         }
         response.writeHead(upstream.status, responseHeaders);
-        response.end(Buffer.from(responseBody));
+        response.end(upstream.ok
+          ? annotateToolsListResponse(body, Buffer.from(responseBody), responseHeaders["Content-Type"])
+          : Buffer.from(responseBody));
       } catch {
         response.writeHead(502, { "Content-Type": "application/json" });
         response.end('{"error":"Statewright managed MCP bridge unavailable."}\n');

@@ -2671,6 +2671,51 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
+    #[test]
+    fn tools_list_preserves_annotations_across_active_and_inactive_workflows() {
+        let mut gateway = test_gateway();
+        let annotations = json!({
+            "title": "Read", "readOnlyHint": true, "destructiveHint": false,
+            "openWorldHint": true, "vendorHint": "preserved"
+        });
+        gateway.upstream = UpstreamManager::mock(vec![(
+            serde_json::from_value(json!({
+                "name": "read_file", "inputSchema": {}, "annotations": annotations
+            }))
+            .unwrap(),
+            crate::protocol::ToolCallResult::text("contents"),
+        )]);
+        for active in [Some("test".into()), None] {
+            gateway.active_workflow = active;
+            let result = gateway.handle_tools_list(Some(json!(1))).result.unwrap();
+            let tools = result["tools"].as_array().unwrap();
+            assert_eq!(
+                tools.iter().find(|t| t["name"] == "read_file").unwrap()["annotations"],
+                annotations
+            );
+            for name in [
+                "statewright_get_state",
+                "statewright_get_usage",
+                "statewright_list_workflows",
+            ] {
+                assert_eq!(
+                    tools.iter().find(|t| t["name"] == name).unwrap()["annotations"],
+                    json!({
+                        "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false
+                    })
+                );
+            }
+            assert!(
+                tools
+                    .iter()
+                    .find(|t| t["name"] == "statewright_transition")
+                    .unwrap()
+                    .get("annotations")
+                    .is_none()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn adapter_rpcs_share_gateway_enforcement_and_accounting() {
         let mut gateway = test_gateway();
@@ -3404,6 +3449,7 @@ mod tests {
         // Mock upstream with Edit tool that returns success
         let mock_edit = (
             ToolInfo {
+                annotations: None,
                 name: "Edit".into(),
                 description: Some("Edit a file".into()),
                 input_schema: json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
@@ -3412,6 +3458,7 @@ mod tests {
         );
         let mock_read = (
             ToolInfo {
+                annotations: None,
                 name: "Read".into(),
                 description: Some("Read a file".into()),
                 input_schema: json!({"type": "object", "properties": {"file_path": {"type": "string"}}}),
@@ -3420,6 +3467,7 @@ mod tests {
         );
         let mock_bash = (
             ToolInfo {
+                annotations: None,
                 name: "Bash".into(),
                 description: Some("Run a command".into()),
                 input_schema: json!({"type": "object", "properties": {"command": {"type": "string"}}}),
@@ -3661,6 +3709,7 @@ mod tests {
 
         let mock_edit = (
             ToolInfo {
+                annotations: None,
                 name: "Edit".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),
@@ -3669,6 +3718,7 @@ mod tests {
         );
         let mock_read = (
             ToolInfo {
+                annotations: None,
                 name: "Read".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),
@@ -3677,6 +3727,7 @@ mod tests {
         );
         let mock_grep = (
             ToolInfo {
+                annotations: None,
                 name: "Grep".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),
@@ -3814,6 +3865,7 @@ mod tests {
         let mgr = SessionManager::new();
         let mock_deploy = (
             ToolInfo {
+                annotations: None,
                 name: "deploy".into(),
                 description: None,
                 input_schema: json!({"type": "object"}),

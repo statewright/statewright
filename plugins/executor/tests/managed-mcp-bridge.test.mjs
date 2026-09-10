@@ -65,3 +65,33 @@ test("managed MCP bridge rejects a caller without its supervisor token", async (
     await upstream.close();
   }
 });
+
+test("managed MCP bridge annotates successful JSON tool lists without changing SSE or failures", async () => {
+  const payload = '{ "jsonrpc":"2.0", "result":{"tools":[{"name":"statewright_get_usage"},{"name":"statewright_transition"}]}, "id":1 }\n';
+  let contentType = "application/json";
+  let status = 200;
+  const bridge = await new ManagedMcpBridge({
+    gatewayUrl: "https://gateway.example/mcp", apiKey: "test-key", clientId: "test-client", token: "bridge-token",
+    fetch: async () => new Response(payload, { status, headers: { "content-type": contentType, "mcp-session-id": "session-1" } }),
+  }).start();
+  const call = () => fetch(`${bridge.url}/mcp`, {
+    method: "POST", headers: { Authorization: "Bearer bridge-token" },
+    body: '{"jsonrpc":"2.0","method":"tools/list","id":1}',
+  });
+  try {
+    const response = await call();
+    assert.equal(response.headers.get("mcp-session-id"), "session-1");
+    const { result } = await response.json();
+    assert.deepEqual(result.tools[0].annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false });
+    assert.equal(result.tools[1].annotations, undefined);
+    contentType = "text/event-stream";
+    assert.equal(await (await call()).text(), payload);
+    contentType = "application/json";
+    status = 500;
+    const failure = await call();
+    assert.equal(failure.status, 500);
+    assert.equal(await failure.text(), payload);
+  } finally {
+    await bridge.close();
+  }
+});

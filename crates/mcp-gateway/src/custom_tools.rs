@@ -1,7 +1,7 @@
 use serde_json::json;
 use statewright_engine::resolve_transition;
 
-use crate::protocol::ToolInfo;
+use crate::protocol::{ToolAnnotations, ToolInfo};
 use crate::session::GatewaySession;
 
 /// Handle the statewright_transition tool call.
@@ -274,6 +274,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
 pub fn custom_tool_definitions() -> Vec<ToolInfo> {
     vec![
         ToolInfo {
+            annotations: None,
             name: "statewright_transition".into(),
             description: Some(
                 "Transition the state machine to a new state by emitting an event.".into(),
@@ -294,6 +295,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_get_state".into(),
             description: Some(
                 "Get the current state machine state, available tools, transitions, and iteration count.".into(),
@@ -304,6 +306,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_get_usage".into(),
             description: Some(
                 "Get state-level provider token usage, tool-result estimates, and non-tool overhead. Values identify whether they are exact or estimated.".into(),
@@ -314,6 +317,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_list_workflows".into(),
             description: Some(
                 "List all available named workflows and which one is currently active.".into(),
@@ -324,6 +328,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_load_workflow".into(),
             description: Some(
                 "Load a named workflow, resetting the state machine to the workflow's initial state.".into(),
@@ -356,6 +361,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_pause".into(),
             description: Some(
                 "Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).".into(),
@@ -366,6 +372,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_deactivate".into(),
             description: Some(
                 "Deactivate workflow enforcement. All tools pass through without restriction.".into(),
@@ -376,6 +383,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_get_status".into(),
             description: Some(
                 "Get gateway status: active workflow, current state, available workflows.".into(),
@@ -386,6 +394,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_create_workflow".into(),
             description: Some(
                 "Create a new workflow from a JSON definition. Schema at https://statewright.ai/workflow-schema.json".into(),
@@ -410,6 +419,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_run_agent".into(),
             description: Some(
                 "Run a state-machine-constrained agent to fix bugs or build features. Spawns the Rust agent executor and streams progress.".into(),
@@ -438,6 +448,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: None,
             name: "statewright_get_model_traits".into(),
             description: Some(
                 "Get model behavioral traits from the registry. Returns tool_mode, reasoning support, context limits, and other characteristics the agent should use to configure itself for the given model.".into(),
@@ -458,6 +469,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
 /// Force-state tool definition, gated on meta.debug.
 pub fn force_state_tool_definition() -> ToolInfo {
     ToolInfo {
+        annotations: None,
         name: "statewright_force_state".into(),
         description: Some(
             "Force the state machine to a specific state, bypassing guards and transitions. Debug mode only.".into(),
@@ -639,6 +651,37 @@ mod tests {
                 .iter()
                 .any(|t| t.name == "statewright_get_model_traits")
         );
+    }
+
+    #[test]
+    fn custom_tool_annotations_only_classify_proven_reads() {
+        let read_tools = [
+            "statewright_get_state",
+            "statewright_get_usage",
+            "statewright_list_workflows",
+        ];
+        for tool in custom_tool_definitions()
+            .into_iter()
+            .chain([force_state_tool_definition()])
+        {
+            let value = serde_json::to_value(&tool).unwrap();
+            if read_tools.contains(&tool.name.as_str()) {
+                assert_eq!(
+                    value["annotations"],
+                    json!({
+                        "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false
+                    }),
+                    "{}",
+                    tool.name
+                );
+            } else {
+                assert!(
+                    value.get("annotations").is_none(),
+                    "{} must remain conservative",
+                    tool.name
+                );
+            }
+        }
     }
 
     #[test]

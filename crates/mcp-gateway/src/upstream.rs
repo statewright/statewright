@@ -341,6 +341,7 @@ mod tests {
         let mgr = UpstreamManager::mock(vec![
             (
                 ToolInfo {
+                    annotations: None,
                     name: "Edit".into(),
                     description: Some("Edit".into()),
                     input_schema: serde_json::json!({}),
@@ -349,6 +350,7 @@ mod tests {
             ),
             (
                 ToolInfo {
+                    annotations: None,
                     name: "Read".into(),
                     description: Some("Read".into()),
                     input_schema: serde_json::json!({}),
@@ -366,6 +368,7 @@ mod tests {
     async fn mock_call_tool_returns_canned_result() {
         let mut mgr = UpstreamManager::mock(vec![(
             ToolInfo {
+                annotations: None,
                 name: "Edit".into(),
                 description: None,
                 input_schema: serde_json::json!({}),
@@ -384,6 +387,7 @@ mod tests {
     async fn mock_call_tool_unknown_tool_errors() {
         let mut mgr = UpstreamManager::mock(vec![(
             ToolInfo {
+                annotations: None,
                 name: "Edit".into(),
                 description: None,
                 input_schema: serde_json::json!({}),

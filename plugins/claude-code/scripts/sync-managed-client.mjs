@@ -16,6 +16,7 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/codex-history-integrity.mjs", "executor/lib/codex-history-integrity.mjs"],
   ["lib/managed-client-identity.mjs", "executor/lib/managed-client-identity.mjs"],
   ["lib/managed-mcp-bridge.mjs", "executor/lib/managed-mcp-bridge.mjs"],
+  ["lib/tool-annotations.mjs", "executor/lib/tool-annotations.mjs"],
   ["lib/remote-client.mjs", "executor/lib/remote-client.mjs"],
 ];
 

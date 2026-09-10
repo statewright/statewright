@@ -108,9 +108,11 @@ For that profile only, Statewright reads its `base_url`, routes Codex through a 
 adapter, and replaces each undecodable `compaction` or `context_compaction` item with an explicit
 developer handoff note. Retained user/developer items and all post-checkpoint history stay in their
 original order. The adapter cannot recover the encrypted assistant summary; the inserted note
-tells the target model to reconstruct and verify prior state. Authorization headers are forwarded
-without being written to telemetry. Profiles without the sidecar, including the built-in OpenAI
-provider, keep Codex's direct request path.
+tells the target model to reconstruct and verify prior state. Function names outside the provider's
+portable 64-character identifier boundary are mapped deterministically on requests and restored on
+streamed tool calls. Authorization headers are forwarded without being written to telemetry.
+Profiles without the sidecar, including the built-in OpenAI provider, keep Codex's direct request
+path.
 
 ## Run
 

@@ -465,13 +465,15 @@ export async function startCodexAppServerRuntime({
     }
     compatibilityProxy = await startCodexResponsesCompatibilityProxy({
       upstreamBaseUrl,
-      onTranslation: async ({ translated }) => {
-        await telemetry("app_server_compaction_compatibility_applied", {
+      onTranslation: async ({ translated, renamedTools }) => {
+        await telemetry("app_server_responses_compatibility_applied", {
           client_id: clientId,
           provider: selectedProfile.provider,
           translated_items: translated,
+          renamed_tools: renamedTools,
         });
-        stderr.write(`[statewright] translated ${translated} provider-incompatible encrypted compaction item${translated === 1 ? "" : "s"} into an explicit history handoff.\n`);
+        if (translated > 0) stderr.write(`[statewright] translated ${translated} provider-incompatible encrypted compaction item${translated === 1 ? "" : "s"} into an explicit history handoff.\n`);
+        if (renamedTools > 0) stderr.write(`[statewright] mapped ${renamedTools} provider-incompatible function name${renamedTools === 1 ? "" : "s"} at the Responses boundary.\n`);
       },
     });
     launchProfile = {

@@ -703,3 +703,62 @@ test("App Server route proxy injects one pending route and records the server re
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));
 });
+
+test("App Server route proxy binds a bare-picker selection and refreshes labels on subsequent lists", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const upstreamAddress = upstream.address();
+  const labels = {};
+  const resumed = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstreamAddress.port}`,
+    getThreadLabels: async () => labels,
+    onThreadResumed: async ({ threadId }) => {
+      resumed.push(threadId);
+      labels[`codex:${threadId}`] = { label: "adv" };
+    },
+  });
+  const upstreamConnection = new Promise((resolveConnection) => upstream.once("connection", resolveConnection));
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  const upstreamSocket = await upstreamConnection;
+  const resumeForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "picker-thread" } }));
+  assert.equal((await resumeForwarded).method, "thread/resume");
+  const resumeResult = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  upstreamSocket.send(JSON.stringify({ id: 1, result: { thread: { id: "picker-thread" } } }));
+  await resumeResult;
+  assert.deepEqual(resumed, ["picker-thread"]);
+  const listForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  client.send(JSON.stringify({ id: 2, method: "thread/list", params: {} }));
+  await listForwarded;
+  const listResult = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  upstreamSocket.send(JSON.stringify({ id: 2, result: { data: [{ id: "picker-thread", cwd: "/repo", name: "Selected session" }] } }));
+  assert.equal((await listResult).result.data[0].name, "[adv · /repo] Selected session");
+  client.close();
+  await proxy.close();
+  await new Promise((resolveClose) => upstream.close(resolveClose));
+});
+
+test("App Server route proxy fails open when optional picker-label callbacks fail", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const upstreamAddress = upstream.address();
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstreamAddress.port}`,
+    getThreadLabels: async () => { throw new Error("label store unavailable"); },
+    onThreadResumed: async () => { throw new Error("label write unavailable"); },
+  });
+  const upstreamConnection = new Promise((resolveConnection) => upstream.once("connection", resolveConnection));
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  const upstreamSocket = await upstreamConnection;
+  client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "still-resumes" } }));
+  await new Promise((resolveMessage) => upstreamSocket.once("message", resolveMessage));
+  const result = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  upstreamSocket.send(JSON.stringify({ id: 1, result: { thread: { id: "still-resumes" } } }));
+  assert.equal((await result).result.thread.id, "still-resumes");
+  client.close();
+  await proxy.close();
+  await new Promise((resolveClose) => upstream.close(resolveClose));
+});

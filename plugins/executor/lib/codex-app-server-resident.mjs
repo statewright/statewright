@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
-import { codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
@@ -141,7 +141,7 @@ async function createManagedMcpBridge({ environment, clientId }) {
   return bridge;
 }
 
-export async function ensureCodexAppServerResident({ command, cwd, environment = process.env, home = homedir(), clientId, threadListCwd = null }) {
+export async function ensureCodexAppServerResident({ command, cwd, environment = process.env, home = homedir(), clientId, threadListCwd = null, terminalLabel = null }) {
   const root = residentRoot(home, clientId);
   const manifestPath = join(root, "manifest.json");
   const runtimeRevision = await residentRuntimeRevision();
@@ -163,6 +163,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
     "--cwd", cwd,
     "--home", home,
     "--thread-list-cwd", threadListCwd ?? "",
+    "--terminal-label", terminalLabel ?? "",
   ], {
     cwd,
     env: { ...environment, STATEWRIGHT_CODEX_RESIDENT_ROOT: root },
@@ -187,6 +188,7 @@ async function main() {
   const cwd = values.cwd;
   const home = values.home ?? homedir();
   const threadListCwd = values["thread-list-cwd"] || null;
+  const terminalLabel = values["terminal-label"] || null;
   const reporter = createErrorReporter({ plugin: "codex", version: "0.3.3" });
   reporter.installProcessHandlers();
   if (!clientId || !command || !cwd) throw new Error("resident requires client-id, command, and cwd");
@@ -221,7 +223,10 @@ async function main() {
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     threadListCwd,
-    threadLabels: await readManagedSessionLabels(home),
+    getThreadLabels: () => readManagedSessionLabels(home),
+    onThreadResumed: terminalLabel
+      ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
+      : undefined,
     onIdle: stop,
     telemetry: telemetryWriter(process.env),
     reporter,

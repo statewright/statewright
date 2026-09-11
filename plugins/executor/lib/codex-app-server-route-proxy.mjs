@@ -173,6 +173,8 @@ export async function startCodexAppServerRouteProxy({
   resumeHistoryLimit = 4,
   threadListCwd = null,
   threadLabels = {},
+  getThreadLabels = async () => threadLabels,
+  onThreadResumed = async () => {},
   forwardPayload = forwardWhenOpen,
   idleMs = 500,
   onIdle = async () => {},
@@ -351,10 +353,15 @@ export async function startCodexAppServerRouteProxy({
         if (responseTo === "thread/resume") {
           notification = clarifyActiveWriterResumeError(notification);
           notification = hydrateBoundedResumeTurns(notification);
+          const threadId = String(notification?.result?.thread?.id ?? "");
+          // Pane labels are display-only. A local metadata write must never
+          // turn a valid upstream resume into a failed native interaction.
+          if (threadId) await onThreadResumed({ threadId }).catch(() => {});
           payload = JSON.stringify(notification);
         }
         if (responseTo === "thread/list") {
-          notification = labelThreadListResponse(notification, homedir(), threadLabels);
+          const labels = await getThreadLabels().catch(() => threadLabels);
+          notification = labelThreadListResponse(notification, homedir(), labels);
           payload = JSON.stringify(notification);
         }
         const statusThreadId = String(notification?.params?.threadId ?? "");

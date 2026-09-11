@@ -204,7 +204,12 @@ test("App Server routing selects the ladder entry owned by the persistent thread
   assert.equal(cloud.message.params.effort, "low");
 });
 
-test("App Server resume history is scoped to the managed project unless the client supplied a cwd", () => {
+test("App Server preserves an explicit thread/list cwd but global discovery passes no scope", () => {
+  assert.deepEqual(applyThreadListCwd({ id: 0, method: "thread/list", params: { limit: 20 } }, null), {
+    id: 0,
+    method: "thread/list",
+    params: { limit: 20 },
+  });
   assert.deepEqual(applyThreadListCwd({ id: 1, method: "thread/list", params: { limit: 20 } }, "/repo"), {
     id: 1,
     method: "thread/list",
@@ -635,7 +640,6 @@ test("App Server route proxy injects one pending route and records the server re
     },
     onRouteInjected: async (receipt) => injected.push(receipt),
     onRouteConfirmed: async (receipt) => confirmed.push(receipt),
-    threadListCwd: "/repo",
   });
   let upstreamSocket;
   const upstreamConnection = new Promise((resolveConnection) => upstream.once("connection", (socket) => {
@@ -649,7 +653,7 @@ test("App Server route proxy injects one pending route and records the server re
   assert.equal((await fetch(`${proxy.url.replace("ws:", "http:")}/healthz`)).status, 200);
   const listForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: -1, method: "thread/list", params: { limit: 20 } }));
-  assert.deepEqual(await listForwarded, { id: -1, method: "thread/list", params: { limit: 20, cwd: "/repo" } });
+  assert.deepEqual(await listForwarded, { id: -1, method: "thread/list", params: { limit: 20 } });
   const labelledList = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   upstreamSocket.send(JSON.stringify({
     id: -1,

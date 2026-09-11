@@ -7,7 +7,7 @@ import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { codexHistoryRepairMode, guardCodexResumeHistory } from "./codex-history-integrity.mjs";
-import { bindManagedClientIdentity, claimManagedSessionOwner, codexRouteOwnsRoot, readCodexRootSession, releaseManagedSessionOwner, resetCodexRootSession, resolveManagedClientIdentity, resumedSessionId, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSessionOwner, codexRouteOwnsRoot, readCodexRootSession, releaseManagedSessionOwner, resetCodexRootSession, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
@@ -592,6 +592,9 @@ export async function runManagedClient({ host, command, args, environment = proc
     const identity = await resolveManagedClientIdentity({ host, args, home, cwd });
     const routedClientId = identity.clientId;
     if (host === "codex") codexRootSessionId = identity.sessionId;
+    if (host === "codex" && identity.sessionId) {
+      await bindManagedSessionLabel({ host, sessionId: identity.sessionId, label: tmuxWindowLabel(environment), cwd, home });
+    }
     if (host === "codex" && identity.sessionId && !oneShotCodexExec) {
       managedSessionOwner = await claimManagedSessionOwner({
         host,

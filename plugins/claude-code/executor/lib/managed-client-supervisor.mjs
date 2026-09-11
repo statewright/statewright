@@ -650,7 +650,10 @@ export async function runManagedClient({ host, command, args, environment = proc
           environment: isolatedEnvironment,
           home,
           clientId: routedClientId,
-          threadListCwd: codexAllSessionsRequested(args) ? null : cwd,
+          // The native resume picker is a cross-project session chooser. Its
+          // rows are decorated from each rollout's session_meta cwd, so do
+          // not filter discovery to the checkout that launched the picker.
+          threadListCwd: null,
           terminalLabel,
         });
         const residentRoutes = residentControlDir(home, routedClientId);

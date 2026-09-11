@@ -30,8 +30,8 @@ async function sessionMetadata(path) {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
     const prompts = rows.filter((item) => item?.type === "response_item" && item?.payload?.type === "message" && item.payload.role === "user")
-      .map((item) => synopsisText(item.payload.content)).filter(Boolean).slice(-5);
-    return { cwd, synopsis: prompts.join(" · ") || null };
+      .map((item) => synopsisText(item.payload.content)).filter(Boolean);
+    return { cwd, synopsis: prompts.at(-1) ?? null };
   } catch { return null; }
   finally { await handle?.close().catch(() => {}); }
 }

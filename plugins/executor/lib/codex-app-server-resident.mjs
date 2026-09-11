@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
+import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
 import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
@@ -17,6 +18,7 @@ const RESIDENT_RUNTIME_FILES = [
   RESIDENT_ENTRYPOINT,
   join(EXECUTOR_ROOT, "codex-app-server-transport.mjs"),
   join(EXECUTOR_ROOT, "codex-app-server-route-proxy.mjs"),
+  join(EXECUTOR_ROOT, "codex-session-metadata.mjs"),
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
@@ -198,6 +200,7 @@ async function main() {
   await mkdir(controlDir, { recursive: true, mode: 0o700 });
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
   const bridge = await createManagedMcpBridge({ environment: process.env, clientId });
+  const knownThreadCwds = new Map();
   let runtime = null;
   let stopping = false;
   const stop = async () => {
@@ -224,6 +227,14 @@ async function main() {
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
+    getThreadCwds: async (threadIds) => {
+      const missing = threadIds.filter((id) => !knownThreadCwds.has(id));
+      if (missing.length) {
+        const resolved = await readCodexThreadCwds({ threadIds: missing, home });
+        for (const [id, cwd] of Object.entries(resolved)) knownThreadCwds.set(id, cwd);
+      }
+      return Object.fromEntries(threadIds.flatMap((id) => knownThreadCwds.has(id) ? [[id, knownThreadCwds.get(id)]] : []));
+    },
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,

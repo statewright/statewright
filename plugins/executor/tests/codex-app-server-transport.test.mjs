@@ -13,6 +13,7 @@ import {
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -242,10 +243,18 @@ test("App Server resume list labels thread names with their home-relative projec
   assert.equal(labelled.result.data[0].status.type, "active");
   assert.equal(labelThreadListResponse(labelled, "/Users/ben"), labelled);
   assert.equal(labelThreadListResponse(source, "/Users/ben", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm] auldwyrm");
-  assert.equal(
-    labelThreadListResponse(source, "/Users/ben", {}, "/Users/ben/dev/resume").result.data[0].name,
-    "[~/dev/resume] auldwyrm",
-  );
+  assert.equal(labelThreadListResponse(source, "/Users/ben", {}, { auldwyrm: "/Users/ben/dev/resume" }).result.data[0].name, "[~/dev/resume] auldwyrm");
+});
+
+test("Codex rollout metadata provides each session's launch checkout", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-cwd-"));
+  try {
+    const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+    const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
+    await mkdir(sessions, { recursive: true });
+    await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/Users/ben/dev/resume" } })}\n{"type":"event_msg"}\n`);
+    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: "/Users/ben/dev/resume" });
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {

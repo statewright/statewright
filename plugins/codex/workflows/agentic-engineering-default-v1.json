@@ -28,7 +28,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
@@ -43,7 +43,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -58,7 +58,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -72,7 +72,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -98,7 +98,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 2,
@@ -113,7 +113,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 1,
@@ -148,7 +148,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
@@ -163,7 +163,7 @@
       "model": "qwen_private/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "http://127.0.0.1:11439/health"},
+        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 1,

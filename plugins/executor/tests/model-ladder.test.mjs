@@ -33,6 +33,19 @@ test("persistent transport selects the equivalent route for its active provider"
   assert.throws(() => selectRouteForProvider(request, "another-provider"), /no route for active Codex thread provider/);
 });
 
+test("persistent transport refuses a required cross-provider route instead of silently using its fallback", () => {
+  assert.throws(
+    () => selectRouteForProvider({
+      ...request,
+      model_ladder: [
+        { model: "local_compatible/local-code-model", health_url: "https://model.example.invalid/health", requires_provider_switch: true },
+        { model: "openai-codex/gpt-5.6-luna" },
+      ],
+    }, "openai"),
+    /requires a cross-provider switch.*refusing to silently substitute/i,
+  );
+});
+
 test("restart transport falls through an unhealthy local route to its cloud equivalent", async () => {
   const seen = [];
   const selected = await selectAvailableRoute(request, {

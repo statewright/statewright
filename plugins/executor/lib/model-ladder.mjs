@@ -14,6 +14,7 @@ function candidateRequest(request, candidate) {
     model: String(entry.model).trim(),
     effort: entry.thinking_level ?? entry.effort ?? request.effort,
     health_url: entry.health_url,
+    requires_provider_switch: entry.requires_provider_switch === true,
   };
 }
 
@@ -34,6 +35,16 @@ export function selectRouteForProvider(request, activeProvider) {
   const candidates = ladderEntries(request)
     .map((candidate) => candidateRequest(request, candidate))
     .filter(Boolean);
+  const requiredProviderSwitch = candidates.find((candidate) => candidate.requires_provider_switch);
+  if (requiredProviderSwitch) {
+    const requiredProvider = providerModel(requiredProviderSwitch.model).provider;
+    if (requiredProvider && requiredProvider !== provider) {
+      throw new Error(
+        `Statewright route '${requiredProviderSwitch.model}' requires a cross-provider switch, but this Codex App Server thread is pinned to '${provider}'. `
+        + "Use a provider-switch-capable companion or restart transport; refusing to silently substitute a same-provider ladder entry.",
+      );
+    }
+  }
   if (candidates.length === 0) {
     const declared = providerModel(request?.model).provider;
     if (!declared || declared === provider) return request;

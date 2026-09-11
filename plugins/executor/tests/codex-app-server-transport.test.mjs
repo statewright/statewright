@@ -204,6 +204,22 @@ test("App Server routing selects the ladder entry owned by the persistent thread
   assert.equal(cloud.message.params.effort, "low");
 });
 
+test("App Server routing fails closed when a ladder requires a cross-provider switch", () => {
+  assert.throws(
+    () => applyRouteToTurnStart({
+      id: 14, method: "turn/start", params: { threadId: "thread-1", input: [] },
+    }, {
+      session_id: "thread-1",
+      model: "qwen_private/qwen3.8-27b",
+      model_ladder: [
+        { model: "qwen_private/qwen3.8-27b", requires_provider_switch: true },
+        { model: "openai-codex/gpt-5.6-terra" },
+      ],
+    }, "openai"),
+    /requires a cross-provider switch.*refusing to silently substitute/i,
+  );
+});
+
 test("App Server preserves an explicit thread/list cwd but global discovery passes no scope", () => {
   assert.deepEqual(applyThreadListCwd({ id: 0, method: "thread/list", params: { limit: 20 } }, null), {
     id: 0,

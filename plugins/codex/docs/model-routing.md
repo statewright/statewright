@@ -146,6 +146,12 @@ persistent thread can still use the same workflow without accidentally sending a
 to OpenAI (or the inverse). The standalone adapter chooses the first ladder entry present in its
 active provider's live model catalog.
 
+When a workflow's first route must actually cross providers, set
+`requires_provider_switch: true` on that ladder entry. A provider-pinned App Server then stops
+with a transport-capability error rather than silently selecting its same-provider fallback. A
+provider-switch-capable companion may consume the same ladder and perform the handoff after the
+availability check succeeds.
+
 Routing is fail-closed:
 
 - An explicit state model missing from the live catalog stops before another turn starts.

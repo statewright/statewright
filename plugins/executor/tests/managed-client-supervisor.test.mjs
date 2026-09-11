@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { bindManagedClientIdentity, resolveManagedClientIdentity, resumedSessionId } from "../lib/managed-client-identity.mjs";
+import { bindManagedClientIdentity, claimManagedSessionOwner, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId } from "../lib/managed-client-identity.mjs";
 import { bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
@@ -153,6 +153,58 @@ test("managed identity isolates a resumed thread across project directories", as
     assert.notEqual(first.clientId, second.clientId);
     assert.equal(first.restored, false);
     assert.equal(second.restored, false);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("same-directory resumed sessions retain independent owners while a duplicate writer is refused", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-managed-owner-"));
+  const cwd = "/workspace/statewright";
+  try {
+    const alpha = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "alpha-thread"], home, cwd });
+    const beta = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "beta-thread"], home, cwd });
+    assert.notEqual(alpha.clientId, beta.clientId);
+    const alphaOwner = await claimManagedSessionOwner({ host: "codex", sessionId: "alpha-thread", clientId: alpha.clientId, home, cwd, pid: process.pid });
+    const betaOwner = await claimManagedSessionOwner({ host: "codex", sessionId: "beta-thread", clientId: beta.clientId, home, cwd, pid: process.pid });
+    assert.notEqual(alphaOwner.owner_id, betaOwner.owner_id);
+    await assert.rejects(
+      claimManagedSessionOwner({ host: "codex", sessionId: "alpha-thread", clientId: alpha.clientId, home, cwd, pid: process.pid }),
+      /refused to attach a second managed writer/i,
+    );
+    await assert.rejects(
+      claimManagedSessionOwner({ host: "codex", sessionId: "alpha-thread", clientId: beta.clientId, home, cwd: "/workspace/other", pid: process.pid }),
+      /refused to attach a second managed writer/i,
+    );
+    assert.equal(await releaseManagedSessionOwner({ host: "codex", sessionId: "alpha-thread", ownerId: alphaOwner.owner_id, home }), true);
+    assert.equal(await releaseManagedSessionOwner({ host: "codex", sessionId: "beta-thread", ownerId: betaOwner.owner_id, home }), true);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("restart transport refuses a duplicate resumed writer before spawning its native child", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-managed-owner-restart-"));
+  const fake = join(home, "fake-codex.mjs");
+  const spawned = join(home, "spawned");
+  const sharedCwd = join(home, "shared");
+  const otherCwd = join(home, "other");
+  const options = {
+    host: "codex",
+    command: fake,
+    args: ["resume", "shared-thread"],
+    environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+    home,
+    cwd: sharedCwd,
+    pollMs: 5,
+    bridgeFactory: fakeBridgeFactory,
+    historyGuard: async () => ({ status: "healthy" }),
+  };
+  try {
+    await mkdir(sharedCwd);
+    await mkdir(otherCwd);
+    await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(spawned)}, "first");\nsetTimeout(() => process.exit(0), 250);\n`);
+    await chmod(fake, 0o755);
+    const first = runManagedClient(options);
+    assert.equal(await waitFor(() => access(spawned).then(() => true, () => false)), true);
+    await assert.rejects(runManagedClient({ ...options, cwd: otherCwd }), /refused to attach a second managed writer/i);
+    assert.equal(await first, 0);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

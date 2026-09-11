@@ -128,7 +128,7 @@ export async function runCodexAppServerTransport({
   pollMs = 100,
   stderr = process.stderr,
   telemetry = async () => {},
-  reporter = createErrorReporter({ plugin: "codex", version: "0.3.2", environment }),
+  reporter = createErrorReporter({ plugin: "codex", version: "0.3.3", environment }),
 }) {
   let pendingRoute = null;
   const runtime = await startCodexAppServerRuntime({
@@ -197,7 +197,7 @@ export async function startCodexAppServerRuntime({
   idleMs = 500,
   shutdownGraceMs = 1_500,
   onIdle = async () => {},
-  reporter = createErrorReporter({ plugin: "codex", version: "0.3.2", environment }),
+  reporter = createErrorReporter({ plugin: "codex", version: "0.3.3", environment }),
 }) {
   const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
   const port = await reserveLoopbackPort();

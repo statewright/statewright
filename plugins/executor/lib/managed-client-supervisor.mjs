@@ -7,7 +7,7 @@ import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { codexHistoryRepairMode, guardCodexResumeHistory } from "./codex-history-integrity.mjs";
-import { bindManagedClientIdentity, codexRouteOwnsRoot, readCodexRootSession, resetCodexRootSession, resolveManagedClientIdentity, resumedSessionId, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { bindManagedClientIdentity, claimManagedSessionOwner, codexRouteOwnsRoot, readCodexRootSession, releaseManagedSessionOwner, resetCodexRootSession, resolveManagedClientIdentity, resumedSessionId, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
@@ -570,7 +570,7 @@ async function nextRouteRequest(controlDir, consumed) {
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.2", environment }) }) {
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const cmdShim = await resolveWindowsCmdShim(command);
   const launchCommand = cmdShim?.command ?? command;
@@ -587,10 +587,20 @@ export async function runManagedClient({ host, command, args, environment = proc
   let codexRootSessionId = null;
   let bridge = null;
   let telemetry = null;
+  let managedSessionOwner = null;
   try {
     const identity = await resolveManagedClientIdentity({ host, args, home, cwd });
     const routedClientId = identity.clientId;
     if (host === "codex") codexRootSessionId = identity.sessionId;
+    if (host === "codex" && identity.sessionId && !oneShotCodexExec) {
+      managedSessionOwner = await claimManagedSessionOwner({
+        host,
+        sessionId: identity.sessionId,
+        clientId: routedClientId,
+        home,
+        cwd,
+      });
+    }
     const config = host === "codex" ? await managedClientConfig(home) : {};
     const preflightCodexHistory = async (launchArgs) => {
       const sessionId = host === "codex" ? resumedSessionId("codex", launchArgs) : null;
@@ -782,6 +792,14 @@ export async function runManagedClient({ host, command, args, environment = proc
       }
     }
   } finally {
+    if (managedSessionOwner) {
+      await releaseManagedSessionOwner({
+        host: managedSessionOwner.host,
+        sessionId: managedSessionOwner.session_id,
+        ownerId: managedSessionOwner.owner_id,
+        home,
+      });
+    }
     await telemetry?.release();
     await bridge?.close();
     await rm(controlDir, { recursive: true, force: true });

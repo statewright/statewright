@@ -1,6 +1,6 @@
 {
   "name": "statewright",
-  "version": "0.3.2+codex.20260909221641",
+  "version": "0.3.3+codex.20260911083251",
   "description": "State machine workflow enforcement \u2014 controls which tools your agent can use in each phase.",
   "author": {
     "name": "statewright.ai",

@@ -10,7 +10,7 @@
       "release_artifact": true
     },
     "codex": {
-      "version": "0.3.2",
+      "version": "0.3.3",
       "production_transport": { "operating_systems": ["ubuntu-24.04", "macos-14"], "native_windows": true },
       "auth": { "mode": "api_key", "onboarding": "os_browser", "test": "plugins/executor/tests/browser-onboarding.test.mjs" },
       "adoption_telemetry": { "event": "ci_canary", "endpoint_acknowledgement": true, "persistence_readback": false, "test": "plugins/executor/tests/plugin-adoption-telemetry-canary.test.mjs" },

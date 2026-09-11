@@ -3,6 +3,18 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Codex Plugin 0.3.3] — 2026-09-11
+
+### Fixed
+- **[mcp]** Preserve read-only tool annotations when Statewright bridges native
+  MCP clients, so approval policy can distinguish safe reads from mutations.
+- **[codex]** Prevent a second managed App Server supervisor from attaching to
+  the same live resumed thread, while allowing independent threads in one
+  checkout to run concurrently.
+- **[codex]** Make App Server termination single-target and thread-aware;
+  `--all` is rejected and operators can select by `--thread-id` or
+  `--client-id`.
+
 ## [Codex Plugin 0.3.2] — 2026-09-09
 
 ### Added

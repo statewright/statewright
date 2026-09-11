@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 
 const STORE_FILE = "managed-client-session-ids.json";
+const LEASE_DIRECTORY = "managed-client-leases";
 export const CODEX_ROOT_SESSION_FILE = "codex-root-session.json";
 const CODEX_OPTIONS_WITH_VALUE = new Set([
   "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config",
@@ -120,6 +121,72 @@ export function codexRouteOwnsRoot(request, registration) {
 
 function storePath(home) {
   return join(home, ".statewright", STORE_FILE);
+}
+
+function leasePath(home, host, sessionId) {
+  const digest = createHash("sha256").update(`${host}-thread:${sessionId}`).digest("hex").slice(0, 32);
+  return join(home, ".statewright", LEASE_DIRECTORY, `${host}-${digest}.json`);
+}
+
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/**
+ * Claim exclusive ownership of a resumed managed session while its native TUI
+ * is attached. The durable client ID intentionally survives restarts, but it
+ * must never allow a second live supervisor to overwrite the resident's root
+ * thread registration.
+ */
+export async function claimManagedSessionOwner({ host, sessionId, clientId, home = homedir(), cwd = process.cwd(), pid = process.pid }) {
+  if (!sessionId || !validId(clientId)) return null;
+  const path = leasePath(home, host, sessionId);
+  const ownerId = randomUUID();
+  const record = {
+    version: 1,
+    owner_id: ownerId,
+    host,
+    session_id: sessionId,
+    client_id: clientId,
+    cwd: resolvePath(cwd),
+    pid,
+    started_at: new Date().toISOString(),
+  };
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try { await handle.writeFile(`${JSON.stringify(record)}\n`); } finally { await handle.close(); }
+      await chmod(path, 0o600);
+      return record;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      let existing = null;
+      try { existing = JSON.parse(await readFile(path, "utf8")); } catch { /* retry stale/corrupt lease once */ }
+      if (Number.isInteger(existing?.pid) && processAlive(existing.pid)) {
+        throw new Error(
+          `Statewright refused to attach a second managed writer to Codex thread '${sessionId}' in ${resolvePath(cwd)}. `
+          + `The existing owner is pid ${existing.pid}; close that session before resuming this exact thread.`,
+        );
+      }
+      await unlink(path).catch((unlinkError) => { if (unlinkError?.code !== "ENOENT") throw unlinkError; });
+    }
+  }
+  throw new Error(`Statewright could not claim managed ownership for Codex thread '${sessionId}'.`);
+}
+
+export async function releaseManagedSessionOwner({ host, sessionId, ownerId, home = homedir() }) {
+  if (!host || !sessionId || !ownerId) return false;
+  const path = leasePath(home, host, sessionId);
+  try {
+    const existing = JSON.parse(await readFile(path, "utf8"));
+    if (existing?.owner_id !== ownerId) return false;
+    await unlink(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function loadStore(home) {

@@ -11,7 +11,7 @@ function validThreadId(value) {
 function synopsisText(content) {
   const text = Array.isArray(content) ? content.map((item) => item?.text ?? "").join(" ") : "";
   const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized || /^(<hook_prompt|\[statewright\]|Statewright workflow remains active)/i.test(normalized)) return null;
+  if (!normalized || /^(<hook_prompt|\[statewright\]|Statewright workflow remains active|Reply exactly |Read-only |Continue the read-only |For the final read-only )/i.test(normalized) || /\bstatewright(?:_|\s)/i.test(normalized)) return null;
   return normalized.slice(0, 96);
 }
 

@@ -89,28 +89,22 @@ function displayCwd(cwd, home = homedir()) {
 export function labelThreadListResponse(message, home = homedir(), labels = {}, threadCwds = {}) {
   if (!Array.isArray(message?.result?.data)) return message;
   let changed = false;
-  const data = message.result.data.filter((entry) => threadCwds[entry?.id]?.threadSource !== "subagent").map((entry) => {
+  const data = message.result.data.filter((entry) => {
+    const metadata = threadCwds[entry?.id];
+    return metadata?.threadSource !== "subagent" && typeof metadata?.lastUserMessage === "string" && metadata.lastUserMessage.trim();
+  }).map((entry) => {
     if (!entry || typeof entry !== "object") return entry;
     const metadata = threadCwds[entry.id];
-    const cwd = displayCwd(metadata?.cwd ?? metadata ?? entry.cwd, home);
+    const cwd = displayCwd(metadata?.cwd ?? entry.cwd, home);
     if (!cwd) return entry;
-    const terminal = labels[`codex:${entry.id}`]?.label;
-    const synopsis = !terminal && metadata?.synopsis ? ` · ${metadata.synopsis}` : "";
-    const fork = !terminal && String(metadata?.cwd ?? "").includes("/.agent-worktrees/") ? "fork · " : "";
-    const fingerprint = String(entry.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(-6);
-    const suffix = fingerprint ? ` · #${fingerprint}` : "";
-    const prefix = terminal ? `[${terminal} · ${cwd}${suffix}]` : `[${fork}${cwd}${synopsis}${suffix}]`;
-    if (typeof entry.name === "string" && entry.name.trim() && !entry.name.startsWith(prefix)) {
+    const display = `[${cwd}] ${metadata.lastUserMessage.replace(/\s+/g, " ").trim()}`;
+    if (entry.name !== display || entry.preview !== display) {
       changed = true;
-      return { ...entry, name: `${prefix} ${entry.name}` };
-    }
-    if ((!entry.name || !String(entry.name).trim()) && typeof entry.preview === "string" && entry.preview.trim() && !entry.preview.startsWith(prefix)) {
-      changed = true;
-      return { ...entry, preview: `${prefix} ${entry.preview}` };
+      return { ...entry, name: display, preview: display };
     }
     return entry;
   });
-  return changed ? { ...message, result: { ...message.result, data } } : message;
+  return changed || data.length !== message.result.data.length ? { ...message, result: { ...message.result, data } } : message;
 }
 
 export function hydrateBoundedResumeTurns(message) {

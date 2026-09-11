@@ -227,14 +227,7 @@ async function main() {
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
-    getThreadCwds: async (threadIds) => {
-      const missing = threadIds.filter((id) => !knownThreadCwds.has(id));
-      if (missing.length) {
-        const resolved = await readCodexThreadCwds({ threadIds: missing, home });
-        for (const [id, cwd] of Object.entries(resolved)) knownThreadCwds.set(id, cwd);
-      }
-      return Object.fromEntries(threadIds.flatMap((id) => knownThreadCwds.has(id) ? [[id, knownThreadCwds.get(id)]] : []));
-    },
+    getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, metadataCache: knownThreadCwds }),
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,

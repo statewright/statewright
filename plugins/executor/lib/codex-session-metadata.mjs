@@ -8,11 +8,23 @@ function validThreadId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9-]{1,128}$/.test(value);
 }
 
-function synopsisText(content) {
-  const text = Array.isArray(content) ? content.map((item) => item?.text ?? "").join(" ") : "";
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (!normalized || /^(<hook_prompt|\[statewright\]|Statewright workflow remains active|Reply exactly |Read-only |Continue the read-only |For the final read-only )/i.test(normalized) || /\bstatewright(?:_|\s)/i.test(normalized)) return null;
-  return normalized.slice(0, 96);
+// Native input history records submitted composer text; rollout user-role
+// messages also contain environment, plugin, and hook injections. Never infer
+// human provenance from message wording or fall back to the model transcript.
+async function lastSubmittedInputs(codexHome, threadIds) {
+  const inputs = new Map();
+  const history = await readFile(join(codexHome, "history.jsonl"), "utf8").catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
+  for (const line of history.split("\n")) {
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (threadIds.has(row.session_id) && typeof row.text === "string" && row.text.trim()) {
+      inputs.set(row.session_id, row.text);
+    }
+  }
+  return inputs;
 }
 
 async function sessionMetadata(path) {
@@ -26,12 +38,7 @@ async function sessionMetadata(path) {
     const row = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
     const cwd = row?.type === "session_meta" ? row.payload?.cwd : null;
     if (typeof cwd !== "string" || !cwd.trim()) return null;
-    const rows = (await readFile(path, "utf8")).split("\n").flatMap((line) => {
-      try { return [JSON.parse(line)]; } catch { return []; }
-    });
-    const prompts = rows.filter((item) => item?.type === "response_item" && item?.payload?.type === "message" && item.payload.role === "user" && !Array.isArray(item.payload.internal_chat_message_metadata_passthrough?.content_item_kinds))
-      .map((item) => synopsisText(item.payload.content)).filter(Boolean);
-    return { cwd, synopsis: prompts.at(-1) ?? null, threadSource: row.payload?.thread_source ?? null };
+    return { cwd, threadSource: row.payload?.thread_source ?? null };
   } catch { return null; }
   finally { await handle?.close().catch(() => {}); }
 }
@@ -59,10 +66,17 @@ async function collectThreadCwds(root, pending, resolved) {
  * Read each requested Codex rollout's immutable session_meta cwd. This is
  * distinct from app-server thread/list cwd, which can reflect a later resume.
  */
-export async function readCodexThreadCwds({ threadIds, home = homedir(), codexHome = join(home, ".codex") } = {}) {
-  const pending = new Set((threadIds ?? []).filter(validThreadId));
+export async function readCodexThreadCwds({ threadIds, home = homedir(), codexHome = join(home, ".codex"), metadataCache = new Map() } = {}) {
+  const requested = new Set((threadIds ?? []).filter(validThreadId));
+  const pending = new Set([...requested].filter((id) => !metadataCache.has(id)));
   const resolved = {};
-  if (pending.size === 0) return resolved;
-  await collectThreadCwds(join(codexHome, "sessions"), pending, resolved);
-  return resolved;
+  if (requested.size === 0) return resolved;
+  if (pending.size) await collectThreadCwds(join(codexHome, "sessions"), pending, resolved);
+  for (const [id, metadata] of Object.entries(resolved)) metadataCache.set(id, metadata);
+  // Only immutable rollout metadata is cached. Refresh inputs for every picker
+  // request so a resident server displays messages submitted since its launch.
+  const inputs = await lastSubmittedInputs(codexHome, requested);
+  return Object.fromEntries([...requested].map((id) => [id, {
+    ...metadataCache.get(id), lastUserMessage: inputs.get(id) ?? null,
+  }]));
 }

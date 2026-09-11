@@ -227,7 +227,7 @@ test("App Server preserves an explicit thread/list cwd but global discovery pass
   });
 });
 
-test("App Server resume list labels thread names with their home-relative project directory", () => {
+test("resume rows replace stale titles with only the original directory and last submitted input", () => {
   const source = {
     id: 1,
     result: {
@@ -239,16 +239,24 @@ test("App Server resume list labels thread names with their home-relative projec
       ],
     },
   };
-  const labelled = labelThreadListResponse(source, "/home/tester");
-  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm · #ldwyrm] auldwyrm");
-  assert.equal(labelled.result.data[1].name, "[~/dev/resume · #resume] Frame faith alignment");
-  assert.equal(labelled.result.data[2].preview, "Untouched legacy entry");
-  assert.equal(labelled.result.data[3].preview, "[~/dev/nomad · #llback] What is next?");
+  const metadata = {
+    auldwyrm: { cwd: "/home/tester/dev/auldwyrm", lastUserMessage: "fix statewright_get_state please" },
+    resume: { cwd: "/home/tester/dev/resume", lastUserMessage: "My latest\nmessage" },
+    fallback: { cwd: "/home/tester/dev/nomad", lastUserMessage: "Read-only validation, please" },
+  };
+  const labelled = labelThreadListResponse(source, "/home/tester", {}, metadata);
+  assert.equal(labelled.result.data.length, 3, "omit sessions without submitted input, never use stale titles");
+  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm] fix statewright_get_state please");
+  assert.equal(labelled.result.data[1].name, "[~/dev/resume] My latest message");
+  assert.equal(labelled.result.data[2].preview, "[~/dev/nomad] Read-only validation, please");
   assert.equal(labelled.result.data[0].id, "auldwyrm");
   assert.equal(labelled.result.data[0].status.type, "active");
-  assert.equal(labelThreadListResponse(labelled, "/home/tester"), labelled);
-  assert.equal(labelThreadListResponse(source, "/home/tester", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm · #ldwyrm] auldwyrm");
-  assert.equal(labelThreadListResponse(source, "/home/tester", {}, { auldwyrm: { cwd: "/home/tester/dev/resume", synopsis: "recent focused work" } }).result.data[0].name, "[~/dev/resume · recent focused work · #ldwyrm] auldwyrm");
+  assert.equal(labelThreadListResponse(labelled, "/home/tester", {}, metadata), labelled);
+  assert.equal(labelThreadListResponse(source, "/home/tester", { "codex:auldwyrm": { label: "adv" } }, metadata).result.data[0].name, labelled.result.data[0].name);
+  assert.equal(source.result.data[0].name, "auldwyrm", "display changes must not mutate saved metadata");
+  const onlyFork = {result: {data: [source.result.data[0]], nextCursor: "page-2"}};
+  const hidden = labelThreadListResponse(onlyFork, "/home/tester", {}, {auldwyrm: {...metadata.auldwyrm, threadSource: "subagent"}});
+  assert.deepEqual(hidden.result, {data: [], nextCursor: "page-2"});
 });
 
 test("Codex rollout metadata provides each session's launch checkout", async () => {
@@ -258,7 +266,14 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
     await mkdir(sessions, { recursive: true });
     await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/home/tester/dev/resume" } })}\n{"type":"event_msg"}\n`);
-    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/home/tester/dev/resume", synopsis: null, threadSource: null } });
+    const metadataCache = new Map();
+    const read = () => readCodexThreadCwds({ home, threadIds: [sessionId], metadataCache });
+    assert.deepEqual(await read(), { [sessionId]: { cwd: "/home/tester/dev/resume", lastUserMessage: null, threadSource: null } });
+    const history = join(home, ".codex", "history.jsonl");
+    await writeFile(history, JSON.stringify({session_id: sessionId, ts: 1, text: "First prompt"}) + "\n");
+    assert.equal((await read())[sessionId].lastUserMessage, "First prompt");
+    await writeFile(history, JSON.stringify({session_id: sessionId, ts: 2, text: "Please use statewright_get_state"}) + "\n{partial", {flag: "a"});
+    assert.equal((await read())[sessionId].lastUserMessage, "Please use statewright_get_state", "cached cwd must not freeze the latest submitted input");
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -632,6 +647,7 @@ test("App Server route proxy injects one pending route and records the server re
   let pending = { session_id: "thread-proxy", model: "openai-codex/gpt-5.6-sol", effort: "high" };
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstreamAddress.port}`,
+    getThreadCwds: async () => ({ "thread-proxy": {cwd: "/repo", lastUserMessage: "Latest input"} }),
     takePendingRoute: async (threadId) => {
       if (pending?.session_id !== threadId) return null;
       const route = pending;
@@ -661,7 +677,7 @@ test("App Server route proxy injects one pending route and records the server re
   }));
   assert.deepEqual(await labelledList, {
     id: -1,
-    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "[/repo · #dproxy] Project session", status: { type: "notLoaded" } }] },
+    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "[/repo] Latest input", preview: "[/repo] Latest input", status: { type: "notLoaded" } }] },
   });
   const childForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: 0, method: "turn/start", params: { threadId: "child-thread", input: [] } }));
@@ -730,6 +746,7 @@ test("App Server route proxy binds a bare-picker selection and refreshes labels 
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstreamAddress.port}`,
     getThreadLabels: async () => labels,
+    getThreadCwds: async () => ({ "picker-thread": {cwd: "/repo", lastUserMessage: "My latest input"} }),
     onThreadResumed: async ({ threadId }) => {
       resumed.push(threadId);
       labels[`codex:${threadId}`] = { label: "adv" };
@@ -751,7 +768,7 @@ test("App Server route proxy binds a bare-picker selection and refreshes labels 
   await listForwarded;
   const listResult = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   upstreamSocket.send(JSON.stringify({ id: 2, result: { data: [{ id: "picker-thread", cwd: "/repo", name: "Selected session" }] } }));
-  assert.equal((await listResult).result.data[0].name, "[adv · /repo · #thread] Selected session");
+  assert.equal((await listResult).result.data[0].name, "[/repo] My latest input");
   client.close();
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));

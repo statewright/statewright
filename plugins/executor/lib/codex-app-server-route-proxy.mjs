@@ -86,12 +86,15 @@ function displayCwd(cwd, home = homedir()) {
  * `preview`. Keep the upstream thread identity intact while making project
  * ownership scannable in a list containing sessions from several checkouts.
  */
-export function labelThreadListResponse(message, home = homedir(), labels = {}) {
+export function labelThreadListResponse(message, home = homedir(), labels = {}, scopedCwd = null) {
   if (!Array.isArray(message?.result?.data)) return message;
   let changed = false;
   const data = message.result.data.map((entry) => {
     if (!entry || typeof entry !== "object") return entry;
-    const cwd = displayCwd(entry.cwd, home);
+    // `thread/list` is normally scoped by the launcher checkout. Codex keeps
+    // a resumed thread's original cwd in the entry, which is historical data
+    // rather than the project from which the operator is resuming it.
+    const cwd = displayCwd(scopedCwd ?? entry.cwd, home);
     if (!cwd) return entry;
     const terminal = labels[`codex:${entry.id}`]?.label;
     const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${cwd}]`;
@@ -361,7 +364,7 @@ export async function startCodexAppServerRouteProxy({
         }
         if (responseTo === "thread/list") {
           const labels = await getThreadLabels().catch(() => threadLabels);
-          notification = labelThreadListResponse(notification, homedir(), labels);
+          notification = labelThreadListResponse(notification, homedir(), labels, threadListCwd);
           payload = JSON.stringify(notification);
         }
         const statusThreadId = String(notification?.params?.threadId ?? "");

@@ -97,7 +97,9 @@ export function labelThreadListResponse(message, home = homedir(), labels = {}, 
     const terminal = labels[`codex:${entry.id}`]?.label;
     const synopsis = !terminal && metadata?.synopsis ? ` · ${metadata.synopsis}` : "";
     const fork = !terminal && String(metadata?.cwd ?? "").includes("/.agent-worktrees/") ? "fork · " : "";
-    const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${fork}${cwd}${synopsis}]`;
+    const fingerprint = String(entry.id ?? "").replace(/[^a-zA-Z0-9]/g, "").slice(-6);
+    const suffix = fingerprint ? ` · #${fingerprint}` : "";
+    const prefix = terminal ? `[${terminal} · ${cwd}${suffix}]` : `[${fork}${cwd}${synopsis}${suffix}]`;
     if (typeof entry.name === "string" && entry.name.trim() && !entry.name.startsWith(prefix)) {
       changed = true;
       return { ...entry, name: `${prefix} ${entry.name}` };

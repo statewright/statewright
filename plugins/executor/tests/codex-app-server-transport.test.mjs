@@ -232,23 +232,23 @@ test("App Server resume list labels thread names with their home-relative projec
     id: 1,
     result: {
       data: [
-        { id: "auldwyrm", cwd: "/Users/ben/dev/auldwyrm", name: "auldwyrm", status: { type: "active" } },
-        { id: "resume", cwd: "/Users/ben/dev/resume", name: "Frame faith alignment", status: { type: "notLoaded" } },
+        { id: "auldwyrm", cwd: "/home/tester/dev/auldwyrm", name: "auldwyrm", status: { type: "active" } },
+        { id: "resume", cwd: "/home/tester/dev/resume", name: "Frame faith alignment", status: { type: "notLoaded" } },
         { id: "legacy", cwd: null, preview: "Untouched legacy entry" },
-        { id: "fallback", cwd: "/Users/ben/dev/nomad", name: null, preview: "What is next?" },
+        { id: "fallback", cwd: "/home/tester/dev/nomad", name: null, preview: "What is next?" },
       ],
     },
   };
-  const labelled = labelThreadListResponse(source, "/Users/ben");
-  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm] auldwyrm");
-  assert.equal(labelled.result.data[1].name, "[~/dev/resume] Frame faith alignment");
+  const labelled = labelThreadListResponse(source, "/home/tester");
+  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm · #ldwyrm] auldwyrm");
+  assert.equal(labelled.result.data[1].name, "[~/dev/resume · #resume] Frame faith alignment");
   assert.equal(labelled.result.data[2].preview, "Untouched legacy entry");
-  assert.equal(labelled.result.data[3].preview, "[~/dev/nomad] What is next?");
+  assert.equal(labelled.result.data[3].preview, "[~/dev/nomad · #llback] What is next?");
   assert.equal(labelled.result.data[0].id, "auldwyrm");
   assert.equal(labelled.result.data[0].status.type, "active");
-  assert.equal(labelThreadListResponse(labelled, "/Users/ben"), labelled);
-  assert.equal(labelThreadListResponse(source, "/Users/ben", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm] auldwyrm");
-  assert.equal(labelThreadListResponse(source, "/Users/ben", {}, { auldwyrm: { cwd: "/Users/ben/dev/resume", synopsis: "recent focused work" } }).result.data[0].name, "[~/dev/resume · recent focused work] auldwyrm");
+  assert.equal(labelThreadListResponse(labelled, "/home/tester"), labelled);
+  assert.equal(labelThreadListResponse(source, "/home/tester", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm · #ldwyrm] auldwyrm");
+  assert.equal(labelThreadListResponse(source, "/home/tester", {}, { auldwyrm: { cwd: "/home/tester/dev/resume", synopsis: "recent focused work" } }).result.data[0].name, "[~/dev/resume · recent focused work · #ldwyrm] auldwyrm");
 });
 
 test("Codex rollout metadata provides each session's launch checkout", async () => {
@@ -257,8 +257,8 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
     const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
     await mkdir(sessions, { recursive: true });
-    await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/Users/ben/dev/resume" } })}\n{"type":"event_msg"}\n`);
-    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/Users/ben/dev/resume", synopsis: null, threadSource: null } });
+    await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/home/tester/dev/resume" } })}\n{"type":"event_msg"}\n`);
+    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/home/tester/dev/resume", synopsis: null, threadSource: null } });
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -661,7 +661,7 @@ test("App Server route proxy injects one pending route and records the server re
   }));
   assert.deepEqual(await labelledList, {
     id: -1,
-    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "[/repo] Project session", status: { type: "notLoaded" } }] },
+    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "[/repo · #dproxy] Project session", status: { type: "notLoaded" } }] },
   });
   const childForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: 0, method: "turn/start", params: { threadId: "child-thread", input: [] } }));
@@ -751,7 +751,7 @@ test("App Server route proxy binds a bare-picker selection and refreshes labels 
   await listForwarded;
   const listResult = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   upstreamSocket.send(JSON.stringify({ id: 2, result: { data: [{ id: "picker-thread", cwd: "/repo", name: "Selected session" }] } }));
-  assert.equal((await listResult).result.data[0].name, "[adv · /repo] Selected session");
+  assert.equal((await listResult).result.data[0].name, "[adv · /repo · #thread] Selected session");
   client.close();
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));

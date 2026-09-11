@@ -1,5 +1,7 @@
 import { WebSocket, WebSocketServer } from "ws";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
+import { relative, resolve } from "node:path";
 import { selectRouteForProvider } from "./model-ladder.mjs";
 
 function routeModel(model) {
@@ -68,6 +70,41 @@ export function applyThreadListCwd(message, cwd = null) {
     ...message,
     params: { ...(message.params ?? {}), cwd },
   };
+}
+
+function displayCwd(cwd, home = homedir()) {
+  if (typeof cwd !== "string" || !cwd.trim()) return null;
+  const resolvedCwd = resolve(cwd);
+  const relativeToHome = relative(resolve(home), resolvedCwd);
+  if (relativeToHome && !relativeToHome.startsWith("..")) return `~/${relativeToHome}`;
+  if (!relativeToHome) return "~";
+  return resolvedCwd;
+}
+
+/**
+ * The native resume picker renders `name` when available and falls back to
+ * `preview`. Keep the upstream thread identity intact while making project
+ * ownership scannable in a list containing sessions from several checkouts.
+ */
+export function labelThreadListResponse(message, home = homedir()) {
+  if (!Array.isArray(message?.result?.data)) return message;
+  let changed = false;
+  const data = message.result.data.map((entry) => {
+    if (!entry || typeof entry !== "object") return entry;
+    const cwd = displayCwd(entry.cwd, home);
+    if (!cwd) return entry;
+    const prefix = `[${cwd}]`;
+    if (typeof entry.name === "string" && entry.name.trim() && !entry.name.startsWith(prefix)) {
+      changed = true;
+      return { ...entry, name: `${prefix} ${entry.name}` };
+    }
+    if ((!entry.name || !String(entry.name).trim()) && typeof entry.preview === "string" && entry.preview.trim() && !entry.preview.startsWith(prefix)) {
+      changed = true;
+      return { ...entry, preview: `${prefix} ${entry.preview}` };
+    }
+    return entry;
+  });
+  return changed ? { ...message, result: { ...message.result, data } } : message;
 }
 
 export function hydrateBoundedResumeTurns(message) {
@@ -312,6 +349,10 @@ export async function startCodexAppServerRouteProxy({
         if (responseTo === "thread/resume") {
           notification = clarifyActiveWriterResumeError(notification);
           notification = hydrateBoundedResumeTurns(notification);
+          payload = JSON.stringify(notification);
+        }
+        if (responseTo === "thread/list") {
+          notification = labelThreadListResponse(notification);
           payload = JSON.stringify(notification);
         }
         const statusThreadId = String(notification?.params?.threadId ?? "");

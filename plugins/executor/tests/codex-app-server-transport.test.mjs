@@ -12,7 +12,7 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -219,6 +219,28 @@ test("App Server resume history is scoped to the managed project unless the clie
     method: "model/list",
     params: {},
   });
+});
+
+test("App Server resume list labels thread names with their home-relative project directory", () => {
+  const source = {
+    id: 1,
+    result: {
+      data: [
+        { id: "auldwyrm", cwd: "/Users/ben/dev/auldwyrm", name: "auldwyrm", status: { type: "active" } },
+        { id: "resume", cwd: "/Users/ben/dev/resume", name: "Frame faith alignment", status: { type: "notLoaded" } },
+        { id: "legacy", cwd: null, preview: "Untouched legacy entry" },
+        { id: "fallback", cwd: "/Users/ben/dev/nomad", name: null, preview: "What is next?" },
+      ],
+    },
+  };
+  const labelled = labelThreadListResponse(source, "/Users/ben");
+  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm] auldwyrm");
+  assert.equal(labelled.result.data[1].name, "[~/dev/resume] Frame faith alignment");
+  assert.equal(labelled.result.data[2].preview, "Untouched legacy entry");
+  assert.equal(labelled.result.data[3].preview, "[~/dev/nomad] What is next?");
+  assert.equal(labelled.result.data[0].id, "auldwyrm");
+  assert.equal(labelled.result.data[0].status.type, "active");
+  assert.equal(labelThreadListResponse(labelled, "/Users/ben"), labelled);
 });
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {
@@ -614,6 +636,15 @@ test("App Server route proxy injects one pending route and records the server re
   const listForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: -1, method: "thread/list", params: { limit: 20 } }));
   assert.deepEqual(await listForwarded, { id: -1, method: "thread/list", params: { limit: 20, cwd: "/repo" } });
+  const labelledList = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+  upstreamSocket.send(JSON.stringify({
+    id: -1,
+    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "Project session", status: { type: "notLoaded" } }] },
+  }));
+  assert.deepEqual(await labelledList, {
+    id: -1,
+    result: { data: [{ id: "thread-proxy", cwd: "/repo", name: "[/repo] Project session", status: { type: "notLoaded" } }] },
+  });
   const childForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
   client.send(JSON.stringify({ id: 0, method: "turn/start", params: { threadId: "child-thread", input: [] } }));
   const childRequest = await childForwarded;

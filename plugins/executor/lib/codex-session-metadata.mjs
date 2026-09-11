@@ -1,4 +1,4 @@
-import { open, opendir } from "node:fs/promises";
+import { open, opendir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -8,7 +8,14 @@ function validThreadId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9-]{1,128}$/.test(value);
 }
 
-async function sessionCwd(path) {
+function synopsisText(content) {
+  const text = Array.isArray(content) ? content.map((item) => item?.text ?? "").join(" ") : "";
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized || /^(<hook_prompt|\[statewright\]|Statewright workflow remains active)/i.test(normalized)) return null;
+  return normalized.slice(0, 96);
+}
+
+async function sessionMetadata(path) {
   let handle;
   try {
     handle = await open(path, "r");
@@ -18,7 +25,13 @@ async function sessionCwd(path) {
     if (newline < 0) return null;
     const row = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
     const cwd = row?.type === "session_meta" ? row.payload?.cwd : null;
-    return typeof cwd === "string" && cwd.trim() ? cwd : null;
+    if (typeof cwd !== "string" || !cwd.trim()) return null;
+    const rows = (await readFile(path, "utf8")).split("\n").flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    });
+    const prompts = rows.filter((item) => item?.type === "response_item" && item?.payload?.type === "message" && item.payload.role === "user")
+      .map((item) => synopsisText(item.payload.content)).filter(Boolean).slice(-5);
+    return { cwd, synopsis: prompts.join(" · ") || null };
   } catch { return null; }
   finally { await handle?.close().catch(() => {}); }
 }
@@ -36,8 +49,8 @@ async function collectThreadCwds(root, pending, resolved) {
     if (!entry.isFile() || !entry.name.startsWith("rollout-") || !entry.name.endsWith(".jsonl")) continue;
     const sessionId = [...pending].find((id) => entry.name.endsWith(`-${id}.jsonl`));
     if (!sessionId) continue;
-    const cwd = await sessionCwd(path);
-    if (cwd) resolved[sessionId] = cwd;
+    const metadata = await sessionMetadata(path);
+    if (metadata) resolved[sessionId] = metadata;
     pending.delete(sessionId);
   }
 }

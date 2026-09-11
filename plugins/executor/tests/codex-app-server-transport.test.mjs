@@ -248,7 +248,7 @@ test("App Server resume list labels thread names with their home-relative projec
   assert.equal(labelled.result.data[0].status.type, "active");
   assert.equal(labelThreadListResponse(labelled, "/Users/ben"), labelled);
   assert.equal(labelThreadListResponse(source, "/Users/ben", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm] auldwyrm");
-  assert.equal(labelThreadListResponse(source, "/Users/ben", {}, { auldwyrm: "/Users/ben/dev/resume" }).result.data[0].name, "[~/dev/resume] auldwyrm");
+  assert.equal(labelThreadListResponse(source, "/Users/ben", {}, { auldwyrm: { cwd: "/Users/ben/dev/resume", synopsis: "recent focused work" } }).result.data[0].name, "[~/dev/resume · recent focused work] auldwyrm");
 });
 
 test("Codex rollout metadata provides each session's launch checkout", async () => {
@@ -258,7 +258,7 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
     await mkdir(sessions, { recursive: true });
     await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/Users/ben/dev/resume" } })}\n{"type":"event_msg"}\n`);
-    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: "/Users/ben/dev/resume" });
+    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/Users/ben/dev/resume", synopsis: null } });
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

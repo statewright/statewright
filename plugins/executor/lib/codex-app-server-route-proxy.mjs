@@ -91,10 +91,12 @@ export function labelThreadListResponse(message, home = homedir(), labels = {}, 
   let changed = false;
   const data = message.result.data.map((entry) => {
     if (!entry || typeof entry !== "object") return entry;
-    const cwd = displayCwd(threadCwds[entry.id] ?? entry.cwd, home);
+    const metadata = threadCwds[entry.id];
+    const cwd = displayCwd(metadata?.cwd ?? metadata ?? entry.cwd, home);
     if (!cwd) return entry;
     const terminal = labels[`codex:${entry.id}`]?.label;
-    const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${cwd}]`;
+    const synopsis = !terminal && metadata?.synopsis ? ` · ${metadata.synopsis}` : "";
+    const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${cwd}${synopsis}]`;
     if (typeof entry.name === "string" && entry.name.trim() && !entry.name.startsWith(prefix)) {
       changed = true;
       return { ...entry, name: `${prefix} ${entry.name}` };

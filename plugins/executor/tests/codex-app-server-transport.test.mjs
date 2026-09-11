@@ -258,7 +258,7 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
     await mkdir(sessions, { recursive: true });
     await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/Users/ben/dev/resume" } })}\n{"type":"event_msg"}\n`);
-    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/Users/ben/dev/resume", synopsis: null } });
+    assert.deepEqual(await readCodexThreadCwds({ home, threadIds: [sessionId, "not-a-real-id"] }), { [sessionId]: { cwd: "/Users/ben/dev/resume", synopsis: null, threadSource: null } });
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

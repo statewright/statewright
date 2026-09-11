@@ -89,14 +89,15 @@ function displayCwd(cwd, home = homedir()) {
 export function labelThreadListResponse(message, home = homedir(), labels = {}, threadCwds = {}) {
   if (!Array.isArray(message?.result?.data)) return message;
   let changed = false;
-  const data = message.result.data.map((entry) => {
+  const data = message.result.data.filter((entry) => threadCwds[entry?.id]?.threadSource !== "subagent").map((entry) => {
     if (!entry || typeof entry !== "object") return entry;
     const metadata = threadCwds[entry.id];
     const cwd = displayCwd(metadata?.cwd ?? metadata ?? entry.cwd, home);
     if (!cwd) return entry;
     const terminal = labels[`codex:${entry.id}`]?.label;
     const synopsis = !terminal && metadata?.synopsis ? ` · ${metadata.synopsis}` : "";
-    const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${cwd}${synopsis}]`;
+    const fork = !terminal && String(metadata?.cwd ?? "").includes("/.agent-worktrees/") ? "fork · " : "";
+    const prefix = terminal ? `[${terminal} · ${cwd}]` : `[${fork}${cwd}${synopsis}]`;
     if (typeof entry.name === "string" && entry.name.trim() && !entry.name.startsWith(prefix)) {
       changed = true;
       return { ...entry, name: `${prefix} ${entry.name}` };

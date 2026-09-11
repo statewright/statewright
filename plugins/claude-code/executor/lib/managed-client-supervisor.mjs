@@ -591,9 +591,10 @@ export async function runManagedClient({ host, command, args, environment = proc
   try {
     const identity = await resolveManagedClientIdentity({ host, args, home, cwd });
     const routedClientId = identity.clientId;
+    const terminalLabel = host === "codex" ? tmuxWindowLabel(environment) : null;
     if (host === "codex") codexRootSessionId = identity.sessionId;
     if (host === "codex" && identity.sessionId) {
-      await bindManagedSessionLabel({ host, sessionId: identity.sessionId, label: tmuxWindowLabel(environment), cwd, home });
+      await bindManagedSessionLabel({ host, sessionId: identity.sessionId, label: terminalLabel, cwd, home });
     }
     if (host === "codex" && identity.sessionId && !oneShotCodexExec) {
       managedSessionOwner = await claimManagedSessionOwner({
@@ -650,6 +651,7 @@ export async function runManagedClient({ host, command, args, environment = proc
           home,
           clientId: routedClientId,
           threadListCwd: codexAllSessionsRequested(args) ? null : cwd,
+          terminalLabel,
         });
         const residentRoutes = residentControlDir(home, routedClientId);
         await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });

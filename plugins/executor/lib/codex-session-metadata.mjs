@@ -29,7 +29,7 @@ async function sessionMetadata(path) {
     const rows = (await readFile(path, "utf8")).split("\n").flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
-    const prompts = rows.filter((item) => item?.type === "response_item" && item?.payload?.type === "message" && item.payload.role === "user")
+    const prompts = rows.filter((item) => item?.type === "response_item" && item?.payload?.type === "message" && item.payload.role === "user" && !Array.isArray(item.payload.internal_chat_message_metadata_passthrough?.content_item_kinds))
       .map((item) => synopsisText(item.payload.content)).filter(Boolean);
     return { cwd, synopsis: prompts.at(-1) ?? null };
   } catch { return null; }

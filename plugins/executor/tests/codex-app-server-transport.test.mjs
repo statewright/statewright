@@ -241,6 +241,7 @@ test("App Server resume list labels thread names with their home-relative projec
   assert.equal(labelled.result.data[0].id, "auldwyrm");
   assert.equal(labelled.result.data[0].status.type, "active");
   assert.equal(labelThreadListResponse(labelled, "/Users/ben"), labelled);
+  assert.equal(labelThreadListResponse(source, "/Users/ben", { "codex:auldwyrm": { label: "adv" } }).result.data[0].name, "[adv · ~/dev/auldwyrm] auldwyrm");
 });
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {

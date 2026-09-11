@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
-import { codexRouteOwnsRoot, readCodexRootSession, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
@@ -221,6 +221,7 @@ async function main() {
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     threadListCwd,
+    threadLabels: await readManagedSessionLabels(home),
     onIdle: stop,
     telemetry: telemetryWriter(process.env),
     reporter,

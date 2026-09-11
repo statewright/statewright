@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -211,6 +212,33 @@ async function saveStore(home, store) {
 
 function bindingKey(host, sessionId, cwd) {
   return `${host}:${sessionId}:${resolvePath(cwd || process.cwd())}`;
+}
+
+export function tmuxWindowLabel(environment = process.env, exec = execFileSync) {
+  // TMUX_PANE alone may survive into a detached child. Require the live tmux
+  // socket marker as well, and treat every probe failure as absent metadata.
+  if (!String(environment.TMUX ?? "").trim()) return null;
+  const pane = String(environment.TMUX_PANE ?? "").trim();
+  if (!pane) return null;
+  try {
+    exec("tmux", ["has-session", "-t", pane], { stdio: "ignore" });
+    const label = exec("tmux", ["display-message", "-p", "-t", pane, "#{window_name}"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return label && label.length <= 80 && !/[\r\n\0]/.test(label) ? label : null;
+  } catch { return null; }
+}
+
+export async function bindManagedSessionLabel({ host, sessionId, label, cwd, home = homedir() }) {
+  if (!sessionId || !label) return false;
+  const store = await loadStore(home);
+  store.labels = store.labels && typeof store.labels === "object" ? store.labels : {};
+  store.labels[`${host}:${sessionId}`] = { label, cwd: resolvePath(cwd), recorded_at: new Date().toISOString() };
+  await saveStore(home, store);
+  return true;
+}
+
+export async function readManagedSessionLabels(home = homedir()) {
+  const store = await loadStore(home);
+  return store.labels && typeof store.labels === "object" ? store.labels : {};
 }
 
 export async function resolveManagedClientIdentity({ host, args, home = homedir(), cwd = process.cwd() }) {

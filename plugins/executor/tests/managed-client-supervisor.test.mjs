@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { bindManagedClientIdentity, claimManagedSessionOwner, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId } from "../lib/managed-client-identity.mjs";
+import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSessionOwner, readManagedSessionLabels, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
@@ -177,6 +177,32 @@ test("same-directory resumed sessions retain independent owners while a duplicat
     assert.equal(await releaseManagedSessionOwner({ host: "codex", sessionId: "alpha-thread", ownerId: alphaOwner.owner_id, home }), true);
     assert.equal(await releaseManagedSessionOwner({ host: "codex", sessionId: "beta-thread", ownerId: betaOwner.owner_id, home }), true);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("managed resumed session persists its tmux label without changing identity bindings", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-managed-label-"));
+  try {
+    assert.equal(await bindManagedSessionLabel({ host: "codex", sessionId: "adv-thread", label: "adv", cwd: "/workspace/auldwyrm", home }), true);
+    assert.deepEqual(await readManagedSessionLabels(home), {
+      "codex:adv-thread": { label: "adv", cwd: "/workspace/auldwyrm", recorded_at: (await readManagedSessionLabels(home))["codex:adv-thread"].recorded_at },
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("tmux labels are optional metadata and fail open outside an active pane", () => {
+  let calls = 0;
+  const exec = () => { calls += 1; throw new Error("tmux unavailable"); };
+  assert.equal(tmuxWindowLabel({}, exec), null);
+  assert.equal(calls, 0);
+  assert.equal(tmuxWindowLabel({ TMUX: "/tmp/tmux-1/default", TMUX_PANE: "%3" }, exec), null);
+  assert.equal(calls, 1);
+  const commands = [];
+  const label = tmuxWindowLabel({ TMUX: "/tmp/tmux-1/default", TMUX_PANE: "%3" }, (command, args) => {
+    commands.push([command, args]);
+    return args[0] === "display-message" ? "adv\n" : "";
+  });
+  assert.equal(label, "adv");
+  assert.deepEqual(commands.map(([, args]) => args[0]), ["has-session", "display-message"]);
 });
 
 test("restart transport refuses a duplicate resumed writer before spawning its native child", async () => {

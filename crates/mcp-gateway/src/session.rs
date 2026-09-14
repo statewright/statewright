@@ -16,7 +16,7 @@ pub struct PendingApproval {
 }
 
 /// Parent snapshot retained while a named child workflow is executing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveSubflow {
     pub name: String,
     pub parent_definition: MachineDefinition,
@@ -27,7 +27,7 @@ pub struct ActiveSubflow {
 }
 
 /// Active gateway session tracking state machine progression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewaySession {
     pub instance_id: String,
     pub definition: MachineDefinition,
@@ -51,6 +51,42 @@ pub struct GatewaySession {
 }
 
 impl GatewaySession {
+    pub fn checkpoint(&self) -> serde_json::Value {
+        serde_json::json!({"schema": "statewright/paused-session/v1", "session": self})
+    }
+
+    pub fn from_checkpoint(
+        value: serde_json::Value,
+        instance_id: &str,
+        state: &str,
+    ) -> Result<Self, String> {
+        if value["schema"] != "statewright/paused-session/v1" {
+            return Err("Legacy pause lacks an authoritative session/approval checkpoint; explicit recovery required".into());
+        }
+        if value["session"].get("pending_approval").is_none() {
+            return Err("Paused checkpoint is missing approval status".into());
+        }
+        let session: Self = serde_json::from_value(value["session"].clone())
+            .map_err(|_| "Invalid paused session checkpoint")?;
+        if session.instance_id != instance_id
+            || session.current_state != state
+            || !session.definition.states.contains_key(state)
+            || !session.context.is_object()
+        {
+            return Err("Paused session identity or state mismatch".into());
+        }
+        if let Some(pending) = &session.pending_approval {
+            if pending.approval_id.is_empty()
+                || pending.from_state != state
+                || !session.definition.states.contains_key(&pending.to_state)
+                || !pending.new_context.is_object()
+            {
+                return Err("Invalid pending approval checkpoint".into());
+            }
+        }
+        Ok(session)
+    }
+
     pub fn new(instance_id: String, definition: MachineDefinition) -> Self {
         let initial = definition.initial.clone();
         // Ensure context is always an object, never null — downstream code uses as_object_mut()
@@ -138,6 +174,13 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    pub fn restore(&self, session: GatewaySession) {
+        self.sessions
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session.instance_id.clone(), session);
+    }
+
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),

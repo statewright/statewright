@@ -45,6 +45,41 @@ pub struct NativeUsageError {
 }
 
 impl Gateway {
+    async fn paused_run(
+        &self,
+        workflow: &str,
+        project: &str,
+    ) -> Result<(String, crate::session::GatewaySession), String> {
+        #[cfg(feature = "metering")]
+        {
+            let pool = self
+                .db_pool
+                .as_ref()
+                .ok_or("Resume requires durable run storage")?;
+            let row = sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>)>(
+                "SELECT id, final_state, context_snapshot FROM workflow_runs \
+                 WHERE owner = $1 AND workflow_name = $2 AND status = 'paused' \
+                   AND session_id = $3 AND project_id = $4 ORDER BY updated DESC LIMIT 1"
+            ).bind(&self.owner_id).bind(workflow).bind(&self.session_id)
+                .bind(project).fetch_optional(pool).await
+                .map_err(|e| { tracing::warn!(error = %e, "Paused run lookup failed"); "Paused run lookup failed" })?
+                .ok_or("No paused run matches this owner, session, workflow and project; no new run was created")?;
+            let (id, state, checkpoint) = row;
+            let state = state.ok_or("Paused run has no state")?;
+            let session = crate::session::GatewaySession::from_checkpoint(
+                checkpoint.ok_or("Paused run has no checkpoint")?,
+                &self.session_id,
+                &state,
+            )?;
+            Ok((id, session))
+        }
+        #[cfg(not(feature = "metering"))]
+        {
+            let _ = (workflow, project);
+            Err("Resume requires durable run storage".into())
+        }
+    }
+
     pub fn new(
         session_manager: SessionManager,
         upstream: UpstreamManager,
@@ -1917,13 +1952,12 @@ impl Gateway {
                 // Transport identity is established by the remote MCP layer
                 // and must never be rewritten by a tool argument. Keep the
                 // legacy session_id field as project/run metadata only.
-                if let Some(pid) = arguments
+                let requested_project = arguments
                     .get("project_id")
                     .and_then(|p| p.as_str())
                     .or_else(|| arguments.get("session_id").and_then(|s| s.as_str()))
-                {
-                    self.project_id = Some(pid.to_string());
-                }
+                    .map(str::to_string)
+                    .or_else(|| self.project_id.clone());
 
                 // Branch parameter: connect sub-agent to a specific fork branch session
                 if let Some(branch_name) = arguments.get("branch").and_then(|b| b.as_str()) {
@@ -2019,22 +2053,52 @@ impl Gateway {
                     }
                 }
 
+                // Resolve and validate before replacing any live session or creating a run.
+                let resume = arguments
+                    .get("resume")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false);
+                let paused = if resume {
+                    match self
+                        .paused_run(workflow_name, requested_project.as_deref().unwrap_or(""))
+                        .await
+                    {
+                        Ok(paused) => Some(paused),
+                        Err(error) => return JsonRpcResponse::error(id, -32600, error),
+                    }
+                } else {
+                    None
+                };
+                #[cfg(feature = "metering")]
+                if let Some((run_id, _)) = &paused {
+                    let result = sqlx::query("UPDATE workflow_runs SET status = 'running', updated = $1 WHERE id = $2 AND status = 'paused'")
+                        .bind(chrono::Utc::now().to_rfc3339()).bind(run_id)
+                        .execute(self.db_pool.as_ref().expect("paused_run checked storage")).await;
+                    if !matches!(result, Ok(ref r) if r.rows_affected() == 1) {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32600,
+                            "Paused run changed or storage update failed; resume denied",
+                        );
+                    }
+                }
                 // Preserve plan_limit across workflow swaps
                 let old_limit = self
                     .session_manager
                     .get(&self.session_id)
                     .and_then(|s| s.plan_limit);
-                self.session_manager
-                    .create(self.session_id.clone(), definition.clone());
+                if let Some((_, session)) = &paused {
+                    self.session_manager.restore(session.clone());
+                } else {
+                    self.session_manager
+                        .create(self.session_id.clone(), definition.clone());
+                }
                 if let Some(limit) = old_limit {
                     self.session_manager.set_plan_limit(&self.session_id, limit);
                 }
                 self.active_workflow = Some(workflow_name.to_string());
+                self.project_id = requested_project;
 
-                let resume = arguments
-                    .get("resume")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
                 let capture_output = definition
                     .meta
                     .as_ref()
@@ -2048,70 +2112,9 @@ impl Gateway {
                     .unwrap_or(false);
 
                 // Resume from paused run or start fresh
-                let (run_id, resumed_state) = if resume {
-                    #[cfg(feature = "metering")]
-                    {
-                        if let Some(pool) = &self.db_pool {
-                            let project_id = self.project_id.clone().unwrap_or_default();
-                            let row = sqlx::query_as::<
-                                _,
-                                (String, Option<String>, Option<serde_json::Value>),
-                            >(
-                                "SELECT id, final_state, context_snapshot FROM workflow_runs \
-                                 WHERE owner = $1 AND workflow_name = $2 AND status = 'paused' \
-                                   AND session_id = $3 AND project_id = $4 \
-                                 ORDER BY updated DESC LIMIT 1",
-                            )
-                            .bind(&self.owner_id)
-                            .bind(workflow_name)
-                            .bind(&self.session_id)
-                            .bind(&project_id)
-                            .fetch_optional(pool)
-                            .await
-                            .ok()
-                            .flatten();
-
-                            if let Some((rid, Some(state), context)) = row {
-                                let ctx = context.unwrap_or(json!({}));
-                                self.session_manager.update_state(
-                                    &self.session_id,
-                                    state.clone(),
-                                    ctx,
-                                );
-                                let now = chrono::Utc::now().to_rfc3339();
-                                let pool2 = pool.clone();
-                                let rid2 = rid.clone();
-                                tokio::spawn(async move {
-                                    let _ = sqlx::query(
-                                        "UPDATE workflow_runs SET status = 'running', updated = $1 WHERE id = $2"
-                                    )
-                                    .bind(&now)
-                                    .bind(&rid2)
-                                    .execute(&pool2)
-                                    .await;
-                                });
-                                self.current_run_id = Some(rid.clone());
-                                (Some(rid), Some(state))
-                            } else {
-                                let rid = self
-                                    .record_run_start(workflow_name, &definition.initial)
-                                    .await;
-                                (rid, None)
-                            }
-                        } else {
-                            let rid = self
-                                .record_run_start(workflow_name, &definition.initial)
-                                .await;
-                            (rid, None)
-                        }
-                    }
-                    #[cfg(not(feature = "metering"))]
-                    {
-                        let rid = self
-                            .record_run_start(workflow_name, &definition.initial)
-                            .await;
-                        (rid, None::<String>)
-                    }
+                let (run_id, resumed_state) = if let Some((rid, session)) = paused {
+                    self.current_run_id = Some(rid.clone());
+                    (Some(rid), Some(session.current_state))
                 } else {
                     let rid = self
                         .record_run_start(workflow_name, &definition.initial)
@@ -2262,6 +2265,13 @@ impl Gateway {
                 )
             }
             "statewright_pause" => {
+                if self.db_pool.is_none() {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32600,
+                        "Pause requires durable run storage",
+                    );
+                }
                 let session = match self.session_manager.get(&self.session_id) {
                     Some(s) => s,
                     None => {
@@ -2270,33 +2280,44 @@ impl Gateway {
                 };
 
                 let paused_state = session.current_state.clone();
-                let paused_context = session.context.clone();
+                let paused_context = session.checkpoint();
                 let workflow_name = self.active_workflow.clone().unwrap_or_default();
 
                 // Save context snapshot to the run record
                 #[cfg(feature = "metering")]
                 if let Some(run_id) = &self.current_run_id {
                     if let Some(pool) = &self.db_pool {
-                        let pool = pool.clone();
                         let now = chrono::Utc::now().to_rfc3339();
-                        let rid = run_id.clone();
-                        let state = paused_state.clone();
-                        let ctx = paused_context.clone();
-                        tokio::spawn(async move {
-                            let _ = sqlx::query(
+                        let saved = sqlx::query(
                                 "UPDATE workflow_runs \
                                  SET status = 'paused', final_state = $1, context_snapshot = $2, updated = $3 \
                                  WHERE id = $4"
                             )
-                            .bind(&state)
-                            .bind(&ctx)
+                            .bind(&paused_state)
+                            .bind(&paused_context)
                             .bind(&now)
-                            .bind(&rid)
-                            .execute(&pool)
+                            .bind(run_id)
+                            .execute(pool)
                             .await;
-                        });
+                        if !matches!(saved, Ok(ref r) if r.rows_affected() == 1) {
+                            return JsonRpcResponse::error(
+                                id,
+                                -32600,
+                                "Pause checkpoint was not saved; workflow remains active",
+                            );
+                        }
+                    } else {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32600,
+                            "Pause requires durable run storage",
+                        );
                     }
+                } else {
+                    return JsonRpcResponse::error(id, -32600, "Pause requires a durable run");
                 }
+                #[cfg(not(feature = "metering"))]
+                let _ = paused_context;
 
                 // Don't clear current_run_id — resume will reuse it
                 let run_id = self.current_run_id.clone();
@@ -2787,14 +2808,12 @@ mod tests {
                     })
                 );
             }
-            assert!(
-                tools
-                    .iter()
-                    .find(|t| t["name"] == "statewright_transition")
-                    .unwrap()
-                    .get("annotations")
-                    .is_none()
-            );
+            assert!(tools
+                .iter()
+                .find(|t| t["name"] == "statewright_transition")
+                .unwrap()
+                .get("annotations")
+                .is_none());
         }
     }
 
@@ -2992,13 +3011,11 @@ mod tests {
                 result["state_snapshot"]["allowed_tools"],
                 json!(["read_file", "grep"])
             );
-            assert!(
-                result["state_snapshot"]["transitions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|transition| transition["event"] == "READY")
-            );
+            assert!(result["state_snapshot"]["transitions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|transition| transition["event"] == "READY"));
         }
 
         assert_eq!(gw.session_id(), "test-session");
@@ -3261,10 +3278,9 @@ mod tests {
             "to_state": "deployed", "status": "approved", "context_snapshot": {"approved": true}});
         let mut foreign = receipt.clone();
         foreign["to_state"] = json!("completed");
-        assert!(
-            gw.apply_approval_receipt("run1", "apr_one", &foreign)
-                .is_err()
-        );
+        assert!(gw
+            .apply_approval_receipt("run1", "apr_one", &foreign)
+            .is_err());
         assert_eq!(
             gw.session_manager
                 .get("approval-session")
@@ -3351,6 +3367,243 @@ mod tests {
 
         // Session should have a pending approval
         assert!(session.pending_approval.is_some());
+    }
+
+    #[tokio::test]
+    async fn paused_checkpoint_preserves_pending_approval_and_counters() {
+        let mut gw = approval_gateway();
+        gw.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            id: Some(json!(1)),
+            params: Some(
+                json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}}),
+            ),
+        })
+        .await
+        .unwrap();
+        let mut session = gw.session_manager.get("approval-session").unwrap();
+        session.transition_count = 13;
+        session.context_bytes = 4096;
+        let checkpoint = session.checkpoint();
+        let restored = crate::session::GatewaySession::from_checkpoint(
+            checkpoint.clone(),
+            "approval-session",
+            "working",
+        )
+        .unwrap();
+        assert_eq!(restored.transition_count, 13);
+        assert_eq!(restored.context_bytes, 4096);
+        assert_eq!(
+            serde_json::to_value(&restored.pending_approval).unwrap(),
+            serde_json::to_value(&session.pending_approval).unwrap()
+        );
+        assert!(crate::session::GatewaySession::from_checkpoint(
+            checkpoint.clone(),
+            "foreign",
+            "working"
+        )
+        .is_err());
+        assert!(crate::session::GatewaySession::from_checkpoint(
+            checkpoint.clone(),
+            "approval-session",
+            "completed"
+        )
+        .is_err());
+        assert!(crate::session::GatewaySession::from_checkpoint(
+            json!({}),
+            "approval-session",
+            "working"
+        )
+        .is_err());
+        let mut invalid = checkpoint;
+        invalid["session"]["pending_approval"]["from_state"] = json!("foreign");
+        assert!(crate::session::GatewaySession::from_checkpoint(
+            invalid,
+            "approval-session",
+            "working"
+        )
+        .is_err());
+        let mut missing = session.checkpoint();
+        missing["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_approval");
+        assert!(crate::session::GatewaySession::from_checkpoint(
+            missing,
+            "approval-session",
+            "working"
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_resume_preserves_live_session_and_pending_gate() {
+        let mut gw = approval_gateway();
+        gw.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            id: Some(json!(1)),
+            params: Some(
+                json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}}),
+            ),
+        })
+        .await
+        .unwrap();
+        let before = gw
+            .session_manager
+            .get("approval-session")
+            .unwrap()
+            .checkpoint();
+        let active = gw.active_workflow.clone();
+        let run = gw.current_run_id.clone();
+        let response = gw.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(2)),
+            params: Some(json!({"name": "statewright_load_workflow", "arguments": {"name": "approval-test", "resume": true}})),
+        }).await.unwrap();
+        assert!(response.error.is_some());
+        assert_eq!(
+            gw.session_manager
+                .get("approval-session")
+                .unwrap()
+                .checkpoint(),
+            before
+        );
+        assert_eq!(gw.active_workflow, active);
+        assert_eq!(gw.current_run_id, run);
+        let response = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(3)),
+                params: Some(json!({"name": "statewright_pause", "arguments": {}})),
+            })
+            .await
+            .unwrap();
+        assert!(response.error.is_some());
+        assert_eq!(
+            gw.session_manager
+                .get("approval-session")
+                .unwrap()
+                .checkpoint(),
+            before
+        );
+        assert_eq!(gw.active_workflow, active);
+        assert_eq!(gw.current_run_id, run);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn pause_resume_storage_failures_and_roundtrip() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        // Never let an absent temporary table fall through to a real run table.
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut gw = approval_gateway();
+        gw.db_pool = Some(pool.clone());
+        gw.current_run_id = Some("fixture-run".into());
+        let mut session = gw.session_manager.get("approval-session").unwrap();
+        session.pending_approval = Some(crate::session::PendingApproval {
+            approval_id: "apr_fixture".into(),
+            event: "DEPLOY".into(),
+            from_state: "working".into(),
+            to_state: "deployed".into(),
+            new_context: json!({}),
+            message: None,
+        });
+        session.transition_count = 13;
+        gw.session_manager.restore(session.clone());
+        let checkpoint = session.checkpoint();
+        async fn denied(gw: &mut Gateway, name: &str, args: serde_json::Value) {
+            let before = gw
+                .session_manager
+                .get("approval-session")
+                .unwrap()
+                .checkpoint();
+            let identity = (
+                gw.active_workflow.clone(),
+                gw.current_run_id.clone(),
+                gw.project_id.clone(),
+            );
+            let r = gw
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    id: Some(json!(1)),
+                    params: Some(json!({"name": name, "arguments": args})),
+                })
+                .await
+                .unwrap();
+            assert!(r.error.is_some(), "expected denial: {r:?}");
+            assert_eq!(
+                gw.session_manager
+                    .get("approval-session")
+                    .unwrap()
+                    .checkpoint(),
+                before
+            );
+            assert_eq!(
+                (
+                    gw.active_workflow.clone(),
+                    gw.current_run_id.clone(),
+                    gw.project_id.clone()
+                ),
+                identity
+            );
+        }
+        let resume = json!({"name": "approval-test", "resume": true});
+        denied(&mut gw, "statewright_load_workflow", resume.clone()).await;
+        denied(&mut gw, "statewright_pause", json!({})).await;
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)").execute(&pool).await.unwrap();
+        denied(&mut gw, "statewright_load_workflow", resume.clone()).await;
+        denied(&mut gw, "statewright_pause", json!({})).await;
+        sqlx::query("INSERT INTO workflow_runs VALUES ('fixture-run', $1, 'approval-test', 'paused', 'approval-session', '', 'working', $2, '')")
+            .bind(&gw.owner_id).bind(&checkpoint).execute(&pool).await.unwrap();
+        // Simulate a concurrent writer/no-op update after successful lookup.
+        sqlx::query("CREATE FUNCTION pg_temp.skip_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER skip_update BEFORE UPDATE ON workflow_runs FOR EACH ROW EXECUTE FUNCTION pg_temp.skip_update()").execute(&pool).await.unwrap();
+        denied(&mut gw, "statewright_load_workflow", resume.clone()).await;
+        denied(&mut gw, "statewright_pause", json!({})).await;
+        sqlx::query("DROP TRIGGER skip_update ON workflow_runs")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Exact owned checkpoint resumes, then pause synchronously persists it.
+        for (name, args) in [
+            ("statewright_load_workflow", resume),
+            ("statewright_pause", json!({})),
+        ] {
+            let r = gw
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    id: Some(json!(2)),
+                    params: Some(json!({"name": name, "arguments": args})),
+                })
+                .await
+                .unwrap();
+            assert!(r.error.is_none(), "{r:?}");
+        }
+        let (status, saved): (String, serde_json::Value) = sqlx::query_as(
+            "SELECT status, context_snapshot FROM workflow_runs WHERE id='fixture-run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "paused");
+        assert_eq!(
+            saved["session"]["pending_approval"],
+            checkpoint["session"]["pending_approval"]
+        );
+        assert_eq!(saved["session"]["transition_count"], 13);
+        pool.close().await;
     }
 
     #[tokio::test]

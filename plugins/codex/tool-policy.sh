@@ -149,6 +149,19 @@ statewright_tool_allowed() {
   local tool_name="$1" hook_input="$2" normalized command
   STATEWRIGHT_TOOL_MODE=""
 
+  # Poll an existing native command without admitting arbitrary stdin writes.
+  # Interactive input requires an explicit write_stdin capability.
+  if [ "$tool_name" = "write_stdin" ] && ! statewright_has_capability "write_stdin"; then
+    if printf '%s' "$hook_input" | jq -e '.tool_input | (has("chars") | not) or .chars == ""' >/dev/null 2>&1; then
+      if statewright_has_capability "Bash" || statewright_has_capability "bash" || statewright_has_capability "Read" ||
+         statewright_has_capability "Grep" || statewright_has_capability "Glob"; then
+        STATEWRIGHT_TOOL_MODE="poll"
+        return 0
+      fi
+    fi
+    return 1
+  fi
+
   # Shell tools must reach Bash discernment even when Bash itself is allowed.
   # Checking the raw tool name first would let redirects and in-place edits
   # bypass the state policy.

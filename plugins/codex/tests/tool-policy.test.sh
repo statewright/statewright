@@ -23,6 +23,18 @@ assert_denied() {
 
 shell_input() { jq -n --arg command "$1" '{tool_input:{command:$command}}'; }
 
+for capability in Bash bash Read Grep Glob; do
+  assert_allowed "$capability" write_stdin '{"tool_input":{"session_id":42,"chars":""}}'
+  test "$STATEWRIGHT_TOOL_MODE" = "poll"
+  assert_allowed "$capability" write_stdin '{"tool_input":{"session_id":42}}'
+  test "$STATEWRIGHT_TOOL_MODE" = "poll"
+  assert_denied "$capability" write_stdin '{"tool_input":{"session_id":42,"chars":"rm -rf target\n"}}'
+  assert_denied "$capability" write_stdin '{"tool_input":{"session_id":42,"chars":"\u0003"}}'
+  assert_denied "$capability" write_stdin '{"tool_input":{"session_id":42,"chars":null}}'
+done
+assert_denied "Write" write_stdin '{"tool_input":{"session_id":42,"chars":""}}'
+assert_allowed "write_stdin" write_stdin '{"tool_input":{"session_id":42,"chars":"yes\n"}}'
+
 assert_allowed "Read" Bash "$(shell_input 'sed -n "1,12p" README.md')"
 assert_allowed "Grep" exec_command "$(shell_input "rg -n 'needle' src")"
 assert_allowed "Glob" Bash "$(shell_input "find src -name '*.rs'")"

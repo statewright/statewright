@@ -76,6 +76,86 @@ impl Gateway {
         &self.session_id
     }
 
+    pub(crate) fn approval_projection(
+        &self,
+        run_id: &str,
+        approval_id: &str,
+    ) -> Result<serde_json::Value, &'static str> {
+        if self.current_run_id.as_deref() != Some(run_id) {
+            return Err("Approval run mismatch");
+        }
+        let session = self
+            .session_manager
+            .get(&self.session_id)
+            .ok_or("Workflow unavailable")?;
+        let pending = match &session.pending_approval {
+            Some(p) if p.approval_id == approval_id => json!({
+                "from_state": p.from_state, "to_state": p.to_state,
+                "message": p.message, "context_snapshot": p.new_context,
+            }),
+            Some(_) => return Err("A different approval is pending"),
+            None => serde_json::Value::Null,
+        };
+        Ok(
+            json!({"owner": self.owner_id, "instance_id": self.transport_session_id,
+            "run_id": run_id, "approval_id": approval_id, "pending": pending}),
+        )
+    }
+
+    pub(crate) fn apply_approval_receipt(
+        &mut self,
+        run_id: &str,
+        approval_id: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<(), &'static str> {
+        if self.current_run_id.as_deref() != Some(run_id)
+            || receipt["run_id"] != run_id
+            || receipt["approval_id"] != approval_id
+        {
+            return Err("Approval receipt identity mismatch");
+        }
+        let status = receipt["status"]
+            .as_str()
+            .ok_or("Missing approval status")?;
+        if !["pending", "approved", "rejected"].contains(&status) {
+            return Err("Invalid approval status");
+        }
+        let session = self
+            .session_manager
+            .get(&self.session_id)
+            .ok_or("Workflow unavailable")?;
+        let Some(pending) = session.pending_approval else {
+            return Ok(());
+        };
+        if pending.approval_id != approval_id
+            || receipt["from_state"] != pending.from_state
+            || receipt["to_state"] != pending.to_state
+        {
+            return Err("Approval transition mismatch");
+        }
+        if status == "pending" {
+            return Ok(());
+        }
+        if status == "approved" {
+            let context = receipt
+                .get("context_snapshot")
+                .filter(|v| v.is_object())
+                .ok_or("Missing approved context")?
+                .clone();
+            self.session_manager
+                .update_state(&self.session_id, pending.to_state.clone(), context);
+            self.record_external_transition(
+                &pending.from_state,
+                &pending.to_state,
+                &pending.event,
+                &json!({"approval_id": approval_id, "review_note": receipt["review_note"]}),
+            );
+        }
+        self.session_manager
+            .clear_pending_approval(&self.session_id);
+        Ok(())
+    }
+
     /// Return the same state shape exposed by `statewright_get_state`, enriched
     /// with run metadata needed by native hooks.  Load callers must use this
     /// snapshot instead of performing a second, potentially different-session
@@ -1322,6 +1402,8 @@ impl Gateway {
                             let response = json!({
                                 "status": "pending_approval",
                                 "approval_id": approval_id,
+                                "run_id": self.current_run_id,
+                                "run_session_id": self.transport_session_id,
                                 "from": prev_state,
                                 "to": new_state,
                                 "message": approval_message,
@@ -3156,6 +3238,74 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn approval_receipt_is_bound_and_applied_once() {
+        let mut gw = approval_gateway();
+        gw.current_run_id = Some("run1".into());
+        gw.session_manager.set_pending_approval(
+            "approval-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_one".into(),
+                event: "DEPLOY".into(),
+                from_state: "working".into(),
+                to_state: "deployed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
+        assert!(gw.approval_projection("other", "apr_one").is_err());
+        assert!(gw.approval_projection("run1", "apr_other").is_err());
+        let receipt = json!({"approval_id": "apr_one", "run_id": "run1", "from_state": "working",
+            "to_state": "deployed", "status": "approved", "context_snapshot": {"approved": true}});
+        let mut foreign = receipt.clone();
+        foreign["to_state"] = json!("completed");
+        assert!(
+            gw.apply_approval_receipt("run1", "apr_one", &foreign)
+                .is_err()
+        );
+        assert_eq!(
+            gw.session_manager
+                .get("approval-session")
+                .unwrap()
+                .current_state,
+            "working"
+        );
+        gw.apply_approval_receipt("run1", "apr_one", &receipt)
+            .unwrap();
+        let epoch = gw.usage.state_epoch();
+        gw.apply_approval_receipt("run1", "apr_one", &receipt)
+            .unwrap();
+        assert_eq!(gw.usage.state_epoch(), epoch);
+        let session = gw.session_manager.get("approval-session").unwrap();
+        assert_eq!(session.current_state, "deployed");
+        assert!(session.pending_approval.is_none());
+        assert_eq!(session.context["approved"], true);
+    }
+
+    #[test]
+    fn approval_rejection_does_not_advance_state() {
+        let mut gw = approval_gateway();
+        gw.current_run_id = Some("run1".into());
+        gw.session_manager.set_pending_approval(
+            "approval-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_one".into(),
+                event: "DEPLOY".into(),
+                from_state: "working".into(),
+                to_state: "deployed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
+        let receipt = json!({"approval_id": "apr_one", "run_id": "run1", "from_state": "working",
+            "to_state": "deployed", "status": "rejected"});
+        gw.apply_approval_receipt("run1", "apr_one", &receipt)
+            .unwrap();
+        let session = gw.session_manager.get("approval-session").unwrap();
+        assert_eq!(session.current_state, "working");
+        assert!(session.pending_approval.is_none());
     }
 
     fn approval_gateway() -> Gateway {

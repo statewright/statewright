@@ -486,8 +486,96 @@ pub fn build_router(state: Arc<RemoteState>) -> Router {
         .route("/message", post(handle_message))
         .route("/health", get(|| async { "ok" }))
         .route("/api/runtime-usage", post(handle_native_usage))
+        .route("/api/runtime-approval", post(handle_runtime_approval))
         .route("/api/approval-callback", post(handle_approval_callback))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+struct RuntimeApprovalRequest {
+    run_id: String,
+    run_session_id: String,
+    approval_id: String,
+    decision: Option<String>,
+}
+
+// Host-only HTTP capability, intentionally absent from MCP tools/list.
+async fn handle_runtime_approval(
+    State(state): State<Arc<RemoteState>>,
+    headers: HeaderMap,
+    Json(body): Json<RuntimeApprovalRequest>,
+) -> axum::response::Response {
+    let Some(key) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if body
+        .decision
+        .as_deref()
+        .is_some_and(|s| s != "approved" && s != "rejected")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    // Require the exact client root as well as the account key. Another pane
+    // in the same account cannot select this session through the request body.
+    let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string();
+    let client = headers.get(CLIENT_ID_HEADER).and_then(|v| v.to_str().ok());
+    if client.is_none() || streamable_session_key(&fingerprint, client, None) != body.run_session_id
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(session) = state
+        .sessions
+        .read()
+        .await
+        .get(&body.run_session_id)
+        .cloned()
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut session = session.lock().await;
+    if !session.gateway.verify_owner_key(key) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mut projection = match session
+        .gateway
+        .approval_projection(&body.run_id, &body.approval_id)
+    {
+        Ok(v) => v,
+        Err(_) => return StatusCode::CONFLICT.into_response(),
+    };
+    if state.approval_secret.is_empty() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    projection["decision"] = serde_json::json!(body.decision);
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/internal/human-approval",
+            state.pb_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&state.approval_secret)
+        .timeout(std::time::Duration::from_secs(10))
+        .json(&projection)
+        .send()
+        .await;
+    let receipt = match response {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    };
+    let Some(receipt) = receipt else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    if session
+        .gateway
+        .apply_approval_receipt(&body.run_id, &body.approval_id, &receipt)
+        .is_err()
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    Json(receipt).into_response()
 }
 
 /// POST /api/runtime-usage — Update the live usage ledger from provider-native
@@ -1198,6 +1286,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn runtime_approval_requires_key_and_exact_client_root() {
+        let body = json!({"run_id": "r", "run_session_id": "foreign", "approval_id": "apr_test"})
+            .to_string();
+        let response = build_router(test_state())
+            .oneshot(
+                Request::post("/api/runtime-approval")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = build_router(test_state())
+            .oneshot(
+                Request::post("/api/runtime-approval")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer key")
+                    .header(CLIENT_ID_HEADER, "own-client")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

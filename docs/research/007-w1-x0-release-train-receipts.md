@@ -106,8 +106,9 @@ This closes the last executable P0 verification identified by the milestone plan
 shared approval/journal/resume ownership is now evidenced against the installed standalone Codex
 binary, not only against fixtures. W2's human-interactive approval loop and W1's
 authenticated-turn evidence remain external gates (hosted-runner credential secrets and
-human-owned Windows respectively); X1, C1 implementation, D1, O1, and P1 remain gated as
-recorded in the approved plan.
+human-owned Windows respectively). The managed X1 fixture evidence is recorded below; stock
+Codex desktop and every Claude Desktop acceptance case remain gated, alongside C1, D1, O1 and
+P1.
 
 Host hygiene note: `~/.statewright/bin/codex --version` (managed shim) reported a stale
 Statewright telemetry listener identity conflict on this host during discovery
@@ -122,3 +123,16 @@ for the next slice: the Codex side already has a proven, Statewright-managed WS 
 app-server transport on this host; the Claude desktop side is not automatable here until MCP is
 provisioned, so the C1/X1 transport decision must not bind the Claude desktop surface on this
 host.
+
+## X1: managed Codex app-server conformance fixture
+
+The Statewright-owned Codex app-server surface has deterministic conformance coverage in
+`task test:codex-native-approvals`: evidence presentation, cancellation, disconnect safety,
+cold reopening of a pending gate, stale-input rejection, and release after the owning thread is
+idle are exercised by `codex-native-approval-proxy.test.mjs`. The transport fixture also covers
+bounded resume history, reconnect behavior, and route preservation in
+`codex-app-server-transport.test.mjs`.
+
+This is fixture evidence for the Statewright-owned app-server process, not a claim that the
+stock ChatGPT/Codex desktop app exposes an attachable or Statewright-controlled process. Stock
+Codex desktop and every Claude Desktop surface remain separate, unproven M3 acceptance gates.

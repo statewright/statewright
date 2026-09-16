@@ -106,6 +106,25 @@ tasks:
     cmds:
       - node --test plugins/executor/tests/proxy-feature-parity.test.mjs
 
+  test:control-plane-audit:
+    desc: "Validate the host capability inventory and standalone hosted-routing fixtures; not live approval conformance"
+    cmds:
+      - node --test plugins/executor/tests/control-plane-capability-contract.test.mjs plugins/executor/tests/app-server-handoff-proxy.test.mjs
+
+  test:codex-native-approvals:
+    desc: "Validate standalone Codex approval parking, authorization, journaling, and native proxy release"
+    cmds:
+      - node --test plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs
+      - git diff --check
+
+  test:codex-native-approvals:vendor:
+    desc: "Exercise installed vendor Codex approval protocol without inference or real workflow decisions"
+    preconditions:
+      - sh: '[ -n "${CODEX_BIN:-}" ]'
+        msg: "Set CODEX_BIN to the vendor binary, not codex/ascodex shims"
+    cmds:
+      - node plugins/executor/tests/codex-native-approval-vendor-canary.mjs
+
   test:claude-setup:
     desc: "Verify Claude setup preserves endpoint selection and removes only legacy Statewright MCP"
     cmds:
@@ -123,6 +142,11 @@ tasks:
     desc: "Run all workspace tests"
     cmds:
       - "{{.CARGO}} test --workspace"
+
+  test:approval-auth:
+    desc: "Check engine and gateway approval contracts"
+    cmds:
+      - "{{.CARGO}} test -p statewright-engine -p statewright-mcp-gateway --no-default-features --lib"
 
   build:
     desc: "Build all binaries"

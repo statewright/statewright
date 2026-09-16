@@ -60,3 +60,6 @@ gold.validate-gold*.json
 logs/
 plugins/smoke-test/
 tmp/
+
+# Agent tooling worktrees (never commit)
+.agent-worktrees/

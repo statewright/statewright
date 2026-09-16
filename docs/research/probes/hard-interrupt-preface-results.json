@@ -1,0 +1,243 @@
+{
+  "date": "2026-09-15",
+  "schema": "statewright/hard-interrupt-preface-validation/v1",
+  "test_count": 104,
+  "test_failures": 0,
+  "native": [
+    {
+      "binary": "Codex 0.153.4",
+      "outcome": "sol_astra_roundtrip_passed",
+      "scope": "Real native app-server and production proxy; scripted HTTP/WebSocket model endpoints; not live inference or production Statewright workflow",
+      "requests": [
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a345-e93c-7940-9107-b0e53dbe4709\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 0\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a345-e8cd-7920-8c83-823448aa2ebf\","
+        },
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-6-astra",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a345-e955-7252-ba1b-004a9dfd2716\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 1\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a345-e94e-7291-9604-c775c7fdcf3c\","
+        },
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a345-e9cf-76a0-9fab-9e3fd42d1ae9\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 2\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a345-e9c7-7782-a728-991155a95bb0\","
+        }
+      ],
+      "auxiliaryRequests": [
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "purpose": "native WebSocket prewarm"
+        }
+      ],
+      "notices": [
+        "[statewright] switching from sol=>astra, hard interrupt required",
+        "[statewright] switching from astra=>sol, hard interrupt required"
+      ],
+      "terminals": [
+        "interrupted",
+        "interrupted",
+        "completed"
+      ],
+      "nativeCalls": [
+        {
+          "method": "initialize"
+        },
+        {
+          "method": "initialized"
+        },
+        {
+          "method": "thread/start",
+          "model": "gpt-5.6-sol",
+          "provider": "openai"
+        },
+        {
+          "method": "turn/start"
+        },
+        {
+          "method": "turn/start",
+          "model": "gpt-6-astra"
+        },
+        {
+          "method": "turn/start",
+          "model": "gpt-5.6-sol"
+        }
+      ]
+    },
+    {
+      "binary": "Codex 0.153.4",
+      "outcome": "blocked_openai_to_qwen_compaction",
+      "scope": "Real native app-server and production proxy; scripted HTTP/WebSocket model endpoints; not live inference or production Statewright workflow",
+      "requests": [
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a347-d75c-7461-895e-67d6635ba4f0\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 0\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a347-d6fa-70e3-b6c3-f448e4213dc7\","
+        },
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-6-astra",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a347-d778-7c11-b926-b427fe27e295\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 1\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a347-d771-7ed3-abd0-db50588d3368\","
+        },
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "effort": "low",
+          "type": "response.create",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a347-d800-75e1-80f7-600a34440581\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 2\"}],\"internal_chat_message_metadata_passthrough\":{\"turn_id\":\"01a0a347-d7e1-71c0-8ccd-8e34b8307b3d\","
+        }
+      ],
+      "auxiliaryRequests": [
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "purpose": "native WebSocket prewarm"
+        },
+        {
+          "endpoint": "/qwen/v1/responses",
+          "model": "gpt-5.6-sol",
+          "purpose": "wrong-model destination compaction",
+          "rejected": true
+        }
+      ],
+      "notices": [
+        "[statewright] switching from sol=>astra, hard interrupt required",
+        "[statewright] switching from astra=>sol, hard interrupt required",
+        "[statewright] switching from sol=>qwen3.8-27b, hard interrupt required"
+      ],
+      "terminals": [
+        "interrupted",
+        "interrupted",
+        "interrupted",
+        "interrupted"
+      ],
+      "nativeCalls": [
+        {
+          "method": "initialize"
+        },
+        {
+          "method": "initialized"
+        },
+        {
+          "method": "thread/start",
+          "model": "gpt-5.6-sol",
+          "provider": "openai"
+        },
+        {
+          "method": "turn/start"
+        },
+        {
+          "method": "turn/start",
+          "model": "gpt-6-astra"
+        },
+        {
+          "method": "turn/start",
+          "model": "gpt-5.6-sol"
+        },
+        {
+          "method": "thread/unsubscribe"
+        },
+        {
+          "method": "thread/resume",
+          "model": "qwen3.8-27b",
+          "provider": "qwen_private"
+        },
+        {
+          "method": "turn/start",
+          "model": "qwen3.8-27b"
+        }
+      ]
+    },
+    {
+      "binary": "Codex 0.153.4",
+      "outcome": "blocked_qwen_to_openai_compaction",
+      "scope": "Real native app-server and production proxy; scripted HTTP/WebSocket model endpoints; not live inference or production Statewright workflow",
+      "requests": [
+        {
+          "endpoint": "/qwen/v1/responses",
+          "model": "qwen3.8-27b",
+          "effort": "low",
+          "tail": "[{\"type\":\"message\",\"id\":\"msg_01a0a347-bc80-7063-9e3f-7b0cee26cbfc\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Isolated roundtrip 0\"}]}]"
+        }
+      ],
+      "auxiliaryRequests": [
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "gpt-5.6-sol",
+          "purpose": "native WebSocket prewarm"
+        },
+        {
+          "endpoint": "/openai/v1/responses",
+          "model": "qwen3.8-27b",
+          "purpose": "wrong-model destination compaction",
+          "rejected": true
+        }
+      ],
+      "notices": [
+        "[statewright] switching from qwen3.8-27b=>sol, hard interrupt required"
+      ],
+      "terminals": [
+        "interrupted",
+        "interrupted"
+      ],
+      "nativeCalls": [
+        {
+          "method": "initialize"
+        },
+        {
+          "method": "initialized"
+        },
+        {
+          "method": "thread/start",
+          "model": "qwen3.8-27b",
+          "provider": "qwen_private"
+        },
+        {
+          "method": "turn/start"
+        },
+        {
+          "method": "thread/unsubscribe"
+        },
+        {
+          "method": "thread/resume",
+          "model": "gpt-5.6-sol",
+          "provider": "openai"
+        },
+        {
+          "method": "turn/start",
+          "model": "gpt-5.6-sol"
+        }
+      ]
+    }
+  ],
+  "tui": {
+    "scope": "Real stock TUI with scripted lifecycle rendering; production notice formatter; not inference or full workflow acceptance",
+    "capture": "\u001b[2m╭───────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)            │\n│                                       │\n│ model:     \u001b[3mloading\u001b[0;2m\u001b[39m\u001b[49m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change │\n│ directory: \u001b[0m\u001b[39m\u001b[49m~/dev/polyhedron\u001b[2m           │\n╰───────────────────────────────────────╯\n\u001b[0m\u001b[39m\u001b[49m\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[2m? for shortcuts\n\u001b[0m\u001b[39m\u001b[49m> \u001b[1mYou are in \u001b[0m\u001b[39m\u001b[49m/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-handoff-tui-B7vTGO\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n\u001b[38;5;6m› 1. Yes, continue\n\u001b[39m  2. No, quit\n\n  \u001b[2mPress enter to continue\n╭───────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)            │\n│                                       │\n│ model:     \u001b[3mloading\u001b[0;2m\u001b[39m\u001b[49m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change │\n│ directory: \u001b[0m\u001b[39m\u001b[49m~/dev/polyhedron\u001b[2m           │\n╰───────────────────────────────────────╯\n\u001b[0m\u001b[39m\u001b[49m\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[38;2;246;226;183mgpt-6-astra default\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m\u001b[49m~/dev/polyhedron\n\n\u001b[2m\u001b[39m╭────────────────────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)                         │\n│                                                    │\n│ model:     \u001b[0m\u001b[39m\u001b[49mgpt-6-astra\u001b[2m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change          │\n│ directory: \u001b[0m\u001b[39m\u001b[49m/var/…/T/statewright-handoff-tui-B7vTGO\u001b[2m │\n╰────────────────────────────────────────────────────╯\n\n  To get started, describe a task or try one of these commands:\n\n\u001b[0m\u001b[39m\u001b[49m  /init\u001b[2m - create an AGENTS.md file with instructions for Codex\n\u001b[0m\u001b[39m\u001b[49m  /status\u001b[2m - show current session configuration\n\u001b[0m\u001b[39m\u001b[49m  /permissions\u001b[2m - choose what Codex is allowed to do\n\u001b[0m\u001b[39m\u001b[49m  /model\u001b[2m - choose what model and reasoning effort to use\n\u001b[0m\u001b[39m\u001b[49m  /review\u001b[2m - review any changes and find issues\n\n\n\u001b[1m› \u001b[0m\u001b[39m\u001b[49mhard preface rendering probe\n\n\n\u001b[2m• \u001b[0m\u001b[39m\u001b[49mNATIVE_HANDOFF_BEFORE — scripted rendering probe; no model inference.\n\n\u001b[38;5;3m⚠ [statewright] switching from sol=>astra, hard interrupt required\n\n\u001b[38;5;1m■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.\n\n\u001b[2m\u001b[39m• \u001b[0m\u001b[39m\u001b[49mStatewright supervisor: intake · gpt-6-astra / high · running\n\n\u001b[2m• \u001b[0m\u001b[39m\u001b[49mNATIVE_HANDOFF_AFTER — continuation rendered; normal completion follows.\n\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[38;2;246;226;183mgpt-6-astra default\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m\u001b[49m/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-handoff-tui-B7vTGO\n\n\n\n"
+  },
+  "live_qwen_contract": {
+    "endpoint": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/v1/responses",
+    "input": "Reply only PROBE_OK",
+    "model": "gpt-5.6-sol",
+    "max_output_tokens": 16,
+    "http_status": 404,
+    "error_code": "model_not_found"
+  },
+  "caveats": [
+    "Native provider probes use loopback scripted HTTP/WebSocket endpoints and a dummy key; no real OpenAI credentials.",
+    "One early fixture attempt ignored OPENAI_BASE_URL and received 401 from api.openai.com using the dummy key. Corrected probes set openai_base_url explicitly.",
+    "Cross-provider cases deliberately interrupt the diagnostic after observing an unsupported compaction model; their final interrupted status is cleanup, not a successful handoff.",
+    "Qwen catalog entry is a synthetic template with actual target context-window override; real provider inference and full workflow are not validated."
+  ]
+}

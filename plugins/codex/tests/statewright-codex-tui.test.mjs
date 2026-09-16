@@ -10,9 +10,13 @@ import { cliModel, codexArgs, parseArgs, run } from "../scripts/statewright-code
 const codexRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function invokeHook(input, environment, endpoint = "post-tool") {
+  const inherited = { ...process.env };
+  for (const key of Object.keys(inherited)) {
+    if (key.startsWith("STATEWRIGHT_")) delete inherited[key];
+  }
   return await new Promise((resolveResult) => {
     const child = spawn("bash", [resolve(codexRoot, "hook.sh"), endpoint], {
-      env: { ...process.env, ...environment },
+      env: { ...inherited, ...environment },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -45,6 +49,7 @@ test("workflow load emits an atomic route restart request only for a supervised 
     assert.equal(registration.status, 0, registration.stderr);
     const result = await invokeHook({
       session_id: "session-1",
+      turn_id: "turn-1",
       tool_name: "mcp__statewright__statewright_load_workflow",
       tool_response: JSON.stringify({ state_snapshot: {
         workflow: "routing-test",
@@ -66,6 +71,7 @@ test("workflow load emits an atomic route restart request only for a supervised 
     const route = JSON.parse(await readFile(resolve(controlDir, entries[0]), "utf8"));
     assert.deepEqual(route, {
       session_id: "session-1",
+      turn_id: "turn-1",
       root_session_id: "session-1",
       client_id: route.client_id,
       run_id: "run-1",

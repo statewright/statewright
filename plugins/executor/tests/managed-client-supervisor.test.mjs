@@ -617,6 +617,33 @@ test("managed supervisor consumes Claude route requests and restarts the same ch
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("managed Claude supervisor prepares and opens each approval packet once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-claude-approval-"));
+  const fake = join(root, "fake-claude.mjs");
+  const prepared = [];
+  const opened = [];
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;\nconst request = {session_id:"claude-root",root_session_id:"",client_id:process.env.STATEWRIGHT_CLIENT_ID,approval_id:"apr_one",run_id:"run_one",run_session_id:"gateway_one"};\nwriteFileSync(join(control, "01.approval.json"), JSON.stringify(request));\nwriteFileSync(join(control, "02.approval.json"), JSON.stringify(request));\nsetTimeout(() => process.exit(0), 120);\n`);
+    await chmod(fake, 0o755);
+    assert.equal(await runManagedClient({
+      host: "claude",
+      command: fake,
+      args: [],
+      environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_PB_URL: "https://statewright.test" },
+      home: root,
+      pollMs: 5,
+      bridgeFactory: fakeBridgeFactory,
+      approvalPreparer: async (options) => {
+        prepared.push(options.request.approval_id);
+        return { reviewUrl: "https://statewright.test/approvals/record_one" };
+      },
+      approvalOpener: (url) => opened.push(url),
+    }), 0);
+    assert.deepEqual(prepared, ["apr_one"]);
+    assert.deepEqual(opened, ["https://statewright.test/approvals/record_one"]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("managed Claude supervisor defers a native child route instead of replacing the parent session", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-managed-claude-fork-"));
   const fake = join(root, "fake-claude.mjs");

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
+process.env.STATEWRIGHT_QWEN_BASE_URL = 'http://127.0.0.1:1/v1';
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 
 function once(socket, event) {
@@ -61,6 +62,79 @@ test("App Server runtime confirms its owned child exits before close completes",
     assert.throws(() => process.kill(pid, 0));
     const retainedHomes = (await readdir(tmpdir())).filter((entry) => entry.startsWith("statewright-swc_shutdown_test-app-server-"));
     assert.ok(retainedHomes.length >= 1, "the isolated home must remain addressable after shutdown");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Standalone App Server starts without any local-model configuration", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-app-server-standalone-"));
+  const fake = join(home, "fake-codex.mjs");
+  const argsPath = join(home, "args.json");
+  const environment = { ...process.env, CODEX_HOME: join(home, ".codex"), STATEWRIGHT_SENTRY_DISABLED: "true" };
+  for (const key of Object.keys(environment)) {
+    if (key.startsWith("STATEWRIGHT_QWEN_")) delete environment[key];
+  }
+  let runtime;
+  try {
+    await mkdir(environment.CODEX_HOME, { recursive: true });
+    await writeFile(fake, `#!/usr/bin/env node
+import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+const url = new URL(process.argv.at(-1));
+createServer((_req, res) => { res.writeHead(200); res.end("ok"); }).listen(Number(url.port), url.hostname);
+`);
+    await chmod(fake, 0o755);
+    runtime = await startCodexAppServerRuntime({ command: fake, environment, cwd: home,
+      home, clientId: "swc_standalone_test", reporter: { async report() {} } });
+    const args = await readFile(argsPath, "utf8");
+    assert.doesNotMatch(args, /qwen|casa|local-models/);
+  } finally {
+    await runtime?.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("App Server starts with the installed Casa Qwen provider and merged catalog", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-app-server-qwen-"));
+  const codexHome = join(home, ".codex");
+  const fake = join(home, "fake-codex.mjs");
+  const argsPath = join(home, "app-server-args.json");
+  const qwenCatalog = join(home, "qwen.models.json");
+  try {
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(join(codexHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-5.6-terra" }] }));
+    await writeFile(qwenCatalog, JSON.stringify({ models: [{ slug: "qwen3.8-27b" }] }));
+    await writeFile(fake, `#!/usr/bin/env node
+import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
+const target = new URL(process.argv.at(-1));
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+createServer((_request, response) => { response.writeHead(200); response.end("ok\\n"); }).listen(Number(target.port), target.hostname);
+`);
+    await chmod(fake, 0o755);
+    const runtime = await startCodexAppServerRuntime({
+      command: fake,
+      environment: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        STATEWRIGHT_QWEN_MODEL_CATALOG: qwenCatalog,
+        STATEWRIGHT_QWEN_BASE_URL: "https://qwen.example.test/v1",
+        STATEWRIGHT_SENTRY_DISABLED: "true",
+      },
+      cwd: home,
+      home,
+      clientId: "swc_qwen_startup_test",
+      reporter: { async report() {} },
+    });
+    try {
+      const args = JSON.parse(await readFile(argsPath, "utf8"));
+      assert.ok(args.some((value) => value.startsWith("model_catalog_json=")));
+      assert.ok(args.some((value) => value.includes("model_providers.qwen_private=") && value.includes("https://qwen.example.test/v1")));
+    } finally {
+      await runtime.close();
+    }
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -165,10 +239,11 @@ test("App Server routing overrides the native next turn and requires a settings 
   assert.equal(message.params.effort, "high");
   assert.deepEqual(settingsConfirmRoute(receipt, {
     method: "thread/settings/updated",
-    params: { threadId: "thread-1", threadSettings: { model: "gpt-5.6-sol", effort: "high" } },
+    params: { threadId: "thread-1", threadSettings: { model: "gpt-5.6-sol", modelProvider: "openai", effort: "high" } },
   }), {
     ...receipt,
     actualModel: "gpt-5.6-sol",
+    actualProvider: "openai",
     actualEffort: "high",
     confirmed: true,
   });
@@ -183,10 +258,11 @@ test("App Server routing overrides the native next turn and requires a settings 
   });
 });
 
-test("App Server routing selects the ladder entry owned by the persistent thread provider", () => {
+test("App Server routing preserves the Statewright-selected provider route", () => {
   const route = {
     session_id: "thread-1",
     model: "local_compatible/local-code-model",
+    effort: "low",
     model_ladder: [
       { model: "local_compatible/local-code-model", thinking_level: "low" },
       { model: "openai-codex/gpt-5.6-luna", thinking_level: "low" },
@@ -200,24 +276,34 @@ test("App Server routing selects the ladder entry owned by the persistent thread
   const cloud = applyRouteToTurnStart({
     id: 13, method: "turn/start", params: { threadId: "thread-1", input: [] },
   }, route, "openai");
-  assert.equal(cloud.message.params.model, "gpt-5.6-luna");
+  assert.equal(cloud.message.params.model, "local-code-model");
   assert.equal(cloud.message.params.effort, "low");
 });
 
-test("App Server routing fails closed when a ladder requires a cross-provider switch", () => {
-  assert.throws(
-    () => applyRouteToTurnStart({
-      id: 14, method: "turn/start", params: { threadId: "thread-1", input: [] },
-    }, {
+test("App Server routing converts the Casa workflow route into the installed Qwen provider", () => {
+  const { message, receipt } = applyRouteToTurnStart({
+    id: 14, method: "turn/start", params: { threadId: "thread-1", input: [] },
+  }, {
       session_id: "thread-1",
-      model: "qwen_private/qwen3.8-27b",
+      model: "casa/qwen3.8-27b",
       model_ladder: [
-        { model: "qwen_private/qwen3.8-27b", requires_provider_switch: true },
+        { model: "casa/qwen3.8-27b", requires_provider_switch: true },
         { model: "openai-codex/gpt-5.6-terra" },
       ],
-    }, "openai"),
-    /requires a cross-provider switch.*refusing to silently substitute/i,
-  );
+  });
+  assert.equal(message.params.model, "qwen3.8-27b");
+  assert.equal(receipt.effectiveProvider, "qwen_private");
+  assert.equal(receipt.providerConfig["model_providers.qwen_private"].wire_api, "responses");
+});
+
+test("App Server expands the plugin root only for trusted plugin hook commands", () => {
+  const sourcePath = "/tmp/codex-home/plugins/cache/personal/statewright/0.3.3/hooks/hooks.json";
+  const result = expandPluginRootHookCommands({
+    result: {
+      data: [{ hooks: [{ command: "bash \"$PLUGIN_ROOT/hook.sh\" stop", sourcePath }] }],
+    },
+  });
+  assert.equal(result.result.data[0].hooks[0].command, "bash \"/tmp/codex-home/plugins/cache/personal/statewright/0.3.3/hook.sh\" stop");
 });
 
 test("App Server preserves an explicit thread/list cwd but global discovery passes no scope", () => {
@@ -709,7 +795,7 @@ test("App Server route proxy injects one pending route and records the server re
   assert.equal(acknowledged, 1);
   upstreamSocket.send(JSON.stringify({
     method: "thread/settings/updated",
-    params: { threadId: "thread-proxy", threadSettings: { model: "gpt-5.6-sol", effort: "high" } },
+    params: { threadId: "thread-proxy", threadSettings: { model: "gpt-5.6-sol", modelProvider: "openai", effort: "high" } },
   }));
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
   assert.deepEqual(confirmed.map(({ confirmed: value }) => value), [true]);
@@ -751,6 +837,93 @@ test("App Server route proxy injects one pending route and records the server re
   client.close();
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));
+});
+
+test("App Server route proxy switches an idle OpenAI thread to Casa Qwen before forwarding the next turn", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const address = upstream.address();
+  let pending = { session_id: "thread-qwen", model: "casa/qwen3.8-27b", effort: "low" };
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${address.port}`,
+    takePendingRoute: async (threadId) => {
+      if (pending?.session_id !== threadId) return null;
+      const route = pending;
+      pending = null;
+      return { route, ack: async () => {} };
+    },
+  });
+  let socket;
+  const connected = new Promise((resolveConnected) => upstream.once("connection", (value) => { socket = value; resolveConnected(); }));
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    const resumed = new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "thread-qwen" } }));
+    const resumeRequest = await resumed;
+    socket.send(JSON.stringify({ id: 1, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-qwen", modelProvider: "openai", model: "gpt-5.6-terra", turns: [] } } }));
+    await once(client, "message");
+    const unsubscribe = new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-qwen", input: [] } }));
+    assert.equal(resumeRequest.method, "thread/resume");
+    assert.deepEqual(await unsubscribe, { jsonrpc: "2.0", id: "statewright-provider-switch-1", method: "thread/unsubscribe", params: { threadId: "thread-qwen" } });
+    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
+    const localResume = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    assert.equal(localResume.method, "thread/resume");
+    assert.equal(localResume.params.modelProvider, "qwen_private");
+    assert.equal(localResume.params.model, "qwen3.8-27b");
+    assert.equal(localResume.params.config["model_providers.qwen_private"].wire_api, "responses");
+    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "qwen_private", model: "qwen3.8-27b", thread: { id: "thread-qwen" } } }));
+    const routedTurn = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    assert.equal(routedTurn.method, "turn/start");
+    assert.equal(routedTurn.params.model, "qwen3.8-27b");
+    assert.equal(routedTurn.params.effort, "low");
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
+});
+
+test("App Server route rejection keeps the native connection usable", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const address = upstream.address();
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${address.port}`,
+    takePendingRoute: async () => ({ route: { session_id: "thread-retry", model: "casa/qwen3.8-27b" }, release: async () => {} }),
+  });
+  let socket;
+  const connected = new Promise((resolveConnected) => upstream.once("connection", (value) => { socket = value; resolveConnected(); }));
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "thread-retry" } }));
+    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    socket.send(JSON.stringify({ id: 1, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    await once(client, "message");
+    const reply = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-retry", input: [] } }));
+    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
+    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    socket.send(JSON.stringify({ id: "statewright-provider-switch-3", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    const rejected = await reply;
+    assert.equal(rejected.id, 2);
+    assert.match(rejected.error.message, /route was not applied/i);
+    assert.equal(client.readyState, WebSocket.OPEN);
+    const forwarded = new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 3, method: "thread/list", params: {} }));
+    assert.equal((await forwarded).method, "thread/list");
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
 });
 
 test("App Server route proxy binds a bare-picker selection and refreshes labels on subsequent lists", async () => {

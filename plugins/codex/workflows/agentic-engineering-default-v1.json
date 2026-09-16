@@ -6,7 +6,7 @@
       "default_profile": "low",
       "usage_measurement": "observed_only",
       "weekly_budget_enforcement": "operator_observed_not_global",
-      "local_first": "qwen_private/qwen3.8-27b",
+      "local_first": "casa/qwen3.8-27b",
       "hosted_routine_fallback": "openai-codex/gpt-5.6-terra",
       "hosted_critical_fallback": "openai-codex/gpt-5.6-sol"
     }
@@ -25,10 +25,10 @@
     "intake": {
       "instructions": "Establish the requested outcome, repository boundary, irreversible actions, acceptance evidence, and whether the work can be split into independent bounded branches. Do not edit. In low trim, every proposed branch must name its model lane and stopping condition.",
       "allowed_tools": ["Read", "Grep", "Glob"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
@@ -40,10 +40,10 @@
       "instructions": "Find the smallest responsible files, contracts, tests, and runtime evidence. Keep each investigation bounded and return a compact evidence packet. Do not edit or make a broad speculative plan.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "rg", "find", "ls", "pwd"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -55,10 +55,10 @@
       "instructions": "Record clean-tree status, the relevant baseline behavior, validation command, and the exact success criterion. If the task spans an integration seam or Qwen has already exhausted two distinct hypotheses, escalate with evidence rather than retrying.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "git log", "rg", "find", "ls", "pwd", "task", "npm", "pnpm", "cargo", "go", "pytest"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -69,10 +69,10 @@
     "implement": {
       "instructions": "Make only the scoped change needed for the declared criterion. One agent owns mutations; parallel branches are read-only or submit a narrowly bounded patch. Do not expand a local task into a refactor. If cross-service coupling or two failed hypotheses emerge, hand off to Terra with the evidence packet.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash", "Edit", "Write"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 3,
@@ -95,10 +95,10 @@
     "validate": {
       "instructions": "Run the declared relevant validation and inspect the actual diff. A command merely starting, a partial check, or an unrelated pass is not validation. Return to localization on contradictory or insufficient evidence.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 2,
@@ -110,10 +110,10 @@
       "instructions": "Perform an independent, evidence-led review. Check scope drift, correctness, credentials and leakage, unsafe cleanup, missing negative coverage, and false-success claims. Qwen may perform the first bounded pass; Terra is the ordinary hosted fallback. Escalate to frontier review only for a named, high-consequence question and explicit approval. Do not edit.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "git log", "rg", "find", "ls", "pwd"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "medium",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "medium", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "medium"}
       ],
       "max_iterations": 1,
@@ -145,10 +145,10 @@
       "instructions": "Record the final evidence chain: scope, baseline, changed files, exact validation, review disposition, remaining risks, and required human action. Do not claim a deploy, release, commit, or approval that did not occur.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "git log", "rg", "find", "ls", "pwd"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 2,
@@ -160,10 +160,10 @@
       "instructions": "Create one coherent commit only after the evidence chain is recorded and the working tree contains no unrelated changes. Do not push, deploy, rewrite history, or bypass a required human approval.",
       "allowed_tools": ["Read", "Grep", "Glob", "Bash"],
       "allowed_commands": ["git status", "git diff", "git diff --check", "git add", "git commit"],
-      "model": "qwen_private/qwen3.8-27b",
+      "model": "casa/qwen3.8-27b",
       "thinking_level": "low",
       "model_ladder": [
-        {"model": "qwen_private/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
+        {"model": "casa/qwen3.8-27b", "thinking_level": "low", "health_url": "https://qwen3-8-27b-affinity.ollama.casa.enhasa.cloud/health", "requires_provider_switch": true},
         {"model": "openai-codex/gpt-5.6-terra", "thinking_level": "low"}
       ],
       "max_iterations": 1,

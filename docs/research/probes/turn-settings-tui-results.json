@@ -1,0 +1,645 @@
+{
+  "schema": "statewright/research/turn-settings-native-tui/v1",
+  "date": "2026-09-14",
+  "binary": "Codex 0.153.4",
+  "source_revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+  "scope": "Real remote TUI and real app-server; scripted loopback provider and inert dynamic tool. No lifecycle notification filtering or rewriting.",
+  "notes": [
+    "Native TUI generated one auxiliary title thread, recorded separately from main Responses requests.",
+    "The probe active field is only a last-event marker, not an authoritative multi-thread state. held means a response object is retained, not a live network request after cancellation. Neither field is used by assertions."
+  ],
+  "checks": {
+    "compatibleSwitchApplied": true,
+    "providerSequence": true,
+    "noInterruptedTerminalBeforeEscape": true,
+    "noBannerBeforeEscape": true,
+    "queuedInputVisible": true,
+    "queuedInputSubmitted": true,
+    "originalFooterDuringSwitchedStep": true,
+    "escapeSentRealInterrupt": true,
+    "genuineInterruptedTerminal": true,
+    "genuineRedBanner": true,
+    "followupUsable": true
+  },
+  "snapshots": [
+    {
+      "stage": "Queued",
+      "capture": "╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n  Welcome to Codex, OpenAI's command-line coding agent\n\n> You are in /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue\n╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  probe-a default · ~/dev/polyhedron\n\n╭─────────────────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)                              │\n│                                                         │\n│ model:     probe-a low   /model to change               │\n│ directory: /var/folders/…/T/statewright-step-tui-OmGVUR │\n╰─────────────────────────────────────────────────────────╯\n\n  To get started, describe a task or try one of these commands:\n\n  /init - create an AGENTS.md file with instructions for Codex\n  /status - show current session configuration\n  /permissions - choose what Codex is allowed to do\n  /model - choose what model and reasoning effort to use\n  /review - review any changes and find issues\n\n\n› native live-switch probe\n\n\n⚠ Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set\n  `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml.\n\n• Working (48s • esc to interrupt)\n\n• Queued follow-up inputs\n  ↳ queued draft survives live settings update\n    shift + ← edit last queued message\n\n› Ask Codex to do anything\n\n  probe-a low · /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n\n\n\n\n",
+      "evidence": {
+        "requests": [
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-b",
+            "effort": "high"
+          }
+        ],
+        "auxiliaryRequests": [
+          {
+            "purpose": "native TUI title generation",
+            "model": "probe-a"
+          }
+        ],
+        "events": [
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52c9-7522-9ebc-ce8e6a01b39e",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52ec-76d0-8d39-2f028a04d8a7",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-5306-7371-8805-e41f52380fc6"
+          }
+        ],
+        "downstreamRequests": [
+          {
+            "method": "initialize"
+          },
+          {
+            "method": "initialized"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "config/batchWrite"
+          },
+          {
+            "method": "account/read"
+          },
+          {
+            "method": "hooks/list"
+          },
+          {
+            "method": "model/list"
+          },
+          {
+            "method": "configRequirements/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "thread/loaded/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "turn/start",
+            "text": "native live-switch probe"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "turn/start",
+            "text": "Generate a concise, single-line task title of at most 36 characters and under five words where possible. Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise. Preserve ticket references exactly. Write in the user's language. Do not use quotes, markdown, or trailing punctuation. Do not answer the request.\n\nUser prompt:\nnative live-switch probe"
+          },
+          {
+            "method": "thread/unsubscribe"
+          },
+          {
+            "method": "thread/name/set"
+          }
+        ],
+        "updates": [
+          {
+            "status": "applied"
+          }
+        ],
+        "boundary": false,
+        "held": true,
+        "active": null
+      }
+    },
+    {
+      "stage": "Completed",
+      "capture": "╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n  Welcome to Codex, OpenAI's command-line coding agent\n\n> You are in /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue\n╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  probe-a default · ~/dev/polyhedron\n\n╭─────────────────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)                              │\n│                                                         │\n│ model:     probe-a low   /model to change               │\n│ directory: /var/folders/…/T/statewright-step-tui-OmGVUR │\n╰─────────────────────────────────────────────────────────╯\n\n  To get started, describe a task or try one of these commands:\n\n  /init - create an AGENTS.md file with instructions for Codex\n  /status - show current session configuration\n  /permissions - choose what Codex is allowed to do\n  /model - choose what model and reasoning effort to use\n  /review - review any changes and find issues\n\n\n› native live-switch probe\n\n\n⚠ Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set\n  `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml.\n\n• NATIVE_SWITCH_COMPLETE — model B/high used within the original turn.\n\n\n› queued draft survives live settings update\n\n\n• QUEUED_DRAFT_RECEIVED — next turn ran normally.\n\n\n› Ask Codex to do anything\n\n  probe-a low · /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n\n",
+      "evidence": {
+        "requests": [
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-b",
+            "effort": "high"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          }
+        ],
+        "auxiliaryRequests": [
+          {
+            "purpose": "native TUI title generation",
+            "model": "probe-a"
+          }
+        ],
+        "events": [
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52c9-7522-9ebc-ce8e6a01b39e",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52ec-76d0-8d39-2f028a04d8a7",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-5306-7371-8805-e41f52380fc6"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-52d6-7cc3-a668-4fbbdf1d18db"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d9-12bc-7a00-99fe-6bdc9708ba91"
+          }
+        ],
+        "downstreamRequests": [
+          {
+            "method": "initialize"
+          },
+          {
+            "method": "initialized"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "config/batchWrite"
+          },
+          {
+            "method": "account/read"
+          },
+          {
+            "method": "hooks/list"
+          },
+          {
+            "method": "model/list"
+          },
+          {
+            "method": "configRequirements/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "thread/loaded/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "turn/start",
+            "text": "native live-switch probe"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "turn/start",
+            "text": "Generate a concise, single-line task title of at most 36 characters and under five words where possible. Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise. Preserve ticket references exactly. Write in the user's language. Do not use quotes, markdown, or trailing punctuation. Do not answer the request.\n\nUser prompt:\nnative live-switch probe"
+          },
+          {
+            "method": "thread/unsubscribe"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "turn/start",
+            "text": "queued draft survives live settings update"
+          }
+        ],
+        "updates": [
+          {
+            "status": "applied"
+          }
+        ],
+        "boundary": false,
+        "held": false,
+        "active": null
+      }
+    },
+    {
+      "stage": "Cancelled",
+      "capture": "\u001b[2m╭───────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)            │\n│                                       │\n│ model:     \u001b[3mloading\u001b[0;2m\u001b[39m\u001b[49m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change │\n│ directory: \u001b[0m\u001b[39m\u001b[49m~/dev/polyhedron\u001b[2m           │\n╰───────────────────────────────────────╯\n\u001b[0m\u001b[39m\u001b[49m\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[2m? for shortcuts\n\u001b[0m\u001b[39m\u001b[49m  Welcome to \u001b[1mCodex\u001b[0m\u001b[39m\u001b[49m, OpenAI's command-line coding agent\n\n> \u001b[1mYou are in \u001b[0m\u001b[39m\u001b[49m/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n\u001b[38;5;6m› 1. Yes, continue\n\u001b[39m  2. No, quit\n\n  \u001b[2mPress enter to continue\n╭───────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)            │\n│                                       │\n│ model:     \u001b[3mloading\u001b[0;2m\u001b[39m\u001b[49m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change │\n│ directory: \u001b[0m\u001b[39m\u001b[49m~/dev/polyhedron\u001b[2m           │\n╰───────────────────────────────────────╯\n\u001b[0m\u001b[39m\u001b[49m\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[38;2;246;226;183mprobe-a default\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m\u001b[49m~/dev/polyhedron\n\n\u001b[2m\u001b[39m╭─────────────────────────────────────────────────────────╮\n│ >_ \u001b[0;1m\u001b[39m\u001b[49mOpenAI Codex\u001b[0;2m\u001b[39m\u001b[49m (v0.153.4)                              │\n│                                                         │\n│ model:     \u001b[0m\u001b[39m\u001b[49mprobe-a low\u001b[2m   \u001b[0m\u001b[38;5;6m\u001b[49m/model\u001b[2m\u001b[39m to change               │\n│ directory: \u001b[0m\u001b[39m\u001b[49m/var/folders/…/T/statewright-step-tui-OmGVUR\u001b[2m │\n╰─────────────────────────────────────────────────────────╯\n\n  To get started, describe a task or try one of these commands:\n\n\u001b[0m\u001b[39m\u001b[49m  /init\u001b[2m - create an AGENTS.md file with instructions for Codex\n\u001b[0m\u001b[39m\u001b[49m  /status\u001b[2m - show current session configuration\n\u001b[0m\u001b[39m\u001b[49m  /permissions\u001b[2m - choose what Codex is allowed to do\n\u001b[0m\u001b[39m\u001b[49m  /model\u001b[2m - choose what model and reasoning effort to use\n\u001b[0m\u001b[39m\u001b[49m  /review\u001b[2m - review any changes and find issues\n\n\n\u001b[1m› \u001b[0m\u001b[39m\u001b[49mnative live-switch probe\n\n\n\u001b[38;5;3m⚠ Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set\n\u001b[39m  \u001b[38;5;3m`suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml.\n\n\u001b[2m\u001b[39m• \u001b[0m\u001b[39m\u001b[49mNATIVE_SWITCH_COMPLETE — model B/high used within the original turn.\n\n\n\u001b[1;2m› \u001b[0m\u001b[39m\u001b[49mqueued draft survives live settings update\n\n\n\u001b[2m• \u001b[0m\u001b[39m\u001b[49mQUEUED_DRAFT_RECEIVED — next turn ran normally.\n\n\n\u001b[1;2m› \u001b[0m\u001b[39m\u001b[49mcancel probe\n\n\n\u001b[38;5;1m■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.\n\u001b[39m\n\n\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\n\u001b[0m\u001b[39m\u001b[49m\n  \u001b[38;2;246;226;183mprobe-a low\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m\u001b[49m/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n",
+      "evidence": {
+        "requests": [
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-b",
+            "effort": "high"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          }
+        ],
+        "auxiliaryRequests": [
+          {
+            "purpose": "native TUI title generation",
+            "model": "probe-a"
+          }
+        ],
+        "events": [
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52c9-7522-9ebc-ce8e6a01b39e",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52ec-76d0-8d39-2f028a04d8a7",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-5306-7371-8805-e41f52380fc6"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-52d6-7cc3-a668-4fbbdf1d18db"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d9-12bc-7a00-99fe-6bdc9708ba91"
+          },
+          {
+            "method": "turn/completed",
+            "status": "interrupted",
+            "turnId": "01a0a2d9-434f-7ea1-a455-29126bb717a4"
+          }
+        ],
+        "downstreamRequests": [
+          {
+            "method": "initialize"
+          },
+          {
+            "method": "initialized"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "config/batchWrite"
+          },
+          {
+            "method": "account/read"
+          },
+          {
+            "method": "hooks/list"
+          },
+          {
+            "method": "model/list"
+          },
+          {
+            "method": "configRequirements/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "thread/loaded/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "turn/start",
+            "text": "native live-switch probe"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "turn/start",
+            "text": "Generate a concise, single-line task title of at most 36 characters and under five words where possible. Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise. Preserve ticket references exactly. Write in the user's language. Do not use quotes, markdown, or trailing punctuation. Do not answer the request.\n\nUser prompt:\nnative live-switch probe"
+          },
+          {
+            "method": "thread/unsubscribe"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "turn/start",
+            "text": "queued draft survives live settings update"
+          },
+          {
+            "method": "turn/start",
+            "text": "cancel probe"
+          },
+          {
+            "method": "turn/interrupt"
+          }
+        ],
+        "updates": [
+          {
+            "status": "applied"
+          }
+        ],
+        "boundary": false,
+        "held": true,
+        "active": null
+      }
+    },
+    {
+      "stage": "Followup",
+      "capture": "╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n  Welcome to Codex, OpenAI's command-line coding agent\n\n> You are in /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n\n  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\n  policies to load.\n\n› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue\n╭───────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)            │\n│                                       │\n│ model:     loading   /model to change │\n│ directory: ~/dev/polyhedron           │\n╰───────────────────────────────────────╯\n\n\n› Ask Codex to do anything\n\n  probe-a default · ~/dev/polyhedron\n\n╭─────────────────────────────────────────────────────────╮\n│ >_ OpenAI Codex (v0.153.4)                              │\n│                                                         │\n│ model:     probe-a low   /model to change               │\n│ directory: /var/folders/…/T/statewright-step-tui-OmGVUR │\n╰─────────────────────────────────────────────────────────╯\n\n  To get started, describe a task or try one of these commands:\n\n  /init - create an AGENTS.md file with instructions for Codex\n  /status - show current session configuration\n  /permissions - choose what Codex is allowed to do\n  /model - choose what model and reasoning effort to use\n  /review - review any changes and find issues\n\n\n› native live-switch probe\n\n\n⚠ Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set\n  `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml.\n\n• NATIVE_SWITCH_COMPLETE — model B/high used within the original turn.\n\n\n› queued draft survives live settings update\n\n\n• QUEUED_DRAFT_RECEIVED — next turn ran normally.\n\n\n› cancel probe\n\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.\n\n\n› followup after real cancellation\n\n\n• FOLLOWUP_RECEIVED — client remains usable.\n\n\n› Ask Codex to do anything\n\n  probe-a low · /var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR\n",
+      "evidence": {
+        "requests": [
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-b",
+            "effort": "high"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          },
+          {
+            "model": "probe-a",
+            "effort": "low"
+          }
+        ],
+        "auxiliaryRequests": [
+          {
+            "purpose": "native TUI title generation",
+            "model": "probe-a"
+          }
+        ],
+        "events": [
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52c9-7522-9ebc-ce8e6a01b39e",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "warning",
+            "params": {
+              "threadId": "01a0a2d8-52ec-76d0-8d39-2f028a04d8a7",
+              "message": "Under-development features enabled: step_model_switching. Under-development features are incomplete and may behave unpredictably. To suppress this warning, set `suppress_unstable_features_warning = true` in /private/var/folders/8m/dptdg16x7zl3j61fnks47npc0000gn/T/statewright-step-tui-OmGVUR/config.toml."
+            }
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-5306-7371-8805-e41f52380fc6"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d8-52d6-7cc3-a668-4fbbdf1d18db"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d9-12bc-7a00-99fe-6bdc9708ba91"
+          },
+          {
+            "method": "turn/completed",
+            "status": "interrupted",
+            "turnId": "01a0a2d9-434f-7ea1-a455-29126bb717a4"
+          },
+          {
+            "method": "turn/completed",
+            "status": "completed",
+            "turnId": "01a0a2d9-bd7d-7f72-9ff3-ff89be064e05"
+          }
+        ],
+        "downstreamRequests": [
+          {
+            "method": "initialize"
+          },
+          {
+            "method": "initialized"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "config/batchWrite"
+          },
+          {
+            "method": "account/read"
+          },
+          {
+            "method": "hooks/list"
+          },
+          {
+            "method": "model/list"
+          },
+          {
+            "method": "configRequirements/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "thread/loaded/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "thread/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "skills/list"
+          },
+          {
+            "method": "turn/start",
+            "text": "native live-switch probe"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "plugin/list"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "config/read"
+          },
+          {
+            "method": "thread/start"
+          },
+          {
+            "method": "turn/start",
+            "text": "Generate a concise, single-line task title of at most 36 characters and under five words where possible. Start with an imperative verb. Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise. Preserve ticket references exactly. Write in the user's language. Do not use quotes, markdown, or trailing punctuation. Do not answer the request.\n\nUser prompt:\nnative live-switch probe"
+          },
+          {
+            "method": "thread/unsubscribe"
+          },
+          {
+            "method": "thread/name/set"
+          },
+          {
+            "method": "turn/start",
+            "text": "queued draft survives live settings update"
+          },
+          {
+            "method": "turn/start",
+            "text": "cancel probe"
+          },
+          {
+            "method": "turn/interrupt"
+          },
+          {
+            "method": "turn/start",
+            "text": "followup after real cancellation"
+          }
+        ],
+        "updates": [
+          {
+            "status": "applied"
+          }
+        ],
+        "boundary": false,
+        "held": true,
+        "active": null
+      }
+    }
+  ]
+}

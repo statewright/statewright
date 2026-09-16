@@ -21,6 +21,18 @@ statewright_is_shell_tool() {
   esac
 }
 
+# Only checksum generation over explicit file operands, not check manifests,
+# stdin, arbitrary options, interpreters, or shell-expanded operands.
+statewright_checksum_args_allowed() {
+  local executable="$1" args="$2" operand pattern
+  operand="([[:alnum:]_./][[:alnum:]_./:@%+=,-]*|'[[:alnum:]_./][[:alnum:]_./:@%+=, -]*'|\"[[:alnum:]_./][[:alnum:]_./:@%+=, -]*\")"
+  pattern="^(--[[:blank:]]+)?${operand}([[:blank:]]+${operand})*$"
+  if [ "$executable" = "shasum" ]; then
+    pattern="^-a[[:blank:]]+256[[:blank:]]+(--[[:blank:]]+)?${operand}([[:blank:]]+${operand})*$"
+  fi
+  [[ "$args" =~ $pattern ]]
+}
+
 statewright_readonly_segment_capability() {
   local segment="$1" token args
   STATEWRIGHT_SEGMENT_CAPABILITY=""
@@ -36,6 +48,9 @@ statewright_readonly_segment_capability() {
   args=$(printf '%s\n' "$segment" | sed -E 's/^[[:space:]]*[^[:space:]]+[[:space:]]*//')
 
   case "$token" in
+    sha256sum|shasum)
+      statewright_checksum_args_allowed "$token" "$args" || return 1
+      STATEWRIGHT_SEGMENT_CAPABILITY="Read" ;;
     cat|head|tail|less|more|bat|xxd|ls|pwd|stat|file|wc|du|dirname|basename|realpath|jq|cut|tr|sort|uniq|which|true|false)
       STATEWRIGHT_SEGMENT_CAPABILITY="Read" ;;
     grep|rg|ag|ack|ripgrep)

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
-import { ManagedMcpBridge } from "../lib/managed-mcp-bridge.mjs";
+import { ManagedMcpBridge, timeoutForManagedMcpRequest } from "../lib/managed-mcp-bridge.mjs";
 
 async function startServer(handler) {
   const server = createServer(handler);
@@ -17,6 +17,12 @@ async function startServer(handler) {
     }),
   };
 }
+
+test("managed MCP bridge reserves a bounded long timeout only for delegated agent runs", () => {
+  assert.equal(timeoutForManagedMcpRequest(Buffer.from('{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_run_agent"}}')), 300_000);
+  assert.equal(timeoutForManagedMcpRequest(Buffer.from('{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state"}}')), 15_000);
+  assert.equal(timeoutForManagedMcpRequest(Buffer.from("not json")), 15_000);
+});
 
 test("managed MCP bridge forwards one immutable client identity", async () => {
   let receivedIdentity = null;

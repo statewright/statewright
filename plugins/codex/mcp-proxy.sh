@@ -39,7 +39,15 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     if [ "$method" = "tools/call" ] && run_codex_local_tool "$line"; then
       continue
     fi
-    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+    # Most MCP calls must fail quickly when the local bridge disappears.  A
+    # delegated agent run is intentionally long-lived, however: it waits for
+    # the gateway to start and collect a child executor.  Giving that request
+    # the ordinary health-check timeout made managed V2 workflows silently
+    # fall through to the legacy gateway before their selected model ran.
+    timeout_seconds=15
+    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
+    [ "$method" = "tools/call" ] && [ "$tool_name" = "statewright_run_agent" ] && timeout_seconds=300
+    response=$(curl -sf --max-time "$timeout_seconds" -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
       -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
       --data-binary "$line" 2>/dev/null || true)

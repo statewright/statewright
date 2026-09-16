@@ -174,6 +174,24 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
     let Some(allowed_tokens) = simple_command_tokens(allowed) else {
         return false;
     };
+    if allowed_tokens.first().is_some_and(|token| token == "task")
+        && allowed_tokens.last().is_some_and(|token| token.ends_with(":*"))
+    {
+        if command_tokens.len() < allowed_tokens.len() {
+            return false;
+        }
+        let namespace_index = allowed_tokens.len() - 1;
+        if command_tokens[..namespace_index] != allowed_tokens[..namespace_index] {
+            return false;
+        }
+        let namespace = allowed_tokens[namespace_index].trim_end_matches('*');
+        let task_name = &command_tokens[namespace_index];
+        let suffix = task_name.strip_prefix(namespace).unwrap_or_default();
+        return !suffix.is_empty()
+            && suffix
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, ':' | '_' | '-'));
+    }
     !allowed_tokens.is_empty()
         && command_tokens.len() >= allowed_tokens.len()
         && command_tokens[..allowed_tokens.len()] == allowed_tokens
@@ -229,12 +247,35 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     let tokens = simple_command_tokens(segment)?;
     let executable = tokens.first()?.rsplit('/').next()?;
     match executable {
+        "sha256sum" | "shasum" if readonly_checksum_args(executable, &tokens[1..]) => Some("Read"),
         "ls" | "pwd" | "stat" | "file" | "wc" | "du" | "dirname" | "basename" | "realpath"
         | "jq" | "cut" | "tr" | "sort" | "uniq" | "which" | "true" | "false" | "sed" | "awk"
         | "gawk" => Some("Read"),
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
+}
+
+// Match the Codex hook's narrow checksum-generation surface. In particular,
+// reading a checksum manifest (-c) and invoking an interpreter are not implied.
+fn readonly_checksum_args(executable: &str, args: &[String]) -> bool {
+    let args = if executable == "shasum" {
+        if args.len() < 3 || args[0] != "-a" || args[1] != "256" {
+            return false;
+        }
+        &args[2..]
+    } else {
+        args
+    };
+    let args = if args.first().is_some_and(|arg| arg == "--") {
+        &args[1..]
+    } else {
+        args
+    };
+    !args.is_empty() && args.iter().all(|arg| {
+        arg.starts_with(|ch: char| ch.is_ascii_alphanumeric() || "_./".contains(ch))
+            && arg.chars().all(|ch| ch.is_ascii_alphanumeric() || "_./:@%+=, -".contains(ch))
+    })
 }
 
 /// Split a command string on `&&`, `||`, `;`, and `|` (single pipe).
@@ -801,6 +842,67 @@ mod tests {
             "cargo test"
         ));
         assert!(!matches_allowed_command("cargo testbed", "cargo test"));
+    }
+
+    #[test]
+    fn allowed_task_namespace_is_bounded_to_one_test_task() {
+        for command in [
+            "task test:unit",
+            "task test:unit -- --runInBand",
+            "task test:pocketbase:migrations DATABASE=isolated",
+        ] {
+            assert!(
+                matches_allowed_command(command, "task test:*"),
+                "should allow test namespace command: {command}"
+            );
+        }
+
+        for command in [
+            "task test",
+            "task test:",
+            "task testing:unit",
+            "task deploy",
+            "task test:unit; node exploit.mjs",
+            "task test:unit && task deploy",
+            "task test:unit $(node exploit.mjs)",
+            "task test:unit > receipt.txt",
+        ] {
+            assert!(
+                !matches_allowed_command(command, "task test:*"),
+                "should reject command outside the bounded test namespace: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_checksums_require_narrow_generation_arguments() {
+        for command in [
+            "sha256sum receipt.json",
+            "sha256sum -- receipt.json ./second.json",
+            "sha256sum \"path with spaces/receipt.json\"",
+            "sha256sum 'path with spaces/receipt.json'",
+            "/usr/bin/shasum -a 256 /tmp/receipt.json",
+            "shasum -a 256 -- receipt.json ./second.json",
+            "shasum -a 256 receipt.json | head -n 1",
+        ] {
+            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+        }
+        for command in [
+            "sha256sum", "sha256sum -", "sha256sum --",
+            "sha256sum --check receipt.sha256", "sha256sum -c receipt.sha256",
+            "sha256sum --binary receipt.json", "sha256sum receipt.json --help",
+            "shasum receipt.json", "shasum -a 512 receipt.json", "shasum -a 256",
+            "shasum -a 256 --check receipt.sha256",
+            "sha256sum receipt.json > receipt.sha256",
+            "sha256sum receipt.json; touch marker",
+            "sha256sum receipt.json & touch marker",
+            "sha256sum $(touch marker)", "sha256sum `touch marker`",
+            "sha256sum \"$RECEIPT\"", "sha256sum *.json",
+            "sha256sum \"unterminated",
+            "openssl dgst -sha256 receipt.json", "python3 -c 'print(1)'",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
     }
 
     #[test]

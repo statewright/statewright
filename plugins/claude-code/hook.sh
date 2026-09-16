@@ -214,6 +214,27 @@ request_interactive_route_restart() {
   jq -n --arg session_id "$HOOK_SESSION" --arg root_session_id "$root_session_id" --arg client_id "$CLIENT_ID" --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" --arg model "$model" --arg effort "$effort" '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort}' > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
 }
 
+# Approval evidence is prepared by the persistent managed supervisor. The hook
+# writes only gateway-owned identities; artifact paths remain in the bound
+# approval projection and are never trusted from assistant-facing prose.
+request_interactive_approval_review() {
+  local state_json="$1" control_dir approval_id run_id run_session_id request_path root_session_id
+  control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
+  [ -n "$control_dir" ] || return 1
+  approval_id=$(echo "$state_json" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)
+  run_id=$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)
+  run_session_id=$(echo "$state_json" | jq -r '.run_session_id // empty' 2>/dev/null || true)
+  [ -n "$approval_id" ] && [ -n "$run_id" ] && [ -n "$run_session_id" ] || return 1
+  root_session_id="${STATEWRIGHT_MANAGED_CLAUDE_ROOT_SESSION_ID:-}"
+  mkdir -p "$control_dir" || return 1
+  request_path="$control_dir/$(date +%s%N)-${approval_id}.approval.json"
+  jq -n --arg session_id "$HOOK_SESSION" --arg root_session_id "$root_session_id" \
+    --arg client_id "$CLIENT_ID" --arg approval_id "$approval_id" --arg run_id "$run_id" \
+    --arg run_session_id "$run_session_id" \
+    '{session_id:$session_id,root_session_id:$root_session_id,client_id:$client_id,approval_id:$approval_id,run_id:$run_id,run_session_id:$run_session_id}' \
+    > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
+}
+
 # ============================================================
 # HOOK HANDLERS
 # ============================================================
@@ -701,8 +722,13 @@ case "$ENDPOINT" in
         INIT_MODEL=$(echo "$STATE_JSON" | jq -r '.model // empty' 2>/dev/null || true)
         INIT_MODEL_NOTE=""
         [ -n "$INIT_MODEL" ] && INIT_MODEL_NOTE=" Recommended model: $INIT_MODEL."
-        request_interactive_route_restart "$STATE_JSON"
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}.${INIT_MODEL_NOTE} KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
+        if request_interactive_approval_review "$STATE_JSON"; then
+          APPROVAL_MESSAGE=$(echo "$STATE_JSON" | jq -r '.pending_approval.message // "Human review required."' 2>/dev/null || true)
+          echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} The managed Statewright supervisor is opening the evidence packet in your browser. This workflow remains parked until an authorized reviewer approves or rejects it.\"}}"
+        else
+          request_interactive_route_restart "$STATE_JSON"
+          echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}.${INIT_MODEL_NOTE} KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
+        fi
         ;;
       stop)
         # Deactivate enforcement
@@ -784,10 +810,12 @@ case "$ENDPOINT" in
           elif [ "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" != "" ]; then
             APPROVAL_MESSAGE=$(echo "$STATE_JSON" | jq -r '.pending_approval.message // "Human review required."' 2>/dev/null || true)
             APPROVAL_MODE=$(echo "$STATE_JSON" | jq -r '.meta.approval_mode // "ui"' 2>/dev/null || true)
+            REVIEW_NOTICE=""
+            request_interactive_approval_review "$STATE_JSON" && REVIEW_NOTICE=" The managed Statewright supervisor is opening the evidence packet in your browser."
             if [ "$APPROVAL_MODE" = "external" ]; then
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Approval is pending on the configured external review channel. Do not continue this workflow until that reviewer resolves it.\"}}"
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Approval is pending on the configured external review channel.${REVIEW_NOTICE} Do not continue this workflow until that reviewer resolves it.\"}}"
             else
-              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE}${REVIEW_NOTICE} Do not continue the workflow until an authorized reviewer approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
             # Keep the final state cache until SessionEnd. Claude writes its
@@ -819,6 +847,7 @@ case "$ENDPOINT" in
               echo "$AUTHORITATIVE_EPOCH" > "$PROJECT_DIR/.state_epoch"
               reset_stop_continuation_state
             fi
+            request_interactive_approval_review "$STATE_JSON" || true
           fi
         fi
         ;;
@@ -882,8 +911,13 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # Approval UI is owned by PostToolUse (or its external channel).
-    [ -n "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ] && exit 0
+    # A resumed pending gate must recreate its browser review surface. The
+    # supervisor deduplicates by approval identity, so repeated Stop hooks are
+    # harmless while still recovering from a restarted managed client.
+    if [ -n "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ]; then
+      request_interactive_approval_review "$STATE_JSON" || true
+      exit 0
+    fi
     allow_stop_nudge "$STATE_JSON" || exit 0
 
     ITER=$(echo "$STATE_JSON" | jq -r '.iteration // 0' 2>/dev/null || true)

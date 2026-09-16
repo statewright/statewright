@@ -4,6 +4,7 @@
       "command": "bash",
       "args": ["./mcp-proxy.sh"],
       "cwd": ".",
+      "startup_timeout_sec": 120,
       "env_vars": [
         "STATEWRIGHT_GATEWAY_URL",
         "STATEWRIGHT_PB_URL",

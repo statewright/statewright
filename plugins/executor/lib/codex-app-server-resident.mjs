@@ -11,6 +11,7 @@ import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, read
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
+import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -18,6 +19,12 @@ const RESIDENT_RUNTIME_FILES = [
   RESIDENT_ENTRYPOINT,
   join(EXECUTOR_ROOT, "codex-app-server-transport.mjs"),
   join(EXECUTOR_ROOT, "codex-app-server-route-proxy.mjs"),
+  join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
+  join(EXECUTOR_ROOT, "human-approval.mjs"),
+  join(EXECUTOR_ROOT, "approval-journal.mjs"),
+  join(EXECUTOR_ROOT, "codex-approval-gate.mjs"),
+  join(EXECUTOR_ROOT, "runtime-approval-service.mjs"),
+  join(EXECUTOR_ROOT, "approval-evidence.mjs"),
   join(EXECUTOR_ROOT, "codex-session-metadata.mjs"),
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
@@ -124,6 +131,22 @@ export async function nextCodexResidentRouteRequest(controlDir, clientId, thread
   return null;
 }
 
+// Display-only lookup: never reserve, consume, or reorder the routing queue.
+// Legacy records without an exact turn ID remain routable, but unattributed.
+export async function peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId) {
+  const { readdir } = await import("node:fs/promises");
+  const registration = await readCodexRootSession(controlDir, clientId);
+  if (!registration || registration.sessionId !== threadId) return null;
+  const names = (await readdir(controlDir)).filter(name => name === "route.json" || name.endsWith(".route.json")).sort();
+  for (const name of names) {
+    const route = await readManifest(join(controlDir, name));
+    if (!codexRouteOwnsRoot(route, registration)) continue;
+    // Match the next consumable route, not any later convenient match.
+    return route.turn_id === turnId ? route : null;
+  }
+  return null;
+}
+
 function telemetryWriter(environment) {
   const explicit = environment.STATEWRIGHT_TELEMETRY_URL?.trim();
   const pocketbase = environment.STATEWRIGHT_PB_URL?.replace(/\/$/, "");
@@ -200,6 +223,11 @@ async function main() {
   await mkdir(controlDir, { recursive: true, mode: 0o700 });
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
   const bridge = await createManagedMcpBridge({ environment: process.env, clientId });
+  const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
+      apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
+      pbUrl: process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai",
+      presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
+      ownsThread: async threadId => (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId });
   const knownThreadCwds = new Map();
   let runtime = null;
   let stopping = false;
@@ -225,6 +253,8 @@ async function main() {
       STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
+    approvalService,
+    peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
     getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, metadataCache: knownThreadCwds }),

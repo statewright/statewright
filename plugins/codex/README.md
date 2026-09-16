@@ -2,6 +2,20 @@
 
 State machine guardrails for [OpenAI Codex CLI](https://github.com/openai/codex). Per-state tool enforcement, interrupts, fork/join, approval gates.
 
+## Read-only tool equivalents
+
+Workflow names such as `Read`, `Grep`, and `Glob` are capabilities, not a promise
+that Codex exposes tools with those exact names. The existing policy maps simple
+`exec_command` reads (`cat`, `rg`, read-only `find`) to the required capability.
+
+With `Read`, the local hook and gateway also recognize checksum generation using
+`sha256sum FILE...` or `shasum -a 256 FILE...`, with an optional `--` before files.
+Use explicit paths (quote paths containing spaces). This narrow form excludes
+stdin, globs/expansions, other flags including manifest-check mode, and file-output
+redirection. It does not authorize Python or OpenSSL. Hash output must be compared
+with the expected digest before claiming verification; reading a receipt alone
+does not independently verify its hash. State command restrictions still apply.
+
 ## Install
 
 ```bash
@@ -117,6 +131,44 @@ and marked shell-path block.
 
 The explicit `statewright-codex-tui.mjs` launcher remains available for scripts
 that want to name the workflow and bootstrap route up front.
+
+### Native workflow approvals (experimental App Server mode)
+
+The standalone Statewright managed client owns the native approval controller,
+private resolver, and restart-safe journal. `codex-local-models`, a local model
+endpoint, and Qwen configuration are not required. For the source-checkout
+road test, launch the Statewright shim directly, rather than an `ascodex` alias
+that may point to the companion:
+
+```bash
+STATEWRIGHT_CODEX_TRANSPORT=app-server STATEWRIGHT_QWEN_ENABLED=false ~/.statewright/bin/codex
+```
+
+At a human gate, Statewright saves the exact run/session/approval identity,
+pauses the native goal, and presents the authorized reviewer and evidence link
+in Codex's permission form. The API-key identity must be an authorized reviewer
+with Pro entitlement; otherwise the session waits without decision controls.
+Cancel or disconnect does not approve or reject. Resume reopens a still-pending
+gate, including after a runtime restart. An acknowledged approval must match
+the owning workflow and destination route before autonomous work resumes.
+Newer user input supersedes the old automatic continuation.
+
+`STATEWRIGHT_NATIVE_APPROVALS=0` disables native presentation, not enforcement:
+pending work remains parked. Failures go to the resident debug/error sink, not
+raw terminal stderr. Existing active residents are never force-replaced by an
+update. Exit the specific road-test session before restarting its runtime.
+
+Run `task test:codex-native-approvals` from the Statewright checkout for the
+deterministic lifecycle gate. The vendor protocol probe uses:
+
+```bash
+CODEX_BIN=/path/to/codex task test:codex-native-approvals:vendor
+```
+
+It exercises the installed vendor protocol with
+no inference or real approval decision. These are not desktop/Windows GUI or
+live staging journey certificates. Marketplace release packaging and the live
+pause/approve/resume road test remain separate release gates.
 
 Start a workflow via MCP tool:
 

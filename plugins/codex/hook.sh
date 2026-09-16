@@ -307,6 +307,7 @@ request_interactive_route_restart() {
   request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.route.json"
   jq -n \
     --arg session_id "$HOOK_SESSION" \
+    --arg turn_id "$(echo "$HOOK_INPUT" | jq -r '.turn_id // empty' 2>/dev/null || true)" \
     --arg root_session_id "$root_session_id" \
     --arg client_id "$CLIENT_ID" \
     --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" \
@@ -314,7 +315,7 @@ request_interactive_route_restart() {
     --arg model "$model" \
     --arg effort "$effort" \
     --argjson model_ladder "$model_ladder" \
-    '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder}' \
+    '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder} + (if $turn_id != "" then {turn_id: $turn_id} else {} end)' \
     > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
 }
 

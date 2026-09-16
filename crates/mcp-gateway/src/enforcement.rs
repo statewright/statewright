@@ -295,6 +295,30 @@ mod tests {
     }
 
     #[test]
+    fn checksum_shell_uses_read_equivalence_without_general_shell_access() {
+        let session = session_at("planning");
+        for command in ["sha256sum receipt.json", "shasum -a 256 receipt.json"] {
+            let resolved = resolve_adapter_tool_name(&session, "exec_command", &json!({"cmd": command}));
+            assert_eq!(resolved, "read_file");
+            assert!(matches!(enforce_tool_call(&session, &resolved), EnforcementDecision::Allow));
+        }
+        for command in [
+            "openssl dgst -sha256 receipt.json",
+            "python3 -c 'print(1)'",
+            "shasum -a 256 receipt.json > receipt.sha256",
+        ] {
+            assert_eq!(
+                resolve_adapter_tool_name(&session, "exec_command", &json!({"cmd": command})),
+                "exec_command",
+            );
+        }
+        assert_eq!(
+            resolve_adapter_tool_name(&session_at("completed"), "exec_command", &json!({"cmd": "sha256sum receipt.json"})),
+            "exec_command",
+        );
+    }
+
+    #[test]
     fn adapter_tool_names_resolve_only_to_equivalent_allowed_tools() {
         let session = session_at("planning");
         assert_eq!(

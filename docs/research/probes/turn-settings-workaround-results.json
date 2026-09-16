@@ -1,0 +1,217 @@
+{
+  "schema": "statewright/research/turn-settings-workaround/v1",
+  "date": "2026-09-14",
+  "binary": "Codex 0.153.4",
+  "source_revision": "3d2ee51ca2d5db578f328aa75e20aa22c0197c9a",
+  "source_tag": "rust-v0.153.4",
+  "scope": "Real native app-server with loopback scripted Responses endpoint. Synthetic compatible catalog and unmodified pinned Sol/Astra catalog entries; no real provider inference. Native TUI results recorded separately.",
+  "results": [
+    {
+      "mode": "current",
+      "update": {
+        "status": "applied"
+      },
+      "guards": {
+        "staleTurn": {
+          "status": "targetUnavailable"
+        },
+        "providerField": {
+          "code": -32600,
+          "message": "Invalid request: unknown field `modelProvider`, expected one of `threadId`, `turnId`, `approvalsReviewer`, `model`, `effort`, `summary`, `serviceTier`"
+        }
+      },
+      "requests": [
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-b",
+          "effort": "high"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "thread-only",
+      "update": {},
+      "guards": {},
+      "requests": [
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-b",
+          "effort": "high"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "flag-off",
+      "update": {
+        "error": {
+          "code": -32600,
+          "message": "turn settings updates require the step_model_switching feature"
+        }
+      },
+      "guards": {},
+      "requests": [
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "unsafe-destination",
+      "update": {
+        "error": {
+          "code": -32600,
+          "message": "the destination changes the admitted node REPL availability restriction"
+        }
+      },
+      "guards": {},
+      "requests": [
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        },
+        {
+          "model": "probe-a",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "sol-to-astra",
+      "update": {
+        "error": {
+          "code": -32600,
+          "message": "the destination changes the admitted node REPL review requirement"
+        }
+      },
+      "guards": {},
+      "requests": [
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "low"
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "low"
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "astra-to-sol",
+      "update": {
+        "error": {
+          "code": -32600,
+          "message": "the destination changes the admitted node REPL review requirement"
+        }
+      },
+      "guards": {},
+      "requests": [
+        {
+          "model": "gpt-6-astra",
+          "effort": "low"
+        },
+        {
+          "model": "gpt-6-astra",
+          "effort": "low"
+        },
+        {
+          "model": "gpt-6-astra",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    },
+    {
+      "mode": "sol-effort-only",
+      "update": {
+        "status": "applied"
+      },
+      "guards": {},
+      "requests": [
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "low"
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "high"
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "effort": "low"
+        }
+      ],
+      "terminals": [
+        "completed",
+        "completed"
+      ],
+      "interruptionCount": 0,
+      "inference": "scripted loopback only"
+    }
+  ]
+}

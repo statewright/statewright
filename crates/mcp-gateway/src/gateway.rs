@@ -127,6 +127,12 @@ impl Gateway {
             Some(p) if p.approval_id == approval_id => json!({
                 "from_state": p.from_state, "to_state": p.to_state,
                 "message": p.message, "context_snapshot": p.new_context,
+                "reviewer": session.definition.states.get(&p.from_state)
+                    .and_then(|s| s.on.get(&p.event))
+                    .and_then(|t| match t {
+                        statewright_engine::TransitionDef::Full { approval_reviewer, .. } => approval_reviewer.clone(),
+                        _ => None,
+                    }),
             }),
             Some(_) => return Err("A different approval is pending"),
             None => serde_json::Value::Null,
@@ -3243,7 +3249,8 @@ mod tests {
                         "DEPLOY": {
                             "target": "deployed",
                             "requires_approval": true,
-                            "approval_message": "Review before deploy"
+                            "approval_message": "Review before deploy",
+                            "approval_reviewer": {"email": "release@example.com"}
                         },
                         "SKIP": "completed"
                     }
@@ -3274,6 +3281,8 @@ mod tests {
         );
         assert!(gw.approval_projection("other", "apr_one").is_err());
         assert!(gw.approval_projection("run1", "apr_other").is_err());
+        assert_eq!(gw.approval_projection("run1", "apr_one").unwrap()["pending"]["reviewer"],
+            json!({"email":"release@example.com"}));
         let receipt = json!({"approval_id": "apr_one", "run_id": "run1", "from_state": "working",
             "to_state": "deployed", "status": "approved", "context_snapshot": {"approved": true}});
         let mut foreign = receipt.clone();

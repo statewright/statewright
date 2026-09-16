@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -11,6 +11,7 @@ import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSession
 import { resolveApiKey } from "./remote-client.mjs";
 import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
+import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -570,7 +571,18 @@ async function nextRouteRequest(controlDir, consumed) {
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
+async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.now()) {
+  const entries = (await readdir(controlDir))
+    .filter((name) => name.endsWith(".approval.json"))
+    .sort();
+  for (const name of entries) {
+    if (consumed.has(name) || (retryAfter.get(name) ?? 0) > now) continue;
+    return { name, request: JSON.parse(await readFile(join(controlDir, name), "utf8")) };
+  }
+  return null;
+}
+
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const cmdShim = await resolveWindowsCmdShim(command);
   const launchCommand = cmdShim?.command ?? command;
@@ -578,6 +590,10 @@ export async function runManagedClient({ host, command, args, environment = proc
   const oneShotCodexExec = codexOneShotInvocation(host, args);
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
   const consumed = new Set();
+  const consumedApprovals = new Set();
+  const preparedApprovals = new Set();
+  const approvalRetryAfter = new Map();
+  const reportedApprovalErrors = new Set();
   let nextArgs = args;
   // Managed clients can spawn native children. Those children inherit the
   // bridge identity, but are not safe restart targets: a process-group signal
@@ -591,6 +607,9 @@ export async function runManagedClient({ host, command, args, environment = proc
   try {
     const identity = await resolveManagedClientIdentity({ host, args, home, cwd });
     const routedClientId = identity.clientId;
+    const approvalApiKey = host === "claude" ? await resolveApiKey(environment) : null;
+    const approvalGatewayUrl = environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
+    const approvalPbUrl = environment.STATEWRIGHT_PB_URL ?? "https://statewright.ai";
     const terminalLabel = host === "codex" ? tmuxWindowLabel(environment) : null;
     if (host === "codex") codexRootSessionId = identity.sessionId;
     if (host === "codex" && identity.sessionId) {
@@ -732,6 +751,50 @@ export async function runManagedClient({ host, command, args, environment = proc
           return result.code ?? 1;
         }
         while (!exited) {
+          if (host === "claude") {
+            const approval = await nextApprovalRequest(controlDir, consumedApprovals, approvalRetryAfter).catch(() => null);
+            if (approval) {
+              const { name, request: approvalRequest } = approval;
+              if (approvalRequest.client_id !== routedClientId) {
+                consumedApprovals.add(name);
+              } else if (preparedApprovals.has(approvalRequest.approval_id)) {
+                consumedApprovals.add(name);
+              } else {
+                try {
+                  const prepared = await approvalPreparer({
+                    request: approvalRequest,
+                    apiKey: approvalApiKey,
+                    gatewayUrl: approvalGatewayUrl,
+                    pbUrl: approvalPbUrl,
+                    cwd,
+                    clientId: routedClientId,
+                  });
+                  approvalOpener(prepared.reviewUrl);
+                  preparedApprovals.add(approvalRequest.approval_id);
+                  consumedApprovals.add(name);
+                  approvalRetryAfter.delete(name);
+                  reportedApprovalErrors.delete(name);
+                  const resultPath = join(controlDir, `${approvalRequest.approval_id}.approval-result.json`);
+                  await writeFile(`${resultPath}.tmp`, `${JSON.stringify({
+                    approval_id: approvalRequest.approval_id,
+                    review_url: prepared.reviewUrl,
+                  })}\n`, { mode: 0o600 });
+                  await rename(`${resultPath}.tmp`, resultPath);
+                } catch (error) {
+                  approvalRetryAfter.set(name, Date.now() + 2000);
+                  if (!reportedApprovalErrors.has(name)) {
+                    reportedApprovalErrors.add(name);
+                    await reporter.report(error, {
+                      mechanism: "approval_evidence",
+                      host,
+                      operation: "prepare_review",
+                      approval_id: approvalRequest.approval_id ?? null,
+                    });
+                  }
+                }
+              }
+            }
+          }
           const request = await nextRouteRequest(controlDir, consumed).catch(() => null);
           if (request) {
             if (request.client_id !== routedClientId) {

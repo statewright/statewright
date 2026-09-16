@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
-import { chmod, cp, mkdtemp, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
+import { routeIdentity, startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
@@ -17,9 +17,22 @@ function childStopped(child) {
 }
 
 async function stopOwnedAppServer(child, closed, graceMs) {
-  if (!childStopped(child)) child.kill("SIGTERM");
+  const signal = async name => {
+    if (process.platform === "win32") {
+      const { terminateWindowsProcessTree } = await import("./managed-client-supervisor.mjs");
+      const result = await terminateWindowsProcessTree(child);
+      if (result.status !== "success" && !childStopped(child)) throw new Error("Owned App Server process-tree cleanup failed");
+      return;
+    }
+    try { process.kill(-child.pid, name); }
+    catch (error) {
+      if (error.code !== "ESRCH") throw error;
+      if (!childStopped(child)) child.kill(name);
+    }
+  };
+  await signal("SIGTERM");
   if (await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
-  if (!childStopped(child)) child.kill("SIGKILL");
+  await signal("SIGKILL");
   if (await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
   throw new Error(`Statewright could not confirm that its owned Codex App Server process ${child.pid ?? "unknown"} stopped.`);
 }
@@ -76,6 +89,43 @@ async function prepareAppServerHome(codexHome, clientId) {
   const configPath = join(appServerHome, "config.toml");
   await writeFile(configPath, "# Statewright ephemeral App Server configuration.\n", { flag: "a", mode: 0o600 });
   return { appServerHome, configPath };
+}
+
+function providerConfigArgument(provider) {
+  return `{name=${JSON.stringify(provider.name)},base_url=${JSON.stringify(provider.base_url)},wire_api=${JSON.stringify(provider.wire_api)},requires_openai_auth=${provider.requires_openai_auth ? "true" : "false"}}`;
+}
+
+async function optionalQwenStartupArgs({ codexHome, appServerHome, environment }) {
+  if (environment.STATEWRIGHT_QWEN_ENABLED === "false") return [];
+  if (!environment.STATEWRIGHT_QWEN_BASE_URL && environment.STATEWRIGHT_QWEN_ENABLED !== "true") return [];
+  const identity = routeIdentity("casa/qwen3.8-27b", environment);
+  const qwenCatalogPath = identity.config.model_catalog_json;
+  const [nativeRaw, qwenRaw] = await Promise.all([
+    readFile(join(codexHome, "models_cache.json"), "utf8").catch(() => null),
+    readFile(qwenCatalogPath, "utf8").catch(() => null),
+  ]);
+  if (!nativeRaw || !qwenRaw) return [];
+  let nativeCatalog;
+  let qwenCatalog;
+  try {
+    nativeCatalog = JSON.parse(nativeRaw);
+    qwenCatalog = JSON.parse(qwenRaw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(nativeCatalog?.models) || !Array.isArray(qwenCatalog?.models)) return [];
+  const models = new Map();
+  for (const model of [...nativeCatalog.models, ...qwenCatalog.models]) {
+    if (typeof model?.slug === "string" && model.slug) models.set(model.slug, model);
+  }
+  if (!models.has(identity.model)) return [];
+  const catalogPath = join(appServerHome, "statewright-model-catalog.json");
+  await writeFile(catalogPath, `${JSON.stringify({ models: [...models.values()] })}\n`, { mode: 0o600 });
+  const provider = identity.config["model_providers.qwen_private"];
+  return [
+    "-c", `model_catalog_json=${JSON.stringify(catalogPath)}`,
+    "-c", `model_providers.qwen_private=${providerConfigArgument(provider)}`,
+  ];
 }
 
 function stripRemoteArgs(args) {
@@ -143,6 +193,7 @@ export async function runCodexAppServerTransport({
       pendingRoute = null;
       return route;
     },
+    peekRouteRequest: async (threadId, turnId) => pendingRoute?.session_id === threadId && pendingRoute?.turn_id === turnId ? pendingRoute : null,
     stderr,
     telemetry,
     reporter,
@@ -191,6 +242,8 @@ export async function startCodexAppServerRuntime({
   home = homedir(),
   clientId,
   nextRouteRequest = async () => null,
+  approvalService = null,
+  peekRouteRequest = async () => null,
   stderr = process.stderr,
   telemetry = async () => {},
   threadListCwd = null,
@@ -207,11 +260,13 @@ export async function startCodexAppServerRuntime({
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
+  const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
 
-  const appServer = spawn(command, ["app-server", "--listen", url], {
+  const appServer = spawn(command, [...providerArgs, "app-server", "--listen", url], {
     cwd,
     env: { ...environment, CODEX_HOME: appServerHome },
     stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
   const appServerClosed = new Promise((resolveClosed) => appServer.once("close", resolveClosed));
   appServer.stderr.on("data", (chunk) => stderr.write(chunk));
@@ -230,6 +285,7 @@ export async function startCodexAppServerRuntime({
     await waitForReady(url, appServer);
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
+      approvalService,
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
       resumeHistoryLimit: resumeHistoryLimit(environment),
       threadListCwd,
@@ -239,6 +295,10 @@ export async function startCodexAppServerRuntime({
       idleMs,
       onIdle,
       takePendingRoute: nextRouteRequest,
+      peekPendingRoute: peekRouteRequest,
+      onHandoffStatus: async (event) => {
+        await telemetry("app_server_handoff_status", {client_id: clientId, ...event});
+      },
       onRouteInjected: async (receipt) => {
         await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
         stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);

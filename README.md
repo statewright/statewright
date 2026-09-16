@@ -164,9 +164,16 @@ In this example, `diagnose` uses Haiku (fast, cheap reconnaissance), `propose_fi
 
 Mark a transition with `requires_approval: true` to park it for review. The
 gateway defaults to local UI routing and stores the pending approval (including
-its `approval_message`) in the session state cache. Client hooks surface that
-message as a review prompt after the transition; they do not block the host's
-Stop hook.
+its `approval_message`) in the session state cache. Managed Codex and Claude
+clients keep the workflow parked until the gate is resolved.
+
+An approval transition may include a `statewright/evidence-packet/v1` manifest
+with a concise summary, checklist, and project-relative artifacts. The managed
+client hashes and uploads those files through the bound approval, then opens an
+authenticated review page. Reviewers can inspect the packet from a browser or
+mobile device without receiving the agent's turn history. Evidence retention is
+plan-controlled, and path escape, unsupported files, or digest mismatch fail
+closed.
 
 Set `meta.approval_mode` to `"external"` when an out-of-band reviewer owns the
 decision. In that mode clients leave the pending approval to that channel and
@@ -174,12 +181,11 @@ do not present a local prompt. Statewright does not currently ship a Telegram,
 Slack, or Discord dispatcher; an external integration must resolve the pending
 approval through the gateway callback/API.
 
-Codex, OMX, and Claude Code hooks refresh their cached workflow state after a
-transition. When that cache contains a pending local approval, those hooks
-PostToolUse hook asks the host UI to present the review message. Their Stop
-hooks deliberately pass through: they must not hide or replace the host's
-approval prompt. An `external` approval mode leaves that prompt to the
-configured integration instead.
+Codex and Claude Code refresh their cached workflow state after a transition.
+Codex presents an authorized native decision dialog and links the review page.
+Claude's persistent supervisor uploads the same packet and opens the review
+page while its Stop hook leaves the workflow parked. An `external` approval
+mode leaves the decision to the configured integration.
 | Interrupts | Edit a file matching a glob pattern? Auto-transition to a validation state, then return where you were |
 | Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
 | Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |

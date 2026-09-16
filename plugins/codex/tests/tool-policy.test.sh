@@ -66,6 +66,37 @@ for command in 'tee file' 'dd of=file' 'cp from to' 'mv from to' 'ln from to' 'i
   fi
 done
 assert_denied "Read" Bash "$(shell_input 'python3 -c "print(1)"')"
+for command in \
+  'sha256sum receipt.json' \
+  'sha256sum -- receipt.json ./second.json' \
+  'sha256sum "path with spaces/receipt.json"' \
+  "sha256sum 'path with spaces/receipt.json'" \
+  '/usr/bin/shasum -a 256 /tmp/receipt.json' \
+  'shasum -a 256 -- receipt.json ./second.json' \
+  'shasum -a 256 receipt.json | head -n 1'; do
+  for tool in Bash exec_command; do
+    assert_allowed "Read" "$tool" "$(shell_input "$command")"
+    test "$STATEWRIGHT_TOOL_MODE" = "readonly_shell"
+    assert_denied "Grep" "$tool" "$(shell_input "$command")"
+    assert_denied "Glob" "$tool" "$(shell_input "$command")"
+  done
+done
+for command in \
+  'sha256sum' 'sha256sum -' 'sha256sum --' \
+  'sha256sum --check receipt.sha256' 'sha256sum -c receipt.sha256' \
+  'sha256sum --binary receipt.json' 'sha256sum receipt.json --help' \
+  'shasum receipt.json' 'shasum -a 512 receipt.json' 'shasum -a 256' \
+  'shasum -a 256 --check receipt.sha256' \
+  'sha256sum receipt.json > receipt.sha256' \
+  'sha256sum receipt.json; touch marker' \
+  'sha256sum receipt.json & touch marker' \
+  'sha256sum $(touch marker)' 'sha256sum `touch marker`' \
+  'sha256sum "$RECEIPT"' 'sha256sum *.json' \
+  'sha256sum "unterminated' \
+  'openssl dgst -sha256 receipt.json' \
+  'python3 -c "print(1)"'; do
+  assert_denied "Read" exec_command "$(shell_input "$command")"
+done
 assert_denied "Read" Bash "$(shell_input 'git stash')"
 assert_allowed "Edit" apply_patch '{}'
 assert_allowed "WebSearch" webrun '{"tool_input":{"search_query":[{"q":"Statewright"}]}}'

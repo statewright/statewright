@@ -54,6 +54,47 @@ test("Claude workflow load emits a route request only for a managed client", asy
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Claude emits a managed browser-review request when a loaded workflow is awaiting approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-claude-approval-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const control = join(root, "control");
+  const state = {
+    state: "review",
+    run_id: "run-approval",
+    run_session_id: "gateway-approval",
+    pending_approval: { approval_id: "apr_one", from_state: "review", to_state: "completed", message: "Review the packet." },
+    allowed_tools: [],
+    transitions: [],
+  };
+  try {
+    await (await import("node:fs/promises")).mkdir(control, { recursive: true });
+    await (await import("node:fs/promises")).mkdir(bin, { recursive: true });
+    await writeFile(join(control, "identity.json"), '{"version":1,"host":"claude","client_id":"swc_0123456789abcdef0123456789abcdef"}\n');
+    await writeFile(join(bin, "curl"), `#!/usr/bin/env sh\nprintf '%s' ${JSON.stringify(JSON.stringify({ result: { content: [{ text: JSON.stringify(state) }] } }))}\n`);
+    await chmod(join(bin, "curl"), 0o755);
+    const result = await runHook({
+      session_id: "claude-session-approval",
+      tool_name: "mcp__plugin_statewright_statewright_load_workflow",
+      tool_response: JSON.stringify([{ text: JSON.stringify({ run_id: "run-approval" }) }]),
+    }, { HOME: home, PATH: `${bin}:${process.env.PATH}`, STATEWRIGHT_ROUTE_CONTROL_DIR: control, STATEWRIGHT_API_KEY: "test" });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /opening the evidence packet in your browser/);
+    assert.equal((await readdir(control)).filter((entry) => entry.endsWith(".route.json")).length, 0);
+    const entries = (await readdir(control)).filter((entry) => entry.endsWith(".approval.json"));
+    assert.equal(entries.length, 1);
+    const request = JSON.parse(await readFile(join(control, entries[0]), "utf8"));
+    assert.deepEqual(request, {
+      session_id: "claude-session-approval",
+      root_session_id: "",
+      client_id: "swc_0123456789abcdef0123456789abcdef",
+      approval_id: "apr_one",
+      run_id: "run-approval",
+      run_session_id: "gateway-approval",
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Claude standalone Stop nudges an active workflow once, then permits the duplicate Stop", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-claude-stop-"));
   const home = join(root, "home");
@@ -66,7 +107,7 @@ test("Claude standalone Stop nudges an active workflow once, then permits the du
     await writeFile(join(control, "identity.json"), '{"version":1,"host":"claude","client_id":"swc_0123456789abcdef0123456789abcdef"}\n');
     await writeFile(join(bin, "curl"), `#!/usr/bin/env sh\nprintf '%s' ${JSON.stringify(JSON.stringify({ result: { content: [{ text: JSON.stringify(state) }] } }))}\n`);
     await chmod(join(bin, "curl"), 0o755);
-    const environment = { HOME: home, PATH: `${bin}:${process.env.PATH}`, STATEWRIGHT_ROUTE_CONTROL_DIR: control, STATEWRIGHT_API_KEY: "test" };
+    const environment = { HOME: home, PATH: `${bin}:${process.env.PATH}`, STATEWRIGHT_ROUTE_CONTROL_DIR: control, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_STOP_CONTINUATION: "1" };
     const loaded = await runHook({ session_id: "claude-stop", tool_name: "mcp__plugin_statewright_statewright_load_workflow", tool_response: JSON.stringify([{ text: JSON.stringify({ run_id: "run-stop" }) }]) }, environment);
     assert.equal(loaded.code, 0, loaded.stderr);
     const firstStop = await runHook({ session_id: "claude-stop" }, environment, "stop");

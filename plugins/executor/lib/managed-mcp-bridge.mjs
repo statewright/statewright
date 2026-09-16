@@ -3,6 +3,21 @@ import { createServer } from "node:http";
 import { annotateToolsListResponse } from "./tool-annotations.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const AGENT_RUN_TIMEOUT_MS = 300_000;
+
+export function timeoutForManagedMcpRequest(body) {
+  try {
+    const request = JSON.parse(Buffer.from(body).toString("utf8"));
+    if (request?.method === "tools/call" && request?.params?.name === "statewright_run_agent") {
+      return AGENT_RUN_TIMEOUT_MS;
+    }
+  } catch {
+    // The upstream gateway owns JSON-RPC validation; malformed requests keep
+    // the short bridge timeout.
+  }
+  return DEFAULT_REQUEST_TIMEOUT_MS;
+}
 
 function authorized(request, token) {
   const supplied = request.headers.authorization?.replace(/^Bearer\s+/i, "") ?? "";
@@ -57,7 +72,7 @@ export class ManagedMcpBridge {
           method: "POST",
           headers: forwardedHeaders,
           body,
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(timeoutForManagedMcpRequest(body)),
         });
         const responseBody = await upstream.arrayBuffer();
         const responseHeaders = {

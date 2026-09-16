@@ -130,6 +130,15 @@ reasoning-effort flag, so Statewright applies the state model and records the
 effort as advisory for this host. Disable with
 `statewright-managed-client --disable --host claude`.
 
+### Approval evidence
+
+When a parked transition carries a `statewright/evidence-packet/v1` manifest,
+the persistent supervisor uploads the declared project files through the
+gateway-bound approval and opens the authenticated review page once. The hook
+states that the browser review is opening, and a resumed pending gate recreates
+the review request. The workflow remains parked until an authorized reviewer
+decides it; the conversation transcript is not part of the packet.
+
 ### Model translation
 
 Claude routes semantic model tiers across providers so a workflow can remain

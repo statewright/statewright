@@ -107,6 +107,10 @@ pub enum TransitionDef {
         requires_approval: Option<bool>,
         #[serde(default)]
         approval_message: Option<String>,
+        /// Optional gate-specific reviewer. Hosts default an omitted or empty
+        /// selector to the workflow creator.
+        #[serde(default)]
+        approval_reviewer: Option<serde_json::Value>,
     },
     /// Guarded: array of conditional transitions — first matching guard wins.
     Guarded(Vec<GuardedTransition>),

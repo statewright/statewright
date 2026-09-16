@@ -86,6 +86,35 @@ remains fixed (d70438a) and green through 82f6397.
   is an existing local codex host relevant to the D1 deduplication scope, not part of X0 vendor
   discovery.
 
+## P0: installed standalone Codex vendor road test (local macOS host)
+
+`CODEX_BIN=/opt/homebrew/bin/codex` (vendor `codex-cli 0.153.4`, not a Statewright shim) ran
+`task test:codex-native-approvals:vendor`
+(`node plugins/executor/tests/codex-native-approval-vendor-canary.mjs`) on this host
+(`aerith.local`, macOS 15.3.1 arm64). Same-day date as the W1/X0 receipts above.
+
+- Outcome: `statewright/vendor-approval-protocol-canary/v1` **pass**; checked
+  `real-native-goal-get`, `native-form-frame`, `creator-label`, `cancel-keeps-journal`,
+  `turn-blocked-before-inference`.
+- `native_inference_turns: 0`, `approval_decisions: 0`: the protocol round-trips against the
+  installed vendor binary's native goal/app-server surface without inference or real workflow
+  decisions, as the canary contract requires.
+- Fixture-level baseline on the same tree: `task test:codex-native-approvals` 153/153 pass,
+  `git diff --check` clean.
+
+This closes the last executable P0 verification identified by the milestone plan on this host:
+shared approval/journal/resume ownership is now evidenced against the installed standalone Codex
+binary, not only against fixtures. W2's human-interactive approval loop and W1's
+authenticated-turn evidence remain external gates (hosted-runner credential secrets and
+human-owned Windows respectively); X1, C1 implementation, D1, O1, and P1 remain gated as
+recorded in the approved plan.
+
+Host hygiene note: `~/.statewright/bin/codex --version` (managed shim) reported a stale
+Statewright telemetry listener identity conflict on this host during discovery
+(`statewright-managed-client --kill-app-server` is the documented remedy). It did not affect
+the vendor road test, which spawns the vendor binary directly; it is recorded here because it
+would surface in any live Statewright-managed app-server verification on this host.
+
 ## X0 conclusion
 
 Per-surface receipts are recorded without asserting gates, per the plan. Transport implication

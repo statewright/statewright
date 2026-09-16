@@ -22,17 +22,22 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 if (process.platform !== "win32") {
   throw new Error("The Windows vendor CLI auth canary must run on a Windows runner.");
 }
 
-// npm global installs expose .cmd launchers on Windows runners. Node does not
-// apply PATHEXT resolution when spawning by bare name, so resolve the full
-// launcher path first (the route canary proves full-path .cmd spawning works
-// on this runner image); fall back to the bare .cmd name only if the scan
-// misses, and keep the error visible in the receipt.
+// npm global installs expose .cmd launchers on Windows runners. Two Node
+// limitations shape this code: bare names do not get PATHEXT resolution, and
+// the synchronous spawn API (execFileSync/spawnSync) rejects .cmd batch
+// launchers with EINVAL on Windows, so resolve the full launcher path and
+// spawn it through the async API (the pattern the route and managed-client
+// canaries prove on this runner image). The receipt keeps launcher and error
+// visible so any future miss is self-diagnosing.
 function resolveLauncher(name) {
   if (process.platform !== "win32") return name;
   const exts = (process.env.PATHEXT ?? ".CMD;.EXE;.COM;.BAT").split(";").map((e) => e.toLowerCase());
@@ -46,15 +51,16 @@ function resolveLauncher(name) {
   return null;
 }
 
-function runCli(name, args, env = {}, timeoutMs = 240000) {
+async function runCli(name, args, env = {}, timeoutMs = 240000) {
   const command = resolveLauncher(name) ?? (process.platform === "win32" ? `${name}.cmd` : name);
   const started = Date.now();
   try {
-    const stdout = execFileSync(command, args, {
+    const { stdout } = await execFileAsync(command, args, {
       env: { ...process.env, ...env },
       encoding: "utf8",
       timeout: timeoutMs,
-      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
     });
     return { ok: true, latency_ms: Date.now() - started, launcher: command, stdout: String(stdout).trim().slice(-400) };
   } catch (error) {
@@ -62,7 +68,11 @@ function runCli(name, args, env = {}, timeoutMs = 240000) {
       ok: false,
       latency_ms: Date.now() - started,
       launcher: command,
-      error: String(error?.message ?? error).split("\n")[0].slice(0, 300),
+      error: [error?.code != null ? String(error.code) : "", String(error?.message ?? error)]
+        .filter(Boolean)
+        .join(" ")
+        .split("\n")[0]
+        .slice(0, 300),
       stdout: String(error?.stdout ?? "").trim().slice(-400),
     };
   }
@@ -70,8 +80,10 @@ function runCli(name, args, env = {}, timeoutMs = 240000) {
 
 const PROMPT = "Reply with exactly: ok";
 
-const codexVersionProbe = runCli("codex", ["--version"], {}, 30000);
-const claudeVersionProbe = runCli("claude", ["--version"], {}, 30000);
+const [codexVersionProbe, claudeVersionProbe] = await Promise.all([
+  runCli("codex", ["--version"], {}, 30000),
+  runCli("claude", ["--version"], {}, 30000),
+]);
 const codexVersion = codexVersionProbe.stdout || "unknown";
 const claudeVersion = claudeVersionProbe.stdout || "unknown";
 
@@ -83,7 +95,7 @@ function notProvisionedRow(probe, version) {
   return row;
 }
 
-function probeCodex() {
+async function probeCodex() {
   const authJsonB64 = process.env.STATEWRIGHT_CANARY_CODEX_AUTH_JSON?.trim();
   const apiKey = process.env.STATEWRIGHT_CANARY_OPENAI_API_KEY?.trim();
   if (!authJsonB64 && !apiKey) {
@@ -101,7 +113,7 @@ function probeCodex() {
     env = { OPENAI_API_KEY: apiKey };
   }
   try {
-    const probe = runCli("codex", ["exec", "--skip-git-repo-check", PROMPT], env);
+    const probe = await runCli("codex", ["exec", "--skip-git-repo-check", PROMPT], env);
     return {
       credential,
       version: codexVersion,
@@ -113,14 +125,14 @@ function probeCodex() {
   }
 }
 
-function probeClaude() {
+async function probeClaude() {
   const oauthToken = process.env.STATEWRIGHT_CANARY_CLAUDE_OAUTH_TOKEN?.trim();
   const apiKey = process.env.STATEWRIGHT_CANARY_ANTHROPIC_API_KEY?.trim();
   if (!oauthToken && !apiKey) {
     return notProvisionedRow(claudeVersionProbe, claudeVersion);
   }
   const env = oauthToken ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken } : { ANTHROPIC_API_KEY: apiKey };
-  const probe = runCli("claude", ["-p", PROMPT], env);
+  const probe = await runCli("claude", ["-p", PROMPT], env);
   return {
     credential: oauthToken ? "oauth_token" : "api_key",
     version: claudeVersion,
@@ -129,8 +141,8 @@ function probeClaude() {
   };
 }
 
-const codex = probeCodex();
-const claude = probeClaude();
+const codex = await probeCodex();
+const claude = await probeClaude();
 const provisioned = [codex, claude].filter((row) => row.credential !== "none");
 
 const receipt = {

@@ -84,3 +84,49 @@ test("ladder entries cannot replace managed session identity", async () => {
   assert.equal(selected.root_session_id, "thread-1");
   assert.equal(selected.client_id, "client-1");
 });
+
+test("restart transport resolves local health URLs from environment variable references", async () => {
+  const seen = [];
+  const selected = await selectAvailableRoute({
+    ...request,
+    model_ladder: [
+      {
+        model: "local_compatible/local-code-model",
+        thinking_level: "low",
+        health_url: "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL",
+      },
+      { model: "openai-codex/gpt-5.6-luna", thinking_level: "low" },
+    ],
+  }, {
+    fetchImpl: async (url) => {
+      seen.push(url);
+      return { ok: true };
+    },
+    environment: { STATEWRIGHT_LOCAL_MODEL_HEALTH_URL: "https://model.example.invalid/local-health" },
+  });
+  assert.deepEqual(seen, ["https://model.example.invalid/local-health"]);
+  assert.equal(selected.model, "local_compatible/local-code-model");
+});
+
+test("unset local health URL environment references skip the local route instead of fetching", async () => {
+  const seen = [];
+  const selected = await selectAvailableRoute({
+    ...request,
+    model_ladder: [
+      {
+        model: "local_compatible/local-code-model",
+        thinking_level: "low",
+        health_url: "${STATEWRIGHT_LOCAL_MODEL_HEALTH_URL}",
+      },
+      { model: "openai-codex/gpt-5.6-luna", thinking_level: "low" },
+    ],
+  }, {
+    fetchImpl: async (url) => {
+      seen.push(url);
+      return { ok: true };
+    },
+    environment: {},
+  });
+  assert.deepEqual(seen, []);
+  assert.equal(selected.model, "openai-codex/gpt-5.6-luna");
+});

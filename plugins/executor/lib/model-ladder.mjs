@@ -66,17 +66,34 @@ async function healthAvailable(url, fetchImpl, timeoutMs) {
   }
 }
 
+const HEALTH_URL_ENV_REF = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/u;
+
+// A public workflow may name the local endpoint with an environment variable reference
+// (for example "$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL") instead of committing a private host.
+// References resolve lazily against the client process environment, so an unset or empty
+// variable makes the route unavailable and public users fail closed to the next ladder entry.
+function resolveHealthUrl(raw, environment) {
+  const value = String(raw ?? "").trim();
+  if (value === "") return { declared: false, url: "" };
+  const reference = HEALTH_URL_ENV_REF.exec(value);
+  if (reference) return { declared: true, url: String(environment?.[reference[1]] ?? "").trim() };
+  return { declared: true, url: value };
+}
+
 export async function selectAvailableRoute(request, {
   fetchImpl = fetch,
   timeoutMs = 800,
+  environment = process.env,
 } = {}) {
   const candidates = ladderEntries(request)
     .map((candidate) => candidateRequest(request, candidate))
     .filter(Boolean);
   if (candidates.length === 0) return request;
   for (const candidate of candidates) {
-    const healthUrl = String(candidate.health_url ?? "").trim();
-    if (!healthUrl || await healthAvailable(healthUrl, fetchImpl, timeoutMs)) return candidate;
+    const { declared, url } = resolveHealthUrl(candidate.health_url, environment);
+    if (!declared) return candidate;
+    if (url === "") continue;
+    if (await healthAvailable(url, fetchImpl, timeoutMs)) return candidate;
   }
   throw new Error("No Statewright model_ladder candidate passed its availability check.");
 }

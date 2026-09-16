@@ -29,11 +29,11 @@ function gatewayEndpoint(value) {
   return base.endsWith("/mcp") ? base : `${base}/mcp`;
 }
 
-export async function resolveApiKey(environment = process.env) {
+export async function resolveApiKey(environment = process.env, home = homedir()) {
   if (environment.STATEWRIGHT_API_KEY?.trim()) {
     return environment.STATEWRIGHT_API_KEY.trim();
   }
-  return (await readFile(join(homedir(), ".statewright", "api_key"), "utf8")).trim();
+  return (await readFile(join(home, ".statewright", "api_key"), "utf8")).trim();
 }
 
 export class RemoteStatewrightClient {

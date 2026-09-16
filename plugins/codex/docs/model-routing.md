@@ -146,6 +146,12 @@ persistent thread can still use the same workflow without accidentally sending a
 to OpenAI (or the inverse). The standalone adapter chooses the first ladder entry present in its
 active provider's live model catalog.
 
+A `health_url` may name an environment variable (`$STATEWRIGHT_LOCAL_MODEL_HEALTH_URL` or
+`${STATEWRIGHT_LOCAL_MODEL_HEALTH_URL}`) instead of a literal URL. The client resolves the
+reference lazily at route-selection time, which keeps private local endpoints out of public
+workflow files; an unset or empty variable makes that route unavailable and the ladder continues
+with the next entry.
+
 When a workflow's first route must actually cross providers, set
 `requires_provider_switch: true` on that ladder entry. A provider-pinned App Server then stops
 with a transport-capability error rather than silently selecting its same-provider fallback. A

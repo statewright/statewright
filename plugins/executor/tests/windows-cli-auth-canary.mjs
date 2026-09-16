@@ -31,13 +31,17 @@ if (process.platform !== "win32") {
   throw new Error("The Windows vendor CLI auth canary must run on a Windows runner.");
 }
 
-// npm global installs expose .cmd launchers on Windows runners. Two Node
-// limitations shape this code: bare names do not get PATHEXT resolution, and
-// the synchronous spawn API (execFileSync/spawnSync) rejects .cmd batch
-// launchers with EINVAL on Windows, so resolve the full launcher path and
-// spawn it through the async API (the pattern the route and managed-client
-// canaries prove on this runner image). The receipt keeps launcher and error
-// visible so any future miss is self-diagnosing.
+// npm global installs expose .cmd launchers on Windows runners. Bare names do
+// not get PATHEXT resolution, so resolve the full launcher path first. Node
+// 22's child_process can also reject batch (.cmd) launchers with spawn EINVAL
+// (observed on windows-2022 with both the sync and async APIs), so every probe
+// walks a strategy chain and records each strategy's outcome in the receipt:
+//   s1_direct  execFile(launcher, args)      strongest Node-side spawn evidence
+//   s2_cmd     cmd.exe /d /s /c "launcher"   classic batch invocation
+//   s3_pwsh    pwsh -NoProfile -Command &    proven by this workflow's own
+//                 "Verify Codex/Claude CLI" steps on the runner image
+// The first successful strategy drives the probe; the table keeps any future
+// launcher miss self-diagnosing.
 function resolveLauncher(name) {
   if (process.platform !== "win32") return name;
   const exts = (process.env.PATHEXT ?? ".CMD;.EXE;.COM;.BAT").split(";").map((e) => e.toLowerCase());
@@ -51,31 +55,70 @@ function resolveLauncher(name) {
   return null;
 }
 
-async function runCli(name, args, env = {}, timeoutMs = 240000) {
-  const command = resolveLauncher(name) ?? (process.platform === "win32" ? `${name}.cmd` : name);
-  const started = Date.now();
-  try {
-    const { stdout } = await execFileAsync(command, args, {
-      env: { ...process.env, ...env },
-      encoding: "utf8",
-      timeout: timeoutMs,
-      maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
-    });
-    return { ok: true, latency_ms: Date.now() - started, launcher: command, stdout: String(stdout).trim().slice(-400) };
-  } catch (error) {
-    return {
-      ok: false,
-      latency_ms: Date.now() - started,
-      launcher: command,
-      error: [error?.code != null ? String(error.code) : "", String(error?.message ?? error)]
-        .filter(Boolean)
-        .join(" ")
-        .split("\n")[0]
-        .slice(0, 300),
-      stdout: String(error?.stdout ?? "").trim().slice(-400),
-    };
+async function execWithStrategy(strategy, launcher, args, env, timeoutMs) {
+  const base = {
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 4 * 1024 * 1024,
+    windowsHide: true,
+  };
+  let command;
+  let cmdArgs;
+  if (strategy === "s2_cmd") {
+    command = "cmd";
+    cmdArgs = ["/d", "/s", "/c", [launcher, ...args].map((part) => `"${part}"`).join(" ")];
+  } else if (strategy === "s3_pwsh") {
+    command = "pwsh";
+    const script = [`& '${launcher.replaceAll("'", "''")}'`, ...args.map((a) => `'${String(a).replaceAll("'", "''")}'`)].join(" ");
+    cmdArgs = ["-NoProfile", "-NonInteractive", "-Command", script];
+  } else {
+    command = launcher;
+    cmdArgs = args;
   }
+  try {
+    const { stdout } = await execFileAsync(command, cmdArgs, base);
+    return { ok: true, stdout: String(stdout).trim() };
+  } catch (error) {
+    const firstLine = [error?.code != null ? String(error.code) : "", String(error?.message ?? error)]
+      .filter(Boolean)
+      .join(" ")
+      .split("\n")[0]
+      .slice(0, 300);
+    return { ok: false, error: firstLine, stdout: String(error?.stdout ?? "").trim(), stderr: String(error?.stderr ?? "").trim() };
+  }
+}
+
+async function runCli(name, args, env = {}, timeoutMs = 240000) {
+  const launcher = resolveLauncher(name) ?? (process.platform === "win32" ? `${name}.cmd` : name);
+  const chain = process.platform === "win32" ? ["s1_direct", "s2_cmd", "s3_pwsh"] : ["s1_direct"];
+  const strategies = {};
+  let selected = null;
+  for (const strategy of chain) {
+    const started = Date.now();
+    const result = await execWithStrategy(strategy, launcher, args, env, timeoutMs);
+    strategies[strategy] = { ok: result.ok, latency_ms: Date.now() - started };
+    if (result.ok) {
+      strategies[strategy].stdout = result.stdout.slice(-400);
+      if (!selected) {
+        selected = strategy;
+        break; // first success drives the probe; later strategies are not needed
+      }
+    } else {
+      strategies[strategy].error = result.error;
+      strategies[strategy].stdout = result.stdout.slice(-400);
+      if (result.stderr) strategies[strategy].stderr = result.stderr.slice(-200);
+    }
+  }
+  const chosen = selected ? strategies[selected] : strategies[chain[0]];
+  return {
+    launcher,
+    spawn_strategy: selected,
+    strategies,
+    ok: Boolean(selected),
+    stdout: chosen.stdout,
+    error: selected ? undefined : chosen.error,
+  };
 }
 
 const PROMPT = "Reply with exactly: ok";
@@ -90,7 +133,7 @@ const claudeVersion = claudeVersionProbe.stdout || "unknown";
 // A missing launcher on a provisioned vendor is actionable breakage in this
 // step (the install/verify steps already passed), so record it distinctly.
 function notProvisionedRow(probe, version) {
-  const row = { credential: "none", status: "not_provisioned", version, launcher: probe.launcher };
+  const row = { credential: "none", status: "not_provisioned", version, launcher: probe.launcher, spawn_strategy: probe.spawn_strategy, strategies: probe.strategies };
   if (!probe.ok) row.version_error = probe.error;
   return row;
 }

@@ -83,6 +83,16 @@ jobs:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
           STATEWRIGHT_GATEWAY_URL: https://mcp.statewright.ai
         run: node plugins/executor/tests/windows-managed-client-live-gateway-canary.mjs
+
+      - name: Probe authenticated vendor CLI feasibility
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 10
+        env:
+          STATEWRIGHT_CANARY_CODEX_AUTH_JSON: ${{ secrets.STATEWRIGHT_CANARY_CODEX_AUTH_JSON }}
+          STATEWRIGHT_CANARY_OPENAI_API_KEY: ${{ secrets.STATEWRIGHT_CANARY_OPENAI_API_KEY }}
+          STATEWRIGHT_CANARY_CLAUDE_OAUTH_TOKEN: ${{ secrets.STATEWRIGHT_CANARY_CLAUDE_OAUTH_TOKEN }}
+          STATEWRIGHT_CANARY_ANTHROPIC_API_KEY: ${{ secrets.STATEWRIGHT_CANARY_ANTHROPIC_API_KEY }}
+        run: node plugins/executor/tests/windows-cli-auth-canary.mjs
       - name: Submit Codex adoption telemetry event
         if: github.event_name != 'pull_request'
         env:
@@ -121,5 +131,5 @@ jobs:
 
           On trusted `main` pushes and manual dispatches, it also authenticates the executor-owned loopback bridge to production and performs MCP initialization, `tools/list`, and the non-mutating `statewright_get_status` call. Separate steps then submit bounded Codex and Claude Code `ci_canary` adoption events and require explicit endpoint acknowledgements. A manual source must resolve inside trusted `main` history before the secret-bearing steps run. Pull requests exercise only secretless bootstrap and routing. The key is scoped to production-only steps and is never exposed to a child host process.
 
-          This does not claim an authenticated interactive Codex or Claude vendor session. That would require vendor credentials and an interactive Windows canary.
+          It also probes authenticated vendor CLI feasibility: with step-scoped repository secrets it executes a minimal non-interactive `codex exec` / `claude -p` turn against the vendor CLIs installed on the runner. A vendor whose credentials are not provisioned is reported as `not_provisioned` in the receipt without failing the job; a provisioned vendor whose turn fails does fail the job, because that is actionable infeasibility evidence. This still does not claim an interactive vendor session or a Statewright-gated approval loop on Windows; those require an interactive runner and human acceptance.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

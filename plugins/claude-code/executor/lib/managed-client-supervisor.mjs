@@ -172,10 +172,27 @@ async function nativeTelemetryEnabled({ environment, home, cwd }) {
   return false;
 }
 
-export async function acquireManagedTelemetry({ environment = process.env, home = homedir(), cwd = process.cwd(), supervisorId = `${process.pid}-${randomUUID()}`, agentPath = telemetryAgentPath(environment) } = {}) {
-  if (!await nativeTelemetryEnabled({ environment, home, cwd })) return null;
-  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return null;
+// A detached telemetry listener exports an identity that embeds the API key it
+// was spawned with. A managed client started from a shell that does not export
+// STATEWRIGHT_API_KEY must resolve the same key from ~/.statewright/api_key, or
+// a healthy listener is misreported as a stale/conflicting listener.
+async function resolvedTelemetryApiKey(environment, home) {
+  const fromEnvironment = (environment.STATEWRIGHT_API_KEY ?? "").trim();
+  if (fromEnvironment) return fromEnvironment;
+  try {
+    return await resolveApiKey(environment, home);
+  } catch {
+    return "";
+  }
+}
+
+export async function acquireManagedTelemetry({ environment: clientEnvironment = process.env, home = homedir(), cwd = process.cwd(), supervisorId = `${process.pid}-${randomUUID()}`, agentPath = telemetryAgentPath(clientEnvironment) } = {}) {
+  if (!await nativeTelemetryEnabled({ environment: clientEnvironment, home, cwd })) return null;
+  if (clientEnvironment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return null;
   if (!existsSync(agentPath)) return null;
+  const environment = { ...clientEnvironment };
+  const resolvedKey = await resolvedTelemetryApiKey(environment, home);
+  if (!environment.STATEWRIGHT_API_KEY && resolvedKey) environment.STATEWRIGHT_API_KEY = resolvedKey;
   const dataDir = telemetryDirectory(environment, home);
   const port = telemetryPort(environment);
   const markerPath = join(dataDir, "managed-service.json");

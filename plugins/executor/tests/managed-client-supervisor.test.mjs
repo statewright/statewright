@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import net from "node:net";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSessionOwner, readManagedSessionLabels, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
-import { bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -948,4 +949,85 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
     assert.equal(removed.removed.length, 2);
     assert.equal(removed.profile, profilePath);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+const TEST_ROOT = dirname(fileURLToPath(import.meta.url));
+const TELEMETRY_AGENT = resolve(TEST_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
+
+async function freeLoopbackPort() {
+  const server = net.createServer();
+  await new Promise((resolveBind, rejectBind) => {
+    server.once("error", rejectBind);
+    server.listen(0, "127.0.0.1", resolveBind);
+  });
+  const { port } = server.address();
+  await new Promise((resolveClose) => server.close(resolveClose));
+  return port;
+}
+
+async function pollHealth(port, attempts = 80) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
+      if (response.ok) return await response.json();
+    } catch { /* listener not bound yet */ }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+  }
+  return null;
+}
+
+test("keyless managed client resolves the on-disk telemetry key instead of reporting a false identity conflict", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-telemetry-key-"));
+  const home = join(root, "home");
+  const cwd = join(root, "cwd");
+  try {
+    await mkdir(join(home, ".statewright"), { recursive: true });
+    await mkdir(cwd, { recursive: true });
+    await writeFile(join(home, ".statewright", "api_key"), "file-telemetry-key\n", { mode: 0o600 });
+    await writeFile(join(home, ".statewright", "config.json"), `${JSON.stringify({ telemetry: { codex: { native_tokens: true } } })}\n`);
+    const port = await freeLoopbackPort();
+    const listenerEnv = {
+      STATEWRIGHT_TELEMETRY_DIR: join(home, ".statewright", "telemetry", "native-codex"),
+      STATEWRIGHT_TELEMETRY_PORT: String(port),
+      STATEWRIGHT_API_KEY: "file-telemetry-key",
+      STATEWRIGHT_PB_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_CODEX_SESSIONS_DIR: join(root, "sessions"),
+    };
+    const listener = spawn(process.execPath, [TELEMETRY_AGENT], { env: listenerEnv, stdio: "ignore", detached: process.platform !== "win32" });
+    listener.unref();
+    const healthy = await pollHealth(port);
+    assert.equal(healthy?.listener_status, "healthy", "test listener became healthy");
+    try {
+      // A client shell that does not export STATEWRIGHT_API_KEY must resolve the
+      // key from the on-disk file and accept the already-healthy listener.
+      const telemetry = await acquireManagedTelemetry({
+        environment: { ...listenerEnv, STATEWRIGHT_API_KEY: undefined },
+        home,
+        cwd,
+        agentPath: TELEMETRY_AGENT,
+        supervisorId: "keyless-test",
+      });
+      assert.ok(telemetry, "keyless client acquired telemetry instead of throwing");
+      assert.equal(telemetry.port, port);
+
+      // A shell that exports a genuinely stale key must still surface the conflict.
+      await assert.rejects(
+        acquireManagedTelemetry({
+          environment: { ...listenerEnv, STATEWRIGHT_API_KEY: "stale-telemetry-key" },
+          home,
+          cwd,
+          agentPath: TELEMETRY_AGENT,
+          supervisorId: "stale-test",
+        }),
+        /identity conflicts/,
+      );
+
+      await telemetry.release();
+    } finally {
+      if (listener.pid) listener.kill("SIGTERM");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

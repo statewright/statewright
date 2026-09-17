@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { createExecutorSessionStore } from "../../lib/executor-session-ownership.mjs";
 import { createExecutorApprovalMirror } from "../../lib/executor-approval-mirror.mjs";
 import { createExecutorRequestController } from "../../lib/executor-request-controller.mjs";
 import { approvalJournal } from "../../lib/approval-journal.mjs";
+import { createPiNativeSession } from "../../lib/host-adapters.mjs";
 
 export const digest = "a".repeat(64);
 export const base = { run_id: "run", run_session_id: "session", workflow: "fixture", state: "review" };
@@ -13,7 +15,7 @@ export const pending = { ...base, pending_approval: { approval_id: "approval", e
 
 // Synthetic authority only. Real durable owner/journal, never a gateway,
 // workflow load, approval resolver or provider request.
-export async function fixture(t, { parked = false } = {}) {
+export async function fixture(t, { parked = false, nativeFile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "executor-request-"));
   let owner;
   t.after(async () => {
@@ -25,7 +27,11 @@ export async function fixture(t, { parked = false } = {}) {
   const store = createExecutorSessionStore(options);
   owner = await store.open();
   await owner.bindGateway(base);
-  await owner.bindHost({ sessionId: owner.record.host_session_id, sessionFile: join(owner.nativeRoot, "fixture.jsonl") });
+  const sessionFile = nativeFile ? await createPiNativeSession({
+    pluginsRoot: fileURLToPath(new URL("../../../", import.meta.url)), cwd: root,
+    sessionDir: owner.nativeRoot, sessionId: owner.record.host_session_id,
+  }) : join(owner.nativeRoot, "fixture.jsonl");
+  await owner.bindHost({ sessionId: owner.record.host_session_id, sessionFile });
   let live = parked ? pending : base;
   let decision = "pending";
   let afterRead = async () => {};

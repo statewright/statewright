@@ -11,8 +11,9 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(nativeSessionId ?? "")
     || target?.sessionManager?.getSessionId() !== nativeSessionId || typeof call !== "function"
     || typeof register !== "function" || typeof onReady !== "function") throw new Error("Owned SDK frontend unavailable");
+  const nativeSessionFile = target.sessionManager.getSessionFile();
   const operations = createPiRequestOperations();
-  const gate = createPiRequestGate({ ...gateOptions, nativeSessionId, call, onAdmit: ref => operations.admit(ref) });
+  const gate = createPiRequestGate({ ...gateOptions, nativeSessionId, nativeSessionFile, call, onAdmit: ref => operations.admit(ref) });
   let runtime = null;
   let dispose = null;
   let session = null;
@@ -22,7 +23,8 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
   let readiness = null;
   let closing = null;
 
-  const native = () => { try { return !closed && session?.sessionManager.getSessionId() === nativeSessionId; } catch { return false; } };
+  const native = () => { try { return !closed && session?.sessionManager.getSessionId() === nativeSessionId
+    && session.sessionManager.getSessionFile() === nativeSessionFile; } catch { return false; } };
   const invalidate = () => { closed = true; readiness = null; };
   const observeNative = () => {
     if (native()) return true;

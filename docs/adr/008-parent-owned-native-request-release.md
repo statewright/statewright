@@ -147,6 +147,38 @@ and full parent close/drain remain unproved. No readiness receipt is a claim
 that these original production acceptance requirements have been satisfied.
 Shipped executor/index/ADR007 hold and installed runtime remain unchanged.
 
+The additive private readiness negotiation binds the exact parent owner and
+request controller, existing native UUID/file, executor ID and fresh random
+parent/child lifetime IDs. The parent must explicitly bind its owned child
+handle; these IDs are launch challenges, not claimed kernel peer credentials.
+They and acknowledged process readiness are ephemeral and never adopted from
+the durable host_ready descriptor. One private Pi-only ready receipt can obtain
+one exact acknowledgement; duplicate/concurrent/foreign/extra-field receipts
+cannot. The ordinary hooks/ready plugin identity does not activate this mode.
+Request delivery and declared MCP/pre/post/stop bridge effects require this
+readiness; locally observed revocation is rechecked synchronously at dispatch
+and after awaited callback/telemetry work. Close/child exit/error or descriptor/
+owner drift revokes monotonically and cancels the parent request controller.
+Bridge HTTP shutdown runs even when cancellation fails.
+
+The trusted frontend readiness publisher validates the SDK receipt and exact
+public SessionManager UUID/file around private IPC, validates every returned
+acknowledgement field, claims publication once and bounds a lost acknowledgement
+even if transport ignores abort. File-backed frontend/gate checks also capture
+the original file; preserving the UUID cannot authorize a substituted native
+file. Memory-only SDK fixtures remain supported without advertising production
+readiness for them. An acknowledgement proves only this configured trusted
+construction/transport boundary, not every project effect/provider/final-output
+guard or reviewer/human authority. The local bearer transport and a model API
+key are not a new isolation/human-strength proof. A trusted project callback
+with bearer/challenge access is not a cryptographically measured SDK process.
+No cross-process SDK mode/CLI launch is activated by these fixtures. Parent
+main must explicitly construct this mode and forward its own challenge; it
+still does neither. Protocol-unconfigured legacy bridges retain existing
+behavior; managed activation must require this mode, not silently fall back.
+No controller-close/full parent inflight-drain/crash-lock promise is inferred
+from this prerequisite; these remain original acceptance obligations.
+
 ## Consequences and rollback
 
 Safety wins over replay availability: at-most-once durable consumption is

@@ -1,8 +1,11 @@
 import { createServer } from "node:http"
+import { EventEmitter } from "node:events"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { AuthStorage, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
 import { createPiRequestFrontend } from "./request-frontend.mjs"
+import { createPiNativeReadinessPublisher } from "./request-readiness.mjs"
+import { createExecutorNativeReadiness } from "../../executor/lib/executor-native-readiness.mjs"
 import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs"
 
@@ -12,8 +15,8 @@ afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await clean
 // Public SDK services/runtime and actual Agent; task-owned HTTP returns inert
 // SSE. Parent authority is synthetic, owner/journal/bridge are real local code.
 async function frontendFixture(options: { parked?: boolean; streaming?: boolean; register?: (...args: any[]) => unknown;
-  onReady?: (...args: any[]) => unknown } = {}) {
-  const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, options)
+  onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any } = {}) {
+  const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, { ...options, nativeFile: options.handshake })
   const requests: any[] = []
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []
@@ -29,10 +32,13 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
   })
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
   cleanup.push(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }))
+  const nativeReadiness = options.handshake ? createExecutorNativeReadiness({ owner: f.owner, requestController: f.controller }) : null
+  const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null, killed: false })
+  nativeReadiness?.bindChild(child)
   const bridge = await new AdapterBridge({ call: async (name: string) => {
     if (name !== "statewright_get_state") throw new Error("Unexpected fixture effect")
     return f.getState()
-  } }, { host: "pi", sessionOwner: f.owner, requestController: f.controller }).start()
+  } }, { host: "pi", sessionOwner: f.owner, requestController: f.controller, nativeReadiness }).start()
   cleanup.push(() => bridge.close())
   const call = async (action: string, body: unknown, signal?: AbortSignal) => {
     const response = await fetch(`${bridge.url}/hooks/request/${action}`, {
@@ -41,18 +47,19 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
     })
     const result = await response.json()
     if (!response.ok) throw new Error(result.error)
-    return result
+    return action === "ready" && options.acknowledgement ? options.acknowledgement(result) : result
   }
-  const cwd = dirname(f.owner.path)
-  const sessionManager = SessionManager.inMemory(cwd)
-  sessionManager.newSession({ id: f.owner.record.host_session_id })
+  const cwd = options.handshake ? f.owner.record.scope.cwd : dirname(f.owner.path)
+  const sessionManager = options.handshake ? SessionManager.open(f.owner.record.host_session_file, f.owner.nativeRoot, cwd) : SessionManager.inMemory(cwd)
+  if (!options.handshake) sessionManager.newSession({ id: f.owner.record.host_session_id })
   const model = { id: "synthetic-chat", name: "Synthetic", api: "openai-completions", provider: "synthetic-provider",
     baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, reasoning: false,
     input: ["text"], contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
     getAll: () => [], find: () => model, isUsingOAuth: () => false }
   const onPark = vi.fn()
-  const onReady = vi.fn(options.onReady ?? (() => {}))
+  const publish = nativeReadiness ? createPiNativeReadinessPublisher({ challenge: nativeReadiness.challenge, sessionManager, call }) : null
+  const onReady = vi.fn(async (...args: any[]) => { await options.onReady?.(...args); if (publish) await publish(args[0]) })
   const args = { nativeSessionId: f.owner.record.host_session_id, call,
     target: { cwd, agentDir: join(cwd, "agent"), sessionManager },
     servicesOptions: { authStorage: AuthStorage.inMemory(), modelRegistry,
@@ -62,13 +69,136 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
     gateOptions: { pollMs: 5, timeoutMs: 3_000, onPark }, register: options.register ?? (() => {}), onReady }
   const frontend = await createPiRequestFrontend(args)
   cleanup.push(() => frontend.close())
-  return { ...f, frontend, args, requests, sessionManager, modelRegistry, onPark, onReady,
+  return { ...f, frontend, args, requests, sessionManager, modelRegistry, onPark, onReady, nativeReadiness, child, bridge, publish,
     session: frontend.runtime.session,
     bind: () => frontend.runtime.session.bindExtensions({ uiContext: { notify: vi.fn(), setStatus: vi.fn() } }),
   }
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("negotiates exact native file and fresh parent/child lifetimes before actual SDK delivery", async () => {
+    const f = await frontendFixture({ handshake: true })
+    expect(f.sessionManager.getSessionFile()).toBe(f.owner.record.host_session_file)
+    await f.session.prompt("pre-handshake held input")
+    expect(f.requests).toHaveLength(0)
+    expect(f.nativeReadiness!.ready).toBe(false)
+    await f.bind()
+    expect(await f.bridge.waitForReady({ timeoutMs: 10 })).toBe(true)
+    await f.session.prompt("private acknowledged input")
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(1)
+    await expect(f.publish!(f.frontend.readiness)).rejects.toThrow("ownership mismatch")
+  })
+
+  it("holds actual SDK input throughout private parent acknowledgement publication", async () => {
+    let arrived!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    const f = await frontendFixture({ handshake: true, onReady: async () => { arrived(); await barrier } })
+    const binding = f.bind()
+    await arrival
+    try {
+      await f.session.prompt("private ack overlap")
+      expect(f.nativeReadiness!.ready).toBe(false)
+      expect(f.frontend.readiness).toBeNull()
+      expect(f.owner.record.request_epoch).toBe(0)
+      expect(f.modelRegistry.hasConfiguredAuth).not.toHaveBeenCalled()
+    } finally { release(); await binding }
+    expect(f.nativeReadiness!.ready).toBe(true)
+  })
+
+  it("fails closed if the bound child exits during actual SDK startup", async () => {
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ handshake: true, register: pi => pi.on("session_start", () => f.child.emit("exit", 0)) })
+    await expect(f.bind()).rejects.toThrow("readiness")
+    await f.session.prompt("obsolete child input")
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.owner.record.request_epoch).toBe(0)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("rejects a foreign private acknowledgement before actual SDK gate enable", async () => {
+    const f = await frontendFixture({ handshake: true, acknowledgement: value => ({ ...value, child_lifetime_id: "foreign" }) })
+    await expect(f.bind()).rejects.toThrow("acknowledgement")
+    await f.session.prompt("forged private ack input")
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.owner.record.request_epoch).toBe(0)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("rejects file drift before private publication and UUID-preserving descriptor substitution", async () => {
+    const f = await frontendFixture({ handshake: true })
+    vi.spyOn(f.sessionManager, "getSessionFile").mockReturnValue("/foreign/native.jsonl")
+    await expect(f.bind()).rejects.toThrow("Owned SDK frontend unavailable")
+    expect(f.nativeReadiness!.ready).toBe(false)
+    expect(f.requests).toHaveLength(0)
+    expect(f.owner.record.request_epoch).toBe(0)
+  })
+
+  it("rechecks exact native file after an awaited private acknowledgement", async () => {
+    const f = await frontendFixture({ handshake: true, acknowledgement: value => {
+      vi.spyOn(f.sessionManager, "getSessionFile").mockReturnValue("/foreign/late.jsonl")
+      return value
+    } })
+    await expect(f.bind()).rejects.toThrow("acknowledgement")
+    await f.session.prompt("late descriptor drift")
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.requests).toHaveLength(0)
+    expect(f.owner.record.request_epoch).toBe(0)
+  })
+
+  it("holds fresh input after parent lifetime close without creating a new epoch", async () => {
+    const f = await frontendFixture({ handshake: true })
+    await f.bind()
+    await f.nativeReadiness!.close()
+    await f.session.prompt("parent disconnected input")
+    expect(f.owner.record.request_epoch).toBe(0)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("revokes native readiness monotonically after UUID-preserving file drift", async () => {
+    const f = await frontendFixture({ handshake: true })
+    await f.bind()
+    const abort = vi.spyOn(f.session.agent, "abort")
+    const file = vi.spyOn(f.sessionManager, "getSessionFile").mockReturnValue("/foreign/after-ready.jsonl")
+    expect(f.frontend.readiness).toBeNull()
+    await f.session.prompt("foreign file input")
+    expect(abort).not.toHaveBeenCalled()
+    expect(f.owner.record.request_epoch).toBe(0)
+    file.mockRestore()
+    await f.session.prompt("restored file must remain held")
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("denies actual primary HTTP after file drift during the provider auth await", async () => {
+    const f = await frontendFixture({ handshake: true })
+    await f.bind()
+    const abort = vi.spyOn(f.session.agent, "abort")
+    f.modelRegistry.getApiKeyAndHeaders.mockImplementation(async () => {
+      vi.spyOn(f.sessionManager, "getSessionFile").mockReturnValue("/foreign/provider.jsonl")
+      return { ok: true, apiKey: "synthetic-not-a-secret" }
+    })
+    await f.session.prompt("provider file drift")
+    expect(f.requests).toHaveLength(0)
+    expect(abort).not.toHaveBeenCalled()
+    expect(f.frontend.readiness).toBeNull()
+  })
+
+  it("bounds private acknowledgement even when an injected transport ignores cancellation", async () => {
+    const f = await frontendFixture({ handshake: true })
+    let signal!: AbortSignal
+    const publish = createPiNativeReadinessPublisher({ challenge: f.nativeReadiness!.challenge, sessionManager: f.sessionManager,
+      timeoutMs: 10, call: (_action: string, _body: unknown, incoming: AbortSignal) => { signal = incoming; return new Promise(() => {}) } })
+    await expect(publish({ schema: "statewright/pi-native-readiness/v1", native_session_id: f.owner.record.host_session_id }))
+      .rejects.toThrow("timed out")
+    expect(signal.aborted).toBe(true)
+    await expect(publish({ schema: "statewright/pi-native-readiness/v1", native_session_id: f.owner.record.host_session_id }))
+      .rejects.toThrow("ownership mismatch")
+    expect(f.nativeReadiness!.ready).toBe(false)
+  })
+
   it("holds actual SDK input until startup binding, then publishes exact native readiness", async () => {
     const f = await frontendFixture()
     expect(f.frontend.readiness).toBeNull()

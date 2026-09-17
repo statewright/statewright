@@ -2,6 +2,173 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 8 entry: private parent/native readiness negotiation
+
+Base `607bdc8`; canonical Statewright main, same preserved dirty inventory as
+Slice 7. Root implements serially; no supervising workflow or implementation
+delegation. Mandatory clean-context Astra/high read-only review is a separate
+bounded decision pass. No production CLI/index/main activation in this cut.
+
+Owned scope: additive executor native-readiness module and its fixture suite;
+AdapterBridge readiness binding; additive Pi readiness publisher, actual public
+SDK frontend handshake fixtures; ADR008 and this receipt. Acceptance: exact
+existing native UUID/file, executor ID and newly minted parent/child lifetime
+challenge; bound owned child required; acknowledgement once only; old/replayed/
+malformed/foreign receipts denied; startup/close/child-exit overlap cannot admit
+requests or declared bridge effects. Legacy adapter identity is not native
+readiness. Actual SDK startup must await private acknowledgement before gate
+enable. Synthetic authority/task-owned HTTP/child/native files only.
+
+Observed-only envelope: 60 normal/95 contraction tool calls, 16 KiB returned
+output per call, 30-minute warning/45-minute contraction; final third reserved
+for review/repair/source validation and handoff. One independent reviewer,
+10 read-only calls/12 minutes, at most two distinct repairs per finding, two
+isolated full exports normally plus one regression repair export. Limits are
+root-observed, not provider-token/runtime-enforced. At warning stop optional
+discovery; at contraction finish a coherent verified prerequisite and retain
+the full goal active. No budget changes to a Statewright controller.
+
+Full original nine-row/P1 acceptance is unchanged. This cut excludes owning
+CLI/modes, executor main/observer activation, project effects/final output,
+later provider transport leases, real reviewer resolution, host canaries,
+deploy/push and existing live/native sessions. Rollback: scoped local revert;
+ephemeral readiness cannot alter or migrate durable journals/session schemas.
+Later integration gate remains the original authorized native approval/
+restart/new-input/host-parity journey, not this readiness prerequisite alone.
+
+Slice 8 scope expansion before validation: frontend/gate capture the SDK's
+original native file as well as UUID. Private handshake-only checks would
+otherwise permit UUID-preserving file drift after acknowledgement; this is the
+same exact-descriptor requirement, not activation or identity adoption.
+
+Retained evidence: initial one-test baseline failed (HTTP200 vs expected502)
+on previous bridge. First combined run passed18, failed1 cleanup hook and was
+interrupted after32.8s with one cancellation: fixture released owner before
+readiness controller cancellation, leaving server open. Correction puts bridge
+close before owner release and makes HTTP shutdown a finally block even when
+cancellation fails; fresh focused bridge suites19/19. This was fixture ordering
+plus real cleanup robustness, not a permission fallback. Actual SDK frontend
+initial handshake fixtures30/30. Expanded file checks then passed32/33: one
+assertion expected publisher mismatch while the frontend correctly rejected
+earlier. Expectation was updated to the earlier unavailable boundary with all
+zero-epoch/zero-HTTP assertions retained. Fresh parent suite14/14 includes final
+admission microtask close, telemetry-overlap refusal and cancellation-error HTTP
+shutdown. No interrupted command remains running. Pi focused final result and
+exact isolated source/review/wider gates will be recorded below.
+
+### Slice 8 isolated source and original-scope audit
+
+Tested tree `754a7e66865566ff1aa6222cfed9f771bc462f57`, clean source export
+`/tmp/statewright-ready-reviewed.Wwx3Xg`. Node wider integration295/295,
+zero failures/skips/cancellations; Pi173 passed/1 existing opt-in live-canary
+skip (5 files passed/1 skipped); native-file suite2/2; generated Claude parity
+and syntax checks for bridge/parent readiness/Pi publisher/frontend/gate all
+exit0; staged diff check0. Focused parent14/14, actual SDK frontend33/33.
+Node gate is the Slice7 explicit command plus executor-native-readiness.test.mjs;
+Pi gates are npm test -- --reporter=dot and npm run test:native in its package;
+parity is node plugins/claude-code/scripts/sync-managed-client.mjs --check.
+SDK0.73.0/dependency source remains the existing installation, unchanged; export
+contains only the scoped staged tree, not user-dirty Rust/canary/runtime files.
+Temporary exports are validation fixtures, not the durable research destination.
+
+No whole-workspace Rust/typecheck/lint/build, migration, headed interactive/RPC
+CLI or staging/production gates run. No real workflow query/load/approval/
+resolution/provider inference, installed-runtime edit, or existing session
+inspection/signalling. Actual Node child test proves owned exit observation;
+actual SDK frontend tests use a fake lifecycle handle in the same process, not
+cross-process native CLI launch. Local inert SSE is HTTP boundary evidence,
+not a real model or reviewer approval journey. Mocked Pi index clients can print
+gateway URLs; those diagnostics are not external gateway verification.
+
+The original 006 nine-row contract and 012 numbered plan were reread, not
+redefined around this handshake. Current requirement-by-requirement audit:
+
+| Original requirement | Current evidence | Still required |
+| --- | --- | --- |
+| 1 immutable ticket/scope/artifact/policy/reviewer/expiry | Exact durable run/session/edge journal checks retained; handshake adds no ticket fields | Full tenant/client/artifact digest/policy/expiry/reviewer enforcement and acceptance |
+| 2 native thread/lineage/request ID/epoch | Exact UUID/file, fresh parent/child launch challenges, same owner/controller and explicitly bound child; private request epochs retained | Real owning CLI/parent IPC wiring and authorized replacement/full cross-process lineage; no kernel peer attestation claim |
+| 3 pending has no declared effects/inference; wait outside model | Configured bridge holds before acknowledgement; SDK startup holds; local revocation checked at dispatch and after awaits; existing parked fixtures retained | Every project command/exec/native effect, later provider transport/retry/summary boundaries and full live park proof |
+| 4 authority before controls; unauthorized dismiss only | Existing shared reviewer entitlement fixtures retained; no UI or resolver added | Real unauthorized/authorized reviewer journey and required-reviewer projection |
+| 5 cancel/dismiss/disconnect keeps journal and cold gate | Durable journal/controller fixtures retained; child exit/close cancels request; fresh lifetime challenge after explicit same-native reopen | Full native cold restart/crash-lock/legacy recovery and parent inflight cancellation/drain, permanently broken SDK cleanup |
+| 6 private fresh authorization/artifact/policy; consume once | No resolve route; strict once-only readiness is separate from approval; original approval consume/tombstones retained | Real resolver entitlement/artifact/policy recheck and authorized consumed native continuation |
+| 7 new input invalidates old continuation/final output | Existing private input claims and callback guards retained; UUID-preserving file drift revokes frontend monotonically | Native rendering/recording of every stale final response, full project callback/retry and cross-process new-input races |
+| 8 decision source/authentication strength | Local bearer/challenge explicitly not human proof or malicious-agent isolation; no stronger provenance claim | Full recorded decision-source/authentication-strength semantics and isolation acceptance |
+| 9 shared reviewer/evidence/retention | Additive client-neutral parent readiness and existing gate semantics retained; no website UX imposed | Complete shared reviewer/evidence/retention implementation and cross-client/host acceptance |
+
+P1 012: A/1 user-dirty Rust pending pre-tool denial remains uncommitted/not
+validated by this cut; 2 no host decision API added, real credential/entitlement
+path still untested; C/3 journal durability exists but main requestController/
+deferred-clear/close/readiness construction is not activated; B/4 actual SDK
+prerequisites gain the private handshake but shipped launcher/index stay ADR007
+hold-only; D approval/restart/unprivileged/trusted re-admit native/host-parity
+canary not run under the no-workflow authority. None is accepted merely from
+this prerequisite passing. Spec114 proposed enterprise obligations remain open.
+
+Next exact integration inputs: own a public-SDK mode/CLI entrypoint (stock main
+cannot inject the guarded runtime); parent main creates deferred-clear mirror,
+request controller and native-readiness mode, binds its newly owned child and
+forwards its own challenge over private launch configuration, never adopts old
+readiness; project effects/timers/correctives/retries capture private ownership;
+finish final-response/later-inference/restart/new-input/authority/host acceptance.
+Activation must require the private handshake, not a legacy identity fallback.
+Full goal remains active; no production readiness/release/compliance claim.
+
+### Slice 8 independent finding and repair
+
+Mandatory clean-context Astra/high `/root/pi_private_readiness_review` inspected
+the ten-path exact staged diff/export and narrowly read imported controller;
+seven read-only calls, one synthetic no-file/no-HTTP challenge, no edits or
+full-suite duplication. P2 at bridge waitForReady: final await could return true
+after close had revoked readiness. Reviewer queued three nested microtasks from
+owner.assertOwner; observed waitForReady:true, actualReady:false, closeCalls:1.
+This proves false startup success, not unauthorized effects; dispatch guards
+still held. No other concrete blocking finding in its bounded pass. Wider
+results were root-reported, not independently rerun.
+
+Root preserved two discriminating reds, each1 failed: minimal final-await
+revocation and actual readiness module with the reviewer's three-microtask
+schedule plus real fixture owner checks. One-line repair synchronously returns
+the current readiness after assertReady rather than unconditional true. Fresh
+parent focused16/16. No earlier failed evidence deleted or tests skipped.
+Repaired-source isolated gates and bounded finding-only re-review follow.
+SDK public session-manager.js provenance:0.73.0, SHA256
+`99f172e1d93ade315be3b5ed1cdb5b578ae83f6d9bc73817be845b00bdb2cf8b`.
+Publisher currently accepts POSIX absolute native paths; Windows behavior is
+not validated or advertised by this local prerequisite.
+
+### Slice 8 final evidence and handoff
+
+Final tested staged tree `3b75ed609891bd43b3b5d008eb12747319da5869`, isolated
+export `/tmp/statewright-ready-verified.3W2OKj`: Node297/297, no failures/skips/
+cancellations; Pi173 passed/1 existing opt-in canary skip; native2/2; generated
+Claude parity plus five owned-module syntax checks exit0; staged diff check0.
+Only source delta from initially reviewed/tested tree is the one-line startup
+repair and two regression tests. The mandatory reviewer finding-only recheck
+used two read-only calls in this exact export: both waitForReady regressions
+passed, zero failures/skips/cancellations, exit0; P2 closed. It did not rerun
+wider suites or certify production. No other implementation agent, no edits
+by reviewer and no running validation/child fixture left behind.
+
+Original-scope audit above remains current after this repair: startup result
+no longer reports success after locally observed final-microtask close. It
+does not close production CLI/main/observer/index activation, pending stop's
+private request correlation, all async callback/final-response/new-input
+boundaries, later provider transport leases, authorized reviewer journey,
+full cold native restart/crash recovery or cross-client/host acceptance.
+Unconfigured production continues ADR007 hold. Owner/path/lifetime challenges
+are not cryptographic measurement or human authority. Original full goal is
+active, not complete or blocked.
+
+Manual portable-control owner is root; operating evidence is local source,
+exact exports, retained reds, scoped independent review and this durable receipt.
+No deployment/migration/install/rollback action taken. Rollback is the coherent
+local additive-prerequisite commit revert with all journals/ownership records
+preserved. Observed-only envelope used two isolated exports and one focused
+finding repair/recheck; protected reserve served validation/review/handoff.
+Provider-token/runtime/controller enforcement remains unavailable, not implied.
+Final recording is receipt-only delta from tested/reviewed source; local commit
+identity and post-commit preservation are verified in the handoff.
+
 ## Manual run contract
 
 User objective: continue P0/P1 approval-journal and resume-ownership work directly,

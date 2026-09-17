@@ -89,8 +89,12 @@ export class AdapterBridge {
     this.client = client;
     this.sessionOwner = options.sessionOwner ?? null;
     this.requestController = options.requestController ?? null;
+    this.nativeReadiness = options.nativeReadiness ?? null;
     this.host = options.host ?? "unknown";
     if (this.requestController && (!this.sessionOwner || this.host !== "pi")) throw new Error("Native request protocol requires an owned Pi bridge");
+    if (this.nativeReadiness && (!this.requestController || !this.nativeReadiness.isBoundTo?.(this.sessionOwner, this.requestController))) {
+      throw new Error("Native readiness requires the same owned Pi request controller");
+    }
     this.telemetry = options.telemetry ?? (async () => {});
     this.executor = {
       active: true,
@@ -124,6 +128,10 @@ export class AdapterBridge {
     this.sessionOwner.assertGateway(live);
   }
 
+  assertNativeDispatch() {
+    if (this.nativeReadiness && !this.nativeReadiness.ready) throw new Error("Native readiness unavailable; continuation denied");
+  }
+
   async start() {
     this.server = createServer(async (request, response) => {
       this.activeRequests += 1;
@@ -154,16 +162,22 @@ export class AdapterBridge {
           }
           const action = url.pathname.slice("/hooks/request/".length);
           let result;
-          if (action === "begin") result = await this.requestController.begin(body);
-          else if (action === "consume") result = await this.requestController.consume(body);
-          else if (action === "cancel") result = await this.requestController.cancel(body);
-          else if (action === "status" && Object.keys(body).length === 1 && Object.hasOwn(body, "reference")) {
-            result = await this.requestController.status(body.reference);
-          } else {
-            json(response, 400, { error: "invalid native request action or fields" });
-            return;
+          if (action === "ready" && this.nativeReadiness) result = await this.nativeReadiness.accept(body);
+          else {
+            if (action !== "cancel") await this.nativeReadiness?.assertReady();
+            if (action === "begin") result = await this.requestController.begin(body);
+            else if (action === "consume") result = await this.requestController.consume(body);
+            else if (action === "cancel") result = await this.requestController.cancel(body);
+            else if (action === "status" && Object.keys(body).length === 1 && Object.hasOwn(body, "reference")) {
+              result = await this.requestController.status(body.reference);
+            } else {
+              json(response, 400, { error: "invalid native request action or fields" });
+              return;
+            }
           }
           await this.sessionOwner?.assertOwner();
+          if (action !== "cancel") await this.nativeReadiness?.assertReady();
+          if (action !== "cancel") this.assertNativeDispatch();
           json(response, 200, result);
           return;
         }
@@ -181,12 +195,12 @@ export class AdapterBridge {
             return;
           }
           this.adapterIdentity = { pluginName, pluginVersion };
-          this.adapterReady = true;
+          this.adapterReady = !this.nativeReadiness;
           await this.record("executor_adapter_ready", {
             plugin_name: pluginName,
             plugin_version: pluginVersion,
           });
-          json(response, 200, { ready: true });
+          json(response, 200, { ready: this.adapterReady });
           return;
         }
         if (url.pathname === "/mcp") {
@@ -215,6 +229,7 @@ export class AdapterBridge {
           }
           try {
             if (this.sessionOwner && method === "tools/call") {
+              if (body.params?.name !== "statewright_get_state") await this.nativeReadiness?.assertReady();
               await this.assertOwnedState();
               if (body.params?.name === "statewright_load_workflow") throw new Error("The executor owns an immutable workflow run; host replacement denied");
               if (this.requestController && body.params?.name !== "statewright_get_state") {
@@ -222,11 +237,14 @@ export class AdapterBridge {
                 if (status.phase !== "active") throw new Error("Native request is awaiting approval; tool traffic denied");
               }
             }
+            if (method === "tools/call" && body.params?.name !== "statewright_get_state") this.assertNativeDispatch();
             const result = await this.client.request(method, body.params ?? {});
             await this.sessionOwner?.assertOwner();
             if (method === "tools/call") await this.assertOwnedState();
             if (this.requestController && method === "tools/call" && body.params?.name !== "statewright_get_state") {
               await this.sessionOwner.assertRequest(body.request_reference);
+              await this.nativeReadiness?.assertReady();
+              this.assertNativeDispatch();
             }
             json(response, 200, { jsonrpc: "2.0", id, result });
           } catch (error) {
@@ -239,10 +257,12 @@ export class AdapterBridge {
           return;
         }
         if (url.pathname === "/hooks/pre-tool") {
+          await this.nativeReadiness?.assertReady();
           await this.assertOwnedState();
           if (this.requestController && (await this.requestController.status(body.request_reference)).phase !== "active") {
             throw new Error("Native request is awaiting approval; tool traffic denied");
           }
+          this.assertNativeDispatch();
           const result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
@@ -250,20 +270,24 @@ export class AdapterBridge {
           await this.sessionOwner?.assertOwner();
           await this.assertOwnedState();
           if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
+          await this.nativeReadiness?.assertReady();
           await this.record("executor_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             policy_tool_name: result?.policy_tool_name ?? null,
             decision: result?.decision ?? null,
             state: result?.state ?? null,
           });
+          this.assertNativeDispatch();
           json(response, 200, result);
           return;
         }
         if (url.pathname === "/hooks/post-tool") {
+          await this.nativeReadiness?.assertReady();
           await this.assertOwnedState();
           if (this.requestController && (await this.requestController.status(body.request_reference)).phase !== "active") {
             throw new Error("Native request is awaiting approval; tool traffic denied");
           }
+          this.assertNativeDispatch();
           const result = adapterResult(await this.client.call("statewright_adapter_post_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
@@ -273,6 +297,7 @@ export class AdapterBridge {
           await this.sessionOwner?.assertOwner();
           await this.assertOwnedState();
           if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
+          await this.nativeReadiness?.assertReady();
           await this.record("executor_adapter_post_tool", {
             tool_name: body.tool_name ?? "",
             policy_tool_name: result?.policy_tool_name ?? null,
@@ -282,17 +307,22 @@ export class AdapterBridge {
             completed: Boolean(result?.completed),
             is_error: Boolean(body.is_error),
           });
+          this.assertNativeDispatch();
           json(response, 200, result);
           return;
         }
         if (url.pathname === "/hooks/stop") {
+          await this.nativeReadiness?.assertReady();
+          this.assertNativeDispatch();
           const result = adapterResult(await this.client.call("statewright_adapter_stop"));
+          await this.nativeReadiness?.assertReady();
           if (result?.decision === "allow") this.terminalStopObserved = true;
           await this.record("executor_adapter_stop", {
             decision: result?.decision ?? null,
             state: result?.state ?? null,
             active: Boolean(result?.active),
           });
+          this.assertNativeDispatch();
           json(response, 200, result);
           return;
         }
@@ -346,17 +376,22 @@ export class AdapterBridge {
     const pollMs = options.pollMs ?? 25;
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      if (this.adapterReady) return true;
+      if (this.nativeReadiness) {
+        if (this.nativeReadiness.ready) { await this.nativeReadiness.assertReady(); return this.nativeReadiness.ready; }
+      } else if (this.adapterReady) return true;
       await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
     }
-    return this.adapterReady;
+    return this.nativeReadiness ? false : this.adapterReady;
   }
 
   async close() {
-    if (!this.server) return;
-    await new Promise((resolveClose, rejectClose) => {
-      this.server.close((error) => error ? rejectClose(error) : resolveClose());
-    });
-    this.server = null;
+    try { await this.nativeReadiness?.close(); } finally {
+      if (this.server) {
+        await new Promise((resolveClose, rejectClose) => {
+          this.server.close((error) => error ? rejectClose(error) : resolveClose());
+        });
+        this.server = null;
+      }
+    }
   }
 }

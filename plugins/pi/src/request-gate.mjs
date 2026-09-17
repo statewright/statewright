@@ -26,14 +26,15 @@ function sleep(ms, signal) {
 }
 
 /** Native callbacks wait outside inference; authority and epochs belong to parent. */
-export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, onActive = () => {}, onAdmit = () => {}, pollMs = 500, timeoutMs = 30 * 60_000 }) {
+export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, onPark = () => {}, onActive = () => {}, onAdmit = () => {}, pollMs = 500, timeoutMs = 30 * 60_000 }) {
   if (typeof call !== "function" || !Number.isSafeInteger(pollMs) || pollMs < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid native request transport limits");
   let sequence = 0;
   let current = null;
   let closed = false;
   let enabled = false;
   function assertNative(ctx) {
-    if (typeof ctx?.sessionManager?.getSessionId !== "function" || ctx.sessionManager.getSessionId() !== nativeSessionId) {
+    if (typeof ctx?.sessionManager?.getSessionId !== "function" || ctx.sessionManager.getSessionId() !== nativeSessionId
+      || nativeSessionFile !== undefined && ctx.sessionManager.getSessionFile?.() !== nativeSessionFile) {
       throw new Error("Live native session changed; admission denied");
     }
   }

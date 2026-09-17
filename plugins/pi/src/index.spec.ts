@@ -273,6 +273,41 @@ describe("isolated delivery capability", () => {
       "error",
     )
   })
+
+  it("notifies the host when a session starts parked on a pending approval", async () => {
+    const parkedState = {
+      ...MOCK_STATE,
+      pending_approval: {
+        approval_id: "appr_park_1",
+        event: "DONE",
+        from_state: "implementing",
+        to_state: "testing",
+        message: "Review the implementation packet.",
+      },
+    }
+    setupFetch([{ match: "/mcp", body: parkedState }])
+    vi.spyOn(console, "log").mockImplementation(() => {})
+    const pi = createMockPi()
+    const ctx = createCtx()
+
+    await statewrightExtension(asPi(pi))
+
+    // stateCache is module-level and persists across tests; repopulate it
+    // from the gateway so the parked state is active, then verify the
+    // session_start notice fires.
+    await pi._fire("before_agent_start", {}, ctx)
+    await pi._fire("session_start", {}, ctx)
+
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining('Workflow is PARKED at "implementing"'),
+      "warning",
+    )
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("approval appr_park_1 (DONE) awaits a reviewer decision"),
+      "warning",
+    )
+  })
+
 })
 
 describe("statewright Pi extension", () => {
@@ -360,7 +395,8 @@ describe("statewright Pi extension", () => {
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
 
-      expect(pi.on).toHaveBeenCalledTimes(7)
+      expect(pi.on).toHaveBeenCalledTimes(8)
+      expect(pi.on).toHaveBeenCalledWith("input", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("context", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("before_provider_request", expect.any(Function))
@@ -437,6 +473,137 @@ describe("statewright Pi extension", () => {
       const results = await pi._fire("tool_call", { toolName: "statewright_transition" }, ctx)
 
       expect(results[0]).toBeUndefined()
+    })
+  })
+
+  describe("approval gate (P0)", () => {
+    const PENDING_STATE = {
+      ...MOCK_STATE,
+      state: "frontier",
+      pending_approval: {
+        approval_id: "appr-1",
+        event: "APPROVE_FIX",
+        from_state: "frontier",
+        to_state: "implement",
+      },
+    }
+
+    it("blocks non-statewright tools while an approval is pending", async () => {
+      setupFetch([{ match: "/mcp", body: PENDING_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const results = await pi._fire("tool_call", { toolName: "Edit" }, ctx)
+      expect(results[0]).toEqual(expect.objectContaining({
+        block: true,
+        reason: expect.stringContaining("APPROVE_FIX"),
+      }))
+    })
+
+    it("blocks model transitions without instructing the model to approve", async () => {
+      setupFetch([{ match: "/mcp", body: PENDING_STATE }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const results = await pi._fire("tool_call", { toolName: "statewright_transition" }, ctx)
+      expect(results[0]).toEqual(expect.objectContaining({ block: true }))
+      expect(JSON.stringify(results)).not.toContain("to approve")
+      expect(JSON.stringify(results)).not.toContain("Call statewright_transition")
+    })
+
+    it("keeps old work held when the pending projection disappears", async () => {
+      let stateBody = PENDING_STATE
+      globalThis.fetch = vi.fn(async (url: any, init?: any) => {
+        const urlStr = String(url)
+        if (!urlStr.includes("/mcp")) {
+          return { ok: false, status: 404, headers: new Headers() } as unknown as Response
+        }
+        const parsed = init?.body ? JSON.parse(init.body as string) : {}
+        if (parsed.method === "initialize") {
+          return {
+            ok: true,
+            headers: new Headers({ "mcp-session-id": "test-session" }),
+            json: async () => ({ jsonrpc: "2.0", id: parsed.id, result: { protocolVersion: "2024-11-05" } }),
+          } as unknown as Response
+        }
+        if (parsed.params?.name === "statewright_get_state") {
+          return {
+            ok: true,
+            headers: new Headers({ "mcp-session-id": "test-session" }),
+            json: async () => ({
+              jsonrpc: "2.0",
+              id: parsed.id,
+              result: { content: [{ type: "text", text: JSON.stringify(stateBody) }] },
+            }),
+          } as unknown as Response
+        }
+        return {
+          ok: true,
+          headers: new Headers(),
+          json: async () => ({
+            jsonrpc: "2.0",
+            id: parsed.id,
+            result: { content: [{ type: "text", text: JSON.stringify({ transitioned: true }) }] },
+          }),
+        } as unknown as Response
+      }) as any
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const blocked = await pi._fire("tool_call", { toolName: "Edit" }, ctx)
+      expect(blocked[0]).toEqual(expect.objectContaining({ block: true }))
+
+      // Projection absence is not an authoritative approved receipt.
+      stateBody = MOCK_STATE
+      await pi._fire("tool_result", { toolName: "statewright_transition" }, ctx)
+      const after = await pi._fire("tool_call", { toolName: "Edit" }, ctx)
+      expect(after[0]).toEqual(expect.objectContaining({ block: true }))
+    })
+
+    it("suppresses held message recovery and disarms an already-armed inactivity timer", async () => {
+      vi.useFakeTimers()
+      try {
+        const changingState = { ...MOCK_STATE } as Record<string, unknown>
+        setupFetch([{ match: "/mcp", body: changingState }])
+        vi.spyOn(console, "log").mockImplementation(() => {})
+        const pi = createMockPi()
+        const ctx = createCtx()
+        await statewrightExtension(asPi(pi))
+        await pi._fire("before_agent_start", {}, ctx)
+        const timerCountBeforeHold = vi.getTimerCount()
+        expect(timerCountBeforeHold).toBeGreaterThan(0)
+
+        Object.assign(changingState, PENDING_STATE, { meta: { orchestration: "plugin" } })
+        const admission = await pi._fire("input", { text: "fixture only", source: "interactive" }, ctx)
+        expect(admission[0]).toEqual({ action: "handled" })
+        expect(vi.getTimerCount()).toBe(timerCountBeforeHold - 1)
+        const callsAtHold = fetchMock.mock.calls.length
+        await pi._fire("message_end", {
+          message: { role: "assistant", stopReason: "error", content: [{ type: "text", text: '{"tool_calls":[{"name":"bash","args":{"command":"fixture"}}]}' }] },
+        }, ctx)
+        await pi._fire("message_end", {
+          message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: '{"tool_calls":[{"name":"bash","args":{"command":"fixture"}}]}' }] },
+        }, ctx)
+        await vi.advanceTimersByTimeAsync(600_000)
+        expect(pi.sendUserMessage).not.toHaveBeenCalled()
+        expect(pi.exec).not.toHaveBeenCalled()
+        expect(fetchMock).toHaveBeenCalledTimes(callsAtHold)
+      } finally {
+        vi.clearAllTimers()
+        vi.useRealTimers()
+      }
     })
   })
 

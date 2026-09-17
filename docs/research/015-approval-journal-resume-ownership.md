@@ -277,3 +277,124 @@ an upcoming native turn/compaction is parked. Establish a discriminating native
 SDK fixture before implementing that boundary. Preserve existing Pi/Gateway
 P1 edits while fixing the model self-approval instruction and waiting lifecycle.
 Do not run any workflow-loading canary under the current instruction.
+
+## Slice 3: Pi fail-closed native admission
+
+Base: `16732d7a5cabd11c3b1963ff619785a1fd1bdbbf`. This is the first
+admission/hold boundary, not the complete P1 waiting/continuation milestone.
+Adopt only the already-dirty Pi extension and its approval tests within scope;
+preserve all Gateway, canary, usage and supervisor edits outside this slice.
+Owned additions: Pi approval-hold helper, actual installed-SDK prompt/runner
+fixtures, executor Pi launch/stop hold fixtures, ADR and this receipt. The Pi
+test-runner configuration must keep native `node:test` fixtures out of Vitest
+discovery, and run them explicitly rather than silently omit them.
+
+Invariants: a pending/malformed approval or unavailable managed transport
+returns the native `input` event's `handled` result before authentication,
+compaction, queueing or agent inference. Exceptions from UI notification must
+not turn the hook into fail-open continuation. Once held, a projection becoming
+absent does not release this process. The model is never told to approve;
+model tools (including Statewright transitions) and recovery are held as well.
+The parent denies a parked Pi launch and stops only its owned Pi child when a
+poll durably observes a pending checkpoint; no automatic old-input continuation.
+
+Cut line: receipt-driven long polling, persisted request epochs, cancellation
+and exactly-once continuation are still required subsequent work. The safe
+intermediate behavior is an explicit hold, not an implicit approval or an
+automatic retry. No live workflow, provider inference or existing session is
+touched. One serial implementer, one bounded read-only review and deterministic
+local fixture gates only. Full original acceptance and promotion remain held.
+
+Primary SDK provenance (installed dependency, not a pinned peer contract):
+version 0.73.0; SHA256 `dist/core/agent-session.js` =
+`84687393bb0db810b93b6e632815ae5e54e1e0ebc17690ec1c4419791c73619f`,
+`dist/core/extensions/runner.js` =
+`dab1eadccdd73b6bb50bbd22b464461c65eca77f368d2b44e5e9af4cbcc18d4d`.
+
+Red/characterization: the first actual-SDK prompt/runner and adopted Pi tests
+had 11 failures, 53 passes: pending/malformed/disconnected/UI-failure input
+reached authentication/compaction/inference, model transitions were exempt,
+and projection absence released old work. The inference boundary is a terminal
+fake-agent counter, not real inference. The three new parent hold fixtures also
+failed on the old source; one unbounded red fixture was terminated by its exact
+task-owned PID, then repaired to finish its own fake child for bounded negative
+validation. No existing live session was signaled.
+
+Pi's initial `npm test` gate showed 54 pass/1 opt-in canary skip and one failed
+suite because Vitest discovered the prior slice's `node:test` session fixture.
+The configuration now routes TypeScript tests to Vitest and adds an explicit
+`npm run test:native` command (2/2 pass), rather than claiming those files were
+run by Vitest.
+
+Initial isolated staged-only snapshot:
+`dad89d6a0186a1e3aba012972c729a5a7062d5dc`, exported under
+`/tmp/statewright-pi-hold.mHTYPO/staged` with installed dependency directories
+symlinked. Approval/Codex/ownership/observer/remote/native/generated-bundle
+integration: 252/252 pass, no failures/skips/cancellations. Pi 67 pass with the
+single pre-existing opt-in live canary skipped; extended admission coverage
+subsequently passes 20/20 focused cases (interactive/RPC/extension input,
+malformed/absent state, stream queueing, initial disconnect, UI failure and
+actual SDK tool-hook non-awaiting abort). Final gate/review pending below.
+
+Syntax checks, generated Claude managed-client `--check`, cached/working
+`git diff --check` pass. No Pi package-specific TypeScript/lint/format
+configuration is present; Vitest transform is not a full type-check claim.
+Rust is unchanged by this slice; prior Rust gates are not relabeled as fresh.
+Full workspace, live/native provider approval journey, Windows process shutdown,
+staging and promotion remain unverified/held.
+
+Next slice must connect fresh native admission to the parent-owned private
+receipt and persisted request epoch, not add a model resolver or release from
+raw projection absence. The ownership record's current `request_epoch` remains
+reserved/unused. Coordinate journal clearance with durable once-only release
+consumption; a crash between consumption and native acceptance must hold
+explicitly, never blindly replay. Verify newer input, rejection, disconnect,
+dismissal, timeout, concurrent processes, run replacement, mid-await recovery,
+automatic retry/compaction and SDK request-boundary races. These remain original
+requirements, not omitted acceptance.
+
+Independent clean-context read-only review:
+`/root/pi_admission_hold_review`, ten named owned paths against base 16732d7.
+Reviewer independently ran staged native admission 13/13, coverage-extended
+admission 20/20, executor observer/contract 16/16 and additional helper callback
+failure/monotonic fixtures. No reproducible must-fix within the explicit
+hold-only cut line; no full-P1 approval verdict. Nonblocking gap was direct
+recovery/inactivity coverage; a new fixture arms normal inactivity, admits a
+valid pending projection through native input, then fires held error recovery
+and advances ten minutes. No user-message delivery, exec or additional gateway
+traffic occurs. The tightened fixture also proves one armed mock timer is
+removed and exercises both error auto-retry and non-error embedded-tool recovery.
+Focused repair 1/1 passes. Independent same-file recheck 1/1 passes (54 tests
+filtered by the single-test selection), closing this mock-timer/extension
+coverage gap. Native in-flight inference cancellation is not proven by it.
+
+Final isolated gate snapshot:
+`9a15555de22f884ada26e158ab85a28e57a67e45`, exported at
+`/tmp/statewright-pi-hold-gate.r5Ip0v/staged`. Node integration 252/252 pass
+(zero skips/cancellations), Pi 75 pass/1 pre-existing opt-in live-canary skip,
+exit 0. Generated managed-client parity and both changed MJS syntax checks
+pass. No failure is relabeled as a pass. Subsequent receipt-only edits do not
+change validated source/test blobs.
+
+Exact final fixture commands, run from the staged export (Pi commands from its
+`plugins/pi` directory):
+
+```sh
+node --test plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs plugins/executor/tests/managed-ownership-races.test.mjs plugins/executor/tests/executor-approval-mirror.test.mjs plugins/executor/tests/executor-observer.test.mjs plugins/executor/tests/executor-contract.test.mjs plugins/executor/tests/remote-client.test.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/executor-session-ownership.test.mjs plugins/pi/tests/session-owner.test.mjs plugins/claude-code/tests/managed-client-bundle.test.mjs
+npm test -- --reporter=dot
+npm run test:native
+node plugins/claude-code/scripts/sync-managed-client.mjs --check
+node --check plugins/executor/statewright-exec.mjs
+node --check plugins/pi/src/approval-hold.mjs
+```
+
+Original acceptance-source SHA256: 006 =
+`6f9c9a84eaadc3f026844d942ad643254e0c87a5794272d1ad7c97c111fab218`;
+012 = `6197628edd0156d59dc135b57d2b1eba6bd25cdb556808ec1a1197d399e70fd8`.
+012 remains a pre-existing untracked user artifact, not adopted into this commit.
+The ten-path local commit contains only this reviewed hold boundary and its
+receipt/ADR/fixtures/configuration. Every unrelated entry in the initial dirty
+inventory remains unstaged; Auldwyrm is untouched. No push, merge, deployment,
+installed-runtime update or workflow use. Full objective remains in progress.
+The agentic-engineering guidance supplied ADR, scoped Git boundary, isolated
+validation and independent review; manual/no-workflow authority took precedence.

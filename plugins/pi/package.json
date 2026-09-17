@@ -14,7 +14,8 @@
   },
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:native": "node --test tests/*.test.mjs"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*"

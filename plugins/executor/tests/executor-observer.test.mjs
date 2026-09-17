@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { createPiNativeSession } from "../lib/host-adapters.mjs";
 import { observeHost } from "../statewright-exec.mjs";
 
 const initialState = { run_id: "run", run_session_id: "gateway", state: "review", iteration: 1 };
@@ -107,4 +112,40 @@ test("a poll cannot replace the owned run even when no approval is pending", asy
   await assert.rejects(observeHost(f.options), /owned run changed/);
   assert.deepEqual(f.children[0].signals, ["SIGINT"]);
   assert.equal(f.observed.length, 1);
+});
+
+test("parked Pi checkpoint denies native launch even without a pending projection", async t => {
+  const f = fixture(t, { host: "pi", approvalMirror: { observe: async () => "parked" } });
+  const result = await observeHost(f.options);
+  assert.equal(result.status, "approval_parked");
+  assert.equal(f.children.length, 0);
+});
+
+test("pending Pi state cannot launch even if the mirror reports live", async t => {
+  const f = fixture(t, { host: "pi", initialState: { ...initialState, pending_approval: { approval_id: "apr" } } });
+  const result = await observeHost(f.options);
+  assert.equal(result.status, "approval_parked");
+  assert.equal(f.children.length, 0);
+});
+
+test("a durable pending observation stops only the owned Pi child without rerouting", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-observer-hold-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionId = randomUUID();
+  const pluginsRoot = new URL("../../", import.meta.url).pathname;
+  const sessionFile = await createPiNativeSession({ pluginsRoot, cwd: root, sessionDir: root, sessionId });
+  let calls = 0;
+  const pending = { ...initialState, pending_approval: { approval_id: "apr" }, model: "changed" };
+  const f = fixture(t, { host: "pi", cwd: root, pluginsRoot, hostSessionId: sessionId, hostSessionFile: sessionFile,
+    client: { call: async () => ++calls === 1 ? pending : initialState },
+    approvalMirror: { observe: async state => state.pending_approval ? "parked" : "live" },
+  });
+  const observing = observeHost(f.options);
+  while (calls < 1) await new Promise(resolve => setImmediate(resolve));
+  if (f.children[0].exitCode === null) f.children[0].finish();
+  const result = await observing;
+  assert.equal(result.status, "approval_parked");
+  assert.equal(f.children.length, 1);
+  assert.deepEqual(f.children[0].signals, ["SIGTERM"]);
+  assert.equal(result.state.pending_approval, undefined);
 });

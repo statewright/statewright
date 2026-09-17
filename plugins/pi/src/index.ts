@@ -17,6 +17,7 @@
 const PLUGIN_NAME = "pi"
 const PLUGIN_VERSION = "0.3.0"
 import { createErrorReporter } from "./error-reporting.mjs"
+import { createPiApprovalHold } from "./approval-hold.mjs"
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION })
 errorReporter.installProcessHandlers()
@@ -105,6 +106,11 @@ function formatStatusBar(s: StateCache | null, extra?: string): string {
   if (!s) return plSegment("statewright", "recon", "iter") + plSegment("inactive", "iter")
   if (extra === "paused") {
     return plSegment("statewright", "recon", "paused") + plSegment("⏸ paused", "paused")
+  }
+
+  if (s.pendingApproval) {
+    return plSegment("statewright", "recon", stateColorKey(s)) +
+           plSegment(`approval:${s.pendingApproval.event}`, "paused")
   }
 
   // Track model for display in final states
@@ -480,6 +486,7 @@ interface StateCache {
   meta: WorkflowMeta
   directExecution: boolean
   modelLadder: Array<{ model: string; url: string }> | null
+  pendingApproval: { approval_id?: string; event: string; from_state: string; to_state: string } | null
 }
 
 let stateCache: StateCache | null = null
@@ -500,6 +507,10 @@ async function refreshState(): Promise<StateCache | null> {
     swLog(`refreshState] gwCall returned null — returning stale cache (state=${stateCache?.state})`)
     return stateCache
   }
+  return cacheState(raw)
+}
+
+function cacheState(raw: Record<string, any>): StateCache {
   stateCache = {
     state: raw.state,
     isFinal: raw.is_final ?? false,
@@ -521,6 +532,7 @@ async function refreshState(): Promise<StateCache | null> {
     disallowedTools: raw.disallowed_tools ?? [],
     directExecution: raw.direct_execution ?? false,
     modelLadder: raw.model_ladder ?? null,
+    pendingApproval: (raw.pending_approval as StateCache["pendingApproval"]) ?? null,
   }
   return stateCache
 }
@@ -1322,6 +1334,26 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let lastThinkingLevel: string | null = null
   let currentRunId: string | null = null  // tracks active workflow run for log capture
   let yoloWasEnabled = false  // track if we enabled YOLO so we can restore on deactivate
+  const approvalHold = createPiApprovalHold({
+    readState: async () => {
+      // Never use refreshState's stale-cache fallback for native admission.
+      const raw = await gwCall("statewright_get_state")
+      if (raw && typeof raw.state === "string" && raw.state.trim()) cacheState(raw)
+      return raw
+    },
+    onHold: () => {
+      disarmInactivityTimer()
+      setAutonomousPermissions(false)
+    },
+  })
+
+  function holdCachedApproval(ctx: any): boolean {
+    approvalHold.observe(stateCache && { state: stateCache.state, pending_approval: stateCache.pendingApproval }, { required: false })
+    if (!approvalHold.held) return false
+    disarmInactivityTimer()
+    approvalHold.stopCurrent(ctx)
+    return true
+  }
 
   // --- Permission system integration (pi-permission-system) ---
   function setAutonomousPermissions(enabled: boolean) {
@@ -1353,7 +1385,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let lastNudgeTime = 0
 
   function deliverCorrective(msg: string) {
-    if (dormant || !stateCache || stateCache.isFinal) return
+    if (approvalHold.held || dormant || !stateCache || stateCache.isFinal) return
     const now = Date.now()
     if (now - lastNudgeTime < 5000) return  // debounce: min 5s between correctives
     lastNudgeTime = now
@@ -1370,7 +1402,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
   function armInactivityTimer() {
     if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
-    if (!stateCache || stateCache.isFinal || dormant) return
+    if (approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
     const thinkingMultiplier = (stateCache.thinkingLevel && stateCache.thinkingLevel !== "off") ? 3 : 1
     // Plugin mode: 90s — model needs time to think + produce JSON tool calls.
     // Agentic mode: standard 60s timeout.
@@ -1380,7 +1412,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     swLog(`inactivity] arming timer: ${timeout / 1000}s (plugin=${isPluginOrchestrated()})`)
     inactivityTimer = setTimeout(() => {
       inactivityTimer = null
-      if (!stateCache || stateCache.isFinal || dormant) return
+      if (approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
 
       // Abort the current stream — steer messages queue behind a running stream
       // and never get delivered. Abort kills the stream, then the corrective
@@ -1451,6 +1483,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // preventing imported session context from locking the model into an old workflow.
   const lazyMode = !process.env.STATEWRIGHT_WORKFLOW && !process.env.STATEWRIGHT_BRANCH_SESSION_ID
   let lazyInitDone = false
+
+  // Register before gateway initialization: an unavailable managed bridge must
+  // not leave a partially loaded extension without its native admission hook.
+  pi.on("input", async (_event, ctx) => {
+    const managed = Boolean(process.env.STATEWRIGHT_ADAPTER_URL || process.env.STATEWRIGHT_EXECUTOR_ID)
+    if (!approvalHold.held && !managed && (dormant || (lazyMode && !lazyInitDone && !stateCache))) return { action: "continue" }
+    return approvalHold.input(ctx)
+  })
 
   async function ensureLazyInit(): Promise<boolean> {
     if (lazyInitDone) return true
@@ -1555,6 +1595,17 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       } else {
         swLog(`auto-load] STATEWRIGHT_WORKFLOW=${autoWorkflow} failed: ${(result as Record<string, unknown>)?._error || "no result"}`)
       }
+    }
+
+    // Parked notice (P1): if the session is parked on a pending approval,
+    // surface it immediately so the operator/reviewer knows tool calls are
+    // blocked until the approval is resolved.
+    if (stateCache?.pendingApproval) {
+      const pa = stateCache.pendingApproval
+      ctx.ui?.notify?.(
+        `[statewright] Workflow is PARKED at "${stateCache.state}": approval ${pa.approval_id} (${pa.event}) awaits a reviewer decision. All tool calls are blocked until it is resolved.`,
+        "warning",
+      )
     }
   })
 
@@ -2523,10 +2574,14 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let currentAbortCtx: { abort: () => void } | null = null
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    // A cache from a previous extension instance is not this turn's fresh
+    // observation. Native input already latches its own fresh admission read.
+    if (approvalHold.held) { approvalHold.stopCurrent(ctx); return }
     if (dormant) return
     currentAbortCtx = ctx as unknown as { abort: () => void }
     pluginStepCount++
     const state = await refreshState()
+    if (holdCachedApproval(ctx)) return
     if (!state) return
 
     if (requiresDeliveryOwner(state.meta)) {
@@ -2884,6 +2939,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
+    if (holdCachedApproval(_ctx)) return approvalHold.blockTool(_ctx)
     if (dormant) return
     // Block malformed tool calls (undefined/empty name from broken model output)
     if (!event.toolName) {
@@ -2907,6 +2963,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           tool_input: event.input ?? {},
         })
         if (decision?.decision === "deny") {
+          if (decision.approval_pending) {
+            approvalHold.observe({ state: stateCache.state, pending_approval: { approval_id: decision.approval_id } })
+            return approvalHold.blockTool(_ctx)
+          }
           return {
             block: true,
             reason: String(decision.reason ?? "Blocked by Statewright"),
@@ -3109,6 +3169,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // --- Post-tool: interrupt detection + state tracking ---
 
   pi.on("tool_result", async (event, ctx) => {
+    if (holdCachedApproval(ctx)) return
     if (dormant) return
 
     // Capture tool log (async, non-blocking)
@@ -3125,6 +3186,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
           is_error: Boolean((event as unknown as { isError?: boolean }).isError),
         })
         await refreshState()
+        if (holdCachedApproval(ctx)) return
         if (stateCache) await applyModelRouting(stateCache, ctx)
       } catch (error) {
         ctx.ui.notify(
@@ -3214,6 +3276,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       }
 
       await refreshState()
+      if (holdCachedApproval(ctx)) return
       if (stateCache) {
         await applyModelRouting(stateCache, ctx)
         if (event.toolName === "statewright_load_workflow" && stateCache.state) {
@@ -3269,6 +3332,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // parse_llm_response → execute → feed results loop.
 
   pi.on("message_end", async (event, _ctx) => {
+    if (holdCachedApproval(_ctx)) return
     if (dormant || !stateCache) return
     const msg = event.message
     if (msg.role !== "assistant") return
@@ -3332,6 +3396,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
       // Execute each extracted tool call directly
       const results: string[] = []
       for (const tc of extracted) {
+        if (holdCachedApproval(_ctx)) return
         const name = normalizeToolName(tc.name)
         const args = tc.args
 
@@ -3742,6 +3807,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
         // safe_next transitions happen inside message_end.
         const msg = results.join("\n\n") + `\n\n${guidance}`
         setTimeout(() => {
+          if (holdCachedApproval(_ctx)) return
           try { pi.sendUserMessage(msg, { deliverAs: "followUp" }) } catch {
             try { pi.sendUserMessage(msg, { deliverAs: "steer" }) } catch { /* both failed */ }
           }

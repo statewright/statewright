@@ -287,7 +287,12 @@ export async function observeHost(options) {
   if (!approvalMirror) throw new Error("Host observation requires approval journal ownership.");
   await options.sessionOwner?.assertOwner();
   options.sessionOwner?.assertGateway(options.initialState);
-  await approvalMirror.observe(options.initialState);
+  const initialApprovalStatus = await approvalMirror.observe(options.initialState);
+  await options.sessionOwner?.assertOwner();
+  if (options.host === "pi" && (initialApprovalStatus === "parked" || options.initialState.pending_approval != null)) {
+    await telemetry("executor_pi_approval_launch_held", { host: "pi", state: options.initialState.state });
+    return { status: "approval_parked", code: 0, signal: null, state: options.initialState, finalSeen: false };
+  }
   let state = options.initialState;
   let stateKey = `${state.state}:${state.iteration ?? 0}`;
   let finalSeen = Boolean(state.is_final);
@@ -333,6 +338,7 @@ export async function observeHost(options) {
     let observerError = null;
     let pollPromise = null;
     let rerouteRequested = false;
+    let piApprovalHeld = false;
     const poll = () => {
       if (pollPromise) return pollPromise;
       if (observerError || finalSeen) return Promise.resolve();
@@ -341,7 +347,15 @@ export async function observeHost(options) {
           const next = await client.call("statewright_get_state");
           await options.sessionOwner?.assertOwner();
           options.sessionOwner?.assertGateway(next);
-          await approvalMirror.observe(next);
+          const approvalStatus = await approvalMirror.observe(next);
+          await options.sessionOwner?.assertOwner();
+          if (options.host === "pi" && (approvalStatus === "parked" || next.pending_approval != null) && !piApprovalHeld) {
+            piApprovalHeld = true;
+            // Hold-only intermediate behavior: terminate our owned native Pi,
+            // rather than let SIGINT become an interactive retry/next prompt.
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+            await telemetry("executor_pi_approval_host_held", { host: "pi", state: next.state });
+          }
           const nextKey = `${next.state}:${next.iteration ?? 0}`;
           const previous = state;
           state = next;
@@ -388,7 +402,7 @@ export async function observeHost(options) {
     }
     await poll();
     if (observerError) throw observerError;
-    if (rerouteRequested && !finalSeen && !state.pending_approval) {
+    if (rerouteRequested && !piApprovalHeld && !finalSeen && !state.pending_approval) {
       continuation = true;
       await telemetry("executor_host_reroute", {
         host: options.host,
@@ -398,7 +412,7 @@ export async function observeHost(options) {
       });
       continue;
     }
-    return { ...result, state, finalSeen };
+    return { ...result, ...(piApprovalHeld ? { status: "approval_parked" } : {}), state, finalSeen };
   }
 }
 
@@ -498,7 +512,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (restored?.status === "parked") {
       process.stderr.write(
         `[statewright-exec] Resumed while approval ${restored.saved.pending_approval.approval_id} is pending; `
-        + "blocked work is not re-executed.\n",
+        + (options.host === "pi" ? "native Pi launch remains held.\n" : "approval checkpoint remains parked.\n"),
       );
     }
     await approvalMirror.observe(initialState);
@@ -569,7 +583,7 @@ export async function main(argv = process.argv.slice(2)) {
       telemetry,
       environment,
     });
-    await deliveryController?.finalizeAfterClientClose();
+    if (result.status !== "approval_parked") await deliveryController?.finalizeAfterClientClose();
     if (result.code && !result.finalSeen) process.exitCode = result.code;
     return result;
   } finally {

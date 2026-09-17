@@ -519,12 +519,26 @@ async fn handle_runtime_approval(
     {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    // Require the exact client root as well as the account key. Another pane
-    // in the same account cannot select this session through the request body.
+    // Require the client's streamable root, or a branch session derived from
+    // it (executor panes run `br_*` branches of their client root). Another
+    // pane in the same account cannot select a session it does not own
+    // through the request body.
     let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, key.as_bytes()).to_string();
-    let client = headers.get(CLIENT_ID_HEADER).and_then(|v| v.to_str().ok());
-    if client.is_none() || streamable_session_key(&fingerprint, client, None) != body.run_session_id
-    {
+    let client = headers
+        .get(CLIENT_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|value| !value.is_empty());
+    let client = match client {
+        Some(client) => client,
+        None => return StatusCode::FORBIDDEN.into_response(),
+    };
+    let root = streamable_session_key(&fingerprint, Some(client), None);
+    let prefix = format!("{root}_");
+    let under_own_branch = body
+        .run_session_id
+        .starts_with(&prefix)
+        && body.run_session_id[root.len() + 1..].starts_with("br_");
+    if body.run_session_id != root && !under_own_branch {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(session) = state
@@ -1314,6 +1328,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn runtime_approval_accepts_branch_sessions_under_own_client_root() {
+        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"key").to_string();
+        let root = streamable_session_key(&fingerprint, Some("own-client"), None);
+        let branch = format!("{root}_br_test_branch");
+        let state = test_state_with_session(&branch, "key").await;
+        {
+            let rs = state.sessions.read().await.get(&branch).cloned().unwrap();
+            let mut rs = rs.lock().await;
+            rs.gateway.seed_native_usage_run("r", "working");
+            rs.gateway.session_manager.set_pending_approval(
+                &branch,
+                crate::session::PendingApproval {
+                    approval_id: "apr_test".into(),
+                    event: "DEPLOY".into(),
+                    from_state: "working".into(),
+                    to_state: "deployed".into(),
+                    new_context: json!({}),
+                    message: None,
+                },
+            );
+        }
+
+        let make = |run_session_id: String| {
+            Request::post("/api/runtime-approval")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer key")
+                .header(CLIENT_ID_HEADER, "own-client")
+                .body(Body::from(
+                    json!({
+                        "run_id": "r",
+                        "run_session_id": run_session_id,
+                        "approval_id": "apr_test"
+                    })
+                    .to_string(),
+                ))
+                .unwrap()
+        };
+
+        // The executor's `br_*` branch under the presenting client root is its
+        // own session: the identity check accepts it (the test state then
+        // answers 503 because no approval secret/PB is configured).
+        let response = build_router(state.clone())
+            .oneshot(make(branch.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // A branch under a different client root stays forbidden even with the
+        // same account key.
+        let other_root = streamable_session_key(&fingerprint, Some("other-client"), None);
+        let response = build_router(state.clone())
+            .oneshot(make(format!("{other_root}_br_evil")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // A branch under the own root that has no stored session must not be
+        // served by a sibling session.
+        let response = build_router(state)
+            .oneshot(make(format!("{root}_br_missing")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

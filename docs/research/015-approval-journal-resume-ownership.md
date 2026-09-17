@@ -398,3 +398,182 @@ inventory remains unstaged; Auldwyrm is untouched. No push, merge, deployment,
 installed-runtime update or workflow use. Full objective remains in progress.
 The agentic-engineering guidance supplied ADR, scoped Git boundary, isolated
 validation and independent review; manual/no-workflow authority took precedence.
+
+## Slice 4: parent-owned request epochs and receipt-driven Pi waiting
+
+Base: `58625323c8475afe09896102af397131a13f5504`. Original full P0/P1
+acceptance remains unchanged. Replace the intermediate managed-Pi hold-only
+behavior with real transport waiting and a private receipt/owned-edge release,
+not projection-based admission. Unmanaged/older-parent sessions stay explicitly
+held rather than acquiring an unproven resolver.
+
+Owned scope: executor session ownership/request-record validation, request
+controller, approval mirror, authenticated private adapter hooks, main wiring;
+Pi request gate and extension integration; their deterministic request-race,
+bridge and installed-SDK fixtures; ADR/this receipt. Preserve every already-dirty
+Gateway/usage/canary/supervisor/OMX artifact. No workflow, real approval, provider
+inference, live-session inspection or deployment. Product workflows may remain
+supported in code; fixture execution does not load one.
+
+Required invariants: the parent mints and durably advances epochs; only exact
+current native/run/session/request identity admits work. New input invalidates
+older waits, including out-of-order async responses. The model cannot supply a
+decision, a checkpoint or an authoritative epoch. Pending waiting is outside
+inference. Release requires private approved receipt, freshly applied owned edge,
+durable once-only consumption and a final current-request check; then and only
+then can the same native callback proceed. Rejected/unavailable/foreign/cancelled/
+dismissed/disconnected/timed-out work cannot resume. Persist consumption before
+clearing the shared journal; an ambiguous crash must hold, never blindly replay.
+
+Validation plan: red/characterization, focused durable record/controller/race
+fixtures, authenticated bridge fixtures and actual public-SDK native admission,
+then one staged-only approval/ownership integration gate and independent
+read-only review. Limits observed-only: one serial implementer, one reviewer,
+60 normal/90 worst tool calls, output <=16 KiB/call, 30-minute warning/45-minute
+handoff, at most two distinct focused repairs per finding. Protect the last third
+for validation, review, recovery and recording; no usage-enforcement/model-price
+claim. If integration is not proven, do not mark the original objective complete.
+
+Activation decision after direct installed-SDK inspection: the extension
+context's `abort()` discards the AgentSession idle promise. Input-only fixtures
+cannot prove in-flight queue/provider/retry/compaction cancellation. Preserve
+the full requirements, but contract this local commit to the independently
+usable durable parent protocol and private native gate, with actual public-SDK
+input/tool-hook fixtures. Do not wire executor main or the shipped extension
+until the remaining boundaries have discriminating proof. ADR 008 records the
+interface, crash semantics and activation conditions; ADR 007 behavior remains
+active. This is a prerequisite, not a replacement acceptance criterion.
+
+Current focused outcomes: original request-controller run had 14 fixture
+teardown failures because FIFO cleanup removed the task-owned temporary root
+before owner release; product assertions passed, but that run is NOT a pass.
+One combined cleanup (release then remove exact mkdtemp root) repaired the
+fixture; 14/14 passed. Extended controller/race/schema fixtures subsequently
+pass 19/19 and bridge fixtures 6/6. Installed-SDK private wait fixtures first
+passed 20/20; after adding three exception/transport cases, 22 passed and one
+failed in SDK dispose because the test's identity-read spy still threw during
+teardown. Restore spies before SDK disposal; this is a bounded fixture cleanup
+repair, not a product fix or a passing failed run. The fresh gate follows below.
+The shared synthetic authority fixture throws if any resolver is called and
+reads the disk ledger before permitting journal clearance. Known delivery
+failures after consumption now durably cancel and cannot replay via status.
+Reopen preserves epochs/tombstones but rejects an old request reference.
+Full staged integration and independent review follow below; original full
+acceptance remains active and unproven.
+
+First staged-only full gate: snapshot
+`5e6943c56261ed3c5958a43af39ff668b97d63b2`, exported to
+`/tmp/statewright-request-gate.5Bp5fQ` with only installed dependency directories
+symlinked. Node approval/ownership/observer/native/generated integration 280/280
+passes, no skips/cancellations/failures. Pi Vitest 98 pass, one pre-existing
+opt-in live-canary skip; explicit `npm run test:native` 2/2. Generated Claude
+managed-client parity and six changed MJS syntax checks pass; cached diff check
+passes. No Rust source is in this slice, so prior Rust results are not recast as
+fresh. No package-specific full type-check/lint/format gate exists for Pi;
+Vitest transformation is not such a claim. These results bind to this snapshot,
+not later repairs or full workspace correctness.
+
+The same installed SDK source hashes were rechecked live: version 0.73.0,
+AgentSession SHA256 `84687393bb0db810b93b6e632815ae5e54e1e0ebc17690ec1c4419791c73619f`,
+ExtensionRunner SHA256 `dab1eadccdd73b6bb50bbd22b464461c65eca77f368d2b44e5e9af4cbcc18d4d`.
+Peer wildcard remains unpinned; no wider SDK-version support claim.
+
+Clean-context read-only review `/root/parent_request_release_review` is limited
+to the twelve staged paths, ten minutes/eight tool calls and one focused
+challenge. No repeated wide gate, source mutation, live provider/workflow or
+unrelated dirty artifact inspection is authorized for it. Review identified a
+possible native session change during waiting; this is within the private gate's
+exact-identity contract, not a deferred full-provider requirement. Reproduction,
+repair and fresh focused re-review follow below. No review verdict is implied
+by the passed fixture gate.
+
+Review finding R1 (P1): a live native session could change after the initial
+identity check while input was parked or a checkpoint awaited. The reviewer's
+direct gate challenge returned `continue` after that switch. Three new actual
+SDK regressions also failed on the staged source: changed-native parked input
+and a late begin response each reached the terminal agent once, and an existing
+request's tool checkpoint failed to block. Product defect, not fixture-only.
+Repair rereads live native identity before private traffic, after responses,
+before consumption and immediately before admission; changed/missing/throwing
+identity stays held. Lazy native abort is never invoked against the foreign
+replacement session. Fresh installed-SDK gate 26/26 passes.
+
+A discriminating parent cancellation fixture additionally failed before repair:
+old status remained admissible while the durable cancellation write was held.
+Cancellation now synchronously invalidates the latest reference before awaiting
+the write; current-reference validation repeats after its asynchronous ownership
+check. That new fixture passes. The first combined parent rerun was 21 pass/5
+failure because older cancel tests expected only the old `ended` error message;
+they did correctly deny and retain journals. Tighten that assertion to the two
+valid identity-denial reasons (`replaced|ended`), preserving the denial/journal
+assertions. These failed/superseded results are not fresh passes. Focused rerun
+and bounded re-review follow; no full acceptance verdict yet.
+
+The first R1 re-review kept the finding open: the public input/checkpoint
+wrapper awaited the inner wait result and did not reread identity after that
+last handoff. A queued native-session change inside onActive still produced
+`continue`. Two new actual SDK regressions reproduce this final-await window;
+the earlier 26/26 gate did not cover it and is not approval. R1 repair attempt
+two checks native identity and request activity after the public wait, just
+before returning success; checkpoint captures its original request rather than
+letting replacement substitute a newer one. Parent response view also repeats
+the synchronous current-reference/closed check immediately before output.
+Final focused gate and same-finding re-review follow below. This exhausts the
+two distinct focused R1 repair attempts; do not open an unbounded repair loop.
+
+Final R1 re-review by the same clean-context reviewer: closed within the
+prerequisite boundary. Its repeated microtask challenges now yield input
+`handled` and checkpoint `false`, both held with zero foreign-session aborts.
+The synchronous parent response view also closes the reviewed cancellation
+handoff. No remaining issue found in that bounded recheck; this is not full
+native/provider/queue/recovery approval. Root's fresh focused gates: parent
+controller + bridge 26/26; installed-SDK private gate 28/28.
+
+Final isolated staged gate: snapshot
+`d53cef31999a0943387a33d65be05f73be549e88`, exported to
+`/tmp/statewright-request-final.pxSLTE`. Approval/Codex/
+ownership/observer/remote/bridge/native/generated Node integration 281/281 pass,
+zero skips/cancellations/failures. Pi 103 pass/1 pre-existing opt-in live-canary
+skip; explicit native-session gate 2/2. Generated Claude managed-client parity
+and each of the six MJS syntax checks return exit 0. No source/test edits after
+this gate; following changes only extend the receipt. All failures and
+superseded gates above remain recorded, not relabeled as successful.
+
+Commands from the final staged export (npm commands from plugins/pi):
+
+```sh
+node --test plugins/executor/tests/{human-approval,approval-journal,codex-approval-gate,runtime-approval-service,codex-native-approval-proxy,codex-app-server-transport,managed-ownership-races,executor-approval-mirror,executor-observer,executor-contract,remote-client,host-adapters,executor-session-ownership,adapter-bridge,executor-request-controller,executor-request-bridge}.test.mjs plugins/pi/tests/session-owner.test.mjs plugins/claude-code/tests/managed-client-bundle.test.mjs
+npm test -- --reporter=dot
+npm run test:native
+node plugins/claude-code/scripts/sync-managed-client.mjs --check
+node --check plugins/executor/lib/executor-request-controller.mjs
+node --check plugins/executor/lib/executor-request-record.mjs
+node --check plugins/executor/lib/executor-session-ownership.mjs
+node --check plugins/executor/lib/executor-approval-mirror.mjs
+node --check plugins/executor/lib/adapter-bridge.mjs
+node --check plugins/pi/src/request-gate.mjs
+```
+
+Manual/no-workflow authority overrides workflow activation guidance. Applied
+agentic-engineering SDLC controls influenced the inactive cutline, ADR, staged
+scope, source-bound fixture gates, protected review/recording reserve and
+independent adversarial review. Budgets remain observed-only, not controller
+enforcement; contraction protected the final gate/review/handoff rather than
+promising unsupported native cancellation. No cumulative token/tool/time usage
+enforcement claim. No Rust/full-workspace/type-check/live-native/staging or
+promotion pass. Every unrelated initial dirty artifact remains outside this
+twelve-path commit; Auldwyrm is untouched. No workflow/API approval/provider
+inference/installed-runtime change/live-session signal/deployment/push.
+
+Exact next slice, with full original acceptance retained: build discriminating
+actual SDK Agent signal/onPayload, provider HTTP cancellation, queues/automatic
+retry/compaction and recovery/follow-up correlation fixtures, then wire executor
+main/observer/private bridge and Pi extension with readiness and exact native
+identity, parent close/cancel and private outer references. Guard every async
+effect and inference boundary; do not let SDK's extension-source follow-ups mint
+new human-input epochs or leak an old queued message into replacement input.
+Receipt + applied owned edge + durable current epoch + consumption + fresh
+native identity all remain required. Prove the complete authorized native
+journey separately before activation/promotion; never substitute these fake
+authority/terminal-agent fixtures for that acceptance. Original goal remains
+active, not complete or blocked.

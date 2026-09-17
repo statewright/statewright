@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { gatewayEndpoint } from "./remote-client.mjs";
+import { requestCheckpoint, requestReference, sameRequest, validateExecutorRequest } from "./executor-request-record.mjs";
 
 const SCHEMA = "statewright/executor-session/v1";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,6 +60,7 @@ export function createExecutorSessionStore({ root, workflow, projectId, host, cw
       || typeof record.created_at !== "string" || !Number.isFinite(Date.parse(record.created_at))) {
       throw new Error("Invalid or foreign executor ownership record; resume denied");
     }
+    validateExecutorRequest(record);
     return record;
   }
 
@@ -84,6 +86,8 @@ export function createExecutorSessionStore({ root, workflow, projectId, host, cw
       throw error;
     }
     let released = false;
+    let closing = false;
+    let mutation = Promise.resolve();
     let record;
     async function assertOwner() {
       if (released || JSON.parse(await readFile(lockPath, "utf8")).owner_token !== ownerToken) {
@@ -95,6 +99,8 @@ export function createExecutorSessionStore({ root, workflow, projectId, host, cw
     }
     async function release() {
       if (released) return;
+      closing = true;
+      await mutation;
       await assertOwner();
       await lock.close();
       await unlink(lockPath);
@@ -132,6 +138,44 @@ export function createExecutorSessionStore({ root, workflow, projectId, host, cw
       record = next;
     }
 
+    function mutate(operation) {
+      if (closing || released) return Promise.reject(new Error("Executor ownership is closing; continuation denied"));
+      const result = mutation.then(async () => {
+        await assertOwner();
+        const next = await operation(structuredClone(record));
+        await save(next);
+        return structuredClone(record);
+      });
+      mutation = result.catch(() => {});
+      return result;
+    }
+
+    async function assertRequest(reference, { terminal = false } = {}) {
+      await stableOwner();
+      if (closing || !sameRequest(record.request, reference)
+        || !terminal && ["cancelled", "completed"].includes(record.request.phase)) {
+        throw new Error("Request ownership changed or ended; continuation denied");
+      }
+      return structuredClone(record.request);
+    }
+
+    async function stableOwner() {
+      // Public readers must not compare the new atomic disk image with the
+      // preceding cached record while an owned queued write is completing.
+      await mutation;
+      await assertOwner();
+    }
+
+    function mutateRequest(reference, operation) {
+      return mutate(next => {
+        if (!sameRequest(next.request, reference) || ["cancelled", "completed"].includes(next.request.phase)) {
+          throw new Error("Request ownership changed or ended; continuation denied");
+        }
+        next.request = operation(next.request);
+        return next;
+      }).then(next => next.request);
+    }
+
     function assertGateway(live) {
       if (![live?.run_id, live?.run_session_id, live?.state].every(printable) || live.workflow !== scope.workflow
         || record.run_id !== null && record.run_id !== live.run_id
@@ -141,18 +185,68 @@ export function createExecutorSessionStore({ root, workflow, projectId, host, cw
     }
 
     return {
-      path, nativeRoot, scopeId, assertOwner, assertGateway, release,
+      path, nativeRoot, scopeId, assertOwner: stableOwner, assertGateway, assertRequest, release,
       get record() { return structuredClone(record); },
       async bindGateway(live) {
-        assertGateway(live);
-        await save({ ...record, run_id: live.run_id, transport_session_id: live.run_session_id });
+        await mutate(next => {
+          assertGateway(live);
+          return { ...next, run_id: live.run_id, transport_session_id: live.run_session_id };
+        });
       },
       async bindHost({ sessionId: hostSessionId, sessionFile = null }) {
-        if (!printable(hostSessionId) || record.host_ready && (hostSessionId !== record.host_session_id || sessionFile !== record.host_session_file)
-          || scope.host !== "cursor" && hostSessionId !== record.host_session_id) {
-          throw new Error("Native session ownership identity mismatch; continuation denied");
-        }
-        await save({ ...record, host_session_id: hostSessionId, host_session_file: sessionFile, host_ready: true });
+        await mutate(next => {
+          if (!printable(hostSessionId) || next.host_ready && (hostSessionId !== next.host_session_id || sessionFile !== next.host_session_file)
+            || scope.host !== "cursor" && hostSessionId !== next.host_session_id) {
+            throw new Error("Native session ownership identity mismatch; continuation denied");
+          }
+          return { ...next, host_session_id: hostSessionId, host_session_file: sessionFile, host_ready: true };
+        });
+      },
+      async beginRequest({ inputDigest, nativeSessionId }) {
+        const next = await mutate(next => {
+          if (nativeSessionId !== next.host_session_id || !next.host_ready || !next.run_id
+            || typeof inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(inputDigest) || next.request_epoch >= Number.MAX_SAFE_INTEGER) {
+            throw new Error("Invalid native request ownership; continuation denied");
+          }
+          next.request_epoch += 1;
+          next.request = { schema: "statewright/executor-request/v1", request_id: randomUUID(),
+            request_epoch: next.request_epoch, native_session_id: nativeSessionId, input_digest: inputDigest,
+            phase: "active", approval: null, release_nonce: null,
+            consumed_approval_ids: next.request?.consumed_approval_ids ?? [], reason: null };
+          return next;
+        });
+        return requestReference(next.request);
+      },
+      parkRequest(reference, live) {
+        const checkpoint = requestCheckpoint(live);
+        return mutateRequest(reference, request => {
+          if (request.consumed_approval_ids.includes(checkpoint.pending_approval.approval_id)
+            || request.approval && !isDeepStrictEqual(request.approval, checkpoint)) {
+            throw new Error("Request approval changed or was consumed; continuation denied");
+          }
+          return { ...request, phase: request.phase === "ready" ? "ready" : "parked", approval: checkpoint };
+        });
+      },
+      readyRequest(reference) {
+        return mutateRequest(reference, request => {
+          if (!["parked", "ready"].includes(request.phase)) throw new Error("Request has no parked release");
+          return { ...request, phase: "ready", release_nonce: request.release_nonce ?? randomUUID() };
+        });
+      },
+      consumeRequest(reference, nonce) {
+        return mutateRequest(reference, request => {
+          if (request.phase !== "ready" || request.release_nonce !== nonce || typeof nonce !== "string" || !UUID.test(nonce)) {
+            throw new Error("Release is stale or already consumed; continuation denied");
+          }
+          return { ...request, phase: "active", approval: null, release_nonce: null,
+            consumed_approval_ids: [...request.consumed_approval_ids, request.approval.pending_approval.approval_id] };
+        });
+      },
+      cancelRequest(reference, reason = "cancelled") {
+        return mutateRequest(reference, request => ({ ...request, phase: "cancelled", release_nonce: null, reason }));
+      },
+      completeRequest(reference) {
+        return mutateRequest(reference, request => ({ ...request, phase: "completed", release_nonce: null, reason: "completed" }));
       },
     };
   }

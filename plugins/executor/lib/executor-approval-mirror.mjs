@@ -25,7 +25,7 @@ const noop = async () => {};
  * client, transport session and native thread stable as well; no identity is
  * discovered from a newest-session search.
  */
-export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, root, apiKey, gatewayUrl, transportClientId, executorSessionId,
+export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, root, apiKey, gatewayUrl, transportClientId, executorSessionId, deferClear = false,
   telemetry = noop, makeService = createRuntimeApprovalService, getState }) {
   // Scope local storage without storing the credential or trusting CWD alone.
   // This is a journal namespace, not the gateway's authenticated client ID.
@@ -45,6 +45,34 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
     ownsThread: async id => id === threadId,
   });
   let tracked = null;
+  let operation = Promise.resolve();
+  function serialized(action) {
+    const result = operation.then(action);
+    operation = result.catch(() => {});
+    return result;
+  }
+
+  async function readDecision(saved, { signal } = {}) {
+    checkpoint(saved);
+    signal?.throwIfAborted();
+    const ticket = { ...saved.pending_approval, run_id: saved.run_id,
+      run_session_id: saved.run_session_id, threadId };
+    const receipt = await service.read(ticket, { signal });
+    signal?.throwIfAborted();
+    const latest = await (getState ?? service.getState)();
+    signal?.throwIfAborted();
+    if (!latest || latest.run_id !== saved.run_id || latest.run_session_id !== saved.run_session_id) {
+      throw new Error("Approval decision has no matching owned workflow; work remains parked");
+    }
+    const pending = checkpoint(latest);
+    if (pending && (pending.state !== saved.state || !isDeepStrictEqual(saved.pending_approval, pending.pending_approval))) {
+      throw new Error("Approval identity changed during decision read; work remains parked");
+    }
+    if (receipt.status === "approved" && (latest.state !== saved.pending_approval.to_state || latest.pending_approval != null)) {
+      throw new Error("Approved transition is no longer applied to the owning workflow; work remains parked");
+    }
+    return { status: receipt.status, saved, latest };
+  }
 
   async function assertNoLegacyCheckpoint() {
     if (!executorSessionId) return;
@@ -116,6 +144,10 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
       });
       return { status: "parked", saved };
     }
+    if (deferClear) {
+      const decision = await readDecision(saved);
+      return { status: decision.status === "pending" ? "parked" : decision.status, saved };
+    }
     if (live.state === saved.pending_approval.to_state) {
       const ticket = { ...saved.pending_approval, run_id: saved.run_id,
         run_session_id: saved.run_session_id, threadId };
@@ -147,6 +179,7 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
     const next = checkpoint(live);
     const restored = await restore(live);
     if (restored?.status === "parked") return "parked";
+    if (deferClear && ["approved", "rejected"].includes(restored?.status)) return restored.status;
     if (next) {
       await service.park(threadId, next);
       tracked = {
@@ -160,5 +193,26 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
     return "live";
   }
 
-  return { clientId, threadId, restore, observe, assertNoLegacyCheckpoint };
+  return { clientId, threadId, deferClear, assertNoLegacyCheckpoint,
+    restore: live => serialized(() => restore(live)),
+    observe: live => serialized(() => observe(live)),
+    loadCheckpoint: () => serialized(async () => {
+      const saved = await service.restore(threadId);
+      if (saved) checkpoint(saved);
+      return saved;
+    }),
+    readDecision: (saved, options) => serialized(() => readDecision(saved, options)),
+    clearConsumed: (saved, options) => serialized(async () => {
+      if (!deferClear) throw new Error("Explicit consumption requires deferred journal clearance");
+      if (typeof options?.assertConsumed !== "function") throw new Error("Durable consumption verification is required before journal clearance");
+      const current = await service.restore(threadId);
+      if (!current) return;
+      if (!isDeepStrictEqual(checkpoint(current), checkpoint(saved))) throw new Error("Consumed journal identity changed; work remains parked");
+      if ((await readDecision(saved, options)).status !== "approved") throw new Error("Consumed approval is not approved; work remains parked");
+      await options.assertConsumed(saved);
+      await service.clear(threadId, saved.pending_approval.approval_id);
+      tracked = null;
+      await telemetry({ type: "executor_approval_cleared", approvalId: saved.pending_approval.approval_id, reason: "request_release_consumed" });
+    }),
+  };
 }

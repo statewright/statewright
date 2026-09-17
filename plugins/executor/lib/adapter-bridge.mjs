@@ -87,7 +87,10 @@ function authorized(request, token) {
 export class AdapterBridge {
   constructor(client, options = {}) {
     this.client = client;
+    this.sessionOwner = options.sessionOwner ?? null;
+    this.requestController = options.requestController ?? null;
     this.host = options.host ?? "unknown";
+    if (this.requestController && (!this.sessionOwner || this.host !== "pi")) throw new Error("Native request protocol requires an owned Pi bridge");
     this.telemetry = options.telemetry ?? (async () => {});
     this.executor = {
       active: true,
@@ -114,6 +117,13 @@ export class AdapterBridge {
     }
   }
 
+  async assertOwnedState() {
+    if (!this.sessionOwner) return;
+    const live = await this.client.call("statewright_get_state");
+    await this.sessionOwner.assertOwner();
+    this.sessionOwner.assertGateway(live);
+  }
+
   async start() {
     this.server = createServer(async (request, response) => {
       this.activeRequests += 1;
@@ -123,12 +133,13 @@ export class AdapterBridge {
           json(response, 401, { error: "unauthorized" });
           return;
         }
+        await this.sessionOwner?.assertOwner();
         const url = new URL(request.url ?? "/", "http://localhost");
         if (request.method === "GET" && url.pathname === "/hooks/state") {
-          json(response, 200, camelState(
-            await this.client.call("statewright_get_state"),
-            this.executor,
-          ));
+          const state = await this.client.call("statewright_get_state");
+          await this.sessionOwner?.assertOwner();
+          this.sessionOwner?.assertGateway(state);
+          json(response, 200, camelState(state, this.executor));
           return;
         }
         if (request.method !== "POST") {
@@ -136,6 +147,26 @@ export class AdapterBridge {
           return;
         }
         const body = await requestBody(request);
+        if (url.pathname.startsWith("/hooks/request/")) {
+          if (!this.requestController || this.host !== "pi") {
+            json(response, 404, { error: "native request protocol unavailable" });
+            return;
+          }
+          const action = url.pathname.slice("/hooks/request/".length);
+          let result;
+          if (action === "begin") result = await this.requestController.begin(body);
+          else if (action === "consume") result = await this.requestController.consume(body);
+          else if (action === "cancel") result = await this.requestController.cancel(body);
+          else if (action === "status" && Object.keys(body).length === 1 && Object.hasOwn(body, "reference")) {
+            result = await this.requestController.status(body.reference);
+          } else {
+            json(response, 400, { error: "invalid native request action or fields" });
+            return;
+          }
+          await this.sessionOwner?.assertOwner();
+          json(response, 200, result);
+          return;
+        }
         if (url.pathname === "/hooks/ready") {
           const pluginName = typeof body.plugin_name === "string" ? body.plugin_name : "";
           const pluginVersion = typeof body.plugin_version === "string" ? body.plugin_version : "";
@@ -183,7 +214,20 @@ export class AdapterBridge {
             return;
           }
           try {
+            if (this.sessionOwner && method === "tools/call") {
+              await this.assertOwnedState();
+              if (body.params?.name === "statewright_load_workflow") throw new Error("The executor owns an immutable workflow run; host replacement denied");
+              if (this.requestController && body.params?.name !== "statewright_get_state") {
+                const status = await this.requestController.status(body.request_reference);
+                if (status.phase !== "active") throw new Error("Native request is awaiting approval; tool traffic denied");
+              }
+            }
             const result = await this.client.request(method, body.params ?? {});
+            await this.sessionOwner?.assertOwner();
+            if (method === "tools/call") await this.assertOwnedState();
+            if (this.requestController && method === "tools/call" && body.params?.name !== "statewright_get_state") {
+              await this.sessionOwner.assertRequest(body.request_reference);
+            }
             json(response, 200, { jsonrpc: "2.0", id, result });
           } catch (error) {
             json(response, 200, {
@@ -195,10 +239,17 @@ export class AdapterBridge {
           return;
         }
         if (url.pathname === "/hooks/pre-tool") {
+          await this.assertOwnedState();
+          if (this.requestController && (await this.requestController.status(body.request_reference)).phase !== "active") {
+            throw new Error("Native request is awaiting approval; tool traffic denied");
+          }
           const result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
           }));
+          await this.sessionOwner?.assertOwner();
+          await this.assertOwnedState();
+          if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
           await this.record("executor_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             policy_tool_name: result?.policy_tool_name ?? null,
@@ -209,12 +260,19 @@ export class AdapterBridge {
           return;
         }
         if (url.pathname === "/hooks/post-tool") {
+          await this.assertOwnedState();
+          if (this.requestController && (await this.requestController.status(body.request_reference)).phase !== "active") {
+            throw new Error("Native request is awaiting approval; tool traffic denied");
+          }
           const result = adapterResult(await this.client.call("statewright_adapter_post_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
             tool_response: body.tool_response ?? "",
             is_error: Boolean(body.is_error),
           }));
+          await this.sessionOwner?.assertOwner();
+          await this.assertOwnedState();
+          if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
           await this.record("executor_adapter_post_tool", {
             tool_name: body.tool_name ?? "",
             policy_tool_name: result?.policy_tool_name ?? null,

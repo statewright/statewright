@@ -30,6 +30,7 @@ export const RUNTIME_FILES = [
   "executor/lib/managed-mcp-bridge.mjs",
   "executor/lib/tool-annotations.mjs",
   "executor/lib/remote-client.mjs",
+  "executor/lib/windows-command-resolution.mjs",
 ];
 
 function inside(root, candidate) {

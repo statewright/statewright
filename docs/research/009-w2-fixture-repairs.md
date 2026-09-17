@@ -36,3 +36,30 @@ The hosted `windows-2022` run remains the only evidence that executes these
 paths on Windows; it is pending the authorized push or dispatch. This receipt
 does not claim authenticated vendor turns, interactive decisions, WSL, or
 desktop-app integration.
+
+## W2-R4: npm `cmd-shim` template recognition
+
+The initial shim parser only handled a simplified `"%_prog%" ...` launch line.
+npm's `cmd-shim` dependency instead writes a template that runs `SET dp0=%~dp0`
+through a `:find_dp0` subroutine, then chooses between a local `%dp0%\node.exe`
+and a PATH `node` before invoking `"%_prog%"` on the `%dp0%`-relative entrypoint.
+`parseNpmTemplateShim` now recognizes that template, expands `%dp0%` against the
+shim's directory, and preserves the dp0-local-Node-then-PATH preference. A
+`.cmd` matching neither the npm template nor the legacy direct-node form falls
+back to `cmd.exe` rather than being mis-parsed. Regressions cover both
+npm-template branches, the legacy form, and the fallback.
+
+## D1: shared launch-resolver dedup (Claude Code)
+
+The Claude Code managed-client supervisor, `sync-managed-client.mjs`, and
+`sync-runtime.mjs` previously each carried their own copy of the Windows
+launch-resolution logic. They now consume the shared
+`windows-command-resolution.mjs` (a byte-identical copy synced into
+`plugins/claude-code/executor/lib/` by `sync-managed-client.mjs`), so the
+npm-shim contract has a single owner across the Codex executor, the Codex App
+Server transport, and the Claude Code client. The new
+`plugins/claude-code/tests/windows-launch-resolution.test.mjs` drives that
+synced copy's shim path with a forced `win32` platform (both npm-template
+branches plus the `cmd.exe` fallback), keeping the dedup behaviorally verified
+on POSIX hosts; the Claude Code node suite is 27/27, and
+`sync-managed-client.mjs --check` guards against copy drift.

@@ -19,6 +19,7 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/managed-mcp-bridge.mjs", "executor/lib/managed-mcp-bridge.mjs"],
   ["lib/tool-annotations.mjs", "executor/lib/tool-annotations.mjs"],
   ["lib/remote-client.mjs", "executor/lib/remote-client.mjs"],
+  ["lib/windows-command-resolution.mjs", "executor/lib/windows-command-resolution.mjs"],
 ];
 
 export async function managedClientBundleDrift({ sourceRoot = EXECUTOR_ROOT, targetRoot = CLAUDE_ROOT } = {}) {

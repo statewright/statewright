@@ -1,7 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +11,7 @@ import { resolveApiKey } from "./remote-client.mjs";
 import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
+import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -254,40 +254,6 @@ function waitForExit(child) {
     child.once("error", rejectExit);
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
-}
-
-function isWindowsCommand(command, platform = process.platform) {
-  return windowsPlatform(platform) && /\.(?:cmd|bat)$/i.test(String(command));
-}
-
-function expandWindowsCmdShimPath(value, command) {
-  const input = String(value);
-  const prefix = "%~dp0";
-  if (!input.toLowerCase().startsWith(prefix)) return input;
-  return join(dirname(command), input.slice(prefix.length).replace(/^[\\/]+/, ""));
-}
-
-async function resolveWindowsCmdShim(command, platform = process.platform) {
-  if (!isWindowsCommand(command, platform)) return null;
-  let source;
-  try {
-    source = await readFile(command, "utf8");
-  } catch {
-    return null;
-  }
-
-  // npm's Windows shims invoke Node with a JavaScript entrypoint and forward
-  // `%*`. Running that entrypoint directly removes cmd.exe's second argument
-  // parse, which otherwise corrupts quoted config values and prompt text.
-  const match = source.match(/(?:"([^"\r\n]*node(?:\.exe)?)"|([^\s"\r\n]*node(?:\.exe)?))\s+"([^"\r\n]+\.(?:[cm]?js))"\s+%\*/i);
-  if (!match) return null;
-  const nodeCandidate = expandWindowsCmdShimPath(match[1] ?? match[2], command);
-  const entrypoint = expandWindowsCmdShimPath(match[3], command);
-  if (!existsSync(entrypoint)) return null;
-  return {
-    command: existsSync(nodeCandidate) ? nodeCandidate : "node.exe",
-    prefixArgs: [entrypoint],
-  };
 }
 
 export function windowsProcessTreeEnvironment(environment = process.env) {
@@ -601,9 +567,9 @@ async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.
 
 export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
-  const cmdShim = await resolveWindowsCmdShim(command);
-  const launchCommand = cmdShim?.command ?? command;
-  const launchPrefixArgs = cmdShim?.prefixArgs ?? [];
+  const launch = await resolveWindowsLaunch(command);
+  const launchCommand = launch.command;
+  const launchPrefixArgs = launch.prefixArgs;
   const oneShotCodexExec = codexOneShotInvocation(host, args);
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
   const consumed = new Set();
@@ -741,7 +707,6 @@ export async function runManagedClient({ host, command, args, environment = proc
         childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
       }
-      const launchViaWindowsShell = isWindowsCommand(launchCommand);
       const child = spawn(launchCommand, [...launchPrefixArgs, ...nextArgs], {
         cwd,
         env: childEnvironment,
@@ -752,7 +717,7 @@ export async function runManagedClient({ host, command, args, environment = proc
         detached: process.platform !== "win32",
         // Non-npm .cmd/.bat launchers still need cmd.exe. npm-generated shims
         // are resolved to their Node entrypoint above, preserving argv exactly.
-        shell: launchViaWindowsShell,
+        shell: launch.shell,
       });
       let exited = false;
       let restart = false;

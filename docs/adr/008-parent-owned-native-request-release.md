@@ -179,6 +179,35 @@ behavior; managed activation must require this mode, not silently fall back.
 No controller-close/full parent inflight-drain/crash-lock promise is inferred
 from this prerequisite; these remain original acceptance obligations.
 
+An additive managed CLI now constructs this frontend and invokes public SDK
+text/JSON/RPC/interactive modes, not stock main or an injected global session.
+Launch requires a strict private configuration with an existing validated
+UUID/file/cwd descriptor, exact configured model and owned agent directory;
+conflicting session/discovery/unknown arguments fail before native mutation.
+Challenge UUIDs require strings, never coercible JSON arrays or objects. Fixed
+project registration requires the actual process environment, so its own
+gateway settings cannot diverge from the captured private transport settings.
+Only fixed 127.0.0.1 HTTP request hooks receive its captured local bearer;
+redirects are rejected, response bytes and transport time bounded. The native
+mode itself binds extensions once, awaiting private acknowledgement before
+the gate enables. Registration loads the fixed project TypeScript module with
+the upstream jiti family, explicitly declared/locked2.6.5, no transpilation
+filesystem cache or caller-selected extension paths. CLI project diagnostics
+go to stderr; SDK raw text/JSON/RPC output remains stdout. Optional stage
+diagnostics report mechanisms, not launch payloads/credentials or prompts.
+
+Actual task-owned subprocess fixtures cover text/JSON/RPC with real SDK and
+private parent bridge and inert HTTP. Interactive dispatch exists but headed
+TUI is unverified. Existing project hold-only hooks still constrain this path;
+pending approval cannot be claimed to re-admit through it yet. Native SDK bare
+commands, navigation, provider internals and stale final-output ownership are
+not collectively guarded/proven. This CLI is uninstalled and unconnected to
+production launcher/main; its launch configuration is not a new activation
+fallback. Project session_shutdown disarms its owned inactivity timer and
+prevents rearming/corrective delivery after shutdown, allowing tested print
+children to exit naturally rather than forcing process exit or unref masking.
+This does not claim all detached project effects have been drained.
+
 ## Consequences and rollback
 
 Safety wins over replay availability: at-most-once durable consumption is

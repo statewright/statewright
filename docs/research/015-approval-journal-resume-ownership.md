@@ -2,6 +2,164 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 9 entry: owning public-SDK modes and managed CLI
+
+Base `6a08434`, canonical Statewright main; preserved dirty inventory unchanged.
+Previous turn is verified progress (committed handshake, retained red and review
+repair). User no-workflow instruction overrides skill activation: no supervising
+Statewright calls/load/run, no real workflow/decision/inference/deploy/install or
+existing native sessions. Root implements serially; one mandatory clean-context
+Astra/high read-only review. Portable manual evidence controls remain root-owned.
+
+Owned scope: additive Pi managed mode/CLI entrypoints, focused task-owned CLI/
+SDK tests, explicit TypeScript loader dependency metadata if needed, ADR008 and
+this receipt. Require exact private launch challenge and existing descriptor,
+bounded loopback request transport, sealed owned SDK construction and private
+acknowledgement before any prompt; dispatch public text/json/RPC/interactive
+modes, never stock main, arbitrary extensions or automatic native adoption.
+Reject conflicting/unknown launch arguments/configuration before native mutation.
+Task-owned inert HTTP/SSE/native files and synthetic authority only. Shipped
+launcher/main/index remain unactivated; project async effects and final output,
+later provider boundaries/full cold restart/authority/host journeys remain in
+the original goal, not excluded from final acceptance by this slice.
+
+Observed-only envelope:60 normal/95 contraction tool calls, bounded result
+chunks (target16KiB),30-minute warning/45-minute contraction; protected final
+third for source gates/review/repair/handoff. One reviewer10 calls/12minutes,
+at most two distinct repairs/finding, two isolated full exports normally plus
+one justified regression export. No controller/provider-token enforcement.
+At warning stop optional discovery; contraction finishes a coherent verified
+milestone and leaves the full goal active. Exact later integration gate remains
+the complete authorized native approval/new-input/restart/host-parity journey.
+Rollback is a scoped local revert, preserving journals/session records; no
+production launcher fallback or deployment is authorized by this prerequisite.
+
+Slice9 characterized baseline: HEAD has no plugins/pi/request-main.mjs (git
+cat-file -e fails explicitly); installed SDK main MainOptions accepts only
+extensionFactories, while public modes accept AgentSessionRuntime. No stock
+CLI was executed or native config weakened. Initial new fixture suite3 passed/
+2 failed at8-second child deadlines; fixture environment was tightened to
+synthetic API key, local endpoints and actual telemetry-off controls, fresh
+suite again3 passed/2 failed. Diagnostic fixed-module import307ms disproved a
+loader delay. Discriminating text challenge then observed epoch1, HTTP1,
+synthetic final stdout and received private acknowledgement, but child remained
+alive. Source index had a60-second owned inactivity timer and no shutdown hook.
+Root added monotonic shutdown/disarm; same actual text child passed in687ms.
+Fresh text/JSON suite5/5. No deadline enlarged, no force-exit/unref fallback.
+Failed runs retain their synthetic authority classification; neither is a
+real approval or successful full pause/resume proof. Timed-out children were
+task-owned and terminated/awaited by fixtures; no user session signalled.
+Root source scope includes the necessary index timer-shutdown repair, not its
+pending/retry/effect activation. New modes/CLI require their own strict config;
+SDK0.73.0 and upstream jiti loader are primary installed source, unchanged.
+
+The first staged export b45a7f9529066e645dc63fba7f45a261fe083555,
+/tmp/statewright-cli-reviewed.qkSv0F, was superseded before review/full gates:
+RPC fixture ended stdin after native prompt ACK (preflight success), obtaining
+exit0 but no terminal synthetic response. Result5 passed/1 failed; not accepted
+as completed inference. SDK rpc-mode.js:prompt confirms ACK is preflight, not
+agent completion. Fixture now awaits agent_end before EOF, retaining strict
+HTTP1/epoch1/response/output/native-file assertions. This is a fixture lifecycle
+repair, not a weaker RPC criterion. Final source/gates/review recorded below.
+
+First full isolated gates on35f57caf6dd3f5bb9f358479b4566488e435c753,
+/tmp/statewright-cli-verified.HfAVHm: Node297/297,native2/2,parity/four syntax0;
+Pi178 passed/1 failed/1 opt-in skip. Failure was original index.spec's exact
+8-hook registration count after adding the required ninth session_shutdown
+hook. Fixture assertion now expects9 and explicitly verifies session_shutdown,
+retaining all prior hook/tool assertions. No product or approval policy relaxed.
+This justified third export is only stale fixture/evidence reconciliation;
+source review remains on the same product implementation. Final fresh gates
+must pass before any commit. Every original requirement remains controlling.
+
+Third export eab1755063fa9fa030e3fdf94b6507612d9bd09d,
+/tmp/statewright-cli-final.RfhPl7, passed Node297/297, Pi179/1 existing opt-in
+live skip, native2/2, parity/four syntax0. Independent Astra/high review then
+confirmed a medium strict-schema defect: RegExp.test coerced singleton UUID
+arrays into strings for readiness IDs. Parent comparison still rejects them;
+no authorization bypass or actual malformed-launch durable mutation was
+demonstrated. SDK setup has append calls before handshake, so early strict
+rejection matters. Root also identified fixed registration reading process.env
+while an injected alternate env could configure its private transport
+differently. Added regression tests first:2 failed/5 filtered skips. Repair
+requires strings for all four UUIDs and the actual process environment for
+fixed registration; caller-injected trusted registration remains explicit.
+This is one bounded schema repair plus adjacent environment-consistency guard,
+not new production activation. A fourth exact source export is justified by the
+confirmed review finding; optional discovery stopped and final reserve is used
+for fresh gates, one finding-only recheck (4 calls/5 minutes), audit and commit.
+All superseded exports and failures remain recorded, never accepted as final.
+
+### Slice 9 final isolated gates, review and full-scope audit
+
+Final tested tree a3362a3a9d251a6f09bb3f9f0bb1f9e1df9d78ac, source export
+/tmp/statewright-cli-repaired.MASbbE: Node297 passed, zero failed/skipped/
+cancelled; Pi180 passed/1 existing opt-in live-canary skip (6 files passed/
+1 skipped); native2/2; generated Claude parity and four CLI/module/mode/
+publisher syntax checks exit0. Focused managed CLI7/7 includes actual owned
+text/JSON/RPC subprocesses. Gate commands: the Slice8 explicit Node integration
+set (17 executor suites plus Pi session-owner and Claude managed-client bundle),
+npm test -- --reporter=dot and npm run test:native in plugins/pi, and node
+plugins/claude-code/scripts/sync-managed-client.mjs --check plus node --check
+for plugins/pi/request-main.mjs and src/{request-main,request-mode,
+request-readiness}.mjs. Existing SDK0.73.0/dependencies were linked unchanged
+into the export; no dependency install or whole-workspace Rust/typecheck/lint/
+build/clean-install/migration/headed-TUI/staging/production validation claimed.
+Final committed source must match this tree except receipt-only reporting.
+
+Clean-context mandatory Astra/high /root/pi_managed_cli_review used8 read-only
+calls and two focused challenges in its first pass; reviewed all11 scoped paths
+and relevant imported ownership/SDK code. Confirmed the one medium UUID-coercion
+finding above, no other scoped defect. Transport challenges rejected unknown
+action,65537-byte response and stalled response at100ms. It independently notes
+SDK RPC explicitly exits0 after disposal: natural event-loop exit is evidenced
+only by print modes, not RPC. Finding-only recheck used2 calls on the final tree;
+valid config accepted and all16 malformed ID/value combinations rejected;
+alternate env rejected before configuration access/SDK setup, explicit trusted
+registration still reached ordinary validation. No outstanding scoped defect
+found, not a full approval/restart acceptance verdict. Reviewer made no edits,
+full-suite reruns, live/native inspection or external endpoint calls.
+
+Full original006 nine-row contract and012 numbered P1 acceptance remain the
+objective. This current-state audit carries every row, not just the new CLI:
+
+| Original requirement | Current evidence | Still required before full acceptance |
+| --- | --- | --- |
+| 1 immutable tenant/client/gateway/run/edge/artifact/policy/reviewer/expiry | Durable exact run/session/edge journal checks retained; CLI configuration strictly typed | Complete ticket artifact-digest/policy/expiry/reviewer enforcement and journey |
+| 2 host-owned native thread/lineage/request ID/epoch | Actual SDK text/JSON/RPC child binds exact native file/UUID and fresh parent/child/executor challenge; one owned epoch and private acknowledgement | Parent main/host adapter activation, authorized replacements and full cross-process lineage; no kernel-peer attestation claim |
+| 3 pending has no declared effects or inference; parked outside model | Existing journal/hold/controller/SDK boundary fixtures retained; new CLI awaits private readiness before prompt | All project/native commands and exec effects, later provider retry/summary/compaction boundaries and full park proof; current hold-only project hooks do not re-admit approval |
+| 4 authority before controls; unauthorized dismiss only | Shared entitlement fixtures retained; CLI adds no reviewer/decision UI | Real authorized/unauthorized reviewer flow and required-reviewer projection |
+| 5 cancel/dismiss/disconnect retains journal; cold resume starts gated | Durable journal/controller fixtures retained; actual owned child exits revoke readiness; shutdown disarms its owned timer without forced print exit | Full native cold restart, crash-lock/legacy recovery, parent inflight cancellation/drain and permanently broken SDK cleanup |
+| 6 private fresh entitlement/artifact/policy recheck; consume once | Approval consume/tombstone tests retained; CLI transport has no resolve action; readiness remains distinct from approval | Real resolver recheck and authorized once-consumed native continuation |
+| 7 new input invalidates old continuation and final output | Private input claims/callback guards retained; RPC fixture now waits for actual terminal response rather than ACK | Reject stale native rendering/recording, all project asynchronous callbacks/retries and cross-process newer-input races; terminal fixture is not stale-output proof |
+| 8 decision source and authentication strength | Synthetic authority, local bearer and launch challenge explicitly not human proof or hostile-agent isolation | Complete recorded decision provenance/authentication-strength semantics and isolation acceptance |
+| 9 shared client-neutral reviewer/evidence/retention | Parent protocol remains client-neutral, no mandatory website imposed | Complete shared reviewer/evidence/retention and authorized cross-client/host acceptance |
+
+P1 012 A/1: pending-pre-tool gateway Rust changes remain user-dirty, uncommitted
+and not validated here. Plan2: no host decision API introduced; real authenticated
+private reviewer credentials/entitlement journey remains unverified. C/3: journal
+durability exists, but executor main/observer deferred-clear mirror, request
+controller and readiness construction remain inactive. B/4: owning public-SDK
+CLI now exists and is subprocess-tested; project pending hold still blocks
+authorized re-admit, and every native/project effect must be guarded before
+activation. D: local gateway/native approval canary covering park, unprivileged
+deny, trusted re-admit, restart and host parity remains unrun; no real workflow,
+approval/resolver or provider inference under this manual authority. Spec114
+proposed enterprise obligations are not accepted merely from local fixtures.
+
+Next integration cut is parent main/host adapter wiring to this owned entrypoint
+with descriptor-first construction, deferred-clear mirror, requestController,
+native-readiness challenge and bound owned child; never adopt legacy readiness.
+Do not enable that path before exact private ownership is captured by project
+effects/correctives/retries, pending approval can safely readmit only the exact
+once-consumed request, and native bare effects/final responses are guarded.
+Then prove full authorized approval/new-input/cold-restart/host-parity journey,
+including the preserved gateway work, rather than counting more prerequisites
+as full acceptance. Synthetic main/observer fixtures remain authorized; live
+authority is not inferred. Local commit/revert only; no deploy/install/push,
+Statewright query/load/use, user-session signalling or user-dirty staging.
+Full goal stays active; no release, production readiness or compliance claim.
+
 ## Slice 8 entry: private parent/native readiness negotiation
 
 Base `607bdc8`; canonical Statewright main, same preserved dirty inventory as

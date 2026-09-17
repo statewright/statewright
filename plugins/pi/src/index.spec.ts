@@ -395,7 +395,8 @@ describe("statewright Pi extension", () => {
       expect(names).toContain("statewright_list_workflows")
       expect(names).toContain("statewright_load_workflow")
 
-      expect(pi.on).toHaveBeenCalledTimes(8)
+      expect(pi.on).toHaveBeenCalledTimes(9)
+      expect(pi.on).toHaveBeenCalledWith("session_shutdown", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("input", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("before_agent_start", expect.any(Function))
       expect(pi.on).toHaveBeenCalledWith("context", expect.any(Function))

@@ -1383,9 +1383,10 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let inactivityTimer: ReturnType<typeof setTimeout> | null = null
   let nudgeCount = 0
   let lastNudgeTime = 0
+  let shuttingDown = false
 
   function deliverCorrective(msg: string) {
-    if (approvalHold.held || dormant || !stateCache || stateCache.isFinal) return
+    if (shuttingDown || approvalHold.held || dormant || !stateCache || stateCache.isFinal) return
     const now = Date.now()
     if (now - lastNudgeTime < 5000) return  // debounce: min 5s between correctives
     lastNudgeTime = now
@@ -1402,7 +1403,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
 
   function armInactivityTimer() {
     if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
-    if (approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
+    if (shuttingDown || approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
     const thinkingMultiplier = (stateCache.thinkingLevel && stateCache.thinkingLevel !== "off") ? 3 : 1
     // Plugin mode: 90s — model needs time to think + produce JSON tool calls.
     // Agentic mode: standard 60s timeout.
@@ -1412,7 +1413,7 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
     swLog(`inactivity] arming timer: ${timeout / 1000}s (plugin=${isPluginOrchestrated()})`)
     inactivityTimer = setTimeout(() => {
       inactivityTimer = null
-      if (approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
+      if (shuttingDown || approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
 
       // Abort the current stream — steer messages queue behind a running stream
       // and never get delivered. Abort kills the stream, then the corrective
@@ -1469,6 +1470,11 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   function disarmInactivityTimer() {
     if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null }
   }
+
+  pi.on("session_shutdown", () => {
+    shuttingDown = true
+    disarmInactivityTimer()
+  })
 
   function resetInactivity() {
     disarmInactivityTimer()

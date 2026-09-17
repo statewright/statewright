@@ -127,6 +127,34 @@ test("native-session overrides cannot retarget executor ownership", () => {
   assert.throws(() => buildHostLaunch({ ...base, host: "pi", hostSessionFile: null }, state), /exact owned/);
 });
 
+const challenge = { schema: "statewright/native-readiness-challenge/v1",
+  executor_session_id: randomUUID(), native_session_id: randomUUID(),
+  native_session_file: "/private/owned.jsonl", parent_lifetime_id: randomUUID(), child_lifetime_id: randomUUID() };
+const ownedPi = { ...base, host: "pi", piRequestFrontend: true, piAgentDir: "/private/agent",
+  hostSessionId: challenge.native_session_id, hostSessionFile: challenge.native_session_file,
+  nativeReadiness: { challenge }, environment: { PATH: "/bin", STATEWRIGHT_PI_REQUEST_LAUNCH: "foreign" } };
+
+test("owned Pi launches the fixed Node SDK frontend with private exact configuration", () => {
+  const launch = buildHostLaunch(ownedPi, state);
+  assert.equal(launch.command, process.execPath);
+  assert.deepEqual(launch.args, ["/statewright/plugins/pi/request-main.mjs", "--thinking", "medium", "--", "Fix it"]);
+  const config = JSON.parse(launch.environment.STATEWRIGHT_PI_REQUEST_LAUNCH);
+  assert.deepEqual(config, { schema: "statewright/pi-request-launch/v1", challenge,
+    cwd: "/repo", agent_dir: "/private/agent", model: { provider: "openai", id: "gpt-5.6-terra" } });
+  assert.equal(launch.environment.PATH, "/bin");
+});
+
+test("owned Pi rejects stock executable/arguments and ambiguous routed models", () => {
+  for (const changes of [{ hostBin: "pi" }, { hostArgs: ["--extension", "/foreign.ts"] },
+    { hostSessionFile: "/foreign.jsonl" }, { piAgentDir: "relative" }]) {
+    assert.throws(() => buildHostLaunch({ ...ownedPi, ...changes }, state), /owned Pi|Owned Pi/);
+  }
+  for (const model of [null, "gpt-5.6-terra", {}, ["openai/gpt-5.6-terra"], "openai/"]) {
+    assert.throws(() => buildHostLaunch(ownedPi, { ...state, model }), /model/);
+  }
+  assert.throws(() => buildHostLaunch({ ...base, host: "claude", piRequestFrontend: true }, state), /owned Pi|Owned Pi/);
+});
+
 test("Pi SDK native header is ownership-checked and malformed history is never repaired", async t => {
   const root = await mkdtemp(join(tmpdir(), "pi-native-owner-"));
   t.after(() => rm(root, { recursive: true, force: true }));

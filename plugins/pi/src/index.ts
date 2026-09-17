@@ -178,6 +178,9 @@ const GW_URL = process.env.STATEWRIGHT_GATEWAY_URL || "https://mcp.statewright.a
 const KEY_PATH = join(homedir(), ".statewright", "api_key")
 
 function getApiKey(): string | null {
+  // Owned project work uses only the captured private bridge. Do not undo
+  // the parent's credential removal by reading its privileged key from disk.
+  if (isPiProjectManaged()) return null
   if (process.env.STATEWRIGHT_API_KEY) return process.env.STATEWRIGHT_API_KEY.trim()
   try {
     return readFileSync(KEY_PATH, "utf8").trim()
@@ -1553,7 +1556,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   async function ensureLazyInit(): Promise<boolean> {
     if (lazyInitDone) return true
     const key = getApiKey()
-    if (!key) {
+    if (!key && !ownership && !process.env.STATEWRIGHT_ADAPTER_URL) {
       console.warn("[statewright] No API key found. Visit https://statewright.ai/keys")
       return false
     }
@@ -1562,7 +1565,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       return false
     }
     console.log(`[statewright] Connected to ${GW_URL}`)
-    reportPluginEvent(key!, "connect")
+    if (key) reportPluginEvent(key, "connect")
     registerStatewrightTools()
     lazyInitDone = true
     return true

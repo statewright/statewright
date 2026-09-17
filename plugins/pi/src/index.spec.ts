@@ -47,6 +47,7 @@ vi.mock("typebox", () => ({
 
 import { readFileSync } from "node:fs"
 import statewrightExtension, { requiresDeliveryOwner } from "./index.js"
+import { withPiProjectEffects } from "./project-effects.mjs"
 
 // --- Types ---
 
@@ -330,6 +331,18 @@ describe("statewright Pi extension", () => {
   })
 
   describe("initialization", () => {
+    it("owned registration never reads or reports the privileged gateway key", async () => {
+      process.env.STATEWRIGHT_ADAPTER_URL = "http://127.0.0.1:4321"
+      process.env.STATEWRIGHT_ADAPTER_TOKEN = "bridge-token"
+      process.env.STATEWRIGHT_EXECUTOR_ID = "executor-1"
+      setupFetch([{ match: "/hooks/state", body: { ...MOCK_STATE, executor: { active: true } } }])
+      const pi = createMockPi()
+      await withPiProjectEffects({ dispatch: (effect: any) => effect({ reference: null }) }, () => statewrightExtension(asPi(pi)))
+      expect(readFileSync).not.toHaveBeenCalled()
+      expect(pi.registerTool).toHaveBeenCalledTimes(9)
+      expect(fetchMock.mock.calls.every(([url]: [string]) => url.endsWith("/hooks/state"))).toBe(true)
+    })
+
     it("exits when no API key", async () => {
       delete process.env.STATEWRIGHT_API_KEY
       ;(readFileSync as Mock).mockImplementation(() => { throw new Error("ENOENT") })

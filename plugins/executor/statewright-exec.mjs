@@ -35,6 +35,7 @@ import {
 import { createExecutorSessionStore, attachExecutorSession } from "./lib/executor-session-ownership.mjs";
 import { RemoteStatewrightClient, resolveApiKey } from "./lib/remote-client.mjs";
 import { createExecutorApprovalMirror } from "./lib/executor-approval-mirror.mjs";
+import { createPiExecutorRuntime } from "./lib/executor-pi-runtime.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./lib/error-reporting.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +59,9 @@ Session:
   --fallback-model MODEL     Host startup model when the workflow has no route
   --fallback-effort LEVEL    Host startup effort when the workflow has no route
   --keep-host-on-final       Leave the TUI open after a final workflow state
+  --pi-request-frontend     Experimental parent-owned Pi SDK frontend (no fallback)
+  --pi-agent-dir PATH       Exact Pi SDK agent/config directory for that path
+  --pi-mode MODE            interactive (default), text or json startup task
 
 Delivery:
   ${DELIVERY_CONFIG_RELATIVE_PATH}     Auto-discovered isolated-delivery config
@@ -88,6 +92,8 @@ function parseArgs(argv) {
     ["--plugins-root", "pluginsRoot"],
     ["--fallback-model", "fallbackModel"],
     ["--fallback-effort", "fallbackEffort"],
+    ["--pi-agent-dir", "piAgentDir"],
+    ["--pi-mode", "piMode"],
     ["--delivery-config", "deliveryConfig"],
     ["--delivery-run-id", "deliveryRunId"],
     ["--telemetry-path", "telemetryPath"],
@@ -101,6 +107,7 @@ function parseArgs(argv) {
     else if (arg === "--resume-workflow") options.resumeWorkflow = true;
     else if (arg === "--keep-host-on-final") options.exitOnFinal = false;
     else if (arg === "--no-telemetry") options.telemetryEnabled = false;
+    else if (arg === "--pi-request-frontend") options.piRequestFrontend = true;
     else if (arg === "--host-arg") {
       if (!argv[index + 1]) throw new Error("--host-arg requires a value.");
       options.hostArgs.push(argv[++index]);
@@ -127,6 +134,8 @@ function validateOptions(options) {
     throw new Error("Exact native-session resume is not yet supported for this executor host");
   }
   assertHostOwnershipArgs(options);
+  if (!options.piRequestFrontend && (options.piAgentDir || options.piMode)) throw new Error("Pi SDK options require --pi-request-frontend");
+  if (options.piMode && !["interactive", "text", "json"].includes(options.piMode)) throw new Error("Invalid --pi-mode");
 }
 
 export function resolvePluginsRoot(options) {
@@ -153,6 +162,7 @@ export function resolvePluginsRoot(options) {
 
 function sanitizedAgentEnvironment(environment) {
   const safe = { ...environment };
+  delete safe.STATEWRIGHT_PI_REQUEST_LAUNCH;
   for (const name of Object.keys(safe)) {
     if (
       /^(KUBECONFIG|KUBE_|KUBERNETES_|DOCKER_CONFIG$|REGISTRY_|GH_TOKEN$|GITHUB_TOKEN$|NPM_TOKEN$|CARGO_REGISTRY_TOKEN$|STATEWRIGHT_API_KEY$|STRIPE_|SMTP_|SENTRY_)/.test(name)
@@ -261,6 +271,13 @@ async function waitForChild(child) {
 }
 
 export function assertHostAdapterContract(options) {
+  if (options.piRequestFrontend && (!options.approvalMirror?.deferClear || !options.nativeReadiness
+    || !options.nativeReadiness.isBoundTo(options.sessionOwner, options.requestController)
+    || options.adapterBridge?.nativeReadiness !== options.nativeReadiness
+    || options.adapterBridge?.requestController !== options.requestController
+    || options.adapterBridge?.sessionOwner !== options.sessionOwner)) {
+    throw new Error("Owned Pi execution requires one exact parent readiness/controller/bridge and deferred journal");
+  }
   if (
     options.host === "opencode"
     && typeof options.adapterBridge?.waitForReady !== "function"
@@ -276,7 +293,19 @@ function stopChild(child) {
   timer.unref?.();
 }
 
+function stopOwnedChild(options, child) {
+  // Revoke synchronously before SIGINT can be interpreted as a fresh input.
+  // The owning observer's finally awaits and reports any cancellation failure.
+  if (options.piRequestFrontend) void options.nativeReadiness.close().catch(() => {});
+  stopChild(child);
+}
+
 export async function observeHost(options) {
+  try { return await observeHostLifetime(options); }
+  finally { if (options.piRequestFrontend) await options.nativeReadiness?.close(); }
+}
+
+async function observeHostLifetime(options) {
   assertHostAdapterContract(options);
   const {
     client,
@@ -289,7 +318,7 @@ export async function observeHost(options) {
   options.sessionOwner?.assertGateway(options.initialState);
   const initialApprovalStatus = await approvalMirror.observe(options.initialState);
   await options.sessionOwner?.assertOwner();
-  if (options.host === "pi" && (initialApprovalStatus === "parked" || options.initialState.pending_approval != null)) {
+  if (options.host === "pi" && !options.piRequestFrontend && (initialApprovalStatus === "parked" || options.initialState.pending_approval != null)) {
     await telemetry("executor_pi_approval_launch_held", { host: "pi", state: options.initialState.state });
     return { status: "approval_parked", code: 0, signal: null, state: options.initialState, finalSeen: false };
   }
@@ -312,10 +341,27 @@ export async function observeHost(options) {
     });
     const child = (options.spawnHost ?? spawn)(launch.command, launch.args, {
       cwd: options.cwd,
-      env: options.environment,
+      env: launch.environment ?? options.environment,
       stdio: "inherit",
     });
     const childResult = waitForChild(child);
+
+    if (options.piRequestFrontend) {
+      try {
+        options.nativeReadiness.bindChild(child);
+        if (!await options.nativeReadiness.waitForAcknowledgement({ timeoutMs: options.nativeReadyTimeoutMs ?? 5_000 })) {
+          throw new Error("Owned Pi exited or timed out without exact native acknowledgement");
+        }
+      } catch (error) {
+        const revocation = options.nativeReadiness.close();
+        stopChild(child);
+        // Start shutdown before durable cancellation can stall, but do not
+        // return on cancellation failure until the owned child is reaped.
+        const [revoked] = await Promise.allSettled([revocation, childResult]);
+        if (revoked.status === "rejected") throw revoked.reason;
+        throw error;
+      }
+    }
 
     if (options.host === "opencode") {
       const ready = await Promise.race([
@@ -349,7 +395,7 @@ export async function observeHost(options) {
           options.sessionOwner?.assertGateway(next);
           const approvalStatus = await approvalMirror.observe(next);
           await options.sessionOwner?.assertOwner();
-          if (options.host === "pi" && (approvalStatus === "parked" || next.pending_approval != null) && !piApprovalHeld) {
+          if (options.host === "pi" && !options.piRequestFrontend && (approvalStatus === "parked" || next.pending_approval != null) && !piApprovalHeld) {
             piApprovalHeld = true;
             // Hold-only intermediate behavior: terminate our owned native Pi,
             // rather than let SIGINT become an interactive retry/next prompt.
@@ -376,16 +422,16 @@ export async function observeHost(options) {
             }
             if (changedRoute && !next.pending_approval && hostRoutingMode(options.host) === "restart") {
               rerouteRequested = true;
-              stopChild(child);
+              stopOwnedChild(options, child);
             }
           }
           if (next.is_final) {
             finalSeen = true;
-            if (options.exitOnFinal) stopChild(child);
+            if (options.exitOnFinal) stopOwnedChild(options, child);
           }
         } catch (error) {
           observerError = error;
-          stopChild(child);
+          stopOwnedChild(options, child);
         } finally {
           pollPromise = null;
         }
@@ -459,6 +505,7 @@ export async function main(argv = process.argv.slice(2)) {
   let lease = null;
   let sessionOwner = null;
   let adapterBridge = null;
+  let piRuntime = null;
 
   try {
     sessionOwner = await createExecutorSessionStore({ root: join(homedir(), ".statewright", "executor-sessions"),
@@ -486,6 +533,7 @@ export async function main(argv = process.argv.slice(2)) {
       gatewayUrl,
       transportClientId,
       executorSessionId: savedOwner.executor_session_id,
+      deferClear: Boolean(options.piRequestFrontend),
       getState: async () => {
         await sessionOwner.assertOwner();
         const snapshot = await client.call("statewright_get_state");
@@ -512,7 +560,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (restored?.status === "parked") {
       process.stderr.write(
         `[statewright-exec] Resumed while approval ${restored.saved.pending_approval.approval_id} is pending; `
-        + (options.host === "pi" ? "native Pi launch remains held.\n" : "approval checkpoint remains parked.\n"),
+        + (options.host === "pi" && !options.piRequestFrontend ? "native Pi launch remains held.\n" : "approval checkpoint remains parked.\n"),
       );
     }
     await approvalMirror.observe(initialState);
@@ -541,7 +589,18 @@ export async function main(argv = process.argv.slice(2)) {
       }
       verifiedDeliveryOwner = true;
     }
-    adapterBridge = await new AdapterBridge(client, {
+    // Pi SDK readiness must describe the native file BEFORE bridge construction.
+    let hostSessionId;
+    let hostSessionFile;
+    if (options.piRequestFrontend) {
+      hostSessionId = savedOwner.host_session_id;
+      hostSessionFile = options.resumeWorkflow ? savedOwner.host_session_file : await createPiNativeSession({
+        pluginsRoot: options.pluginsRoot, cwd, sessionDir: sessionOwner.nativeRoot, sessionId: hostSessionId });
+      await sessionOwner.bindHost({ sessionId: hostSessionId, sessionFile: hostSessionFile });
+      piRuntime = await createPiExecutorRuntime({ client, sessionOwner, approvalMirror, executorId,
+        deliveryActive: verifiedDeliveryOwner, telemetry });
+      adapterBridge = piRuntime.adapterBridge;
+    } else adapterBridge = await new AdapterBridge(client, {
       executorId,
       deliveryActive: verifiedDeliveryOwner,
       host: options.host,
@@ -559,19 +618,23 @@ export async function main(argv = process.argv.slice(2)) {
       pluginsRoot: options.pluginsRoot,
     };
     const environment = executorAgentEnvironment(process.env, session);
-    const hostSessionId = await prepareHostSession({
-      ...options,
-      cwd,
-      environment,
-    }, savedOwner.host_session_id);
-    const hostSessionFile = options.host === "pi"
-      ? options.resumeWorkflow ? savedOwner.host_session_file : await createPiNativeSession({ pluginsRoot: options.pluginsRoot,
-        cwd, sessionDir: sessionOwner.nativeRoot, sessionId: hostSessionId })
-      : null;
-    await sessionOwner.bindHost({ sessionId: hostSessionId, sessionFile: hostSessionFile });
+    if (!options.piRequestFrontend) {
+      hostSessionId = await prepareHostSession({
+        ...options,
+        cwd,
+        environment,
+      }, savedOwner.host_session_id);
+      hostSessionFile = options.host === "pi"
+        ? options.resumeWorkflow ? savedOwner.host_session_file : await createPiNativeSession({ pluginsRoot: options.pluginsRoot,
+          cwd, sessionDir: sessionOwner.nativeRoot, sessionId: hostSessionId })
+        : null;
+      await sessionOwner.bindHost({ sessionId: hostSessionId, sessionFile: hostSessionFile });
+    }
     const result = await observeHost({
       ...options,
+      ...piRuntime,
       cwd,
+      ...(options.piRequestFrontend ? { piAgentDir: resolve(options.piAgentDir ?? environment.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")) } : {}),
       hostSessionId,
       hostSessionFile,
       sessionOwner,
@@ -587,29 +650,35 @@ export async function main(argv = process.argv.slice(2)) {
     if (result.code && !result.finalSeen) process.exitCode = result.code;
     return result;
   } finally {
-    if (adapterBridge) {
-      const requireTerminalStop = hostRequiresTerminalStop(options.host);
-      const drained = await adapterBridge.waitForShutdown({ requireTerminalStop });
-      if (!drained) {
-        await telemetry("executor_adapter_drain_timeout", {
-          active_requests: adapterBridge.activeRequests,
-          require_terminal_stop: requireTerminalStop,
-          terminal_stop_observed: adapterBridge.terminalStopObserved,
-        });
-      } else {
-        await telemetry("executor_adapter_drained", {
-          require_terminal_stop: requireTerminalStop,
-          terminal_stop_observed: adapterBridge.terminalStopObserved,
-        });
+    try {
+      await piRuntime?.nativeReadiness.close();
+      if (adapterBridge) {
+        const requireTerminalStop = hostRequiresTerminalStop(options.host);
+        const drained = await adapterBridge.waitForShutdown({ requireTerminalStop });
+        if (!drained) {
+          await telemetry("executor_adapter_drain_timeout", {
+            active_requests: adapterBridge.activeRequests,
+            require_terminal_stop: requireTerminalStop,
+            terminal_stop_observed: adapterBridge.terminalStopObserved,
+          });
+        } else {
+          await telemetry("executor_adapter_drained", {
+            require_terminal_stop: requireTerminalStop,
+            terminal_stop_observed: adapterBridge.terminalStopObserved,
+          });
+        }
+      }
+    } finally {
+      try { await adapterBridge?.close(); }
+      finally {
+        lease?.stop();
+        if (!workspaceSession) await rm(leasePath, { force: true }).catch(() => {});
+        if (options.host === "opencode") {
+          await rm(opencodeIsolationRoot(executorId), { recursive: true, force: true }).catch(() => {});
+        }
+        await sessionOwner?.release();
       }
     }
-    await adapterBridge?.close();
-    lease?.stop();
-    if (!workspaceSession) await rm(leasePath, { force: true }).catch(() => {});
-    if (options.host === "opencode") {
-      await rm(opencodeIsolationRoot(executorId), { recursive: true, force: true }).catch(() => {});
-    }
-    await sessionOwner?.release();
   }
 }
 

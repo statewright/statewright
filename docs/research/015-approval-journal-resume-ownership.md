@@ -2,6 +2,173 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 13 entry: parent-owned Pi composition
+
+Base ee8ceb2; authoritative goal active. Root reverified the unchanged seven
+tracked user changes and both checkout hashes. Manual agentic-engineering
+controls continue without any Statewright query/load/use or workflow identity.
+This cut connects executor main, descriptor-first bridge construction, deferred
+journal consumption, exact child readiness and the fixed owning SDK CLI. It is
+an explicit experimental --pi-request-frontend path, not a replacement objective
+or default activation: all original 006/012/spec111/116 requirements remain.
+No stock-Pi fallback after an owned launch failure. Other hosts and the default
+legacy hold-only path retain their existing behavior.
+
+Acceptance uses real durable ownership/journals and task-owned native files,
+loopback IPC and inert children, synthetic authority only: pending cold resume
+can launch but cannot dispatch before exact readiness/consumption; observed
+pending does not terminate the owning parked frontend; exit/startup failure
+revokes its controller; a fast acknowledged print child is not misclassified;
+launch cannot override native selection/module/model through stock host flags.
+Remaining project effects, asynchronous interactive rendering, real entitlement/
+resolver/artifact freshness, native restart canaries and cross-host acceptance
+are not discharged by this composition. No live/native session inspection,
+real decisions/inference, installation, push or deployment authorized.
+
+Observed-only envelope: 100 normal/135 contraction root calls, 30-minute warning/
+45-minute contraction, 16KiB output targets, final-third validation/review reserve.
+Root is serial implementation owner; skill-required clean-context Astra/high
+read-only review: 10 calls/12 minutes/two bounded checks; fresh finding-only
+recheck: four calls/five minutes/two checks, at most two repairs per finding.
+Two exact-source exports plus one regression-justified export; no provider or
+controller enforcement claims. Thresholds stop optional breadth, not required
+repair or full-objective audit. Scoped local revert preserves journals; no
+migration, production-control expansion or implementation delegation.
+
+Retained red: two host-adapter tests proved owned=true still launched stock Pi
+and accepted an arbitrary executable. Initial actual parent/CLI checks failed
+2/2 before readiness: fixture omitted executorId, falsely taking the standalone
+workflow-load path. After supplying the exact fixture identity, both checks
+still failed zero-response/zero-HTTP: fake request accepted an object instead
+of the bridge's actual request(method, params), causing read-only state failure
+and correct input hold. Correct only these fake-client identities/signatures;
+no input/provider assertion, denial or production authority boundary weakened.
+Existing root CLI entrypoint was found outside src and reused; no duplicate
+entrypoint retained. Temporary synthetic-only diagnostic removed before freeze.
+
+Separate parent credential boundary: owned project getApiKey returns null before
+environment/file access; private bridge initialization/lazy commands do not
+require a privileged key. Unit proof retains a supplied fixture key and verifies
+zero key-file reads or telemetry requests. Ordinary standalone behavior remains.
+Focused public SDK parent+index gate58/58; actual old CLI gate15/15 preserved.
+Initial focused Node49/49; expanded cleanup proof verifies controller failure
+cannot skip stopping/reaping an unacknowledged owned child. Parent shutdown
+invalidates readiness before SIGINT and cleanup releases ownership despite
+revocation/bridge failure. Exact-source gates and mandatory review follow.
+
+First frozen tree e290845e98528339fe26fcc9cf6264ad2f2467ca, export
+/tmp/statewright-parent-composition.NzDNIt: Node306 passed/1 failed of307;
+native2/2, Claude parity/four mjs syntax exit0. The new success fixture's 20ms
+readiness timer expired during parallel filesystem ownership verification.
+Correct success setup to the actual unchanged production 5,000ms contract;
+retain explicit20ms timeout/cancellation-failure scenarios. No production wait,
+SDK/authority gate or success assertion weakened. Initial Node source receipt
+remains failed/superseded; fresh exact-source export required after correction.
+
+Corrected exact tree bc229e49ba0532f68d13742759848fa34dd9976b, export
+/tmp/statewright-parent-verified.VCmz8n: fresh Node307/307 (zero skips/failures/
+cancellations), Pi210 passed/1 existing opt-in live-canary skip, native2/2,
+generated Claude parity/four mjs syntax exit0. Node command: unchanged17 executor
+suites plus executor-pi-parent, Pi session-owner and Claude managed-client bundle;
+Pi npm test -- --reporter=dot and npm run test:native; parity via sync-managed-client
+--check; syntax main/native-readiness/pi-runtime/host-adapters. All root handles
+terminal. Installed dependencies reused without install or vendor edits; fake
+network/gateway diagnostics are not live-service proof. Rust/workspace-wide lint/
+typecheck/build, real main attachment/load, actual reviewer/resolver/provider,
+headed TUI, staging/production/native Windows/WSL/desktop gates not run/claimed.
+
+Full original scope audit, not redefined around this flag: 006 row2 now includes
+main's descriptor-first owned composition, exact spawned-child ACK and lifetime
+revocation, but full branch lineage/replacement/host acceptance remain open.
+Row3 gains private parent launch/park/consume evidence, not direct project
+filesystem/spawn/configuration/provider/telemetry, global writes, later provider
+transport/internal retries/summary subrequests or every consequential effect.
+Row5 gains actual fixed-CLI cold parked reopen with same native ID/file and newer
+epoch under synthetic authority; cancellation retains the journal. Crash/lock/
+legacy recovery, real entitled decision and complete native restart canaries
+remain. Row7 keeps native message/latest-text protection; asynchronous interactive
+rendering/buffered output leases still open. Rows1/4/6/8/9 retain ticket/artifact/
+policy/expiry/entitlement/reviewer/provenance/retention/client-neutral obligations.
+Removing key-file fallback is narrower than hostile-code/OS isolation or proof
+of a human click. No immutable ticket/real resolver/UI authorization claim added.
+
+012 A/1 Rust pending pre-tool denial is still user-dirty, not validated/committed
+here; A/2 no host decision surface preserved, real reviewer path untested. C/3
+parent request-controller/deferred-clear/observer/close integration now exists
+only through the explicit experimental flag, with actual synthetic cold native
+fixture evidence; default remains legacy. B/4 real owning frontend launcher now
+connected, but all effects/render/transport guards precede production activation;
+projection-only clearance still cannot release. D local-gateway/fake-Pi trusted
+decision denial/re-admit/restart canary not run. Spec111's combined real native/
+website journey and116's packaging/native Windows/WSL/desktop/soak promotion
+requirements remain unfulfilled. Full goal active; no changed definition of done.
+
+Next bounded implementation: protect remaining project effect/configuration/
+native mutation paths with originating private ownership, then asynchronous
+interactive output/transport continuations; retain parent/cold-resume/replacement
+regressions. Only after these and authorized full native acceptance should the
+default move off ADR007 hold-only. Safe local work remains, so not blocked or
+complete. Original authority exclusions and both dirty-tree hashes unchanged.
+
+Mandatory clean-context Astra/high /root/pi_parent_composition_review used10
+read-only calls/two bounded checks. Original export's parent8/8 passed; held
+controller.close on corrected export reproduced P2: after20ms startup timeout,
+120ms later the unacknowledged fake child was alive with zero signals. Releasing
+cancellation then signalled/reaped it. Readiness was revoked, so this is a child
+lifecycle/drain defect, not a demonstrated authorization bypass. Root adds the
+discriminating held-cancellation regression before one repair: revoke/start
+cancellation, signal immediately, then await both cancellation and reaping while
+preserving cancellation errors. Prior green integration export is superseded
+for this runtime defect. One regression-justified third exact export and fresh
+finding-only clean-context recheck required; full scope/default boundaries stay.
+
+Root held-cancellation regression failed1/1 with zero child signals before the
+repair. After moving stop ahead of the await and joining cancellation/child
+completion with allSettled, fresh parent suite9/9 and main syntax exit0.
+No cancellation error is suppressed and completion still waits for cancellation;
+signal/reaping proceeds while it is held. Final source validation follows.
+
+Final repaired tree2710401fe3da6683f9825a4037244951e428e28b, export
+/tmp/statewright-parent-repaired.KsX9zc: Pi210 passed/1 existing opt-in live skip,
+native2/2, Claude parity/four syntax exit0; Node307 passed/1 failed of308.
+Failed unchanged Codex app-server child-shutdown fixture uses20ms shutdown grace
+and timed out confirming its task PID70582 after SIGKILL during parallel load.
+Both Codex runtime/test are byte-unchanged from ee8ceb2 (Git tree diff empty).
+Exact failed task PID no longer exists (signal0 ESRCH, no termination signal
+sent); isolated same-export/same20ms test passed1/1. These observations support
+a load-sensitive exit-confirmation race; they do not prove a general production
+shutdown fix. No source/assertion/grace weakened or unrelated Codex fix made.
+One justified full Node execution with --test-concurrency=1 characterizes the
+unchanged-source integration separately; retain the concurrent failure and its
+validation limitation regardless of the serial result. No additional export.
+
+Fresh clean-context Astra/high /root/pi_parent_composition_recheck used4 calls/
+two bounded checks within5minutes. P2 closed: existing held-cancellation case
+signals/exits child while cancellation is held and parent remains pending;
+independent memory challenge holds child exit while cancellation rejects,
+readiness stays revoked/late ACK denied, parent stays pending and reports the
+cancellation failure only after child exit. Existing prompt cancellation-failure
+case also passed. No remaining finding in P2 repair, no broader verdict. No
+implementation delegation or reviewer source edits; full original audit above
+remains controlling. Third export justified by that one product repair.
+
+Final same-export serial Node gate308/308, zero skips/failures/cancellations,
+exit0; unchanged20ms Codex shutdown case included. Parallel307/308 remains a
+recorded load-sensitive validation limitation, not overwritten by serial green.
+All root test handles terminal; no live/user process inspected or signalled,
+only exact failed task PID existence checked. Production source/ADR/tests match
+the reviewed/tested tree exactly; final delta is this receipt only. Seven user
+tracked diffs retain55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm retains94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+Manual profile owner/root and rollback via scoped local commit revert unchanged;
+no durable schema migration, journal deletion, live activation or production
+control claim. Optional breadth stopped; additional validation was limited to
+retained red/P2 repair/recheck and the characterized unchanged Codex fixture.
+Numeric envelopes are observations/routing thresholds, not enforced provider
+usage. Full objective active with useful safe source work remaining, not complete
+or blocked; no Statewright workflow/query/use, real decision/inference, installed
+runtime change, dependency installation, push or deployment occurred.
+
 ## Slice 12 entry: native command admission and late output
 
 Base faa8c58, canonical Statewright main; authoritative goal remains active.

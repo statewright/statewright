@@ -122,6 +122,41 @@ proved across authority changes. Dependency compatibility is source-bound
 evidence, not a version pin. No full native acceptance is implied.
 No live/native authorized approval journey, deployment or promotion is claimed.
 
+### Experimental parent composition (Slice13)
+
+Executor main now has an explicit --pi-request-frontend path. It creates or
+validates and binds the exact native descriptor before constructing the owned
+bridge/controller/readiness; the approval mirror uses deferred clearance.
+The host adapter launches the existing fixed plugins/pi/request-main.mjs through
+the current Node executable, with a private exact readiness challenge, native
+file, agent directory and explicit provider/model route. Stock executable,
+extension/session arguments, ambiguous model routes and unsupported startup
+modes are denied; failure never falls back to stock Pi. Startup-task modes are
+interactive/text/json; native RPC remains supported by the fixed standalone
+entrypoint but has no initial-task parent launch contract in this cut.
+
+Observer binds the child handle actually spawned before accepting readiness,
+awaits the exact once-only acknowledgement and does not apply legacy termination
+to an owning parked frontend. A private acknowledgement completion latch allows
+a fast print child to complete correctly; it is not live readiness authority.
+Child exit/error/parent stop still revokes readiness and disconnects the request.
+Readiness failure revokes before stopping/reaping the child, even if durable
+cancellation itself fails; parent cleanup still closes its bridge/releases the
+owner on that failure. Parent stop revokes before SIGINT can become a new input.
+Owned project callbacks use only the private bridge and do not recover a removed
+privileged gateway key from the parent's key file. This is not OS isolation.
+
+Acceptance is synthetic authority with real durable ownership/journals, native
+JSONL, fixed project registration, actual public SDK/Agent and fixed print CLI
+children launched through the actual parent composition/observer. A cold parked
+owner retains the same native descriptor, creates a newer request epoch, waits
+without model traffic on projection-only clearance, then consumes one private
+release before one loopback SSE response/native append. Real main attachment/
+workflow loading, authorized reviewer/resolver, real model inference and headed
+interactive rendering are not exercised. This flag is experimental integration,
+not production activation: the default remains ADR007 hold-only, and all remaining
+effects/render/transport/authority/restart/cross-host requirements below remain.
+
 ### Owned native commands and message output (Slice12)
 
 Public SDK0.73.0 extension commands run before its input hook. The owning

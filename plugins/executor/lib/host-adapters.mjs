@@ -1,4 +1,4 @@
-import { dirname, resolve, join } from "node:path";
+import { dirname, resolve, join, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdir, open, lstat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -34,6 +34,9 @@ export async function prepareHostSession(options, fallbackId, execute = execFile
 }
 
 export function assertHostOwnershipArgs(options) {
+  if (options.piRequestFrontend && (options.host !== "pi" || options.hostBin || options.hostArgs?.length)) {
+    throw new Error("Owned Pi frontend denies stock host executable/arguments and other hosts");
+  }
   const flags = new Set(["--session", "--session-id", "--session-dir", "--resume", "--continue", "--fork", "--fork-session", "--no-session"]);
   if (options.host === "pi" || options.host === "claude") { flags.add("-r"); flags.add("-c"); }
   for (const arg of options.hostArgs ?? []) {
@@ -168,6 +171,35 @@ export function buildHostLaunch(options, state, continuation = false) {
     ? `Continue the active Statewright workflow from state '${state.state}'.`
     : options.prompt;
   const extra = options.hostArgs ?? [];
+
+  if (options.piRequestFrontend) {
+    const challenge = options.nativeReadiness?.challenge;
+    if (!challenge || challenge.schema !== "statewright/native-readiness-challenge/v1"
+      || challenge.native_session_id !== options.hostSessionId || challenge.native_session_file !== options.hostSessionFile
+      || typeof options.piAgentDir !== "string" || !isAbsolute(options.piAgentDir)
+      || typeof options.cwd !== "string" || !isAbsolute(options.cwd)) {
+      throw new Error("Owned Pi launch requires the exact private descriptor/readiness and agent directory");
+    }
+    if (typeof route.model !== "string") throw new Error("Owned Pi requires an explicit provider/model route");
+    const separator = route.model.indexOf("/");
+    const provider = route.model.slice(0, separator);
+    const id = route.model.slice(separator + 1);
+    if (separator < 1 || !id || provider.length > 256 || id.length > 256 || /[\s\u0000-\u001f\u007f]/.test(route.model)) {
+      throw new Error("Owned Pi requires an unambiguous provider/model route");
+    }
+    const mode = options.piMode ?? "interactive";
+    if (!["interactive", "text", "json"].includes(mode)) throw new Error("Owned Pi startup task requires interactive/text/json mode");
+    if (route.effort && !["off", "minimal", "low", "medium", "high", "xhigh"].includes(route.effort)) {
+      throw new Error("Owned Pi thinking level is unsupported");
+    }
+    const args = [resolve(pluginsRoot, "pi", "request-main.mjs")];
+    if (mode !== "interactive") args.push("--mode", mode);
+    if (route.effort) args.push("--thinking", route.effort);
+    if (prompt) args.push("--", prompt);
+    return { command: process.execPath, args, environment: { ...options.environment,
+      STATEWRIGHT_PI_REQUEST_LAUNCH: JSON.stringify({ schema: "statewright/pi-request-launch/v1", challenge,
+        cwd: options.cwd, agent_dir: options.piAgentDir, model: { provider, id } }) } };
+  }
 
   switch (options.host) {
     case "pi": {

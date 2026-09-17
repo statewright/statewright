@@ -16,6 +16,8 @@ export function createExecutorNativeReadiness({ owner, requestController }) {
   let child = null;
   let phase = "waiting";
   let closing = null;
+  let settleAcknowledgement;
+  const acknowledged = new Promise(resolve => { settleAcknowledgement = resolve; });
   const descriptor = () => {
     const now = owner.record;
     return now.host_ready && now.executor_session_id === saved.executor_session_id
@@ -26,6 +28,7 @@ export function createExecutorNativeReadiness({ owner, requestController }) {
   const ended = () => { void close().catch(() => {}); };
   function close() {
     phase = "closed";
+    settleAcknowledgement(false);
     if (!closing) {
       child?.removeListener("exit", ended);
       child?.removeListener("error", ended);
@@ -61,7 +64,15 @@ export function createExecutorNativeReadiness({ owner, requestController }) {
       await assertAlive();
       check();
       phase = "ready";
+      settleAcknowledgement(true);
       return acknowledgement;
+    },
+    async waitForAcknowledgement({ timeoutMs = 5_000 } = {}) {
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid native acknowledgement timeout");
+      let timer;
+      try {
+        return await Promise.race([acknowledged, new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); })]);
+      } finally { clearTimeout(timer); }
     },
     async assertReady() {
       await assertAlive();

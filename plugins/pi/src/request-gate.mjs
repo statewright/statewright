@@ -121,6 +121,14 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
     get reference() { return current?.reference ? structuredClone(current.reference) : null; },
     get held() { return !current?.admitted || current.phase !== "active" || !active(current); },
     ownsNative(ctx) { try { assertNative(ctx); return enabled && !closed; } catch { return false; } },
+    matchesNative(ctx) { try { assertNative(ctx); return !closed; } catch { return false; } },
+    isSuperseded(ctx, reference) {
+      try {
+        assertNative(ctx);
+        return !closed && !!current && !!reference
+          && (!equal(current.reference, reference) || current.controller.signal.reason === "superseded");
+      } catch { return false; }
+    },
     ownsRequest(ctx, reference) {
       try {
         assertNative(ctx);
@@ -132,6 +140,7 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
       return typeof approvalId === "string" && this.ownsRequest(ctx, reference)
         && current.consumedApprovalIds.has(approvalId);
     },
+    operationSignal(ctx, reference) { return this.ownsRequest(ctx, reference) ? current.controller.signal : null; },
     canDispatch(ctx, operationSignal, reference, { compaction = false } = {}) {
       try {
         assertNative(ctx);

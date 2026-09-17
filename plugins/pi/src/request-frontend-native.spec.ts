@@ -8,6 +8,8 @@ import { createPiNativeReadinessPublisher } from "./request-readiness.mjs"
 import { createExecutorNativeReadiness } from "../../executor/lib/executor-native-readiness.mjs"
 import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs"
+import statewrightExtension, { callStatewrightGateway } from "./index.js"
+import { dispatchPiProjectEffect } from "./project-effects.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
 afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await cleanup.pop()!() })
@@ -15,7 +17,8 @@ afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await clean
 // Public SDK services/runtime and actual Agent; task-owned HTTP returns inert
 // SSE. Parent authority is synthetic, owner/journal/bridge are real local code.
 async function frontendFixture(options: { parked?: boolean; streaming?: boolean; register?: (...args: any[]) => unknown;
-  onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any } = {}) {
+  onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any;
+  beforeCreate?: (fixture: any) => void } = {}) {
   const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, { ...options, nativeFile: options.handshake })
   const requests: any[] = []
   const server = createServer(async (request, response) => {
@@ -40,6 +43,7 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
     return f.getState()
   } }, { host: "pi", sessionOwner: f.owner, requestController: f.controller, nativeReadiness }).start()
   cleanup.push(() => bridge.close())
+  options.beforeCreate?.({ ...f, bridge })
   const call = async (action: string, body: unknown, signal?: AbortSignal) => {
     const response = await fetch(`${bridge.url}/hooks/request/${action}`, {
       method: "POST", headers: { Authorization: `Bearer ${bridge.token}`, "Content-Type": "application/json" },
@@ -58,6 +62,7 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
     getAll: () => [], find: () => model, isUsingOAuth: () => false }
   const onPark = vi.fn()
+  const uiContext = { notify: vi.fn(), setStatus: vi.fn() }
   const publish = nativeReadiness ? createPiNativeReadinessPublisher({ challenge: nativeReadiness.challenge, sessionManager, call }) : null
   const onReady = vi.fn(async (...args: any[]) => { await options.onReady?.(...args); if (publish) await publish(args[0]) })
   const args = { nativeSessionId: f.owner.record.host_session_id, call,
@@ -71,11 +76,278 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
   cleanup.push(() => frontend.close())
   return { ...f, frontend, args, requests, sessionManager, modelRegistry, onPark, onReady, nativeReadiness, child, bridge, publish,
     session: frontend.runtime.session,
-    bind: () => frontend.runtime.session.bindExtensions({ uiContext: { notify: vi.fn(), setStatus: vi.fn() } }),
+    uiContext, bind: () => frontend.runtime.session.bindExtensions({ uiContext }),
   }
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("denies project exec after its inherited request is superseded", async () => {
+    const effects: Array<() => Promise<any>> = []
+    let unbound!: () => Promise<any>
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      unbound = () => pi.exec(process.execPath, ["-e", "process.stdout.write('unbound-effect')"])
+      pi.on("input", () => {
+        effects.push(ownership.bind(() => pi.exec(process.execPath,
+          ["-e", "process.stdout.write('task-owned-effect')"])))
+      })
+    } })
+    await expect(unbound()).rejects.toThrow("Project request unavailable")
+    await f.bind()
+    await f.session.prompt("first exec owner")
+    expect((await effects[0]()).stdout).toBe("task-owned-effect")
+    await f.session.prompt("replacement exec owner")
+    await expect(effects[0]()).rejects.toThrow("Project request unavailable")
+    expect((await effects[1]()).stdout).toBe("task-owned-effect")
+    await expect(unbound()).rejects.toThrow("Project request unavailable")
+    await f.frontend.close()
+    await expect(effects[1]()).rejects.toThrow("Project request unavailable")
+  })
+
+  it("parks a current project exec outside inference until one private release is consumed", async () => {
+    let effect!: () => Promise<any>
+    const f = await frontendFixture({ register: (pi, ownership) => pi.on("input", () => {
+      effect = ownership.bind(() => pi.exec(process.execPath, ["-e", "process.stdout.write('released-effect')"]))
+    }) })
+    await f.bind()
+    await f.session.prompt("initial effect owner")
+    f.setLive(pending)
+    let settled = false
+    const execution = effect().finally(() => { settled = true })
+    execution.catch(() => {}) // teardown may cancel a deliberately parked assertion path
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
+    expect(settled).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    f.setLive({ ...pending, state: "work", pending_approval: null })
+    await vi.waitFor(() => expect(f.events.filter(event => event === "read:pending").length).toBeGreaterThanOrEqual(2),
+      { timeout: 2_000, interval: 5 })
+    expect(settled).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    f.approve()
+    expect((await execution).stdout).toBe("released-effect")
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(await f.mirror.loadCheckpoint()).toBeNull()
+    expect(f.requests).toHaveLength(1)
+  })
+
+  it("sends the host reference outside model arguments and retains its captured bridge on environment drift", async () => {
+    const effects: Array<() => Promise<any>> = []
+    const controls: Array<() => Promise<any>> = []
+    const saved = process.env.STATEWRIGHT_ADAPTER_URL
+    const savedToken = process.env.STATEWRIGHT_ADAPTER_TOKEN
+    cleanup.push(() => {
+      if (saved === undefined) delete process.env.STATEWRIGHT_ADAPTER_URL; else process.env.STATEWRIGHT_ADAPTER_URL = saved
+      if (savedToken === undefined) delete process.env.STATEWRIGHT_ADAPTER_TOKEN; else process.env.STATEWRIGHT_ADAPTER_TOKEN = savedToken
+    })
+    const f = await frontendFixture({ beforeCreate: owner => {
+      process.env.STATEWRIGHT_ADAPTER_URL = owner.bridge.url
+      process.env.STATEWRIGHT_ADAPTER_TOKEN = owner.bridge.token
+    }, register: (pi, ownership) => pi.on("input", () => {
+      effects.push(ownership.bind(() => callStatewrightGateway("synthetic_effect", { request_reference: "model-controlled" })))
+      controls.push(ownership.bind(() => callStatewrightGateway("statewright_get_state")))
+    }) })
+    const bodies: any[] = []
+    const originalFetch = globalThis.fetch
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
+      if (String(url) === `${f.bridge.url}/mcp`) bodies.push(JSON.parse(String(init?.body)))
+      return originalFetch(url, init)
+    })
+    f.bridge.client.request = vi.fn(async (_method, params) => ({ content: [{ type: "text", text: JSON.stringify(
+      params.name === "statewright_get_state" ? await f.getState() : { effect: "synthetic" }) }] }))
+    await f.bind()
+    await f.session.prompt("first transport owner")
+    expect(await effects[0]()).toEqual({ effect: "synthetic" })
+    expect(bodies[0].request_reference).toMatchObject({ schema: "statewright/executor-request-ref/v1",
+      request_epoch: 1, native_session_id: f.owner.record.host_session_id })
+    expect(bodies[0].params.arguments.request_reference).toBe("model-controlled")
+    await f.session.prompt("replacement transport owner")
+    await expect(effects[0]()).rejects.toThrow("Project request unavailable")
+    await expect(controls[0]()).rejects.toThrow("Project request unavailable")
+    expect(bodies).toHaveLength(1)
+    expect(await effects[1]()).toEqual({ effect: "synthetic" })
+    expect(bodies[1].request_reference.request_epoch).toBe(2)
+    expect(bodies[1].request_reference.request_id).not.toBe(bodies[0].request_reference.request_id)
+    delete process.env.STATEWRIGHT_ADAPTER_URL
+    process.env.STATEWRIGHT_ADAPTER_TOKEN = "changed-environment-token"
+    expect(await effects[1]()).toEqual({ effect: "synthetic" })
+    expect(bodies).toHaveLength(3) // captured private endpoint/token, no mutable-env retarget or direct fallback
+  })
+
+  it("denies managed gateway effects when construction has no private bridge", async () => {
+    const saved = process.env.STATEWRIGHT_ADAPTER_URL
+    cleanup.push(() => { if (saved === undefined) delete process.env.STATEWRIGHT_ADAPTER_URL; else process.env.STATEWRIGHT_ADAPTER_URL = saved })
+    let effect!: () => Promise<any>
+    const f = await frontendFixture({ beforeCreate: () => { delete process.env.STATEWRIGHT_ADAPTER_URL },
+      register: (pi, ownership) => pi.on("input", () => {
+        effect = ownership.bind(() => callStatewrightGateway("synthetic_effect"))
+      }) })
+    await f.bind()
+    await f.session.prompt("effect without project bridge")
+    await expect(effect()).rejects.toThrow("Managed project requires its private executor bridge")
+    expect(f.requests).toHaveLength(1)
+  })
+
+  it("suppresses an awaited old project result without letting its SDK error close newer ownership", async () => {
+    let arrive!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrive = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    const runs: Array<() => Promise<any>> = []
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    const subsequent = vi.fn()
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.on("input", () => runs.push(ownership.bind(() => f.session.extensionRunner!.emit({
+        type: "tool_result", toolName: "synthetic-delayed", toolCallId: "synthetic", input: {}, content: [], isError: false,
+      }))))
+      pi.on("tool_result", async event => {
+        if (event.toolName !== "synthetic-delayed") return
+        await dispatchPiProjectEffect(async () => { arrive(); await barrier; return "obsolete" })
+        subsequent()
+        pi.sendUserMessage("obsolete message", { deliverAs: "followUp" })
+      })
+    } })
+    await f.bind()
+    await f.session.prompt("first awaited callback owner")
+    const errors = vi.fn()
+    f.session.extensionRunner!.onError(errors)
+    const old = runs[0]()
+    await arrival
+    await f.session.prompt("replacement while awaiting callback")
+    release()
+    await old
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({ error: "Project request unavailable" }))
+    expect(subsequent).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(2)
+    expect(f.frontend.readiness).not.toBeNull()
+    await f.session.prompt("new ownership still usable")
+    expect(f.requests).toHaveLength(3)
+  })
+
+  it("still revokes readiness for a genuine current callback error while its request is parked", async () => {
+    let arrive!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrive = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    let hook!: () => Promise<any>; let effect!: () => Promise<any>
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.on("input", () => {
+        hook = ownership.bind(() => f.session.extensionRunner!.emit({ type: "tool_result", toolName: "synthetic-current-error",
+          toolCallId: "synthetic", input: {}, content: [], isError: false }))
+        effect = ownership.bind(() => pi.exec(process.execPath, ["-e", "process.stdout.write('never-run')"]))
+      })
+      pi.on("tool_result", async event => {
+        if (event.toolName !== "synthetic-current-error") return
+        arrive(); await barrier; throw new Error("Synthetic current project error")
+      })
+    } })
+    await f.bind()
+    await f.session.prompt("current callback owner")
+    const callback = hook()
+    await arrival
+    f.setLive(pending)
+    const parked = effect()
+    parked.catch(() => {})
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
+    release()
+    await callback
+    expect(f.frontend.readiness).toBeNull()
+    await f.frontend.close()
+    await expect(parked).rejects.toThrow("Project request unavailable")
+    expect(f.requests).toHaveLength(1)
+  })
+
+  it("correlates the actual project's pre/post-tool hooks with the parent request", async () => {
+    const keys = ["STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN", "STATEWRIGHT_EXECUTOR_ID",
+      "STATEWRIGHT_BRANCH_SESSION_ID", "STATEWRIGHT_API_KEY", "STATEWRIGHT_NO_UPDATE_CHECK", "STATEWRIGHT_WORKFLOW"]
+    const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]))
+    cleanup.push(() => { for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]
+    } })
+    const events: Array<() => Promise<any>> = []
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    const policyCalls: string[] = []
+    const bodies: any[] = []
+    let holdPost = false
+    let arrive!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrive = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    f = await frontendFixture({ streaming: true, beforeCreate: owner => {
+      Object.assign(process.env, { STATEWRIGHT_ADAPTER_URL: owner.bridge.url, STATEWRIGHT_ADAPTER_TOKEN: owner.bridge.token,
+        STATEWRIGHT_EXECUTOR_ID: "synthetic-owner", STATEWRIGHT_BRANCH_SESSION_ID: "session",
+        STATEWRIGHT_API_KEY: "synthetic-key", STATEWRIGHT_NO_UPDATE_CHECK: "1" })
+      delete process.env.STATEWRIGHT_WORKFLOW
+      owner.bridge.client.call = vi.fn(async name => {
+        if (name === "statewright_get_state") return { ...await owner.getState(), allowed_tools: ["Read"] }
+        policyCalls.push(name)
+        if (holdPost && name === "statewright_adapter_post_tool") { arrive(); await barrier }
+        return { decision: "allow", state: "review" }
+      })
+      owner.bridge.client.request = vi.fn(async () => ({ content: [{ type: "text", text: JSON.stringify(
+        { ...await owner.getState(), allowed_tools: ["Read"] }) }] }))
+      const originalFetch = globalThis.fetch
+      vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
+        if ([`${owner.bridge.url}/hooks/pre-tool`, `${owner.bridge.url}/hooks/post-tool`].includes(String(url))) {
+          bodies.push(JSON.parse(String(init?.body)))
+        }
+        if (holdPost && String(url) === `${owner.bridge.url}/hooks/post-tool`) {
+          // Simulate a non-cooperative in-flight adapter while preserving the
+          // real local bridge/SDK path. The post-await ownership check must
+          // protect replacement even if transport cancellation is ignored.
+          return originalFetch(url, { ...init, signal: undefined })
+        }
+        if (!String(url).startsWith("http://127.0.0.1:")) throw new Error("Unexpected non-local fixture request")
+        return originalFetch(url, init)
+      })
+    }, register: async (pi, ownership) => {
+      await statewrightExtension(pi, ownership)
+      pi.on("input", () => events.push(ownership.bind(async () => {
+        const decision = await f.session.extensionRunner!.emitToolCall({ type: "tool_call", toolName: "read",
+          toolCallId: "synthetic", input: { request_reference: "model-controlled" } })
+        await f.session.extensionRunner!.emitToolResult({ type: "tool_result", toolName: "read", toolCallId: "synthetic",
+          input: {}, content: [{ type: "text", text: "inert result" }], isError: false })
+        return decision
+      })))
+    } })
+    await f.bind()
+    const first = f.session.prompt("project hook owner")
+    first.catch(() => {})
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    expect(await events[0]()).toBeUndefined()
+    expect(policyCalls).toEqual(["statewright_adapter_pre_tool", "statewright_adapter_post_tool"])
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0].request_reference).toEqual(bodies[1].request_reference)
+    expect(bodies[0].request_reference.request_epoch).toBe(1)
+    expect(bodies[0].tool_input.request_reference).toBe("model-controlled")
+    delete process.env.STATEWRIGHT_ADAPTER_URL
+    process.env.STATEWRIGHT_ADAPTER_TOKEN = "changed-environment-token"
+    expect(await events[0]()).toBeUndefined()
+    expect(policyCalls).toHaveLength(4)
+    expect(bodies).toHaveLength(4)
+    holdPost = true
+    const delayed = events[0]()
+    await arrival
+    const replacement = f.session.prompt("new project hook owner")
+    replacement.catch(() => {})
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 2_000, interval: 5 })
+    const abort = vi.spyOn(f.session.agent, "abort")
+    const notifications = f.uiContext.notify.mock.calls.length
+    release()
+    await delayed
+    expect(abort).not.toHaveBeenCalled()
+    expect(f.uiContext.notify).toHaveBeenCalledTimes(notifications)
+    expect(f.session.agent.state.isStreaming).toBe(true)
+    expect(await events[0]()).toMatchObject({ block: true })
+    expect(policyCalls).toHaveLength(6)
+    expect(bodies).toHaveLength(6)
+    expect(f.frontend.readiness).not.toBeNull()
+    await f.frontend.close()
+    await Promise.all([first, replacement])
+  })
+
   it("privately admits before project input and never lends current ownership outside its call", async () => {
     let ownership: any
     const observed: boolean[] = []

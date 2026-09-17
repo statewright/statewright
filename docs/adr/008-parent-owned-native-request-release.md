@@ -232,6 +232,48 @@ prevents rearming/corrective delivery after shutdown, allowing tested print
 children to exit naturally rather than forcing process exit or unref masking.
 This does not claim all detached project effects have been drained.
 
+### Project exec and bridge effects
+
+Owned registration and its hook/tool/command callbacks enter a trusted project
+effect context. The immutable inherited binding carries both project context
+and the original private SDK call; an outside callback cannot borrow the latest
+reference. Project exec and API messages require current ownership, a fresh
+parent checkpoint and a final ownership check around their awaited dispatch.
+Exec receives the private request cancellation signal combined with any caller
+signal. Superseded results are denied rather than returned to authorize another
+effect. An old SDK-collected callback error cannot close a newer owned request;
+current/control registration errors still revoke readiness. This is not arbitrary
+code interception, malicious-agent isolation or an inference-internals lease.
+
+Managed pre/post-tool and interrupt routing selects the immutable ownership
+mode, not a later environment value. A post-tool failure rechecks inherited
+ownership before notification or lazy abort. Error suppression applies only to
+an actually superseded reference/arrival (including preflight), not a current
+request merely parked/cancelled: genuine current SDK callback errors revoke
+readiness even while held. Phase denial is not evidence of supersession.
+
+Project MCP/adapter effects carry request_reference outside params.arguments
+and tool_input; model values cannot retarget that binding. State observation
+alone may run during read-only startup control, never mutate/release a request.
+The project bridge endpoint/token are captured at owning construction; managed
+traffic rejects redirects, uses per-action Connection:close and combines its
+existing transport deadline with request cancellation. Missing private bridge
+denies dispatch/initialization, never falls back to standalone gateway routing.
+Legacy unmanaged transport remains explicitly separate. API message methods
+return an awaitable denial; void callers have a rejection observer but no retry
+or alternate unowned delivery. Project timers/correctives/permission changes
+check their inherited ownership; private failure cannot fabricate a final state.
+
+Actual SDK/Agent, task-owned exec and loopback parent fixtures prove current and
+stale dispatch, parked exec with durable consumed-before-clear ordering, real
+project pre/post-tool reference propagation and old callback-result/error races.
+These use synthetic authority only. Direct project filesystem/spawn, configuration
+and provider/telemetry callbacks, bare native commands/final rendering, complete
+resource drains/cold restart and production parent/main activation remain open
+original acceptance requirements. Rollback is a scoped revert preserving journals
+and native records; revisit broad claims only with their specific source/runtime
+journeys, not a green transport test.
+
 ## Consequences and rollback
 
 Safety wins over replay availability: at-most-once durable consumption is

@@ -18,6 +18,7 @@ const PLUGIN_NAME = "pi"
 const PLUGIN_VERSION = "0.3.0"
 import { createErrorReporter } from "./error-reporting.mjs"
 import { createPiApprovalHold } from "./approval-hold.mjs"
+import { dispatchPiProjectEffect, isPiProjectManaged } from "./project-effects.mjs"
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION })
 errorReporter.installProcessHandlers()
@@ -199,15 +200,25 @@ async function gwCall(
   toolName: string,
   args: Record<string, unknown> = {},
 ): Promise<Record<string, unknown> | null> {
+  return dispatchPiProjectEffect(({ reference, signal, bridge }: any) => gwCallTransport(toolName, args, reference, signal, bridge),
+    { observation: toolName === "statewright_get_state" })
+}
+
+async function gwCallTransport(toolName: string, args: Record<string, unknown>, requestReference: unknown, signal?: AbortSignal,
+  bridge?: Readonly<{ url?: string; token?: string }>): Promise<Record<string, unknown> | null> {
   lastGwError = ""
-  if (process.env.STATEWRIGHT_ADAPTER_URL) {
+  const adapterUrl = bridge ? bridge.url : process.env.STATEWRIGHT_ADAPTER_URL
+  const adapterToken = bridge ? bridge.token : process.env.STATEWRIGHT_ADAPTER_TOKEN
+  if (adapterUrl) {
     try {
-      const response = await fetch(`${process.env.STATEWRIGHT_ADAPTER_URL.replace(/\/$/, "")}/mcp`, {
+      const response = await fetch(`${adapterUrl.replace(/\/$/, "")}/mcp`, {
         method: "POST",
+        ...(bridge ? { redirect: "error" } : {}),
         headers: {
           "Content-Type": "application/json",
-          ...(process.env.STATEWRIGHT_ADAPTER_TOKEN
-            ? { Authorization: `Bearer ${process.env.STATEWRIGHT_ADAPTER_TOKEN}` }
+          ...(bridge ? { Connection: "close" } : {}),
+          ...(adapterToken
+            ? { Authorization: `Bearer ${adapterToken}` }
             : {}),
         },
         body: JSON.stringify({
@@ -215,8 +226,9 @@ async function gwCall(
           id: rpcId++,
           method: "tools/call",
           params: { name: toolName, arguments: args },
+          ...(requestReference ? { request_reference: requestReference } : {}),
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.any([AbortSignal.timeout(8_000), ...(signal ? [signal] : [])]),
       })
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
@@ -239,6 +251,7 @@ async function gwCall(
       return null
     }
   }
+  if (isPiProjectManaged()) throw new Error("Managed project requires its private executor bridge")
   const apiKey = getApiKey()
   if (!apiKey) return null
 
@@ -317,7 +330,7 @@ export async function callStatewrightGateway(
 }
 
 async function gwInit(): Promise<boolean> {
-  if (process.env.STATEWRIGHT_ADAPTER_URL) {
+  if (process.env.STATEWRIGHT_ADAPTER_URL || isPiProjectManaged()) {
     try {
       return Boolean((await adapterCall("state"))?.state)
     } catch {
@@ -372,17 +385,28 @@ async function adapterCall(
   endpoint: "state" | "pre-tool" | "post-tool" | "stop",
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown> | null> {
-  const base = process.env.STATEWRIGHT_ADAPTER_URL?.replace(/\/$/, "")
-  if (!base) return null
-  const token = process.env.STATEWRIGHT_ADAPTER_TOKEN
+  return dispatchPiProjectEffect(({ reference, signal, bridge }: any) => adapterCallTransport(endpoint, body, reference, signal, bridge),
+    { observation: endpoint === "state" })
+}
+
+async function adapterCallTransport(endpoint: "state" | "pre-tool" | "post-tool" | "stop", body: Record<string, unknown> | undefined,
+  requestReference: unknown, signal?: AbortSignal, bridge?: Readonly<{ url?: string; token?: string }>): Promise<Record<string, unknown> | null> {
+  const base = (bridge ? bridge.url : process.env.STATEWRIGHT_ADAPTER_URL)?.replace(/\/$/, "")
+  if (!base) {
+    if (isPiProjectManaged()) throw new Error("Managed project requires its private executor bridge")
+    return null
+  }
+  const token = bridge ? bridge.token : process.env.STATEWRIGHT_ADAPTER_TOKEN
   const response = await fetch(`${base}/hooks/${endpoint}`, {
     method: body ? "POST" : "GET",
+    ...(bridge ? { redirect: "error" } : {}),
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(bridge ? { Connection: "close" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-    signal: AbortSignal.timeout(5_000),
+    ...(body ? { body: JSON.stringify({ ...body, ...(requestReference ? { request_reference: requestReference } : {}) }) } : {}),
+    signal: AbortSignal.any([AbortSignal.timeout(5_000), ...(signal ? [signal] : [])]),
   })
   if (!response.ok) {
     const raw = await response.text()
@@ -1356,6 +1380,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   let approvalHold = createApprovalHold()
 
   function holdCachedApproval(ctx: any): boolean {
+    if (ownership && !ownsAdmission()) return true // stale callers cannot observe, disarm or lazily abort a newer agent
     approvalHold.observe(stateCache && { state: stateCache.state, pending_approval: stateCache.pendingApproval }, { required: false })
     if (!approvalHold.held) return false
     disarmInactivityTimer()
@@ -1365,6 +1390,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
 
   // --- Permission system integration (pi-permission-system) ---
   function setAutonomousPermissions(enabled: boolean) {
+    if (ownership && !ownsAdmission()) return
     const ps = (globalThis as any).__piPermissionSystem
     if (!ps) {
       swLog(`permissions] pi-permission-system not installed — YOLO toggle skipped`)
@@ -1394,6 +1420,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   let shuttingDown = false
 
   function deliverCorrective(msg: string) {
+    if (ownership && !ownsAdmission()) return
     if (shuttingDown || approvalHold.held || dormant || !stateCache || stateCache.isFinal) return
     const now = Date.now()
     if (now - lastNudgeTime < 5000) return  // debounce: min 5s between correctives
@@ -1419,7 +1446,11 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     const timeout = baseTimeout * thinkingMultiplier
 
     swLog(`inactivity] arming timer: ${timeout / 1000}s (plugin=${isPluginOrchestrated()})`)
-    inactivityTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
+      if (ownership && !ownsAdmission()) {
+        if (inactivityTimer === timer) inactivityTimer = null
+        return
+      }
       inactivityTimer = null
       if (shuttingDown || approvalHold.held || !stateCache || stateCache.isFinal || dormant) return
 
@@ -1453,6 +1484,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
           }
         }).catch((err) => {
           swLog(`auto-FAIL] FAIL transition failed: ${err instanceof Error ? err.message : String(err)}`)
+          if (ownership) return // a failed private effect is not an authoritative terminal state
           // Force local state to final to break the loop even if gateway is unreachable
           if (stateCache) stateCache.isFinal = true
         })
@@ -1473,6 +1505,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       deliverCorrective(msg)
       armInactivityTimer()  // re-arm for next cycle
     }, timeout)
+    inactivityTimer = timer
   }
 
   function disarmInactivityTimer() {
@@ -2599,6 +2632,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   let currentAbortCtx: { abort: () => void } | null = null
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    if (ownership && !ownsAdmission()) return
     // A cache from a previous extension instance is not this turn's fresh
     // observation. Native input already latches its own fresh admission read.
     if (approvalHold.held) { approvalHold.stopCurrent(ctx); return }
@@ -2915,6 +2949,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   const LARGE_CONTEXT_THRESHOLD = 64000
 
   pi.on("context", async (_event, _ctx) => {
+    if (ownership && !ownsAdmission()) return
     swLog(`context] fired: dormant=${dormant} stateCache=${!!stateCache} pluginOrch=${isPluginOrchestrated()}`)
     if (dormant || !stateCache || !isPluginOrchestrated()) return
 
@@ -2940,6 +2975,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   // --- Provider request modifications ---
   // Gemma: rewrite role: "tool" → "tool_responses" to prevent infinite loops.
   pi.on("before_provider_request", async (_event, ctx) => {
+    if (ownership && !ownsAdmission()) return
     if (dormant || !stateCache) return
     const payload = _event.payload as Record<string, unknown>
 
@@ -2964,6 +3000,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   // --- Tool enforcement (before each tool call) ---
 
   pi.on("tool_call", async (event, _ctx) => {
+    if (ownership && !ownsAdmission()) return { block: true, reason: "Private project request unavailable" }
     if (holdCachedApproval(_ctx)) return approvalHold.blockTool(_ctx)
     if (dormant) return
     // Block malformed tool calls (undefined/empty name from broken model output)
@@ -2981,7 +3018,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     // Executor-owned sessions use the gateway's adapter RPC as the single
     // policy authority. Standalone Pi sessions retain the local compatibility
     // enforcement below.
-    if (process.env.STATEWRIGHT_ADAPTER_URL) {
+    if (ownership || process.env.STATEWRIGHT_ADAPTER_URL) {
       try {
         const decision = await adapterCall("pre-tool", {
           tool_name: event.toolName,
@@ -3194,6 +3231,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   // --- Post-tool: interrupt detection + state tracking ---
 
   pi.on("tool_result", async (event, ctx) => {
+    if (ownership && !ownsAdmission()) return
     if (holdCachedApproval(ctx)) return
     if (dormant) return
 
@@ -3202,7 +3240,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       .filter((c: { type: string; text?: string }) => c.type === "text")
       .map((c: { text?: string }) => c.text ?? "")
       .join("\n")
-    if (process.env.STATEWRIGHT_ADAPTER_URL && !event.toolName.startsWith("statewright_")) {
+    if ((ownership || process.env.STATEWRIGHT_ADAPTER_URL) && !event.toolName.startsWith("statewright_")) {
       try {
         await adapterCall("post-tool", {
           tool_name: event.toolName,
@@ -3214,6 +3252,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
         if (holdCachedApproval(ctx)) return
         if (stateCache) await applyModelRouting(stateCache, ctx)
       } catch (error) {
+        if (ownership && !ownsAdmission()) return // never notify or lazily abort replacement after this await
         ctx.ui.notify(
           `[statewright] Executor bridge unavailable after tool execution: ${error instanceof Error ? error.message : String(error)}`,
           "error",
@@ -3321,7 +3360,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     }
 
     // Interrupt detection for file-changing tools
-    if (process.env.STATEWRIGHT_ADAPTER_URL) return
+    if (ownership || process.env.STATEWRIGHT_ADAPTER_URL) return
     if (!stateCache?.interrupts) return
     const isFileEdit = ["Edit", "Write", "MultiEdit", "edit_file", "write_file", "apply_patch"].includes(event.toolName)
     if (!isFileEdit) return
@@ -3357,6 +3396,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
   // parse_llm_response → execute → feed results loop.
 
   pi.on("message_end", async (event, _ctx) => {
+    if (ownership && !ownsAdmission()) return
     if (holdCachedApproval(_ctx)) return
     if (dormant || !stateCache) return
     const msg = event.message
@@ -3832,6 +3872,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
         // safe_next transitions happen inside message_end.
         const msg = results.join("\n\n") + `\n\n${guidance}`
         setTimeout(() => {
+          if (ownership && !ownsAdmission()) return
           if (holdCachedApproval(_ctx)) return
           try { pi.sendUserMessage(msg, { deliverAs: "followUp" }) } catch {
             try { pi.sendUserMessage(msg, { deliverAs: "steer" }) } catch { /* both failed */ }
@@ -3890,6 +3931,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
           }
         }).catch((err) => {
           swLog(`auto-FAIL] FAIL transition failed: ${err instanceof Error ? err.message : String(err)}`)
+          if (ownership) return // private denial cannot fabricate completion over newer input
           // Force local state to final to break the loop even if gateway is unreachable
           if (stateCache) stateCache.isFinal = true
         })

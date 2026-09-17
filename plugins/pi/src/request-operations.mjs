@@ -25,6 +25,32 @@ export function createPiRequestOperations() {
     },
     referenceFor() { return copy(reference()); },
     ownsCurrent() { return owned(reference()); },
+    staleCall() {
+      try { const call = calls.getStore(); return !!call?.reference && gate.isSuperseded(context(), call.reference); }
+      catch { return false; }
+    },
+    async dispatch(effect, { observation = false } = {}) {
+      const ref = copy(reference());
+      const unavailable = () => { throw new Error("Project request unavailable"); };
+      const control = () => !closed && !calls.getStore() && (!session || gate.matchesNative(context()));
+      // Only designated read-only state observation may precede admission.
+      // An explicit input with no admitted reference is not bootstrap control.
+      if (!ref) {
+        if (!observation || !control()) unavailable();
+        const result = await effect({ reference: null, signal: undefined });
+        if (!control()) unavailable();
+        return result;
+      }
+      if (!owned(ref)) unavailable();
+      const signal = gate.operationSignal(context(), ref);
+      if (!(signal instanceof AbortSignal)) unavailable();
+      if (!observation && !await gate.checkpoint(context(), signal, ref)) unavailable();
+      if (!owned(ref) || signal.aborted) unavailable();
+      const result = await effect({ reference: ref, signal });
+      // An old result cannot authorize its caller's next declared effect.
+      if (!owned(ref) || signal.aborted) unavailable();
+      return result;
+    },
     hasConsumedApproval(approvalId) {
       const ref = reference();
       return owned(ref) && gate.hasConsumedApproval(context(), ref, approvalId);

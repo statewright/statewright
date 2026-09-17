@@ -2,6 +2,7 @@ import { createAgentSessionServices, createAgentSessionFromServices, createAgent
 import { createPiRequestGate } from "./request-gate.mjs";
 import { createPiRequestOperations } from "./request-operations.mjs";
 import { installPiRequestGuards } from "./request-hooks.mjs";
+import { piProjectMethod, withPiProjectEffects } from "./project-effects.mjs";
 
 // Additive owning SDK frontend. Not an extension-context or stock-CLI patch.
 // This lifetime binds exactly one parent-owned native UUID; replacement needs
@@ -13,6 +14,11 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
     || typeof register !== "function" || typeof onReady !== "function") throw new Error("Owned SDK frontend unavailable");
   const nativeSessionFile = target.sessionManager.getSessionFile();
   const operations = createPiRequestOperations();
+  const projectBridge = Object.freeze({ url: process.env.STATEWRIGHT_ADAPTER_URL, token: process.env.STATEWRIGHT_ADAPTER_TOKEN });
+  const bindProject = fn => {
+    if (typeof fn !== "function") throw new Error("Private inherited call unavailable");
+    return operations.bind((...args) => withPiProjectEffects(operations, () => fn(...args), projectBridge));
+  };
   const gate = createPiRequestGate({ ...gateOptions, nativeSessionId, nativeSessionFile, call, onAdmit: ref => operations.admit(ref) });
   let runtime = null;
   let dispose = null;
@@ -69,10 +75,13 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
             };
             const managed = new Proxy(pi, {
               get(object, key, receiver) {
-                if (key !== "on") return Reflect.get(object, key, receiver);
+                if (!["on", "registerTool", "registerCommand"].includes(key)) {
+                  return ["exec", "sendUserMessage", "sendMessage"].includes(key)
+                    ? piProjectMethod(object, key, operations, projectBridge) : Reflect.get(object, key, receiver);
+                }
                 return (...args) => {
                   if (sealed || closed) unavailable("Managed hook registration is sealed");
-                  return on(...args);
+                  return piProjectMethod(object, key, operations, projectBridge)(...args);
                 };
               },
               set: () => unavailable("Managed extension API is read-only"),
@@ -82,8 +91,9 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
             });
             try {
               on("input", (event, ctx) => operations.input(event, ctx));
-              await register(managed, Object.freeze({ bind: fn => operations.bind(fn), ownsCurrent: () => operations.ownsCurrent(),
-                hasConsumedApproval: id => operations.hasConsumedApproval(id) }));
+              await withPiProjectEffects(operations, () => register(managed, Object.freeze({
+                bind: bindProject, ownsCurrent: () => operations.ownsCurrent(),
+                hasConsumedApproval: id => operations.hasConsumedApproval(id) })), projectBridge);
               installPiRequestGuards({ pi: { on }, gate, referenceFor: () => operations.referenceFor() });
               registered = true;
             } finally { sealed = true; }
@@ -101,7 +111,10 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
       operations.install({ session, gate });
       // Independent public runner listener: UI bindings cannot replace it.
       // SDK catches event errors; successful bind alone is not startup proof.
-      session.extensionRunner.onError(() => { invalidate(); void close().catch(() => {}); });
+      session.extensionRunner.onError(() => {
+        if (operations.staleCall()) return; // old callback failure cannot close a newer owned request
+        invalidate(); void close().catch(() => {});
+      });
       const prompt = session.prompt.bind(session);
       session.prompt = (...args) => observeNative() ? prompt(...args) : Promise.resolve();
       const bind = session.bindExtensions.bind(session);

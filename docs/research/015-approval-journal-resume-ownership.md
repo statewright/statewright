@@ -2,6 +2,176 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 11 entry: project exec and bridge effect ownership
+
+Base627d7b0, canonical Statewright main; previous turn is verified progress.
+Current status retains the same seven user-modified tracked paths and untracked
+plans/canaries; Auldwyrm remains untouched. No supervising Statewright query,
+load/use/workflow, real decision/inference, existing native sessions, install,
+push or deploy. Manual root implementation; one mandatory clean-context
+Astra/high read-only adversarial review. Existing manual source/evidence/Git
+control profile retained, root owns controls; no release/compliance claim.
+
+Current code exposes project pi.exec without request correlation and sends
+project MCP/adapter bodies without the private outer request_reference expected
+by the already-owned parent bridge. Scope: Pi project-effect context module,
+request operations/gate/frontend, project index transports, focused SDK/bridge
+fixtures, ADR008 and this receipt. Acceptance: current project exec succeeds;
+outside/stale/closed calls never invoke it; a parked effect waits outside
+inference; replacement during an awaited effect suppresses its result/later
+effect; bridge effects carry the immutable host reference outside tool arguments.
+Legacy transports keep their explicit unmanaged behavior. Managed context never
+falls back to direct gateway dispatch. Read-only bootstrap state observation is
+separate from effect authority and cannot authorize a mutation. API message
+effects are similarly checked; delayed project correctives must not borrow the
+latest call. Native bare commands/final rendering, direct filesystem/spawn,
+other project configuration/provider/telemetry boundaries remain explicit open
+requirements, not silently covered by this cut. Parent production activation
+and full original authorized/new-input/cold-restart/host journey remain the
+single later integration acceptance gate; no full-goal completion here.
+
+Observed-only budget:85 normal/120 contraction root tool calls;30-minute warning,
+45-minute contraction; chunks target16KiB; final third reserved for validation,
+review/repair/audit/local commit. Root provider counters/controller interruption
+unavailable; no control-plane capability probe authorized. One root turn plus
+one Astra/high reviewer decision pass10 calls/12minutes and <=2 focused checks;
+finding-only recheck4 calls/5minutes, <=2 distinct repairs/finding. Two full
+source exports normally, one justified regression export. Warning stops optional
+discovery; contraction records verified progress and preserves full goal active.
+No reset of cumulative accounting. Rollback is a scoped local revert, never
+delete journal/native sessions or activate a legacy fallback.
+
+Retained baseline: real SDK inherited pi.exec after replacement returned
+task-owned-effect/code0 instead of denial (1 failed/34 filtered). Root integrated
+project dispatch ownership/cancellation, scoped registration/hooks/tools/commands
+and top-level bridge helpers; first focused70/70 passed. Expanded frontend
+36 passed/2 failed: one fixture tried nonexistent mirror.service rather than
+the public loadCheckpoint; the other proved inherited binding carried private
+call scope but lost project-effect scope, so bridge traffic lacked its outer
+reference. Root repaired the binding to carry both contexts, retaining the
+real parent enforcement. Fresh frontend38/38 passed. Actual project pre/post
+fixture then38 passed/1 failed: it emitted tools after Agent completion when
+the native operation signal is aborted. Fixture now holds an actual inert SSE
+Agent active, proves both current policy calls before replacement, and awaits
+both owned Agent prompts/close; no admission assertion or deadline weakened.
+Frontend39/39 passed. Captured-bridge followup73 passed/1 failed because test
+configured env after construction and a patch mistakenly placed setup in the
+exec case. Setup now precedes the correct fixture's construction. Focused75/75
+passed: frontend40, legacy/owned admission23, CLI12. All failed runs terminal;
+task-owned fixtures clean up their resources, no user session signalled.
+
+Root source also denies stale cached-hold lazy abort and project callback entry,
+corrective/permission effects; a stale timer may clear only its own handle.
+Private denial cannot force cached final state in either FAIL fallback. Scoped
+bridge traffic captures the endpoint/token, rejects redirects, owns Connection:
+close and combines existing deadlines with private request cancellation. Fresh
+native identity guards and an immutable cancellation signal belong to the
+original request; neither reference nor authority comes from model arguments.
+Bare SDK commands/rendering and direct filesystem/spawn remain unguarded gaps.
+
+Original-scope audit, current source:006 items1 artifact/policy/reviewer/expiry
+ticket enforcement open;2 project outer references now bound, but parent
+main/host-adapter activation/full lineage open;3 exec/API-message/MCP/adapter
+effect dispatch guarded, all other native/project/provider effects open;4 real
+authorized/unauthorized reviewer controls/entitlement journey open;5 journal
+retained through park, complete cold restart/legacy recovery/drain open;6 current
+matching-ID consumption proof retained, real private artifact/policy/entitlement
+resolver journey open;7 stale project dispatch/result/SDK error regressions now
+covered, all final rendering/recording/global mutable callback races open;8 no
+new decision API/human-strength claim, provenance/isolation acceptance open;9
+shared reviewer/evidence/retention/host acceptance open, no mandatory website.
+012 A/1 gateway changes still user-dirty/unvalidated;2 no host decisions added;
+C/3 main/observer deferred-clear mirror/controller/readiness integration open;
+B/4 owning park/re-admit strengthened, not all project effects;D local gateway
+park/unprivileged deny/trusted release/restart/host canary not run. Spec111's
+full authoritative resolver and isolated combined-native journey and116's
+cross-host/native/soak/promotion obligations remain unproved. Full goal active.
+
+Next exact integration work: guard direct project filesystem/spawn and captured
+configuration/provider/telemetry callbacks, bare SDK commands and final-output
+recording/rendering; then descriptor-first parent main/observer/host adapter
+construct the deferred-clear mirror/controller/readiness and this owned child
+without legacy fallback. Complete original authorized/new-input/cold-restart/
+host acceptance with preserved gateway work. Only this receipt may differ from
+the final frozen source export when validation/review reporting is appended.
+
+### Slice 11 independent findings and repaired acceptance
+
+First frozen tree37e5310e47556f3a998a90b4e2a4a882bd95983d, export
+/tmp/statewright-project-effects.VDc46E: Node297/297, Pi195 passed/1 existing
+opt-in live skip, native2/2, generated Claude parity/four mjs syntax exit0.
+Source acceptance is superseded by the following repair, not silently green.
+SDK0.73.0/install and dependency links unchanged. No workspace Rust/typecheck/
+lint/build/clean-install/migration/headed TUI/real gateway/reviewer/provider/
+staging or production gate claimed. Mock diagnostics are not external evidence.
+
+Mandatory clean-context Astra/high /root/pi_project_effects_review used7
+read-only shell calls/2 memory-only challenges, no writes/network/children/live
+sessions/agents. Two confirmed P1 findings on actual extracted/transpiled source
+callbacks: deleting env URL changed parent-private pre-tool deny into undefined/
+allow while parent policyCalls stayed1; stale awaited post-tool rejection still
+notified1 and lazy-aborted1 after ownership became false. These are actual
+declared-boundary defects, not the deferred parent activation/native gaps.
+Root repairs select pre/post/interrupt routing from immutable ownership mode,
+and recheck ownership before post-tool failure notification/abort. Existing
+actual SDK/Agent/project/local-bridge case now deletes URL/changes token while
+active and proves four policy calls over the captured endpoint, then exercises
+a delayed sixth pre/post call: the fixture deliberately ignores its transport
+cancellation so the final result/error check must protect the actual newer SSE
+Agent. No additional abort/notification, replacement stays streaming, stale
+event denies and cannot add policy calls. Both Agent prompts/close are awaited.
+Product transport cancellation/deadlines remain unchanged; no retry/fallback.
+
+Root disconfirming SDK regression found a third error-classification defect:
+current parked callback error retained readiness (1 failed/40 filtered). The
+listener mistook non-active phase for obsolete identity. Gate now distinguishes
+an actually different reference or superseded arrival, including the new-input
+preflight gap; parked/current/disconnected/native-drift faults are not hidden as
+obsolete. Genuine current parked error revokes readiness, cancels the pending
+effect and preserves the journal; older callback errors cannot close newer
+ownership. Fresh focused76/76: frontend41, admission23, CLI12. One distinct
+repair per finding; bounded finding-only reviewer recheck4 calls/5minutes.
+Only these repairs and source gates/recheck/audit/commit remain in this cut.
+
+Final repaired tested tree14eba1068241f3f8e94811504cfc0cba59295ec8,
+export /tmp/statewright-project-repaired.eZztH5. Fresh exact-export gates:
+Node297/297 (zero failures/skips/cancellations), Pi196 passed/1 existing opt-in
+live skip (6 files passed/1 skipped), native2/2, Claude generated parity and
+project-effects/request-frontend/request-operations/request-gate syntax exit0.
+Commands: npm test -- --reporter=dot; npm run test:native in plugins/pi;
+node plugins/claude-code/scripts/sync-managed-client.mjs --check; node --check
+on the four named mjs sources; unchanged17 executor Node suites plus Pi native
+session-owner and Claude managed-client bundle. Focused76/76 is preserved.
+All root validation handles are terminal; no restarted observation or widened
+deadline. Dependency symlinks/install unchanged. Only this receipt differs
+from the exact tested source for final reporting; owned staged diff check0.
+
+Finding-only independent recheck used3/4 read-only calls and the original two
+memory challenges. Actual pre-tool callback denies before and after URL deletion,
+parent policyCalls2; superseded post-tool rejection now abort0/notify0. Both
+original P1 findings closed. Source inspection found classification repair
+consistent: same-reference parked errors actionable, changed references/explicit
+supersession cover preflight, native identity failure does not hide an error.
+No remaining finding within that recheck; SDK regressions inspected, not rerun
+by reviewer. Root owns exact-export suites and full original-scope acceptance.
+
+Manual accounting is approximately85 root tool calls including failed checks/
+one failed patch verification and final recording, plus reviewer7+recheck3;
+roughly15 minutes, below30-minute warning/45-minute contraction. No optional
+discovery after source freeze. Two full exports used, one repair per finding,
+no third export. Instruction/owned-diff reads sometimes exceeded16KiB target;
+selected instructions were fully reread and changed regions inspected. No
+provider token/output-byte/controller enforcement claim or cumulative reset.
+Tracked user-dirty diff hashes unchanged:
+Statewright55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+Same untracked inventory preserved.
+Narrow eight-path local commit only; full goal remains active, no live approval,
+workflow, deployment or original-scope completion claim. Rollback/next exact
+integration inputs above remain unchanged, with source audit confirming parent
+main still lacks bound bridge/controller/readiness and host launcher uses stock
+Pi extension rather than this owned entrypoint.
+
 ## Slice 10 entry: private admission before project hold-only hooks
 
 Base5373ca7, canonical Statewright main, preserved user-dirty inventory unchanged.

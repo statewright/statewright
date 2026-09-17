@@ -137,7 +137,8 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
     dispose = runtime.dispose.bind(runtime);
     runtime.dispose = close;
     for (const method of ["newSession", "switchSession", "fork", "importFromJsonl"]) runtime[method] = freshOwnerRequired;
-    return Object.freeze({ runtime, get readiness() { observeNative(); return readiness; }, close });
+    return Object.freeze({ runtime, get readiness() { observeNative(); return readiness; },
+      get finalResponse() { return observeNative() ? operations.finalResponse() : null; }, close });
   } catch (error) {
     await close();
     // A failed constructor can own a session before the SDK runtime exists.

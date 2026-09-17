@@ -34,7 +34,7 @@ function respondWithTool(response: ServerResponse) {
 // Public SDK factory installs actual Agent, onPayload and primary provider
 // transport. Responses are inert loopback SSE, not model inference. No native
 // session files, user settings, provider credentials or workflow are used.
-async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?: boolean; bind?: boolean } = {}) {
+async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?: boolean; bind?: boolean; history?: "initial" | "after" } = {}) {
   const f = await fixture({ after: (fn: () => Promise<void>) => cleanup.push(fn) }, options)
   const requests: any[] = []
   const sockets: ServerResponse[] = []
@@ -71,6 +71,14 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
   cleanup.push(() => gate.close())
   const sessionManager = SessionManager.inMemory("/fixture")
   sessionManager.newSession({ id: f.owner.record.host_session_id })
+  // Synthetic initial history is setup, before any guarded runtime API exists.
+  // Runtime appendMessage remains denied outside a private request scope.
+  const seedHistory = () => {
+    for (let index = 0; index < 4; index++) {
+      sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `synthetic history ${index}` }], timestamp: Date.now() } as any)
+    }
+  }
+  if (options.history === "initial") seedHistory()
   const model = { id: "synthetic-chat", name: "Synthetic", api: "openai-completions", provider: "synthetic-provider",
     baseUrl: `http://127.0.0.1:${address.port}/v1`, reasoning: false, input: ["text"],
     contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
@@ -78,7 +86,10 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     getAll: () => [], find: () => model, isUsingOAuth: () => false }
   const handlers = new Map<string, Array<(...args: any[]) => unknown>>()
   const on = (event: string, handler: (...args: any[]) => unknown) => handlers.set(event, [...handlers.get(event) ?? [], handler])
-  let beforeAgent: () => unknown | Promise<unknown> = () => {}
+  let preparedHistory: (() => unknown) | null = null
+  let beforeAgent: () => unknown | Promise<unknown> = () => {
+    if (options.history === "after") preparedHistory ??= operations.bind(seedHistory)
+  }
   let beforeProvider = (_ctx: any) => {}
   let command = async () => {}
   let toolEffect = () => {}
@@ -109,6 +120,10 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
   session.extensionRunner!.setUIContext({ notify: vi.fn(), setStatus: vi.fn() } as any)
   gate.enable()
   return { ...f, gate, operations, session, sessionManager, modelRegistry, requests, sockets, onPark, execute,
+    seedHistory: () => {
+      if (!preparedHistory) throw new Error("Synthetic history has no captured owner")
+      return preparedHistory()
+    },
     setBeforeAgent: (callback: typeof beforeAgent) => { beforeAgent = callback },
     setBeforeProvider: (callback: typeof beforeProvider) => { beforeProvider = callback },
     setServe: (callback: typeof serve) => { serve = callback },
@@ -382,13 +397,11 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
   })
 
   it("guards actual SDK manual compaction before its separate provider path", async () => {
-    const f = await agentFixture()
+    const f = await agentFixture({ history: "after" })
     await f.prompt()
-    // Public session entries supply real SDK compaction preparation. No
+    f.seedHistory()
+    // Public initial session entries supply real compaction preparation. No
     // _checkCompaction/compact/provider implementation is mocked.
-    for (let index = 0; index < 4; index++) {
-      f.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `synthetic history ${index}` }], timestamp: Date.now() } as any)
-    }
     f.setLive(pending)
     const compaction = f.compact()
     // Attach rejection immediately; it is expected after cancellation.
@@ -402,11 +415,9 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
   })
 
   it("releases actual SDK manual compaction for its captured request once", async () => {
-    const f = await agentFixture()
+    const f = await agentFixture({ history: "after" })
     await f.prompt()
-    for (let index = 0; index < 4; index++) {
-      f.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `synthetic history ${index}` }], timestamp: Date.now() } as any)
-    }
+    f.seedHistory()
     f.setLive(pending)
     const compaction = f.compact()
     await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
@@ -455,10 +466,7 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
   })
 
   it("inherits real SDK threshold compaction's separate provider path", async () => {
-    const f = await agentFixture()
-    for (let index = 0; index < 4; index++) {
-      f.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `synthetic history ${index}` }], timestamp: Date.now() } as any)
-    }
+    const f = await agentFixture({ history: "initial" })
     f.session.setAutoCompactionEnabled(true)
     const ended: any[] = []
     f.session.subscribe(event => { if (event.type === "compaction_end") ended.push(event) })

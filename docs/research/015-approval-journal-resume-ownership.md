@@ -2,6 +2,159 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 12 entry: native command admission and late output
+
+Base faa8c58, canonical Statewright main; authoritative goal remains active.
+The same seven tracked user changes and untracked plans/canaries are preserved;
+Statewright user diff55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270,
+Auldwyrm94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+Manual implementation only: no Statewright query/load/use/workflow, real
+decision/inference, existing native sessions, push/install/deploy. The combined
+agentic-engineering controls apply without its workflow activation, overridden
+by the user's explicit manual instruction. Root owns the existing manual
+source/evidence/Git control profile; one clean-context Astra/high read-only
+review after source freeze, no implementation delegation.
+
+Installed public SDK0.73.0 executes extension commands before input interception,
+executes native bash without that input path, and persists/emits a message after
+awaiting its project message_end hook. Stock text mode reads the last shared
+Agent state even when its latest command/input produced no response. This cut
+owns private admission for registered commands and native bash, cancellation/
+late chunks/results/recording, public SDK event subscriptions and message writes,
+and latest-owned text response selection. No SDK dependency source edits or
+global stdout interception. Scope: request operations/frontend/project-effects/
+mode plus focused actual SDK/CLI fixtures, ADR008 and this receipt. Direct
+filesystem/spawn/configuration/provider/telemetry and asynchronous interactive
+render continuations remain explicit open requirements, as does parent main/
+observer/host adapter production integration and full original acceptance.
+
+Acceptance: a pending command/bash cannot invoke its handler/exec; a private
+release is consumed once before execution; replacement drops old chunks,
+results, SDK listener delivery and native message writes; inherited callbacks
+cannot mint a user epoch; command-only/handled input cannot print an old final
+response. Use actual SDK sessions/Agent, task-owned native files/loopback SSE
+and inert synthetic parent authority. Retain red checks before implementation.
+Same observed-only envelope:85 normal/120 contraction root calls,30-minute
+warning/45-minute contraction,16KiB output targets/final-third reserve. No
+provider counters/controller-interruption capability probe authorized. One
+review10 calls/12minutes/2 challenges; finding-only recheck4 calls/5minutes,
+<=2 distinct repairs/finding; two full exports plus one justified regression.
+Thresholds stop optional breadth and record a compact verified handoff, never
+declare full-goal success. Scoped local revert is rollback; no journal deletion
+or legacy fallback. Entire006 nine-item/012 A-D/spec111/116 obligations retained;
+items3/7 are strengthened locally, not a production acceptance claim.
+
+Retained red: three actual SDK tests failed (41 filtered): slash handler bypassed
+park, bash resolved code0/current+obsolete output after replacement, and two
+late assistant message_end events published instead of one. First repair:
+frontend44/44 passed. Expanded focused58 passed/1 failed: a new assertion
+incorrectly expected first-session bash to flush native history immediately;
+installed SDK SessionManager._persist defers until an assistant exists. Fixture
+now proves public in-memory recording then the actual JSONL after a later
+authorized synthetic response, retaining the bash-only zero-inference check.
+No SDK persistence boundary/deadline/assertion weakened to force durability.
+Fresh focused90/90: frontend47, private gate28, CLI15 (three new actual-child
+scenarios: command-only text and native RPC bash active/parked). Added one
+negative race for older bash finally vs newer status/cancel and static public
+run ownership; root avoids the SDK's single mutable bash controller for control.
+Full source gates/review/audit/local commit remain before acceptance.
+
+First frozen tree799f6a785f43f549de1217d9f24e7cad70567ca1,
+export/tmp/statewright-native-output.j97C4Z: Node297/297, native2/2, Claude parity
+and four mjs syntax exit0; Pi203 passed/3 failed/1 existing opt-in skip. Three
+older actual-Agent compaction fixtures seeded unbound public appendMessage after
+installation; denial is correct. Scope adds request-agent-native.spec.ts fixture
+preparation, not unbound runtime write authorization. Moving all history before
+construction gave36 passed/1 failed: manual compaction now made3 HTTP calls vs
+the original2 because its session ordering changed. Manual fixtures now capture
+a private bind at before_agent_start and seed after the admitted prompt, retaining
+the original ordering/two-call assertion; threshold setup is before construction.
+Agent37/37 passed. No compaction implementation/provider/assertion was mocked or
+weakened. Initial full gate remains failed/superseded, not reported green.
+
+Mandatory clean-context Astra/high /root/pi_native_output_review used10/10
+read-only calls and one memory-only SDK challenge. Confirmed P1 circular wait:
+message_end hook waits for idle then awaits triggerTurn custom message; both core
+turns finish but their Agent wrappers wait for public delivery behind that hook.
+Observed streams2/coreEnds2/deliveredEnds0/hookReturnedfalse/settledfalse;
+cancellation releases it. Root actual frontend/Agent/loopback regression failed
+with returnedfalse/settledfalse (48 filtered), then one distinct repair moves
+output draining to external prompt completion. Private output tokens distinguish
+each Agent run within a request, bounded queue256, settled on delivery/error/
+cancellation/close. Nested core completion never waits on its enclosing hook.
+Expanded regression holds the second assistant's message hook: first delivered
+agent_end cannot settle external prompt while nested output is still pending;
+release yields both deliveries under epoch1. Finding-only fresh review4 calls/
+5minutes, no new broad discovery. Final exact source export still required.
+
+Final repaired tested tree3ba2b90c9a00ef9b4279cf88c98dd04b2300cfbf,
+export/tmp/statewright-native-repaired.VBUIZ5. Fresh exact-export gates:
+Node297/297, Pi207 passed/1 existing opt-in live skip (6 files passed/1 skipped),
+native2/2; Claude generated parity and four mjs syntax exit0. Commands:
+unchanged17 executor Node suites plus Pi session-owner/Claude bundle; npm test
+-- --reporter=dot and npm run test:native in plugins/pi; node
+plugins/claude-code/scripts/sync-managed-client.mjs --check; node --check on
+project-effects/request-frontend/request-mode/request-operations. Focused129/129
+and final held-nested-delivery1/1 retained. All root test handles terminal,
+no widened timeout/restarted validation or changed dependencies/SDK install.
+Mocked remote diagnostics are not network/live-gateway proof. Workspace Rust/
+lint/typecheck/build/clean install/migrations/headed TUI/real reviewer/gateway/
+provider/staging/production gates not run or claimed. Native first bash history
+durability and async interactive/sink ownership remain explicitly open.
+
+Fresh clean-context Astra/high /root/pi_native_output_recheck used4/4 read-only
+calls,2/2 memory-only checks within5minutes, no writes/network/children/real
+Statewright or existing-session interaction/full-suite repetition. Original
+actual-SDK challenge now streams2/coreEnds2/deliveredEnds2/hookReturnedtrue/
+settledtrue. Held second delivery: streams2/coreEnds2/deliveredEnds1/
+hookReturnedtrue/settledfalse; releasing yields deliveredEnds2/settledtrue.
+Original P1 closed; no remaining finding within recheck scope. Root owns the
+final actual SDK/HTTP/native/CLI/full-suite gates and entire original acceptance.
+One distinct product repair for the finding; fixture changes retained the
+existing manual compaction HTTP2/threshold HTTP3 assertions and fresh private
+runtime-write denial. First failed full export remains superseded evidence.
+
+Manual accounting approximately110 root calls including source reads/failed
+fixtures/repair/review artifact handoff/final recording, reviewer10 plus fresh
+recheck4; roughly12minutes.85 normal target exceeded by fixture reconciliation
+and mandatory finding repair, below120 contraction/30-minute warning/45-minute
+contraction. No optional breadth after freeze; final work only source gates,
+review closure/audit/receipt/scoped commit. Two full exports, no third; one
+product repair and two distinct fixture ordering preparations, no reset.
+Instruction/diff read targets occasionally exceeded16KiB; full selected skill
+instructions read and owned source regions inspected. No provider counters,
+output-byte ledger or controller hard enforcement claim. Only this receipt
+differs from final tested source for reporting. Tracked user hashes unchanged
+at Statewright55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270
+and Auldwyrm94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa;
+same untracked inventory. Narrow nine-path local commit, no push/deploy or
+production activation. Authoritative current goal active; full006/012/spec111/
+116 audit/next exact integration input below retained. Final source inspection
+confirms parent bridge still created without sessionOwner/controller/readiness
+before native descriptor; host launcher still stock extension. Not completion.
+
+Current original-scope audit:006 item1 immutable ticket/artifact/policy/reviewer/
+expiry remains open;2 private command/bash references bind locally, parent main/
+host launcher/complete lineage open;3 native command/bash entry added to guarded
+project effects, other native/direct project/provider effects remain open;4
+authorized/unauthorized controls and real entitlement open;5 journal retains
+park/cancel, full cold restart/drain/recovery open;6 once-only private consumption
+covered synthetically, real resolver/artifact/policy freshness open;7 late public
+message delivery/native append/text selection guarded, async interactive render/
+buffered sink/global state races open;8 no new decision API/human-strength claim,
+full provenance/isolation open;9 client-neutral reviewer/evidence/retention and
+cross-host acceptance open.012 A/1 user-dirty Rust gate remains unvalidated;
+2 hosts still observe, never decide;C/3 main/observer deferred-clear/controller/
+readiness integration open;B/4 native park/re-admit strengthened, not all effects;
+D local gateway trusted/unprivileged release/restart/host canary not run.
+Spec111 real resolver/dialog/native combined journey and116 cross-host/native/
+soak/promotion remain unproved. No live workflow state has been queried.
+Next integration input: remaining direct project filesystem/spawn/configuration/
+provider/telemetry and async native output/state mutations, then descriptor-first
+parent main/observer/host adapter with deferred mirror/controller/readiness and
+owned child (no stock fallback), full authorized/new-input/cold-restart/host
+acceptance using preserved gateway work. Goal active, not blocked or complete.
+
 ## Slice 11 entry: project exec and bridge effect ownership
 
 Base627d7b0, canonical Statewright main; previous turn is verified progress.

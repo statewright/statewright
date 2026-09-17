@@ -17,7 +17,8 @@ export function piProjectMethod(pi, key, operations, bridge) {
   const scoped = callback => (...args) => withPiProjectEffects(operations, () => callback(...args), bridge);
   if (key === "on") return (event, callback) => method.call(pi, event, scoped(callback));
   if (key === "registerTool") return tool => method.call(pi, { ...tool, execute: scoped(tool.execute) });
-  if (key === "registerCommand") return (name, command) => method.call(pi, name, { ...command, handler: scoped(command.handler) });
+  if (key === "registerCommand") return (name, command) => method.call(pi, name, { ...command,
+    handler: (...args) => operations.command(scoped(command.handler), args) });
   if (!["exec", "sendUserMessage", "sendMessage"].includes(key)) return method;
   return (...args) => {
     // Keep a rejection visible to awaiters while void SDK message callers do

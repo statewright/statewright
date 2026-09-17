@@ -1,5 +1,6 @@
 import { createServer } from "node:http"
 import { EventEmitter } from "node:events"
+import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { AuthStorage, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
@@ -10,6 +11,7 @@ import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs"
 import statewrightExtension, { callStatewrightGateway } from "./index.js"
 import { dispatchPiProjectEffect } from "./project-effects.mjs"
+import { runPiRequestMode } from "./request-mode.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
 afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await cleanup.pop()!() })
@@ -81,6 +83,221 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("parks a native extension command before its handler, then consumes one private release", async () => {
+    const handler = vi.fn()
+    const f = await frontendFixture({ parked: true, register: pi => pi.registerCommand("owned", { handler }) })
+    await f.bind()
+    let settled = false
+    const command = f.session.prompt("/owned synthetic command").finally(() => { settled = true })
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 1_000, interval: 5 })
+    expect(handler).not.toHaveBeenCalled()
+    expect(settled).toBe(false)
+    expect(f.requests).toHaveLength(0)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    f.approve()
+    await command
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("parks actual native bash outside inference and denies unbound recording or inherited old execution", async () => {
+    let inherited!: () => Promise<any>
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ handshake: true, parked: true, register: (pi, ownership) => {
+      pi.registerCommand("capture", { handler: () => {
+        inherited = ownership.bind(() => f.session.executeBash("obsolete inherited command", undefined,
+          { operations: { exec: vi.fn() } }))
+      } })
+    } })
+    const chunks = vi.fn()
+    const exec = vi.fn(async (_command, _cwd, options) => {
+      options.onData(new TextEncoder().encode("released native bash"))
+      return { exitCode: 0 }
+    })
+    await expect(f.session.executeBash("before readiness", chunks, { operations: { exec } })).rejects.toThrow("Native command request unavailable")
+    expect(() => f.session.recordBashResult("unbound", { output: "unbound", exitCode: 0, cancelled: false, truncated: false }))
+      .toThrow("Native command request unavailable")
+    await f.bind()
+    const bash = f.session.executeBash("synthetic parked command", chunks, { operations: { exec } })
+    bash.catch(() => {})
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 1_000, interval: 5 })
+    expect(exec).not.toHaveBeenCalled()
+    expect(chunks).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(0)
+    f.approve()
+    expect((await bash).output).toBe("released native bash")
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+    // SDK defers first history flush until an assistant exists. Prove its public
+    // in-memory record now and the actual native file after a later response.
+    expect(f.sessionManager.getEntries().some(entry => entry.type === "message"
+      && entry.message.role === "bashExecution" && entry.message.output === "released native bash")).toBe(true)
+    await f.session.prompt("/capture")
+    const epoch = f.owner.record.request_epoch
+    // A genuinely native external call owns a new epoch; stale inheritance cannot.
+    const real = await f.session.executeBash(`${JSON.stringify(process.execPath)} -e "process.stdout.write('actual owned bash')"`)
+    expect(real.output).toBe("actual owned bash")
+    expect(f.owner.record.request_epoch).toBe(epoch + 1)
+    await expect(inherited()).rejects.toThrow("Native command request unavailable")
+    expect(f.owner.record.request_epoch).toBe(epoch + 1)
+    expect(f.requests).toHaveLength(0)
+    await f.session.prompt("flush legitimate current history")
+    expect(await readFile(f.owner.record.host_session_file, "utf8")).toContain("released native bash")
+    await f.frontend.close()
+    await expect(f.session.executeBash("after close", chunks, { operations: { exec } })).rejects.toThrow("Native command request unavailable")
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(f.requests).toHaveLength(1)
+  })
+
+  it("does not let a superseded parked slash command run or consume the replacement release", async () => {
+    const handler = vi.fn()
+    const f = await frontendFixture({ parked: true, register: pi => pi.registerCommand("owned", { handler }) })
+    await f.bind()
+    const old = f.session.prompt("/owned old")
+    await vi.waitFor(() => expect(f.owner.record.request_epoch).toBe(1), { timeout: 1_000, interval: 5 })
+    const newer = f.session.prompt("/owned replacement")
+    await vi.waitFor(() => expect(f.owner.record.request_epoch).toBe(2), { timeout: 1_000, interval: 5 })
+    f.approve()
+    await old; await newer
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler.mock.calls[0][0]).toBe("replacement")
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("stock SDK text mode cannot print a previous response after command-only input", async () => {
+    const handler = vi.fn()
+    const f = await frontendFixture({ register: pi => pi.registerCommand("owned", { handler }) })
+    const output: string[] = []
+    vi.spyOn(process.stdout, "write").mockImplementation(((chunk: any, encoding: any, callback: any) => {
+      output.push(String(chunk)); (typeof encoding === "function" ? encoding : callback)?.(); return true
+    }) as any)
+    expect(await runPiRequestMode(f.frontend, { mode: "text", messages: ["response owner", "/owned command-only"] })).toBe(0)
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(output.join("")).not.toContain("synthetic response")
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("drops an old native bash chunk, result and recording after replacement input", async () => {
+    let arrive!: () => void; let release!: () => void; let data!: (value: Uint8Array) => void
+    const arrival = new Promise<void>(resolve => { arrive = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    const f = await frontendFixture({ handshake: true })
+    await f.bind()
+    const chunks = vi.fn()
+    const exec = vi.fn(async (_command, _cwd, options) => {
+      data = options.onData; arrive(); await barrier
+      options.onData(new TextEncoder().encode("obsolete bash output"))
+      return { exitCode: 0 }
+    })
+    const old = f.session.executeBash("synthetic command", chunks, { operations: { exec } })
+    const denied = expect(old).rejects.toThrow("Native command request unavailable")
+    await arrival
+    data(new TextEncoder().encode("current bash output"))
+    expect(chunks).toHaveBeenCalledTimes(1)
+    const newer = f.session.prompt("replacement during native bash")
+    release()
+    await denied
+    await newer
+    expect(chunks).toHaveBeenCalledTimes(1)
+    expect(f.session.messages.some(message => message.role === "bashExecution")).toBe(false)
+    expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toContain("obsolete bash output")
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("an older bash finally cannot remove cancellation or status ownership from newer native bash", async () => {
+    const releases: Array<() => void> = []
+    const signals: AbortSignal[] = []
+    cleanup.push(() => releases.forEach(release => release()))
+    const f = await frontendFixture()
+    await f.bind()
+    const backend = { exec: vi.fn((_command, _cwd, options) => {
+      signals.push(options.signal)
+      return new Promise(resolve => releases.push(() => resolve({ exitCode: 0 })))
+    }) }
+    const old = f.session.executeBash("old native bash", undefined, { operations: backend })
+    const deniedOld = expect(old).rejects.toThrow("Native command request unavailable")
+    await vi.waitFor(() => expect(signals).toHaveLength(1), { timeout: 1_000, interval: 5 })
+    const newer = f.session.executeBash("new native bash", undefined, { operations: backend })
+    const deniedNew = expect(newer).rejects.toThrow("Native command request unavailable")
+    await vi.waitFor(() => expect(signals).toHaveLength(2), { timeout: 1_000, interval: 5 })
+    expect(signals[0].aborted).toBe(true)
+    releases[0]()
+    await deniedOld
+    expect(f.session.isBashRunning).toBe(true)
+    expect(signals[1].aborted).toBe(false)
+    f.session.abortBash()
+    expect(signals[1].aborted).toBe(true)
+    releases[1]()
+    await deniedNew
+    expect(f.session.isBashRunning).toBe(false)
+    expect(f.session.messages.some(message => message.role === "bashExecution")).toBe(false)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("drops late SDK output and native persistence after an awaited old message hook", async () => {
+    let arrive!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrive = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    let first = true
+    const f = await frontendFixture({ handshake: true, register: pi => pi.on("message_end", async event => {
+      if (event.message.role !== "assistant" || !first) return
+      first = false; arrive(); await barrier
+    }) })
+    await f.bind()
+    const published: any[] = []
+    f.session.subscribe(event => { if (event.type === "message_end" && event.message.role === "assistant") published.push(event) })
+    const old = f.session.prompt("first delayed output")
+    await arrival
+    const newer = f.session.prompt("replacement delayed output")
+    release()
+    await old; await newer
+    await vi.waitFor(() => expect(published).toHaveLength(1), { timeout: 1_000, interval: 5 })
+    const entries = (await readFile(f.owner.record.host_session_file, "utf8")).trim().split("\n").map(line => JSON.parse(line))
+    expect(entries.filter(entry => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(1)
+    expect(f.requests).toHaveLength(2)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("an awaited message hook can complete a nested owned turn without waiting for its enclosing delivery", async () => {
+    let first = true; let returned = false
+    let secondArrived = false; let releaseSecond!: () => void
+    const secondBarrier = new Promise<void>(resolve => { releaseSecond = resolve })
+    cleanup.push(() => releaseSecond())
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ register: pi => pi.on("message_end", async event => {
+      if (event.message.role !== "assistant") return
+      if (!first) { secondArrived = true; await secondBarrier; return }
+      first = false
+      await f.session.agent.waitForIdle()
+      await f.session.sendCustomMessage({ customType: "synthetic-nested", content: "synthetic nested turn", display: false }, { triggerTurn: true })
+      returned = true
+    }) })
+    await f.bind()
+    const ends: any[] = []
+    f.session.subscribe(event => { if (event.type === "agent_end") ends.push(event) })
+    let settled = false
+    const prompt = f.session.prompt("outer delivery owner").finally(() => { settled = true })
+    cleanup.push(async () => { releaseSecond(); await f.frontend.close(); await prompt })
+    await vi.waitFor(() => expect({ returned, secondArrived }).toEqual({ returned: true, secondArrived: true }), { timeout: 1_000, interval: 5 })
+    expect(settled).toBe(false) // same-request first delivery cannot finish the nested output run
+    expect(ends).toHaveLength(1)
+    releaseSecond()
+    await prompt
+    expect(f.requests).toHaveLength(2)
+    expect(ends).toHaveLength(2)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.frontend.finalResponse).toMatchObject({ role: "assistant", stopReason: "stop" })
+  })
+
   it("denies project exec after its inherited request is superseded", async () => {
     const effects: Array<() => Promise<any>> = []
     let unbound!: () => Promise<any>

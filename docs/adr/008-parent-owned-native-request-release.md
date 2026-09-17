@@ -122,6 +122,52 @@ proved across authority changes. Dependency compatibility is source-bound
 evidence, not a version pin. No full native acceptance is implied.
 No live/native authorized approval journey, deployment or promotion is claimed.
 
+### Owned native commands and message output (Slice12)
+
+Public SDK0.73.0 extension commands run before its input hook. The owning
+frontend therefore admits a registered command privately before invoking its
+project handler; an inherited call retains its original reference rather than
+minting human input. Native executeBash also has a private explicit-entry claim,
+gate admission/checkpoint before backend execution, combined epoch/backend
+cancellation and ownership checks before SDK output accumulation, chunk
+delivery, recordBashResult and return. External native bash invalidates the old
+request synchronously; closed/unready/stale calls cannot execute. Inherited bash
+while Agent streaming is denied rather than entering the SDK's unowned pending
+bash queue. Unbound direct recording is denied. Native abortBash/status track the
+exact private run: an older SDK bash finally cannot clear a newer run's control.
+This guards the owned API; it is not arbitrary subprocess/OS isolation.
+
+SDK AgentSession awaits project message hooks before notifying public subscribers
+and writing message history. Owned subscribe and the public SessionManager
+appendMessage/appendCustomMessageEntry boundaries independently recheck the
+originating private call after those awaits. Queue-update control observations
+are distinct from message effect authority. External prompt completion drains
+public agent_end delivery (or private cancellation/close) so synchronous text
+selection cannot race queued message processing. Each actual Agent entry has a
+distinct opaque output-run token as well as its request reference; first output
+delivery cannot settle another nested run under the same request. Core turn
+completion itself never waits for SDK publication: an awaited message hook may
+start/await a nested owned turn without circularly waiting for the delivery queue
+behind that hook. The bounded private output queue is settled on delivery,
+startup error, private cancellation or owned close. A readonly mode view gives
+stock public runPrintMode only the most recent privately owned delivered
+assistant response, not the last shared Agent message. Command-only/handled
+input clears that candidate synchronously; it cannot print old cached finals.
+No vendor SDK sources or process-global output hooks are modified.
+
+Evidence: actual public SDK/Agent/local SSE, task-owned native JSONL fixtures
+and actual owning text/RPC CLI children. Authority remains synthetic. Existing
+SDK defers the first native history flush until an assistant exists; a bash-only
+first session's durable history is not claimed. Message write guards prevent
+obsolete append entry, not a new fsync/crash-durable SDK history protocol.
+Asynchronous interactive handleEvent/render continuations, buffered sink leases,
+all other SessionManager mutations, global project state/direct filesystem/
+spawn/configuration/provider/telemetry and provider internals still require
+ownership before production activation. These limitations retain the full
+original contract, not unsupported paths declared accepted. Parent main/
+observer/host launcher wiring and full real-authority/cold-resume/cross-host
+acceptance remain open. Legacy hold-only behavior stays monotonic.
+
 Additive `createPiRequestFrontend` now owns public SDK services/session/runtime
 construction for one exact parent-bound native UUID. One managed extension
 factory registers trusted project hooks first and final admission guards last;

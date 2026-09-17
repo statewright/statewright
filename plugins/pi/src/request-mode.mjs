@@ -31,7 +31,26 @@ export function parsePiRequestMode(argv) {
 export async function runPiRequestMode(frontend, { mode, messages = [] }) {
   try {
     if (!["interactive", "text", "json", "rpc"].includes(mode)) throw new Error("Unsupported managed Pi mode");
-    if (mode === "text" || mode === "json") return await runPrintMode(frontend.runtime, { mode, messages });
+    if (mode === "text" || mode === "json") {
+      // Stock text mode selects the last shared Agent message, including an
+      // older response after a handled/command-only input. This read-only mode
+      // view supplies only the latest privately owned, fully delivered response.
+      const session = frontend.runtime.session;
+      const view = new Proxy(session, { get(object, key) {
+        if (key === "state") {
+          const message = frontend.finalResponse;
+          return { ...object.state, messages: message ? [message] : [] };
+        }
+        const value = Reflect.get(object, key, object);
+        return typeof value === "function" ? value.bind(object) : value;
+      } });
+      const runtime = new Proxy(frontend.runtime, { get(object, key) {
+        if (key === "session") return view;
+        const value = Reflect.get(object, key, object);
+        return typeof value === "function" ? value.bind(object) : value;
+      } });
+      return await runPrintMode(runtime, { mode, messages });
+    }
     if (mode === "rpc") { await runRpcMode(frontend.runtime); return 0; }
     await new InteractiveMode(frontend.runtime, { initialMessages: messages }).run();
     return 0;

@@ -89,7 +89,10 @@ describe("managed owning SDK CLI", () => {
     expect(received).toEqual(["/hooks/request/ready", "/hooks/request/begin", "/hooks/request/status"])
   }, 5_000)
 
-  for (const mode of ["text", "json", "rpc"]) for (const parked of [false, true]) it(`runs actual ${mode} CLI${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
+  const scenarios = [ ...["text", "json", "rpc"].flatMap(mode => [false, true].map(parked => ({ mode, parked, bash: false, commandOnly: false }))),
+    { mode: "text", parked: false, bash: false, commandOnly: true },
+    ...[false, true].map(parked => ({ mode: "rpc", parked, bash: true, commandOnly: false })) ]
+  for (const { mode, parked, bash, commandOnly } of scenarios) it(`runs actual ${mode} CLI${bash ? " native bash" : ""}${commandOnly ? " command-only final input" : ""}${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
     const f = await fixture({ after: (callback: () => any) => cleanup.push(callback) }, { nativeFile: true, parked })
     const requests: any[] = []
     const server = createServer(async (request, response) => {
@@ -123,7 +126,7 @@ describe("managed owning SDK CLI", () => {
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } }))
     const launch = { schema: "statewright/pi-request-launch/v1", challenge: readiness.challenge, cwd, agent_dir: agentDir, model: { provider: "synthetic-provider", id: "synthetic-chat" } }
     const before = await readFile(f.owner.record.host_session_file, "utf8")
-    const child = spawn(process.execPath, [fileURLToPath(new URL("../request-main.mjs", import.meta.url)), "--mode", mode, "--thinking", "off", ...(mode === "rpc" ? [] : ["synthetic explicit input"])], {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("../request-main.mjs", import.meta.url)), "--mode", mode, "--thinking", "off", ...(mode === "rpc" ? [] : ["synthetic explicit input", ...(commandOnly ? ["/statewright status"] : [])])], {
       cwd, env: { PATH: process.env.PATH, STATEWRIGHT_ADAPTER_URL: bridge.url, STATEWRIGHT_ADAPTER_TOKEN: bridge.token,
         STATEWRIGHT_PI_REQUEST_LAUNCH: JSON.stringify(launch), STATEWRIGHT_POWERLINE: "0", STATEWRIGHT_API_KEY: "synthetic-not-a-secret",
         STATEWRIGHT_NO_UPDATE_CHECK: "1", STATEWRIGHT_GATEWAY_URL: bridge.url, STATEWRIGHT_PB_URL: bridge.url,
@@ -139,12 +142,14 @@ describe("managed owning SDK CLI", () => {
       stdout += chunk
       if (mode === "rpc") {
         for (const line of stdout.split("\n")) {
-          try { const event = JSON.parse(line); if (event.type === "agent_end") child.stdin.end() } catch { /* partial native JSON line */ }
+          try { const event = JSON.parse(line); if (event.type === "agent_end" || bash && event.type === "response" && event.command === "bash") child.stdin.end() } catch { /* partial native JSON line */ }
         }
       }
     })
     child.stderr.on("data", chunk => { stderr += chunk })
-    if (mode === "rpc") child.stdin.write(`${JSON.stringify({ type: "prompt", id: "synthetic-input", message: "synthetic explicit input" })}\n`)
+    if (mode === "rpc") child.stdin.write(`${JSON.stringify(bash
+      ? { type: "bash", id: "synthetic-input", command: `${JSON.stringify(process.execPath)} -e "process.stdout.write('synthetic CLI bash')"` }
+      : { type: "prompt", id: "synthetic-input", message: "synthetic explicit input" })}\n`)
     const timer = setTimeout(() => child.kill("SIGTERM"), 8_000)
     let result
     try {
@@ -170,16 +175,19 @@ describe("managed owning SDK CLI", () => {
         active: bridge.activeRequests, exitCode: child.exitCode, signalCode: child.signalCode }), { cause: error })
     } finally { clearTimeout(timer) }
     expect({ result, stderr, stdout, requests: requests.length, epoch: f.owner.record.request_epoch }).toEqual(expect.objectContaining({ result: [0, null] }))
-    expect(stdout).toContain("synthetic CLI response")
+    if (commandOnly) expect(stdout).not.toContain("synthetic CLI response")
+    else expect(stdout).toContain(bash ? "synthetic CLI bash" : "synthetic CLI response")
     if (mode !== "text") for (const line of stdout.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow()
-    expect(requests).toHaveLength(1)
-    expect(f.owner.record.request_epoch).toBe(1)
+    expect(requests).toHaveLength(bash ? 0 : 1)
+    expect(f.owner.record.request_epoch).toBe(commandOnly ? 2 : 1)
     if (parked) {
       expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
       expect(f.events.filter((event: string) => event === "clear:approval")).toHaveLength(1)
       expect(await f.mirror.loadCheckpoint()).toBeNull()
     }
-    expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
+    if (!bash) expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
+    // Bash-only first history flush is SDK-deferred until an assistant exists;
+    // this case proves native protocol/admission/exec, not durable bash history.
     expect(readiness.ready).toBe(false)
   }, 12_000)
 })

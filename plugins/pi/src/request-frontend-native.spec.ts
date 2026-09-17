@@ -10,7 +10,7 @@ import { createExecutorNativeReadiness } from "../../executor/lib/executor-nativ
 import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs"
 import statewrightExtension, { callStatewrightGateway } from "./index.js"
-import { dispatchPiProjectEffect } from "./project-effects.mjs"
+import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 import { runPiRequestMode } from "./request-mode.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
@@ -62,7 +62,7 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
     baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, reasoning: false,
     input: ["text"], contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
-    getAll: () => [], find: () => model, isUsingOAuth: () => false }
+    getAll: () => [], find: () => model, isUsingOAuth: () => false, registerProvider: vi.fn() }
   const onPark = vi.fn()
   const uiContext = { notify: vi.fn(), setStatus: vi.fn() }
   const publish = nativeReadiness ? createPiNativeReadinessPublisher({ challenge: nativeReadiness.challenge, sessionManager, call }) : null
@@ -83,6 +83,238 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  async function docsFixture(response: () => Promise<Response> | Response) {
+    const keys = ["STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN", "STATEWRIGHT_WORKFLOW", "STATEWRIGHT_EXECUTOR_ID"]
+    const saved = keys.map(key => process.env[key])
+    cleanup.push(() => {
+      for (const [index, key] of keys.entries()) {
+        if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]
+      }
+    })
+    const effects: Array<() => Promise<any>> = []
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ beforeCreate: owner => {
+      process.env.STATEWRIGHT_ADAPTER_URL = owner.bridge.url
+      process.env.STATEWRIGHT_ADAPTER_TOKEN = owner.bridge.token
+      process.env.STATEWRIGHT_WORKFLOW = "fixture"
+      process.env.STATEWRIGHT_EXECUTOR_ID = owner.owner.record.executor_session_id
+    }, register: async (pi, ownership) => {
+      await statewrightExtension(pi, ownership)
+      pi.registerCommand("capture-docs", { handler: () => effects.push(ownership.bind(() =>
+        f.session.extensionRunner!.getToolDefinition("statewright_search_docs")!.execute("docs", { query: "ownership" }))) })
+    } })
+    const originalFetch = globalThis.fetch
+    const docs = vi.fn(response)
+    const signals: AbortSignal[] = []
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
+      if (String(url) === "https://docs.statewright.ai/search-index.json") {
+        signals.push(init!.signal as AbortSignal)
+        return Promise.resolve(docs())
+      }
+      return originalFetch(url, init)
+    })
+    await f.bind()
+    await f.session.prompt("/capture-docs")
+    return { ...f, docs, effects, signals }
+  }
+
+  const docsIndex = [{ url: "inert:fixture", title: "ownership", section: "fixture", content: "synthetic ownership result" }]
+
+  it("parks secondary docs HTTP before dispatch and consumes its private release", async () => {
+    const f = await docsFixture(() => Response.json(docsIndex))
+    f.setLive(pending)
+    const result = f.effects[0]()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.docs).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(0)
+    f.approve()
+    expect((await result).content[0].text).toContain("synthetic ownership result")
+    expect(f.docs).toHaveBeenCalledTimes(1)
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+  })
+
+  it("drops a secondary docs body completed after a replacement request", async () => {
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let reading!: () => void
+    const started = new Promise<void>(resolve => { reading = resolve })
+    const f = await docsFixture(() => ({ ok: true, json: async () => {
+      reading(); await held; return docsIndex
+    } }) as Response)
+    const result = f.effects[0]()
+    await started
+    await f.session.prompt("/capture-docs")
+    release()
+    expect((await result).content[0].text).toBe("Docs search failed.")
+    expect(f.signals[0].aborted).toBe(true)
+    expect(f.docs).toHaveBeenCalledTimes(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("does not let an old secondary docs callback borrow the replacement request", async () => {
+    const f = await docsFixture(() => Response.json(docsIndex))
+    await f.session.prompt("/capture-docs")
+    expect((await f.effects[0]()).content[0].text).toBe("Docs search failed.")
+    expect(f.docs).not.toHaveBeenCalled()
+    expect((await f.effects[1]()).content[0].text).toContain("synthetic ownership result")
+    expect(f.docs).toHaveBeenCalledTimes(1)
+  })
+
+  it("checkpoints a captured secondary body reader before reading and drops its late chunk", async () => {
+    let request!: () => Promise<Response>
+    let body!: ReadableStreamDefaultController<Uint8Array>
+    const caller = new AbortController()
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("capture-http", { handler: () => { request = ownership.bind(() =>
+        fetchPiProject("http://127.0.0.1:9/inert-response", { signal: caller.signal })) } })
+    } })
+    const originalFetch = globalThis.fetch
+    const fetches = vi.fn((init: RequestInit) => {
+      expect(init.redirect).toBe("error")
+      expect(init.signal).not.toBe(caller.signal)
+      return new Response(new ReadableStream({ start(controller) { body = controller } }))
+    })
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => String(url) === "http://127.0.0.1:9/inert-response"
+      ? Promise.resolve(fetches(init!)) : originalFetch(url, init))
+    await f.bind()
+    await f.session.prompt("/capture-http")
+    const response = await request()
+    expect(() => response.body!.tee()).toThrow("Unowned project body operation")
+    expect(() => response.body!.getReader({ mode: "byob" })).toThrow("Unowned project body operation")
+    const reader = response.clone().body!.getReader()
+    f.setLive(pending)
+    const chunk = reader.read()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    body.enqueue(new TextEncoder().encode("discard old data"))
+    let delivered = false
+    void chunk.then(() => { delivered = true }, () => {})
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(delivered).toBe(false)
+    f.approve()
+    expect(new TextDecoder().decode((await chunk).value)).toBe("discard old data")
+    const late = reader.read()
+    void late.catch(() => {})
+    await f.session.prompt("/capture-http")
+    body.enqueue(new TextEncoder().encode("obsolete data"))
+    await expect(late).rejects.toThrow("Project request unavailable")
+    await expect(response.text()).rejects.toThrow("Project request unavailable")
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(fetches.mock.calls[0][0].signal!.aborted).toBe(true)
+    void reader.cancel().catch(() => {})
+    reader.releaseLock()
+    body.close()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("restores provider project scope without binding its registration epoch", async () => {
+    let invoke!: () => Promise<boolean>
+    let configuration: any
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerProvider("inert-provider", { streamSimple: () => isPiProjectManaged() })
+      pi.registerCommand("provider-scope", { handler: () => { invoke = ownership.bind(async () => configuration.streamSimple()) } })
+    } })
+    configuration = f.modelRegistry.registerProvider.mock.calls[0][1]
+    await f.bind()
+    await f.session.prompt("/provider-scope")
+    expect(await invoke()).toBe(true)
+    await f.session.prompt("/provider-scope")
+    expect(await invoke()).toBe(true) // not the unadmitted registration context
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it.each(["headers", "body"])("cancels secondary HTTP %s even when its transport ignores the caller signal", async phase => {
+    let request!: () => Promise<Response>
+    const caller = new AbortController()
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("held-http", { handler: () => { request = ownership.bind(() =>
+        fetchPiProject("inert:held", { signal: caller.signal })) } })
+    } })
+    const originalFetch = globalThis.fetch
+    let fetched!: () => void
+    const started = new Promise<void>(resolve => { fetched = resolve })
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => {
+      if (String(url) === "inert:held") {
+        if (phase === "headers") { fetched(); return new Promise<Response>(() => {}) }
+        return Promise.resolve({ json: () => { fetched(); return new Promise(() => {}) } } as Response)
+      }
+      return originalFetch(url, init)
+    })
+    await f.bind()
+    await f.session.prompt("/held-http")
+    const result = request().then(response => response.json())
+    const rejected = expect(result).rejects.toThrow("Project request unavailable")
+    await started
+    caller.abort()
+    await rejected
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("cancels a parked secondary checkpoint before it can consume a later release", async () => {
+    let request!: () => Promise<Response>
+    const caller = new AbortController()
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("parked-http", { handler: () => { request = ownership.bind(() =>
+        fetchPiProject("inert:parked-http", { signal: caller.signal })) } })
+    } })
+    const originalFetch = globalThis.fetch
+    const dispatch = vi.fn(async () => Response.json({ inert: true }))
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => String(url) === "inert:parked-http"
+      ? dispatch() : originalFetch(url, init))
+    await f.bind()
+    await f.session.prompt("/parked-http")
+    f.setLive(pending)
+    const result = request()
+    const rejected = expect(result).rejects.toThrow("Project request unavailable")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    caller.abort()
+    await rejected
+    await vi.waitFor(() => expect(f.owner.record.request.phase).toBe("cancelled"), { timeout: 500 })
+    f.approve()
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(0)
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("releases secondary body iteration locks at EOF and read failure", async () => {
+    let request!: () => Promise<Response>
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("iterated-http", { handler: () => { request = ownership.bind(() => fetchPiProject("inert:iterated-http")) } })
+    } })
+    const originalFetch = globalThis.fetch
+    let fail!: (reason: unknown) => void
+    let response = new Response("inert body")
+    vi.spyOn(globalThis, "fetch").mockImplementation((url, init) => String(url) === "inert:iterated-http"
+      ? Promise.resolve(response) : originalFetch(url, init))
+    await f.bind()
+    await f.session.prompt("/iterated-http")
+    const eof = await request()
+    let text = ""
+    for await (const chunk of eof.body!) text += new TextDecoder().decode(chunk)
+    expect(text).toBe("inert body")
+    expect(eof.body!.locked).toBe(false)
+    response = new Response(new ReadableStream({ start(controller) { fail = reason => controller.error(reason) } }))
+    const error = await request()
+    const iterator = error.body!.values()
+    const rejected = expect(iterator.next()).rejects.toThrow("inert reader failure")
+    fail(new Error("inert reader failure"))
+    await rejected
+    expect(error.body!.locked).toBe(false)
+    await iterator.return!()
+    expect(error.body!.locked).toBe(false)
+  })
+
+  it("preserves ordinary standalone HTTP and denies managed HTTP without admission", async () => {
+    const fetches = vi.fn(async () => Response.json({ inert: true }))
+    vi.spyOn(globalThis, "fetch").mockImplementation(fetches)
+    expect(await (await fetchPiProject("inert:standalone", { redirect: "manual" })).json()).toEqual({ inert: true })
+    expect(fetches.mock.calls[0][1]).toEqual({ redirect: "manual" })
+    const f = await frontendFixture({ register: async () => {
+      await expect(fetchPiProject("inert:unbound")).rejects.toThrow("Private inherited call unavailable")
+    } })
+    expect(fetches).toHaveBeenCalledTimes(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
   it("parks a native extension command before its handler, then consumes one private release", async () => {
     const handler = vi.fn()
     const f = await frontendFixture({ parked: true, register: pi => pi.registerCommand("owned", { handler }) })

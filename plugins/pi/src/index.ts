@@ -18,7 +18,7 @@ const PLUGIN_NAME = "pi"
 const PLUGIN_VERSION = "0.3.0"
 import { createErrorReporter } from "./error-reporting.mjs"
 import { createPiApprovalHold } from "./approval-hold.mjs"
-import { dispatchPiProjectEffect, isPiProjectManaged } from "./project-effects.mjs"
+import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION })
 errorReporter.installProcessHandlers()
@@ -160,7 +160,7 @@ const PB_URL = process.env.STATEWRIGHT_PB_URL || "https://statewright.ai"
 
 function reportPluginEvent(apiKey: string, event = "connect") {
   if (process.env.STATEWRIGHT_NO_UPDATE_CHECK) return
-  fetch(`${PB_URL}/api/telemetry/plugin-event`, {
+  fetchPiProject(`${PB_URL}/api/telemetry/plugin-event`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ plugin: PLUGIN_NAME, event, version: PLUGIN_VERSION, api_key: apiKey, platform: `${process.platform}-${process.arch}` }),
@@ -1234,7 +1234,7 @@ async function callOllamaClassifier(
   model: string, prompt: string, timeout: number,
 ): Promise<{ decision: string; reason: string } | null> {
   try {
-    const resp = await fetch(`${OLLAMA_URL}/api/chat`, {
+    const resp = await fetchPiProject(`${OLLAMA_URL}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1881,7 +1881,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     }),
     async execute(_id, params: { query: string }) {
       try {
-        const resp = await fetch("https://docs.statewright.ai/search-index.json", {
+        const resp = await fetchPiProject("https://docs.statewright.ai/search-index.json", {
           signal: AbortSignal.timeout(5000),
         })
         if (!resp.ok) return { content: [{ type: "text", text: "Docs not available" }] }
@@ -2396,7 +2396,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
                     },
                   })
 
-                  const resp = await fetch(url, {
+                  const resp = await fetchPiProject(url, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${model.apiKey || "ollama"}` },
                     body,
@@ -3131,7 +3131,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     const apiKey = getApiKey()
     if (!apiKey) return null
     try {
-      const resp = await fetch(`${PB_URL}/api/collections/workflow_runs/records`, {
+      const resp = await fetchPiProject(`${PB_URL}/api/collections/workflow_runs/records`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
@@ -3161,7 +3161,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     if (!runCreatedLocally || !runId || !getApiKey()) return
     try {
       // Fetch current, append transition, update
-      const resp = await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+      const resp = await fetchPiProject(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
         headers: { Authorization: `Bearer ${getApiKey()}` },
         signal: AbortSignal.timeout(5000),
       })
@@ -3169,7 +3169,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       const run = await resp.json() as { transitions?: unknown[]; transition_count?: number }
       const transitions = Array.isArray(run.transitions) ? run.transitions : []
       transitions.push({ event, from, to, timestamp: new Date().toISOString() })
-      await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+      await fetchPiProject(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${getApiKey()}` },
         body: JSON.stringify({
@@ -3187,7 +3187,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     const runId = currentRunId
     if (!runCreatedLocally || !runId || !getApiKey()) return
     try {
-      await fetch(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
+      await fetchPiProject(`${PB_URL}/api/collections/workflow_runs/records/${runId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${getApiKey()}` },
         body: JSON.stringify({
@@ -3219,7 +3219,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       run_id: runId,
     }
     try {
-      await fetch(`${PB_URL}/api/collections/workflow_logs/records`, {
+      await fetchPiProject(`${PB_URL}/api/collections/workflow_logs/records`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

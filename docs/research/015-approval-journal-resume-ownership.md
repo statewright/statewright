@@ -2,6 +2,138 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 14 entry: secondary project HTTP ownership
+
+Base 765ae8b; full original goal active. Manual source/evidence/Git controls;
+no Statewright workflow query/load/use, real decisions/inference or live session
+inspection. Root owns implementation. This bounded cut captures each secondary
+project HTTP call's private immutable request, gates dispatch and subsequent
+body reads, combines cancellation, and rejects stale results. Actual SDK/index
+docs-tool tests use synthetic authority and intercepted inert responses only.
+Gateway/bootstrap transport retains its separate designated observation path;
+standalone extension HTTP behavior is preserved. Native configuration writes,
+filesystem/process/branch effects, provider event publication and all original
+006/012/spec111/116 obligations remain open; this is not production activation.
+
+Observed-only envelope: 100 normal/135 contraction root calls, 30-minute warning/
+45-minute contraction, 16KiB output targets, final-third validation/review reserve.
+Skill-required clean-context Astra/high read-only review: 10 calls/12 minutes/
+two checks; fresh finding-only recheck: four calls/five minutes/two checks; at
+most two distinct repairs per finding. Two exact-source exports plus one
+regression-justified export. No provider/controller budget enforcement available.
+Serial Node gate retains the previous unchanged parallel shutdown-fixture
+failure rather than claiming it fixed. Scoped local revert; preserve journals,
+all seven tracked user changes and Auldwyrm; no installation/deploy/push.
+
+Initial three docs fixtures failed before reaching HTTP: no workflow fixture
+environment meant lazy-mode tools were not registered. Correct only task-owned
+environment to fixture workflow/executor identity and exact loopback bridge;
+fake client rejects every call except synthetic state observation. No actual
+workflow/controller tool invoked. With original raw docs fetch restored for a
+discriminating regression run, all three corrected tests failed: pending did
+not park, stale body returned synthetic data, old callback borrowed unrestricted
+HTTP. Restore owned helper: all three pass. Six focused tests subsequently
+passed; initial provider-scope fixture failed because its fake ModelRegistry
+lacked the SDK's pre-bind registerProvider method. Add inert registry spy at
+construction, not relax frontend diagnostics. Expanded frontend gate56/56
+passes: seven new cases and all49 prior SDK boundary cases. Cancellation races
+cover ignored signals; late promises remain handled. No SDK/vendor file edit.
+
+Initial frozen tree36dd3083d30a20868c22ae88f22ad38464247140, export
+/tmp/statewright-project-http.vIbmuX: serial Node308/308; Pi218 passed/1 existing
+opt-in live skip; native2/2; Claude parity/two mjs syntax and staged diff-check0.
+Root expanded fixture gate57/57 before this freeze. These green source receipts
+are now superseded, not final: independent Astra/high read-only reviewer
+/root/pi_project_http_review found two P2 lifecycle defects in bounded probes.
+R1 caller abort only raced the return, leaving the parked checkpoint polling
+and able to consume a release (real gate probe: consume1/fetch0 after abort).
+R2 natural body-iteration EOF did not release its reader lock (native comparison
+unlocked; helper locked). No additional scoped finding; no edits by reviewer.
+
+Root added actual SDK regressions: both fail against frozen implementation
+(parked phase instead of cancelled; EOF body locked). Repair attempt1 each:
+private operations.dispatch accepts a constraining caller signal, combines it
+before checkpoint, and the HTTP capture passes cancellation through initial
+dispatch and every body read. A parked cancellation durably cancels only its
+captured request; no later release consumption/fetch. Iterator releases once
+on EOF/error/return and becomes terminal after release. Focused repair2/2 green;
+full source gates and fresh clean-context two-finding recheck required. Seventh
+owned path request-operations.mjs now included; no implementation delegation,
+SDK edits, authority fallback or native identity adoption.
+
+### Slice 14 final source, review and original-objective audit
+
+Final tested/rechecked tree0083169f4ec893a9c6497269059a543dc530e0c3, exact export
+/tmp/statewright-project-http-repaired.mvbpzR: frontend59/59; serial Node308/308
+(zero failures/skips/cancellations); Pi220 passed/1 existing opt-in live-canary
+skip; native2/2; Claude generated managed-client parity, three mjs syntax and
+staged diff check exit0. Both exports used existing dependency symlinks, not a
+clean install. Pi cloud-URL diagnostics are mocked clients; new HTTP tests
+intercept inert responses and otherwise use task-owned loopback/native files.
+No Rust/workspace-wide typecheck/lint/build/security scan, headed/native UI,
+real authorized decision/inference, actual workflow/main attachment, release
+packaging, staging or production acceptance claimed. No migration/schema or
+provider-controller envelope enforcement introduced. Previous parallel Node
+shutdown-fixture failure remains an unchanged retained limitation; serial
+success here does not relabel it fixed or prove concurrency acceptance.
+
+Fresh clean-context Astra/high read-only /root/pi_project_http_recheck ran only
+the two actual SDK repair tests in that final export:2 passed/57 filtered, exit0.
+R1 closed: caller cancellation reaches the captured checkpoint, durable cancel
+precedes simulated release, zero consumption/fetch; immutable reference remains
+copied, no cancellation lookup against replacement input. R2 closed: EOF and
+read failure unlock the captured body, subsequent return is idempotent. No
+remaining issue within these two repairs. Replacement safety was independently
+inspected structurally, not separately exercised by selected recheck tests.
+Root alone implemented, one distinct repair per finding, two exact exports,
+all root handles terminal. Final recording is receipt-only delta from the
+tested/rechecked code, not a new code revision or whole-objective sign-off.
+
+Current original006 nine-row audit (all full requirements remain controlling):
+
+| Requirement | Evidence and still-open obligation |
+| --- | --- |
+| 1 Immutable tenant/client/session/run/edge/artifact/policy/reviewer/expiry ticket | Exact local journal/session/request checks retained; complete artifact/policy/reviewer/expiry/revocation semantics and real authority remain open. |
+| 2 Native thread/lineage/request ID/epoch, never model identity | Parent/SDK/main experimental composition and copied HTTP origins retained; complete branch/replacement/cross-host lineage acceptance remains open. |
+| 3 Pending means no declared effect/inference; human work parked outside inference | Secondary HTTP dispatch/body consumption now privately checkpointed; native configuration, filesystem/process/branch effects, provider publication, all transport/retry/summary boundaries and default activation remain open. |
+| 4 Authority before controls; unauthorized dismissal only | No host decision surface or new authority inference; full entitled native/website reviewer journey remains open. |
+| 5 Cancel/dismiss/disconnect preserves pending; cold resume reconciles | Durable journal/cold synthetic-parent proofs retained; canceled HTTP cannot consume a later release. Full crash-lock/legacy/native cold restart and permanent SDK failure cleanup remain open. |
+| 6 Private resolution with freshness checks; consume once; duplicate/late harmless | Existing nonce/tombstone/applied-edge tests retained; caller cancellation reaches checkpoint before consumption. Real entitlement/artifact/policy freshness and complete native acceptance remain open. |
+| 7 New input invalidates old continuation AND final response | HTTP headers/body/default reads cannot borrow replacement ownership or publish late data; native configuration, every declared effect and asynchronous interactive rendering remain open. |
+| 8 Decision provenance/authentication strength; agent key is not human/isolation proof | Owned child credential separation retained; synthetic authority only, no new strong-human or malicious-agent/OS-isolation claim. |
+| 9 Shared client-neutral reviewer/evidence/retention, no forced website | Shared P0 journal/service remains; complete retention/evidence/reviewer/cross-client/advertised-host acceptance remains open. |
+
+P1 012 audit: A/1 Rust pending pre-tool denial is still unrelated user-dirty and
+unvalidated/uncommitted here; 2 hosts remain unprivileged, real trusted decision
+journey untested; C/3 previous exact experimental parent/deferred-clear/readiness/
+synthetic cold resume proofs are retained by current Node suite, not production
+or complete restart acceptance; B/4 gains secondary HTTP ownership only, not
+whole effect/transport safety; D workflow-loading actual gateway/fake-Pi canary
+not run under no-workflow/no-real-decisions authority. Specs111/116 combined
+native+website reviewer/cold/new-input, packaging/Windows/WSL/desktop/soak and
+promotion gates remain open; proposed114 enterprise requirements not asserted
+implemented. Native fixture success cannot replace those accepted boundaries.
+
+Exact next bounded source milestone: privately checkpoint project setters and
+native metadata/configuration mutations before effect. Installed SDK cycleModel
+awaits ModelRegistry.getAvailable then writes agent.state.model before appending
+history; append-only guarding is too late. Capture original request across that
+await, protect mutation before it changes model/history/settings, preserve only
+explicitly trusted fixed bootstrap behavior and prove no foreign abort/latest
+ownership borrowing. Then close remaining filesystem/spawn/branch/render and
+transport/internal-retry gaps and authorized full acceptance. Do not narrow the
+original objective to protected APIs or the experimental flag.
+
+Canonical seven user-dirty tracked files unchanged SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm untouched tracked diff SHA256
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa;
+untracked user artifacts preserved. Manual profile owner root; no invented
+workflow/run identity. Scoped local revert preserves journals and owner records;
+no installed/live artifact to roll back. Full goal active, not complete or
+blocked; no workflow query/load/use, live session access/signals, actual resolver/
+decisions/inference, installation, push or deployment. Local Git milestone only.
+
 ## Slice 13 entry: parent-owned Pi composition
 
 Base ee8ceb2; authoritative goal active. Root reverified the unchanged seven

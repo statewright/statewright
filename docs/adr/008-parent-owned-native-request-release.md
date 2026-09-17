@@ -34,6 +34,17 @@ still recovery-required, never stolen by PID/age heuristics.
 
 ## Native SDK boundary and activation constraint
 
+Secondary project HTTP (docs, classifier, custom provider and telemetry/run-log
+helpers) captures the private calling request before dispatch. Initial fetch,
+body decoders and default-reader reads checkpoint that same reference, combine
+epoch/caller cancellation and drop old results even when the transport ignores
+abort. Provider callbacks restore project scope at invocation without capturing
+the registration epoch. Managed fetch disallows automatic redirects and raw
+body pipe/tee/BYOB consumption; these are not used by project consumers. Normal
+standalone HTTP remains unchanged. This is not an interception boundary for
+arbitrary code, all SDK/provider transports or provider stream publication;
+native configuration and remaining filesystem/process/branch effects are open.
+
 The Pi gate awaits private status outside inference and returns the SDK input
 event's `continue` only for an active current parent request. It is disabled
 until explicitly enabled after hook registration. Managed errors, invalid

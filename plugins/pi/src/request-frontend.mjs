@@ -76,7 +76,7 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
             const managed = new Proxy(pi, {
               get(object, key, receiver) {
                 if (!["on", "registerTool", "registerCommand"].includes(key)) {
-                  return ["exec", "sendUserMessage", "sendMessage"].includes(key)
+                  return ["exec", "sendUserMessage", "sendMessage", "registerProvider"].includes(key)
                     ? piProjectMethod(object, key, operations, projectBridge) : Reflect.get(object, key, receiver);
                 }
                 return (...args) => {

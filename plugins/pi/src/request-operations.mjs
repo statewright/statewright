@@ -72,9 +72,10 @@ export function createPiRequestOperations() {
       try { const call = calls.getStore(); return !!call?.reference && gate.isSuperseded(context(), call.reference); }
       catch { return false; }
     },
-    async dispatch(effect, { observation = false } = {}) {
+    async dispatch(effect, { observation = false, signal: supplied } = {}) {
       const ref = copy(reference());
       const unavailable = () => { throw new Error("Project request unavailable"); };
+      if (supplied != null && !(supplied instanceof AbortSignal)) unavailable();
       const control = () => !closed && !calls.getStore() && (!session || gate.matchesNative(context()));
       // Only designated read-only state observation may precede admission.
       // An explicit input with no admitted reference is not bootstrap control.
@@ -85,8 +86,10 @@ export function createPiRequestOperations() {
         return result;
       }
       if (!owned(ref)) unavailable();
-      const signal = gate.operationSignal(context(), ref);
-      if (!(signal instanceof AbortSignal)) unavailable();
+      const epochSignal = gate.operationSignal(context(), ref);
+      if (!(epochSignal instanceof AbortSignal)) unavailable();
+      const signal = supplied ? AbortSignal.any([epochSignal, supplied]) : epochSignal;
+      if (signal.aborted) unavailable();
       if (!observation && !await gate.checkpoint(context(), signal, ref)) unavailable();
       if (!owned(ref) || signal.aborted) unavailable();
       const result = await effect({ reference: ref, signal });

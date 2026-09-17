@@ -28,7 +28,11 @@ import {
   hostSupportsLiveRouting,
   prepareHostSession,
   SUPPORTED_HOSTS,
+  assertHostOwnershipArgs,
+  createPiNativeSession,
+  assertPiNativeSession,
 } from "./lib/host-adapters.mjs";
+import { createExecutorSessionStore, attachExecutorSession } from "./lib/executor-session-ownership.mjs";
 import { RemoteStatewrightClient, resolveApiKey } from "./lib/remote-client.mjs";
 import { createExecutorApprovalMirror } from "./lib/executor-approval-mirror.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./lib/error-reporting.mjs";
@@ -46,6 +50,7 @@ Session:
   --cwd PATH                 Source repository (default: current directory)
   --project-id ID            Optional Statewright project scope
   --resume-workflow          Resume the workflow's paused run
+  --executor-session-id ID   Exact persisted executor session (required for resume)
   --host-bin PATH            Override the host executable
   --host-arg ARG             Pass one argument to the host (repeatable)
   --plugins-root PATH        Statewright plugins directory
@@ -78,6 +83,7 @@ function parseArgs(argv) {
     ["--workflow", "workflow"],
     ["--cwd", "cwd"],
     ["--project-id", "projectId"],
+    ["--executor-session-id", "executorSessionId"],
     ["--host-bin", "hostBin"],
     ["--plugins-root", "pluginsRoot"],
     ["--fallback-model", "fallbackModel"],
@@ -116,6 +122,11 @@ function validateOptions(options) {
     throw new Error("--workflow must be a printable workflow name.");
   }
   if (!options.prompt) throw new Error("Provide the task after '--'.");
+  if (options.resumeWorkflow && !options.executorSessionId) throw new Error("--resume-workflow requires an explicit --executor-session-id");
+  if (options.resumeWorkflow && !["pi", "claude", "cursor"].includes(options.host)) {
+    throw new Error("Exact native-session resume is not yet supported for this executor host");
+  }
+  assertHostOwnershipArgs(options);
 }
 
 export function resolvePluginsRoot(options) {
@@ -226,7 +237,7 @@ export function executorAgentEnvironment(environment, session) {
   result = {
     ...result,
     STATEWRIGHT_WORKFLOW: session.workflow,
-    STATEWRIGHT_CLIENT_ID: session.transportSessionId,
+    STATEWRIGHT_CLIENT_ID: session.transportClientId ?? session.transportSessionId,
     STATEWRIGHT_MCP_SESSION_ID: session.transportSessionId,
     STATEWRIGHT_BRANCH_SESSION_ID: session.transportSessionId,
     STATEWRIGHT_EXECUTOR_ID: session.executorId,
@@ -274,6 +285,8 @@ export async function observeHost(options) {
     approvalMirror,
   } = options;
   if (!approvalMirror) throw new Error("Host observation requires approval journal ownership.");
+  await options.sessionOwner?.assertOwner();
+  options.sessionOwner?.assertGateway(options.initialState);
   await approvalMirror.observe(options.initialState);
   let state = options.initialState;
   let stateKey = `${state.state}:${state.iteration ?? 0}`;
@@ -281,6 +294,8 @@ export async function observeHost(options) {
   let continuation = false;
 
   while (true) {
+    await options.sessionOwner?.assertOwner();
+    if (options.host === "pi") await assertPiNativeSession({ sessionFile: options.hostSessionFile, sessionId: options.hostSessionId, cwd: options.cwd });
     const launch = buildHostLaunch(options, state, continuation);
     await telemetry("executor_host_started", {
       host: options.host,
@@ -324,6 +339,8 @@ export async function observeHost(options) {
       pollPromise = (async () => {
         try {
           const next = await client.call("statewright_get_state");
+          await options.sessionOwner?.assertOwner();
+          options.sessionOwner?.assertGateway(next);
           await approvalMirror.observe(next);
           const nextKey = `${next.state}:${next.iteration ?? 0}`;
           const previous = state;
@@ -412,8 +429,7 @@ export async function main(argv = process.argv.slice(2)) {
   const cwd = workspaceSession?.primaryCwd ?? requestedCwd;
   const apiKey = await resolveApiKey();
   const executorId = randomUUID();
-  const transportSessionId = `br_exec_${randomUUID()}`;
-  const fallbackHostSessionId = randomUUID();
+  const gatewayUrl = process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
   const telemetry = options.telemetryEnabled
     ? createTelemetryWriter(resolve(options.telemetryPath), {
         endpoint: process.env.STATEWRIGHT_TELEMETRY_URL ?? null,
@@ -426,29 +442,26 @@ export async function main(argv = process.argv.slice(2)) {
   const leasePath = workspaceSession
     ? join(workspaceSession.runRoot, "executor-lease.json")
     : join(tmpdir(), `statewright-executor-${executorId}.json`);
-  const lease = workspaceSession
-    ? await new ExecutorLease(leasePath, {
-        executor_id: executorId,
-        host: options.host,
-        manifest_path: workspaceSession.manifestPath,
-        manifest_digest: workspaceSession.manifest.manifest_digest,
-        transport_session_id: transportSessionId,
-      }).start()
-    : null;
-  const client = new RemoteStatewrightClient({
-    gatewayUrl: process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
-    apiKey,
-    clientId: transportSessionId,
-    sessionId: transportSessionId,
-  });
+  let lease = null;
+  let sessionOwner = null;
   let adapterBridge = null;
 
   try {
-    await client.initialize();
-    await telemetry("executor_gateway_connected", {
-      gateway_origin: client.gatewayOrigin,
+    sessionOwner = await createExecutorSessionStore({ root: join(homedir(), ".statewright", "executor-sessions"),
+      workflow: options.workflow, projectId: options.projectId, host: options.host, cwd, apiKey, gatewayUrl,
+    }).open({ sessionId: options.executorSessionId, resume: Boolean(options.resumeWorkflow) });
+    const savedOwner = sessionOwner.record;
+    process.stderr.write(`[statewright] Executor session: ${savedOwner.executor_session_id}\n`);
+    if (options.resumeWorkflow) {
+      if (!savedOwner.host_ready) throw new Error("Native session ownership is incomplete; explicit recovery required");
+      if (options.host === "pi") await assertPiNativeSession({ sessionFile: savedOwner.host_session_file,
+        sessionId: savedOwner.host_session_id, cwd });
+    }
+    const transportClientId = savedOwner.transport_client_id;
+    const client = new RemoteStatewrightClient({ gatewayUrl, apiKey, clientId: transportClientId,
+      sessionId: savedOwner.transport_session_id ?? transportClientId, requireNegotiatedSessionId: true,
+      ...(options.resumeWorkflow ? { expectedSessionId: savedOwner.transport_session_id } : {}),
     });
-    process.stderr.write(`[statewright] Gateway: ${client.gatewayOrigin}\n`);
     const approvalMirror = createExecutorApprovalMirror({
       workflow: options.workflow,
       projectId: options.projectId,
@@ -456,21 +469,31 @@ export async function main(argv = process.argv.slice(2)) {
       cwd,
       root: join(homedir(), ".statewright", "exec-approvals"),
       apiKey,
-      gatewayUrl: process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
-      transportClientId: transportSessionId,
-      getState: () => client.call("statewright_get_state"),
+      gatewayUrl,
+      transportClientId,
+      executorSessionId: savedOwner.executor_session_id,
+      getState: async () => {
+        await sessionOwner.assertOwner();
+        const snapshot = await client.call("statewright_get_state");
+        await sessionOwner.assertOwner();
+        sessionOwner.assertGateway(snapshot);
+        return snapshot;
+      },
       telemetry: (event) => telemetry(event.type, {
         approval_id: event.approvalId ?? null,
         to_state: event.toState ?? null,
         reason: event.reason ?? null,
       }),
     });
-    await client.call("statewright_load_workflow", {
-      name: options.workflow,
-      resume: Boolean(options.resumeWorkflow),
-      ...(options.projectId ? { project_id: options.projectId } : {}),
-    });
-    const initialState = await client.call("statewright_get_state");
+    await approvalMirror.assertNoLegacyCheckpoint();
+    const initialState = await attachExecutorSession({ client, owner: sessionOwner, resume: Boolean(options.resumeWorkflow) });
+    await telemetry("executor_gateway_connected", { gateway_origin: client.gatewayOrigin });
+    process.stderr.write(`[statewright] Gateway: ${client.gatewayOrigin}\n`);
+    const transportSessionId = sessionOwner.record.transport_session_id;
+    if (workspaceSession) lease = await new ExecutorLease(leasePath, {
+      executor_id: executorId, host: options.host, manifest_path: workspaceSession.manifestPath,
+      manifest_digest: workspaceSession.manifest.manifest_digest, transport_session_id: transportSessionId,
+    }).start();
     const restored = await approvalMirror.restore(initialState);
     if (restored?.status === "parked") {
       process.stderr.write(
@@ -515,6 +538,7 @@ export async function main(argv = process.argv.slice(2)) {
       host: options.host,
       executorId,
       transportSessionId,
+      transportClientId,
       workspaceSession,
       leasePath,
       adapterBridge,
@@ -525,11 +549,18 @@ export async function main(argv = process.argv.slice(2)) {
       ...options,
       cwd,
       environment,
-    }, fallbackHostSessionId);
+    }, savedOwner.host_session_id);
+    const hostSessionFile = options.host === "pi"
+      ? options.resumeWorkflow ? savedOwner.host_session_file : await createPiNativeSession({ pluginsRoot: options.pluginsRoot,
+        cwd, sessionDir: sessionOwner.nativeRoot, sessionId: hostSessionId })
+      : null;
+    await sessionOwner.bindHost({ sessionId: hostSessionId, sessionFile: hostSessionFile });
     const result = await observeHost({
       ...options,
       cwd,
       hostSessionId,
+      hostSessionFile,
+      sessionOwner,
       initialState,
       client,
       approvalMirror,
@@ -564,6 +595,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (options.host === "opencode") {
       await rm(opencodeIsolationRoot(executorId), { recursive: true, force: true }).catch(() => {});
     }
+    await sessionOwner?.release();
   }
 }
 

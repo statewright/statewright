@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createExecutorApprovalMirror } from "../lib/executor-approval-mirror.mjs";
 import { createRuntimeApprovalService } from "../lib/runtime-approval-service.mjs";
+import { approvalJournal } from "../lib/approval-journal.mjs";
+import { randomUUID } from "node:crypto";
 
 const liveState = {
   run_id: "run_1",
@@ -191,4 +193,49 @@ test("journal scope isolates credential, gateway, host, project and checkout", a
     assert.notEqual(other.clientId, service.clientId);
     assert.equal(await other.restore(liveState), null);
   }
+});
+
+test("explicit executor runs have distinct journals even within the same workflow and project", async t => {
+  const { journalRoot } = makeHarness(t);
+  const base = { workflow: "test-flow", cwd: "/tmp/statewright-exec-mirror", root: journalRoot,
+    apiKey: "test-key", gatewayUrl: "http://127.0.0.1:9" };
+  const a = createExecutorApprovalMirror({ ...base, executorSessionId: randomUUID() });
+  const b = createExecutorApprovalMirror({ ...base, executorSessionId: randomUUID() });
+  assert.notEqual(a.clientId, b.clientId);
+  await a.observe(liveState);
+  assert.equal(await b.restore(liveState), null);
+});
+
+for (const legacy of ["scoped", "original"]) test(`an ambiguous ${legacy} executor journal cannot be bypassed by a new session ID`, async t => {
+  const { service, journalRoot } = makeHarness(t);
+  const id = legacy === "scoped" ? service.clientId : "exec_test-flow_/tmp/statewright-exec-mirror";
+  await approvalJournal(journalRoot, id).save("test-flow", liveState);
+  const newer = createExecutorApprovalMirror({ workflow: "test-flow", cwd: "/tmp/statewright-exec-mirror", root: journalRoot,
+    apiKey: "test-key", gatewayUrl: "http://127.0.0.1:9", executorSessionId: randomUUID() });
+  await assert.rejects(newer.assertNoLegacyCheckpoint(), /ambiguous/);
+  await assert.rejects(newer.observe(liveState), /ambiguous/);
+  assert.equal((await approvalJournal(journalRoot, id).load("test-flow")).pending_approval.approval_id, "apr_1");
+});
+
+test("gateway URL aliases cannot split one explicitly owned approval journal", async t => {
+  const { journalRoot, makeService } = makeHarness(t);
+  const base = { workflow: "test-flow", cwd: "/tmp/statewright-exec-mirror", root: journalRoot,
+    apiKey: "test-key", executorSessionId: randomUUID(), makeService };
+  const variants = ["http://LOCALHOST:9", "http://localhost:9/", "http://localhost:9/mcp"]
+    .map(gatewayUrl => createExecutorApprovalMirror({ ...base, gatewayUrl }));
+  await variants[0].observe(liveState);
+  for (const mirror of variants.slice(1)) {
+    assert.equal(mirror.clientId, variants[0].clientId);
+    assert.equal((await mirror.restore(liveState)).status, "parked");
+  }
+});
+
+test("an opaque legacy raw-URL namespace cannot be bypassed through a canonical URL alias", async t => {
+  const { journalRoot } = makeHarness(t);
+  const base = { workflow: "test-flow", cwd: "/tmp/statewright-exec-mirror", root: journalRoot, apiKey: "test-key" };
+  const legacy = createExecutorApprovalMirror({ ...base, gatewayUrl: "http://LOCALHOST:9" });
+  await legacy.observe(liveState);
+  const owned = createExecutorApprovalMirror({ ...base, gatewayUrl: "http://localhost:9/mcp", executorSessionId: randomUUID() });
+  await assert.rejects(owned.restore({ ...liveState, state: "build", pending_approval: null }), /ambiguous/);
+  assert.equal((await legacy.restore(liveState)).status, "parked");
 });

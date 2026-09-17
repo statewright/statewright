@@ -352,6 +352,11 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                         "type": "boolean",
                         "description": "Resume from the last paused run of this workflow instead of starting fresh"
                     },
+                    "run_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact owned paused run to resume. Requires resume=true; a miss never creates a new run."
+                    },
                     "branch": {
                         "type": "string",
                         "description": "Connect to a specific fork branch session (for parallel sub-agents)"

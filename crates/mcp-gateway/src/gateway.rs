@@ -49,6 +49,7 @@ impl Gateway {
         &self,
         workflow: &str,
         project: &str,
+        expected_run: Option<&str>,
     ) -> Result<(String, crate::session::GatewaySession), String> {
         #[cfg(feature = "metering")]
         {
@@ -59,9 +60,10 @@ impl Gateway {
             let row = sqlx::query_as::<_, (String, Option<String>, Option<serde_json::Value>)>(
                 "SELECT id, final_state, context_snapshot FROM workflow_runs \
                  WHERE owner = $1 AND workflow_name = $2 AND status = 'paused' \
-                   AND session_id = $3 AND project_id = $4 ORDER BY updated DESC LIMIT 1"
+                   AND session_id = $3 AND project_id = $4 \
+                   AND ($5::text IS NULL OR id = $5) ORDER BY updated DESC LIMIT 1"
             ).bind(&self.owner_id).bind(workflow).bind(&self.session_id)
-                .bind(project).fetch_optional(pool).await
+                .bind(project).bind(expected_run).fetch_optional(pool).await
                 .map_err(|e| { tracing::warn!(error = %e, "Paused run lookup failed"); "Paused run lookup failed" })?
                 .ok_or("No paused run matches this owner, session, workflow and project; no new run was created")?;
             let (id, state, checkpoint) = row;
@@ -75,7 +77,7 @@ impl Gateway {
         }
         #[cfg(not(feature = "metering"))]
         {
-            let _ = (workflow, project);
+            let _ = (workflow, project, expected_run);
             Err("Resume requires durable run storage".into())
         }
     }
@@ -1954,6 +1956,18 @@ impl Gateway {
             }
             "statewright_load_workflow" => {
                 let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let resume = arguments
+                    .get("resume")
+                    .and_then(|r| r.as_bool())
+                    .unwrap_or(false);
+                let expected_run = match arguments.get("run_id") {
+                    None => None,
+                    Some(serde_json::Value::String(value))
+                        if resume && !value.trim().is_empty() && value.len() <= 1024
+                            && !value.chars().any(char::is_control) && arguments.get("branch").is_none() => Some(value.as_str()),
+                    Some(_) => return JsonRpcResponse::error(id, -32602,
+                        "run_id must be a nonempty exact resume selector with resume=true and no branch"),
+                };
 
                 // Transport identity is established by the remote MCP layer
                 // and must never be rewritten by a tool argument. Keep the
@@ -2060,13 +2074,13 @@ impl Gateway {
                 }
 
                 // Resolve and validate before replacing any live session or creating a run.
-                let resume = arguments
-                    .get("resume")
-                    .and_then(|r| r.as_bool())
-                    .unwrap_or(false);
                 let paused = if resume {
                     match self
-                        .paused_run(workflow_name, requested_project.as_deref().unwrap_or(""))
+                        .paused_run(
+                            workflow_name,
+                            requested_project.as_deref().unwrap_or(""),
+                            expected_run,
+                        )
                         .await
                     {
                         Ok(paused) => Some(paused),
@@ -3499,6 +3513,116 @@ mod tests {
         );
         assert_eq!(gw.active_workflow, active);
         assert_eq!(gw.current_run_id, run);
+    }
+
+    #[tokio::test]
+    async fn invalid_exact_resume_selectors_preserve_live_ownership() {
+        let mut gw = approval_gateway();
+        let before = gw
+            .session_manager
+            .get("approval-session")
+            .unwrap()
+            .checkpoint();
+        let identity = (
+            gw.active_workflow.clone(),
+            gw.current_run_id.clone(),
+            gw.session_id.clone(),
+        );
+        for extra in [
+            json!({"run_id": "owned", "resume": false}),
+            json!({"run_id": "" , "resume": true}),
+            json!({"run_id": "  ", "resume": true}),
+            json!({"run_id": 42, "resume": true}),
+            json!({"run_id": null, "resume": true}),
+            json!({"run_id": "run\nforeign", "resume": true}),
+            json!({"run_id": "owned", "resume": true, "branch": "other"}),
+        ] {
+            let mut args = extra;
+            args["name"] = json!("approval-test");
+            let response = gw
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    id: Some(json!(1)),
+                    params: Some(json!({"name": "statewright_load_workflow", "arguments": args})),
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.error.unwrap().code, -32602);
+            assert_eq!(
+                gw.session_manager
+                    .get("approval-session")
+                    .unwrap()
+                    .checkpoint(),
+                before
+            );
+            assert_eq!(
+                (
+                    gw.active_workflow.clone(),
+                    gw.current_run_id.clone(),
+                    gw.session_id.clone()
+                ),
+                identity
+            );
+        }
+        let tool = crate::custom_tools::custom_tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == "statewright_load_workflow")
+            .unwrap();
+        let wire = serde_json::to_value(tool).unwrap();
+        assert_eq!(
+            wire["inputSchema"]["properties"]["run_id"]["type"],
+            "string"
+        );
+        assert_eq!(wire["inputSchema"]["properties"]["run_id"]["minLength"], 1);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn exact_resume_selects_owned_run_not_latest_candidate() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)")
+            .execute(&pool).await.unwrap();
+        let mut gw = approval_gateway();
+        gw.db_pool = Some(pool.clone());
+        let checkpoint = gw
+            .session_manager
+            .get("approval-session")
+            .unwrap()
+            .checkpoint();
+        for (run, updated) in [("owned-older", "1"), ("latest-other", "2")] {
+            sqlx::query("INSERT INTO workflow_runs VALUES ($1, $2, 'approval-test', 'paused', 'approval-session', '', 'working', $3, $4)")
+                .bind(run).bind(&gw.owner_id).bind(&checkpoint).bind(updated).execute(&pool).await.unwrap();
+        }
+        let (selected, _) = gw
+            .paused_run("approval-test", "", Some("owned-older"))
+            .await
+            .unwrap();
+        assert_eq!(selected, "owned-older");
+        assert!(gw
+            .paused_run("approval-test", "", Some("absent"))
+            .await
+            .is_err());
+        assert!(gw
+            .paused_run("approval-test", "foreign-project", Some("owned-older"))
+            .await
+            .is_err());
+        let paused: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow_runs WHERE status='paused'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(paused, 2);
+        pool.close().await;
     }
 
     #[cfg(feature = "metering")]

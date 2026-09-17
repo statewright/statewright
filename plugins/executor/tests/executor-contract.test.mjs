@@ -37,6 +37,17 @@ test("executor environment binds all adapters to one transport identity", () => 
   assert.equal(environment.STATEWRIGHT_API_KEY, undefined);
 });
 
+test("executor environment distinguishes stable authenticated client from canonical transport session", () => {
+  const environment = executorAgentEnvironment({ PATH: "/bin" }, {
+    workflow: "delivery", host: "pi", executorId: "executor", transportClientId: "br_exec_owned-client",
+    transportSessionId: "canonical-owned-session", leasePath: "/run/lease.json", pluginsRoot: "/plugins",
+    adapterBridge: { url: "http://127.0.0.1:1234", token: "bridge" },
+  });
+  assert.equal(environment.STATEWRIGHT_CLIENT_ID, "br_exec_owned-client");
+  assert.equal(environment.STATEWRIGHT_MCP_SESSION_ID, "canonical-owned-session");
+  assert.equal(environment.STATEWRIGHT_BRANCH_SESSION_ID, "canonical-owned-session");
+});
+
 test("OpenCode host observation requires an explicit readiness owner", () => {
   assert.throws(
     () => assertHostAdapterContract({ host: "opencode" }),

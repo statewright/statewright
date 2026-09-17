@@ -96,3 +96,15 @@ test("a gate arriving after reroute is requested suppresses the latched restart"
   assert.equal(f.children.length, 1);
   assert.equal(result.state.pending_approval.approval_id, "apr-late");
 });
+
+test("a poll cannot replace the owned run even when no approval is pending", async t => {
+  const f = fixture(t, {
+    sessionOwner: { assertOwner: async () => {}, assertGateway: state => {
+      if (state.run_id !== initialState.run_id) throw new Error("owned run changed");
+    } },
+    client: { call: async () => ({ ...initialState, run_id: "foreign-run" }) },
+  });
+  await assert.rejects(observeHost(f.options), /owned run changed/);
+  assert.deepEqual(f.children[0].signals, ["SIGINT"]);
+  assert.equal(f.observed.length, 1);
+});

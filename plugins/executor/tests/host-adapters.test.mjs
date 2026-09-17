@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import {
   buildHostLaunch,
   hostRoutingMode,
@@ -7,6 +12,8 @@ import {
   hostSupportsLiveRouting,
   prepareHostSession,
   SUPPORTED_HOSTS,
+  createPiNativeSession,
+  assertPiNativeSession,
 } from "../lib/host-adapters.mjs";
 
 const state = {
@@ -18,6 +25,7 @@ const base = {
   cwd: "/repo",
   prompt: "Fix it",
   hostSessionId: "session-1",
+  hostSessionFile: "/private/native-thread.jsonl",
   hostArgs: [],
   pluginsRoot: "/statewright/plugins",
 };
@@ -39,7 +47,7 @@ test("hosts use the strongest available workflow routing boundary", () => {
   assert.equal(hostRoutingMode("cursor"), "restart");
 
   const pi = buildHostLaunch({ ...base, host: "pi" }, state);
-  assert.deepEqual(pi.args.slice(0, 2), ["--session-id", "session-1"]);
+  assert.deepEqual(pi.args.slice(0, 2), ["--session", "/private/native-thread.jsonl"]);
   assert.ok(pi.args.includes("--no-extensions"));
   assert.ok(pi.args.includes("openai/gpt-5.6-terra"));
   assert.ok(pi.args.includes("medium"));
@@ -102,4 +110,43 @@ test("Cursor sessions are executor-owned and resumable", async () => {
     await prepareHostSession({ ...base, host: "pi" }, "pi-session"),
     "pi-session",
   );
+});
+
+test("resume uses the owned Claude thread and never creates a replacement Cursor chat", async () => {
+  const claude = buildHostLaunch({ ...base, host: "claude", resumeWorkflow: true }, state);
+  assert.ok(claude.args.includes("--resume"));
+  assert.ok(!claude.args.includes("--session-id"));
+  assert.equal(await prepareHostSession({ ...base, host: "cursor", resumeWorkflow: true }, "owned-chat",
+    async () => { assert.fail("resume must not create a chat"); }), "owned-chat");
+});
+
+test("native-session overrides cannot retarget executor ownership", () => {
+  for (const arg of ["--session", "--session-id", "--session=/foreign/thread.jsonl", "--resume", "-r", "--fork", "--no-session"]) {
+    assert.throws(() => buildHostLaunch({ ...base, host: "pi", hostArgs: [arg] }, state), /owns native-session/);
+  }
+  assert.throws(() => buildHostLaunch({ ...base, host: "pi", hostSessionFile: null }, state), /exact owned/);
+});
+
+test("Pi SDK native header is ownership-checked and malformed history is never repaired", async t => {
+  const root = await mkdtemp(join(tmpdir(), "pi-native-owner-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionId = randomUUID();
+  const pluginsRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const file = await createPiNativeSession({ pluginsRoot, cwd: root, sessionDir: root, sessionId });
+  await assertPiNativeSession({ sessionFile: file, sessionId, cwd: root });
+  const original = await readFile(file, "utf8");
+  const malformedEntry = (id, parentId, extra = {}) => original + JSON.stringify({ type: "thinking_level_change", id, parentId,
+    timestamp: new Date().toISOString(), thinkingLevel: "off", ...extra }) + "\n";
+  for (const raw of ["", "{}\n", "invalid-json\n", original.replace(sessionId, randomUUID()),
+    original.replace('"version":3', '"version":999'), original + "not-json\n", original + "null\n",
+    original + original.replace(sessionId, randomUUID()), original + '{"type":"message"}\n',
+    malformedEntry("self", "self"), malformedEntry("child", "missing"), malformedEntry("row", null, { thinkingLevel: null })]) {
+    await writeFile(file, raw);
+    await assert.rejects(assertPiNativeSession({ sessionFile: file, sessionId, cwd: root }));
+    assert.equal(await readFile(file, "utf8"), raw);
+  }
+});
+
+test("OMX config flags are not Pi session-selection aliases", () => {
+  assert.doesNotThrow(() => buildHostLaunch({ ...base, host: "omx", hostArgs: ["-c", 'ui.theme="dark"'] }, state));
 });

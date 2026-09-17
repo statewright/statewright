@@ -2,6 +2,10 @@ import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { approvalJournal } from "./approval-journal.mjs";
+import { gatewayEndpoint } from "./remote-client.mjs";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 const noop = async () => {};
 
@@ -17,16 +21,19 @@ const noop = async () => {};
  * Release requires a private authoritative receipt and the applied state edge.
  *
  * The journal key is (clientId, threadId) where clientId is stable across
- * executor restarts (the transport session identity is not), so a fresh
- * process can load the checkpoint written by its predecessor.
+ * executor restarts. Explicit executor ownership keeps its separate gateway
+ * client, transport session and native thread stable as well; no identity is
+ * discovered from a newest-session search.
  */
-export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, root, apiKey, gatewayUrl, transportClientId,
+export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, root, apiKey, gatewayUrl, transportClientId, executorSessionId,
   telemetry = noop, makeService = createRuntimeApprovalService, getState }) {
   // Scope local storage without storing the credential or trusting CWD alone.
   // This is a journal namespace, not the gateway's authenticated client ID.
   const scope = [workflow, projectId ?? null, host ?? null, resolve(cwd),
     gatewayUrl.replace(/\/+$/, ""), createHash("sha256").update(apiKey).digest("hex")];
-  const clientId = `exec_${createHash("sha256").update(JSON.stringify(scope)).digest("hex")}`;
+  const legacyScopedId = `exec_${createHash("sha256").update(JSON.stringify(scope)).digest("hex")}`;
+  const clientId = executorSessionId
+    ? `exec_owned_${createHash("sha256").update(JSON.stringify([...scope.slice(0, 4), gatewayEndpoint(gatewayUrl), scope[5], executorSessionId])).digest("hex")}` : legacyScopedId;
   const threadId = workflow;
   const service = makeService({
     root,
@@ -38,6 +45,33 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
     ownsThread: async id => id === threadId,
   });
   let tracked = null;
+
+  async function assertNoLegacyCheckpoint() {
+    if (!executorSessionId) return;
+    const canonicalLegacyId = `exec_${createHash("sha256").update(JSON.stringify([...scope.slice(0, 4), gatewayEndpoint(gatewayUrl), scope[5]])).digest("hex")}`;
+    for (const id of new Set([legacyScopedId, canonicalLegacyId, `exec_${workflow}_${projectId ?? cwd}`])) {
+      if (await approvalJournal(root, id).load(threadId)) {
+        throw new Error("Legacy executor approval ownership is ambiguous; explicit recovery required");
+      }
+    }
+    // Legacy hashes do not reveal their raw URL/scope. Never pick/adopt one;
+    // conservatively hold same-workflow admission, including in-flight writers.
+    let entries;
+    try { entries = await readdir(root); } catch (error) { if (error.code === "ENOENT") return; throw error; }
+    const files = entries.filter(name => /^[a-f0-9]{64}\.json(?:\.lock)?$/.test(name));
+    if (files.length > 4096) throw new Error("Legacy executor journal inventory exceeds recovery bound; explicit recovery required");
+    for (const name of files) {
+      let value;
+      try { value = JSON.parse(await readFile(join(root, name), "utf8")); }
+      catch (error) { if (error.code === "ENOENT") continue; throw new Error("Unclassifiable executor journal; explicit recovery required", { cause: error }); }
+      if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.clientId !== "string" || typeof value.threadId !== "string") {
+        throw new Error("Unclassifiable executor journal; explicit recovery required");
+      }
+      if (value.threadId === workflow && !value.clientId.startsWith("exec_owned_")) {
+        throw new Error("Legacy executor approval ownership is ambiguous; explicit recovery required");
+      }
+    }
+  }
 
   function checkpoint(live) {
     if (live?.pending_approval == null) return null;
@@ -57,6 +91,7 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
    * and denies execution; it is never an implicit cancellation or approval.
    */
   async function restore(live) {
+    await assertNoLegacyCheckpoint();
     const saved = await service.restore(threadId);
     if (!saved) return null;
     checkpoint(saved);
@@ -125,5 +160,5 @@ export function createExecutorApprovalMirror({ workflow, projectId, host, cwd, r
     return "live";
   }
 
-  return { clientId, threadId, restore, observe };
+  return { clientId, threadId, restore, observe, assertNoLegacyCheckpoint };
 }

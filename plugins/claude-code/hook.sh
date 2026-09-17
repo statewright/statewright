@@ -81,6 +81,30 @@ mcp_call() {
     -d "$1" 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
 
+# Approval gates park the workflow: hooks observe the gateway, poll briefly
+# for the human decision, and resume or deny tool work accordingly. Hooks
+# never decide an approval themselves.
+# $1 = state JSON carrying pending_approval.
+# Returns 0 with the fresh post-decision state JSON on stdout, 1 when the
+# decision is still pending (or the bridge owns the gate lifecycle).
+poll_approval_gate() {
+  local state_json="$1" approval_id deadline fresh
+  approval_id=$(echo "$state_json" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)
+  [ -n "$approval_id" ] || return 2
+  [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] && return 2  # managed bridge owns its gate lifecycle
+  deadline=$(( $(date +%s) + ${STATEWRIGHT_APPROVAL_POLL_TIMEOUT:-15} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 0.5 2>/dev/null || sleep 1
+    fresh=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+    [ -n "$fresh" ] || continue
+    if [ -z "$(echo "$fresh" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ]; then
+      printf '%s' "$fresh"
+      return 0
+    fi
+  done
+  return 1
+}
+
 adapter_call() {
   local endpoint="$1" method="${2:-GET}" body="${3:-}"
   [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] || return 1
@@ -321,8 +345,16 @@ case "$ENDPOINT" in
         echo '{"decision":"block","reason":"Statewright executor bridge is unavailable; refusing to continue without workflow state.","hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
         exit 0
       fi
-      echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. Running without workflow enforcement this turn."}}'
-      rm -f "$CACHE_FILE"  # Clear cache so PreToolUse allows all tools
+      if [ -n "$(jq -r '.pending_approval.approval_id // empty' "$CACHE_FILE" 2>/dev/null || true)" ]; then
+        # The workflow is parked at an approval gate: keep enforcement and
+        # keep pointing Claude at the review surface, even while the gateway
+        # is temporarily unreachable.
+        CACHED_ID=$(jq -r '.pending_approval.approval_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+        jq -n --arg id "$CACHED_ID" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":("APPROVAL GATE: approval " + $id + " is waiting for a human decision (gateway currently unreachable). Do NOT call tools or continue the workflow. Review and decide this approval in the Statewright browser/dashboard; the workflow resumes automatically after the decision.")}}'
+      else
+        echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. Running without workflow enforcement this turn."}}'
+        rm -f "$CACHE_FILE"  # Clear cache so PreToolUse allows all tools
+      fi
       exit 0
     fi
 
@@ -349,6 +381,15 @@ case "$ENDPOINT" in
     if [ ! -f "$PROJECT_DIR/.capture_enabled" ]; then
       CAPTURE=$(echo "$STATE_JSON" | jq -r '.capture_output // false' 2>/dev/null || true)
       [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
+    fi
+
+    # A pending approval parks the workflow: tell Claude to stop working and
+    # point the human at the review surface. Statewright MCP tools stay
+    # available so the user can also decide inside the session.
+    APPROVAL_NOTICE=""
+    if [ -n "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ]; then
+      APPROVAL_ID=$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)
+      APPROVAL_NOTICE=" APPROVAL GATE: approval ${APPROVAL_ID} is waiting for a human decision. Do NOT call tools or continue the workflow. Review and decide this approval in the Statewright browser/dashboard (or via the statewright approval tools in this session). The workflow resumes automatically after the decision."
     fi
 
     # Build context
@@ -403,7 +444,7 @@ case "$ENDPOINT" in
     if [ -n "$THINKING_LEVEL" ]; then
       MODEL_NOTE="${MODEL_NOTE} Recommended effort for this phase: $THINKING_LEVEL. Claude hooks cannot switch effort inside an active session; start or resume with --effort $THINKING_LEVEL when a launcher owns the boundary."
     fi
-    CONTEXT="Statewright workflow active. AUTONOMOUS MODE: work continuously through each state — use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates (requires_approval) or final states. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${MODEL_NOTE}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}${UPDATE_NOTICE:+ $UPDATE_NOTICE}"
+    CONTEXT="${APPROVAL_NOTICE:+${APPROVAL_NOTICE} }Statewright workflow active. AUTONOMOUS MODE: work continuously through each state — use tools, complete the work, transition, and keep going. Do NOT stop or ask the user between states. Only pause at approval gates (requires_approval) or final states. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${MODEL_NOTE}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}${UPDATE_NOTICE:+ $UPDATE_NOTICE}"
     jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
@@ -464,6 +505,26 @@ case "$ENDPOINT" in
     if [ "$DELIVERY_REQUIRED" = "true" ] && [ "${STATEWRIGHT_DELIVERY_ACTIVE:-}" != "1" ]; then
       jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle."}}'
       exit 0
+    fi
+
+    # Approval gate: a pending approval parks enforcement. Poll the gateway
+    # briefly for the human decision; when approved, re-enforce against the
+    # fresh state; otherwise deny with the approval context.
+    APPROVAL_ID=$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)
+    if [ -n "$APPROVAL_ID" ]; then
+      FRESH_STATE=$(poll_approval_gate "$STATE_JSON")
+      GATE_RC=$?
+      if [ "$GATE_RC" -eq 0 ]; then
+        STATE_JSON="$FRESH_STATE"
+        echo "$STATE_JSON" > "$CACHE_FILE"
+        if [ "$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)" = "true" ]; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Approval granted; the workflow has completed. No further tool calls are available."}}'
+          exit 0
+        fi
+      else
+        jq -n --arg id "$APPROVAL_ID" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":("APPROVAL PENDING (id: " + $id + "). A human must review this step in the Statewright browser/dashboard before the workflow can continue. Do not retry tool calls; wait for the approval decision.")}}'
+        exit 0
+      fi
     fi
 
     # Fork enforcement: during an active fork, the cached state is already branch-specific
@@ -947,6 +1008,15 @@ case "$ENDPOINT" in
     fi
 
     STATE_JSON=$(cat "$CACHE_FILE")
+
+    # A pending approval means a human must decide before any further tool
+    # use; never auto-allow through the permission stack. This notice must
+    # fire even for non-autonomous cached state, because the parked
+    # condition is the responder's concern regardless of auto-resolution.
+    if [ -n "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ]; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","additionalContext":"APPROVAL PENDING: a human must review the pending Statewright approval before any further tool use. The permission responder will not auto-approve while the workflow is parked."}}'
+      exit 0
+    fi
 
     # Check meta.autonomous — if false/unset, pass through to human
     AUTONOMOUS=$(echo "$STATE_JSON" | jq -r '.meta.autonomous // false' 2>/dev/null || true)

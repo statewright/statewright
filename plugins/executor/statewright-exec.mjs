@@ -6,7 +6,7 @@ import { realpathSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import {
   assertDeliveryConfigPaths,
   DELIVERY_CONFIG_RELATIVE_PATH,
@@ -30,6 +30,7 @@ import {
   SUPPORTED_HOSTS,
 } from "./lib/host-adapters.mjs";
 import { RemoteStatewrightClient, resolveApiKey } from "./lib/remote-client.mjs";
+import { createExecutorApprovalMirror } from "./lib/executor-approval-mirror.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./lib/error-reporting.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -264,13 +265,16 @@ function stopChild(child) {
   timer.unref?.();
 }
 
-async function observeHost(options) {
+export async function observeHost(options) {
   assertHostAdapterContract(options);
   const {
     client,
     deliveryController,
     telemetry,
+    approvalMirror,
   } = options;
+  if (!approvalMirror) throw new Error("Host observation requires approval journal ownership.");
+  await approvalMirror.observe(options.initialState);
   let state = options.initialState;
   let stateKey = `${state.state}:${state.iteration ?? 0}`;
   let finalSeen = Boolean(state.is_final);
@@ -286,7 +290,7 @@ async function observeHost(options) {
       continuation,
       command: launch.command,
     });
-    const child = spawn(launch.command, launch.args, {
+    const child = (options.spawnHost ?? spawn)(launch.command, launch.args, {
       cwd: options.cwd,
       env: options.environment,
       stdio: "inherit",
@@ -312,52 +316,62 @@ async function observeHost(options) {
     }
 
     let observerError = null;
-    let polling = false;
+    let pollPromise = null;
     let rerouteRequested = false;
-    const poll = async () => {
-      if (polling || observerError || finalSeen) return;
-      polling = true;
-      try {
-        const next = await client.call("statewright_get_state");
-        const nextKey = `${next.state}:${next.iteration ?? 0}`;
-        if (nextKey !== stateKey) {
-          const changedState = next.state !== state.state;
-          const changedRoute = (next.model ?? next.default_model ?? null)
-            !== (state.model ?? state.default_model ?? null)
-            || (next.thinking_level ?? null) !== (state.thinking_level ?? null);
+    const poll = () => {
+      if (pollPromise) return pollPromise;
+      if (observerError || finalSeen) return Promise.resolve();
+      pollPromise = (async () => {
+        try {
+          const next = await client.call("statewright_get_state");
+          await approvalMirror.observe(next);
+          const nextKey = `${next.state}:${next.iteration ?? 0}`;
+          const previous = state;
           state = next;
-          stateKey = nextKey;
-          if (changedState) {
-            await deliveryController?.observeState(next);
-            await telemetry("executor_state_observed", {
-              host: options.host,
-              state: next.state,
-              model: next.model ?? null,
-              thinking_level: next.thinking_level ?? null,
-            });
+          if (nextKey !== stateKey) {
+            const changedState = next.state !== previous.state;
+            const changedRoute = (next.model ?? next.default_model ?? null)
+              !== (previous.model ?? previous.default_model ?? null)
+              || (next.thinking_level ?? null) !== (previous.thinking_level ?? null);
+            stateKey = nextKey;
+            if (changedState) {
+              await deliveryController?.observeState(next);
+              await telemetry("executor_state_observed", {
+                host: options.host,
+                state: next.state,
+                model: next.model ?? null,
+                thinking_level: next.thinking_level ?? null,
+              });
+            }
+            if (changedRoute && !next.pending_approval && hostRoutingMode(options.host) === "restart") {
+              rerouteRequested = true;
+              stopChild(child);
+            }
           }
-          if (changedRoute && hostRoutingMode(options.host) === "restart") {
-            rerouteRequested = true;
-            stopChild(child);
+          if (next.is_final) {
+            finalSeen = true;
+            if (options.exitOnFinal) stopChild(child);
           }
+        } catch (error) {
+          observerError = error;
+          stopChild(child);
+        } finally {
+          pollPromise = null;
         }
-        if (next.is_final) {
-          finalSeen = true;
-          if (options.exitOnFinal) stopChild(child);
-        }
-      } catch (error) {
-        observerError = error;
-        stopChild(child);
-      } finally {
-        polling = false;
-      }
+      })();
+      return pollPromise;
     };
-    const timer = setInterval(() => poll(), 500);
-    const result = await childResult;
-    clearInterval(timer);
+    const timer = setInterval(() => poll(), options.pollIntervalMs ?? 500);
+    let result;
+    try {
+      result = await childResult;
+    } finally {
+      clearInterval(timer);
+      await pollPromise;
+    }
     await poll();
     if (observerError) throw observerError;
-    if (rerouteRequested && !finalSeen) {
+    if (rerouteRequested && !finalSeen && !state.pending_approval) {
       continuation = true;
       await telemetry("executor_host_reroute", {
         host: options.host,
@@ -435,12 +449,36 @@ export async function main(argv = process.argv.slice(2)) {
       gateway_origin: client.gatewayOrigin,
     });
     process.stderr.write(`[statewright] Gateway: ${client.gatewayOrigin}\n`);
+    const approvalMirror = createExecutorApprovalMirror({
+      workflow: options.workflow,
+      projectId: options.projectId,
+      host: options.host,
+      cwd,
+      root: join(homedir(), ".statewright", "exec-approvals"),
+      apiKey,
+      gatewayUrl: process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
+      transportClientId: transportSessionId,
+      getState: () => client.call("statewright_get_state"),
+      telemetry: (event) => telemetry(event.type, {
+        approval_id: event.approvalId ?? null,
+        to_state: event.toState ?? null,
+        reason: event.reason ?? null,
+      }),
+    });
     await client.call("statewright_load_workflow", {
       name: options.workflow,
       resume: Boolean(options.resumeWorkflow),
       ...(options.projectId ? { project_id: options.projectId } : {}),
     });
     const initialState = await client.call("statewright_get_state");
+    const restored = await approvalMirror.restore(initialState);
+    if (restored?.status === "parked") {
+      process.stderr.write(
+        `[statewright-exec] Resumed while approval ${restored.saved.pending_approval.approval_id} is pending; `
+        + "blocked work is not re-executed.\n",
+      );
+    }
+    await approvalMirror.observe(initialState);
     const deliveryRequired = Boolean(
       initialState.meta?.workspace?.required
       || initialState.meta?.preview?.required
@@ -494,6 +532,7 @@ export async function main(argv = process.argv.slice(2)) {
       hostSessionId,
       initialState,
       client,
+      approvalMirror,
       adapterBridge,
       deliveryController,
       telemetry,

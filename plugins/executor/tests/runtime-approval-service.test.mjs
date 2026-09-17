@@ -21,7 +21,7 @@ async function fixture(t, options = {}) {
     fetchImpl: async (url, init) => { calls.push({ url, ...init, body: JSON.parse(init.body) }); return response; },
     openReview: async () => {}, ...options,
   });
-  return { service, calls, respond: value => { response = { ok: true, status: 200, json: async () => structuredClone(value) }; },
+  return { service, calls, root, respond: value => { response = { ok: true, status: 200, json: async () => structuredClone(value) }; },
     response: value => { response = value; } };
 }
 
@@ -145,6 +145,17 @@ test("checkpoint restore and clear are client/thread isolated and require the ex
   await f.service.clear("thread1", "apr_test");
   assert.equal(await f.service.restore("thread1"), null);
   assert.deepEqual(f.calls, []);
+});
+
+test("journal namespace never replaces the authenticated transport client header", async t => {
+  const f = await fixture(t, { journalClientId: "stable-private-namespace" });
+  await f.service.park("thread1", state);
+  const sameJournal = createRuntimeApprovalService({ root: f.root, apiKey: "private-key", gatewayUrl: "https://gateway.invalid",
+    clientId: "next-transport", journalClientId: "stable-private-namespace" });
+  await f.service.read(ticket);
+  assert.equal(f.calls[0].headers["x-statewright-client-id"], "client1");
+  assert.deepEqual(await f.service.restore("thread1"), state);
+  assert.deepEqual(await sameJournal.restore("thread1"), state);
 });
 
 test("async review opening is injected and awaited without implicit browser opening on read", async t => {

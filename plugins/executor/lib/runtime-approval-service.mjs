@@ -9,9 +9,9 @@ function openEvidenceReview(url) {
   });
 }
 
-export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId,
+export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, journalClientId = clientId,
   fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true }) {
-  const journal = approvalJournal(root, clientId);
+  const journal = approvalJournal(root, journalClientId);
   const prepared = new Set();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`,
     "x-statewright-client-id": clientId };

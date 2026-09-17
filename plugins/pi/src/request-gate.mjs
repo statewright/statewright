@@ -26,7 +26,7 @@ function sleep(ms, signal) {
 }
 
 /** Native callbacks wait outside inference; authority and epochs belong to parent. */
-export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, onActive = () => {}, pollMs = 500, timeoutMs = 30 * 60_000 }) {
+export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, onActive = () => {}, onAdmit = () => {}, pollMs = 500, timeoutMs = 30 * 60_000 }) {
   if (typeof call !== "function" || !Number.isSafeInteger(pollMs) || pollMs < 1 || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid native request transport limits");
   let sequence = 0;
   let current = null;
@@ -117,6 +117,14 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
   return {
     get reference() { return current?.reference ? structuredClone(current.reference) : null; },
     get held() { return !current?.admitted || current.phase !== "active" || !active(current); },
+    ownsNative(ctx) { try { assertNative(ctx); return enabled && !closed; } catch { return false; } },
+    ownsRequest(ctx, reference) {
+      try {
+        assertNative(ctx);
+        return !!current?.admitted && active(current) && current.phase === "active"
+          && !!current.reference && equal(current.reference, reference);
+      } catch { return false; }
+    },
     canDispatch(ctx, operationSignal, reference, { compaction = false } = {}) {
       try {
         assertNative(ctx);
@@ -162,6 +170,9 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
         assertNative(ctx);
         if (!active(request)) throw new Error("Native input replaced at admission handoff");
         request.admitted = true;
+        onAdmit(structuredClone(request.reference));
+        assertNative(ctx);
+        if (!active(request)) throw new Error("Native input replaced during private binding");
         return { action: "continue" };
       } catch (error) {
         await cancelRequest(request, error?.name === "TimeoutError" ? "timeout" : "disconnected");

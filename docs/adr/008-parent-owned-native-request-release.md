@@ -76,14 +76,50 @@ SDK auth/header/routing/transport awaits or internal HTTP retries.
 
 This commit does NOT wire the controller into executor main or the gate into
 the shipped Pi extension. Existing ADR 007 hold behavior remains in force.
-The actual-agent fixtures correlate only untouched synthetic prompt digests to
-captured signals, plus an explicit outer manual-compaction reference. That is
-test-only, not a general template/recovery/follow-up binder. Automatic compaction,
-extension-source follow-ups, overlapping pre-start prompts, native commands and
-shutdown, recovery effects and every remaining async/SDK transport boundary
-must retain the same authoritative epoch before activation. AgentSession retry
+The earlier text-digest fixture binder is superseded by
+`createPiRequestOperations`, installed on a task-owned public SDK session before
+input. Private AsyncLocalStorage scopes carry an immutable reference, bound
+once by gate onAdmit inside the original explicit interactive/RPC call.
+Template expansion cannot change it; overlapping same-text calls cannot adopt
+the newest input's reference. Guarded Agent prompt/continue entry rechecks it
+after pre-start awaits and before actual Agent start. SDK event processing,
+AgentSession retry and automatic threshold compaction retain that originating
+scope in the installed 0.73.0 fixtures.
+An opaque claim is assigned synchronously at every external explicit entry.
+SDK input hooks reject stale claims before admission, because slash/template
+lookup awaits before those hooks. An inherited private call cannot claim human
+origin by setting source=interactive/RPC; user frontend entries must be outside
+that scope. The known exact-owned active Agent signal/reference is captured at
+actual start and interrupted at explicit entry, including command-only calls
+that never emit SDK input. This is not heuristic active-session discovery.
+
+Extension sendUserMessage inherits a captured private reference and checkpoints
+without minting a human-input epoch; unbound extension calls are held. Timers
+and detached correctives must capture a private bind callback when armed,
+not when fired. Explicit replacement invalidates before SDK commands/preflight
+and clears owned steering/follow-up queues. Next-turn custom asides remain in
+a bounded private reference-owned queue, appended only at an admitted actual
+Agent entry for that request. They never inhabit SDK's unowned shared pending
+queue. Manual compaction may capture current ownership only at a truly external
+manual entry; an unbound or stale existing context cannot borrow it. Owned close
+aborts the exact-owned SDK Agent, cancels parent ownership and keeps entry
+guards installed for late timers. Native-session drift cannot authorize abort
+of a foreign session.
+
+This requires an owning SDK frontend. The stock shipped Pi CLI/extension does
+not expose its AgentSession object for this installation; it is not activated
+or silently monkey-patched through global discovery. No installed SDK sources
+are edited. Future managed launch must use the public SDK frontend/runtime
+contract and exclusively install these guards before readiness. Native command
+effects, resource/runtime replacement and every remaining async effect/native
+final-response/SDK transport boundary still need exact captured ownership before
+activation. Arbitrary commands bypass SDK input; wrapper invalidation alone is
+not authorization for their project effects. SDK custom/bare paths not guarded
+by this owning frontend must not be advertised as supported. AgentSession retry
 is tested with primary HTTP client retries explicitly zero; default/internal
-provider retries are not proved. The SDK dependency is not pinned by this slice.
+provider retries and compaction's later separate summary subrequests are not
+proved across authority changes. Dependency compatibility is source-bound
+evidence, not a version pin. No full native acceptance is implied.
 No live/native authorized approval journey, deployment or promotion is claimed.
 
 ## Consequences and rollback

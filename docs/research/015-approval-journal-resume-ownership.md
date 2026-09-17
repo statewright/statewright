@@ -775,3 +775,249 @@ progress is not the full requirement audit's success condition. Original goal
 remains active, not complete or blocked; Auldwyrm/installed runtime/live sessions
 remain untouched. No workflow query/load/use, actual decision, real inference,
 external change, deployment or push occurred.
+
+## Slice 6: immutable private SDK call-context ownership
+
+Previous turn is verified progress: local `1f346d283df71125609d332a2f4498dbfde086a1`;
+current status confirms it and the same unrelated dirty inventory. Goal stays
+active, full original scope retained. User manual/no-workflow authority overrides
+skill workflow guidance; no Statewright tool or live session is queried.
+
+Accepted original contracts remain 006 required approval/request ownership and
+012 P1 numbered host-unprivileged/journal/restart/effect hold contract. Current
+SDK 0.73.0 prompt source shows input before expansion and pre-start await; text
+is not immutable operation identity. Use a private AsyncLocalStorage call-context
+carrier at owned SDK session entry instead of injecting tokens into text,
+adopting a current cache, or patching installed SDK sources. Native operation
+callbacks/automatic retry/compaction must retain the captured parent reference.
+Explicit interactive/RPC input may begin a new epoch; extension-source follow-ups
+must inherit a captured reference or be held. Replacement clears owned queues
+and old pre-start/retry calls must never start a new agent over replacement work.
+
+Owned scope: additive Pi request operation carrier, existing gate/hooks only
+for private binding/lifecycle contract, actual-agent fixture and ADR 008/receipt.
+No executor/index activation, provider auth/real inference/workflow/resolver,
+installed runtime or user dirty artifacts. Characterize template expansion,
+same-text overlapping pre-start calls and unbound extension input first; then
+actual automatic compaction/inherited follow-up and replacement queue races.
+Full remaining main/observer/index/effect/native/restart/host parity acceptance
+is unchanged. No claim completion from a carrier alone.
+
+Provisional observed-only envelope: one serial root implementation and one final
+clean-context Astra/high read-only review; 50 normal/80 worst tool calls,
+<=16KiB later tool results, 30-minute discovery warning/45-minute contraction,
+one package integration export plus one repair re-export if required, at most
+two distinct repair attempts per finding. Protect final third for validation,
+review, durable record and local commit. Stop optional discovery at warning;
+hand off exact missing original requirements, never activate weaker semantics.
+No workflow/cumulative quota/model-token/interrupt enforcement is claimed.
+
+Characterized red baseline: actual-agent fixture 19 passed/3 failed. Template
+expansion dispatched zero HTTP instead of one (missing correlation evidence);
+overlapping identical-text pre-start prompt dispatched two instead of only the
+replacement's one (real obsolete-operation borrowing); unbound extension input
+minted epoch 1 and dispatched one instead of epoch 0/zero (source classification
+gap). All use public SDK with inert loopback responses, not native user sessions.
+
+Carrier implementation: private AsyncLocalStorage scope at owned public SDK
+prompt entry, immutable once-only reference bound by the gate's synchronous
+onAdmit callback. Explicit input invalidates before SDK commands/preflight and
+clears owned SDK queues; inherited extension input checkpoints its captured
+reference without begin. Agent prompt/continue wrappers recheck after pre-start
+awaits before actual Agent start; real primary provider/tool/compaction hooks
+consume the originating scope. Raw prompt text contains no private marker/token.
+Next-turn custom asides stay in a bounded private reference-owned queue, not
+SDK's shared unowned pending queue. Close retains installed guards and aborts
+only the exact-owned SDK session, so late timers cannot begin new work.
+
+First carrier gate: 47 passed/3 failed (50). All three original red defects
+closed. New pre-Agent checkpoint correctly parked earlier than old tests expected;
+two old provider-cancellation tests therefore lacked a started Agent signal.
+Move their pending injection into actual before_provider_request to preserve
+the deeper HTTP/signal proof, not weaken the assertions. Likewise the async
+helper identity-drift challenge must inject only at the streaming checkpoint
+to continue testing actual denied-payload handling; pre-start identity denial
+is an additional earlier guard, not an error-output requirement. No failure
+reclassified as pass; fresh inherited queue/automatic-compaction gates follow.
+
+Next focused gate: 54 passed/1 failed (55). Actual automatic threshold
+compaction parked, consumed and completed, but SDK split-turn compaction produced
+both conversation summary and turn-prefix summary while fixture expected a
+single exact summary. Primary installed compaction.js confirms Promise.all of
+both calls and combined turn-context section. Correct the exact content and
+HTTP count expectations to that real SDK behavior (three total HTTP requests:
+original model response plus two inert compaction responses), not suppress the
+native result. All initial defects/inherited follow-ups/queue replacements and
+the original deeper provider cancellation assertions passed this gate.
+
+Root additionally identified that an unbound existing command context must not
+fall back to a newer manual-compaction reference: only a truly external manual
+action may capture the current reference. Add overlapping-command regression,
+private-aside delivery/replacement isolation and owned streaming close/late
+callback proof. This is an explicit owning-SDK frontend boundary; shipping CLI
+launch/extension entry and arbitrary project command effects remain unwired.
+
+Fresh focused gate: 59/59 passed, including actual threshold split-turn
+compaction, inherited follow-ups without epoch mint, delayed old follow-up/native
+continue holds, owned steering/follow-up queue removal, overlapping unbound
+command compaction denial, private-aside positive/replacement isolation and
+owned real streaming close/late callback hold. Added RPC/immutable private-copy
+capture checks; final source gate follows. Earlier incomplete and red evidence
+remains above. Installed compaction primary source SHA256:
+`dfffd30e71b1ebb933aa165030a4a8abad8c9ef987e1a909bd3702a724ad95e3`
+for pi-coding-agent0.73.0 dist/core/compaction/compaction.js.
+
+Owning-SDK frontend is required, not an imaginary extension context method.
+Installed SDK exports public AgentSessionRuntime, InteractiveMode and RPC/print
+mode APIs; stock CLI builds them internally, while the shipped extension has
+no public AgentSession handle for installing these entry guards. Do not access
+an installed live session or infer that importing the extension activates this
+module. Future managed launcher must own public SDK construction and guard
+registration/readiness/runtime replacement. No installed dependency edit,
+provider transport replacement, custom user consent channel or prompt marker.
+
+Full requirement audit: source-bound carrier now strengthens actual template,
+pre-start overlap, extension follow-up/queue, automatic compaction and SDK-close
+ownership evidence. Main/observer/index production wiring, owner frontend/native
+command/project async effects, runtime replacement/restart, internal HTTP retries/
+later transport awaits/summary subrequests, native final responses, broader
+host parity and complete authorized P0/P1 acceptance remain open. ADR007 hold
+remains shipped. No universal/malicious-agent/process-isolation/real human-proof
+claim, no workflow/resolver/live canary/native approval/inference/deploy/push.
+
+Final pre-review focused gate 61/61 passed. Isolated staged snapshot
+`4d25542d673184c29e786c44ca921c8ab8b8c5ef`, export
+`/tmp/statewright-operation-carrier.PkMhca`: Node integration 281/281 no
+skips/failures/cancellations; Pi 136 passed/1 existing opt-in live-canary skip;
+native 2/2; generated managed-client parity and two syntax checks exit 0.
+These gates are superseded by the review repair, not final repaired-source proof.
+
+Clean-context Astra/high reviewer `/root/pi_operation_carrier_review` found R1
+(high): SDK awaits slash-command/template lookup before emitting input, while
+carrier only begins a parent request on input-hook arrival. Older slash/template
+call followed immediately by newer plain input can therefore supersede it.
+The single non-mutating actual SDK input-path challenge (synthetic authority,
+terminal Agent-entry counter, no provider) produced only expanded old input at
+epoch 1; newer input was suppressed. The existing same-text before_agent_start
+case covered a later await and did not discriminate this boundary. No other
+finding in the bounded five-path review; no broad tests or source writes.
+
+R1 repair attempt 1: assign an opaque private entry claim synchronously on every
+external interactive/RPC invocation, including command-only input. Reject old
+claims before gate.input and after its helper return/onAdmit. No marker in text
+or caller-chosen epoch. Add actual-Agent older-template/newer-interactive/RPC
+regressions. Root's adjacent source-origin hardening rejects explicit-source
+claims from an already inherited private call: a delayed model callback cannot
+mint a human epoch by setting source=interactive. Genuine owning user frontends
+must enter outside the inherited scope; final native UI proof is still open.
+Retain failed review challenge and superseded gates; focused recheck then
+fresh isolated repaired-source integration/review required. No broader build.
+
+Root also closed the adjacent command-only interruption gap: invalidating the
+parent reference alone does not abort an already streaming Agent when the SDK
+command returns without input. Track the private exact signal/reference of an
+actually started owned Agent and interrupt it at explicit entry after synchronous
+request invalidation; do not scan or abort unknown/foreign SDK sessions. Add
+real streaming command-only input proof (old signal aborted, no extra HTTP,
+superseded epoch retained). Native command project effects still require their
+own captured reference checks and final-response ownership remains open.
+
+Entry-claim repair focused gate passed 63/63. After adding the adjacent actual
+streaming command-only case, next gate was 63 passed/1 failed (64): owned signal
+was aborted and Agent idle with no extra HTTP, but a direct parent-journal read
+observed reason null before the asynchronous private cancellation had settled.
+Require bounded polling for exact authoritative phase cancelled AND reason
+superseded before cleanup; do not weaken the reason assertion or use a sleep.
+The intermediate staged export `fc8bfd3ba1e44bcdbecf78391d49dff811097a4c`
+at `/tmp/statewright-operation-final.Pt0mFo` is superseded, not green evidence.
+A further mechanical fixture/evidence-only export is justified by that retained
+failure; fresh focused, integration and independent R1 recheck follow. Public
+command return is not claimed to acknowledge durable parent cancellation; its
+asynchronous close/drain contract still needs production-lifecycle proof.
+
+Fresh export `de3f4a0c28753b14ed5843fd7fcf208d425a1d6e` at
+`/tmp/statewright-operation-verified.yFhKbE` passed focused 64/64, wider Node
+281/281, Pi 139 passed/1 opt-in live-canary skip, native 2/2, generated parity and
+both syntax checks exit 0. Independent R1 repetition confirmed exactly one begin
+and one terminal Agent entry: newer explicit input, epoch 1. R1 is closed.
+
+That recheck found adjacent R2 from source: abort ownership was captured before
+SDK clearQueue emits synchronous public queue_update listeners. A listener can
+change native identity, making the cached abort authorization foreign. Actual
+SDK regression reproduced one unwanted native abort (1 failed/36 unrelated
+tests skipped), so the preceding green export is superseded, not final proof.
+R2 repair attempt 1 captures/rechecks native context, explicit-entry claim and
+exact active signal/reference after clearQueue, immediately before abort/SDK
+entry. No foreign abort or stale reentrant SDK entry is authorized. Retain
+failed evidence and require fresh gates plus bounded independent R2 recheck.
+Additional mechanical repair exports exceed the provisional two-export plan;
+this is explicit regression-driven contraction, not an enforced quota claim.
+Optional discovery is closed; only repair, source-bound validation and receipt
+remain for this slice. Full production close/drain and acceptance remain open.
+
+### Slice 6 final gates and full-objective audit
+
+Final tested staged tree `de5689e1df6fbf72bde9e5a9b1f8b9bc6102d97d`, isolated
+export `/tmp/statewright-operation-r2.M3SrX2`: focused Agent/gate 65/65; wider
+Node integration 281/281 (zero skips/failures/cancellations); Pi 140 passed/1
+existing opt-in live-canary skip; native session suite 2/2; generated Claude
+managed-client parity and request-gate/request-operations syntax exit 0. No
+workspace-wide Rust/typecheck/lint/build, internal provider retry, installed
+runtime, real authorized approval or full native acceptance claim. URLs in Pi
+unit-test diagnostics are mocked clients, not live gateway evidence.
+
+Independent clean-context Astra/high read-only reviewer
+`/root/pi_operation_carrier_review` rechecked R2 against that exact final tree:
+actual SDK queue-listener regression 1 passed/36 unrelated skipped, exit 0;
+native/entry ownership is rechecked after callbacks and captured signal/reference
+immediately before abort. No remaining issue within that repair boundary. R1's
+earlier one-begin/newer-only terminal-entry recheck is retained, not claimed
+rerun by the independent R2 recheck; fresh full final suite includes both actual
+interactive/RPC pre-input regressions. Root alone implemented; one mandatory
+independent reviewer, bounded per-finding repair rechecks, no implementation
+delegation. Earlier failed/superseded gates remain above. Final receipt-only
+addition is the sole allowed delta from tested source before commit.
+
+Re-audit all nine original 006 approval/request requirements, not just this
+carrier's local success. Status is partial unless stated as retained constraint:
+
+| Original requirement | Verified local evidence / remaining obligation |
+| --- | --- |
+| Immutable tenant/client/session/run/edge/artifact/policy/reviewer/expiry ticket | Exact client/thread/run/session/ticket/edge journal/service/request checks retained and integration passes; complete artifact/policy/expiry/revocation enterprise semantics are not established. Spec 114 remains proposed, not implemented-by-assertion. |
+| Native thread/lineage/request ID/epoch, not model arguments | Durable parent IDs/epochs and exact native/session ownership retained; private call/entry/reference guards now cover tested SDK async inputs. Main/frontend/runtime-replacement and full child/parent/restart lineage acceptance remain open. |
+| Pending: no declared effect or inference; park outside costly model turns | Shipped ADR007 hold stays in force; additive SDK primary HTTP/tool/retry/compaction holds pass inert fixtures. Every project async effect, later transport await/internal retry/summary subrequest and production activation remain unproved. |
+| Query authority before controls; unauthorized reviewer dismissal only | Private read-only authority architecture retained; no resolver added to Pi carrier/bridge. Complete authenticated reviewer-control/entitlement journey remains unverified, not replaced by synthetic authority. |
+| Cancel/dismiss/disconnect keeps pending journal; cold resume reconciles | Durable journal preservation and exact resume fixtures pass. This slice proves eventual authoritative superseded cancellation for a known streaming command; public command return is not a durable ack. Production close/drain, crash-lock/legacy recovery and complete cold native resume remain open. |
+| Private resolve/recheck/consume once; duplicate/late harmless | Parent once-only nonce/tombstone, fresh approved applied-edge and stale-response fixtures remain green; no host resolver introduced. Complete artifact/policy/entitlement and native delivery acceptance remain unproved; at-most-once is not exactly-once native acceptance. |
+| New user input invalidates older continuation AND final response | Entry-claim/pre-start/template/queue/native signal/late callback fixtures pass; foreign callback cannot abort replacement. Final-response rendering/recording and every declared production effect still need captured ownership checks. |
+| Decision source/authentication strength; accessible API key not human proof | No stronger human/malicious-agent isolation claim. Fixtures use synthetic authority; complete decision provenance/strong-human authentication acceptance remains open. |
+| Shared client-neutral reviewer/evidence/retention semantics | Shared P0 journal/service/request ledger retained, Pi has no decision surface or mandatory website UX. Cross-client/advertised host semantics and full retention/evidence acceptance remain open. |
+
+P1 012 numbered/slice audit: (1/A) Rust pre-tool pending denial remains an
+unrelated user-dirty gateway change, not committed or revalidated by this slice;
+authoritative gateway/transition behavior is not claimed from a mocked client.
+(2) Hosts stay unprivileged, private begin/status/consume/cancel cannot resolve;
+actual trusted decision path remains untested. (3/C) durable journal/session
+identity and request restart fixtures pass, but main requestController and
+observer deferred-clear/owner close/readiness are not wired. (4/B) additive
+owned-SDK admission/release prerequisites are tested, shipped extension remains
+hold-only; it does not automatically activate this carrier. (D) workflow-loading
+local gateway/fake-Pi canary and complete authorized native Pi/Codex/advertised
+host journey are not run under the user's no-workflow authority.
+
+Exact next bounded prerequisite: owning public SDK frontend/runtime construction
+and exclusive final guard registration with native readiness, before enabling
+parent request delivery. Then wire main requestController/observer deferred
+journal clear/close and shipped index's correctives/timeouts/retries/embedded
+tools to private captured binds. Audit every asynchronous effect/final response
+and later inference transport boundary, restart/new-input/parent-child races,
+and host parity; only separately authorized complete native approval acceptance
+can satisfy the original end condition. Current main AdapterBridge has no
+requestController; index still uses approvalHold and uncorrelated sendUserMessage.
+No weaker pending-cache release, workflow load, resolver, real inference,
+installed runtime/live-session change, deployment or push is substituted.
+
+Goal remains active, not complete or blocked. Source progress is a reversible
+local milestone only; all unrelated dirty user artifacts and Auldwyrm are
+preserved. Provisional usage limits were observed-only, with extra exports
+explicitly justified above; no controller quota/token/time enforcement claim.

@@ -1,25 +1,24 @@
 import { createServer, type ServerResponse } from "node:http"
-import { createHash } from "node:crypto"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Type } from "typebox"
 import { AuthStorage, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
 import { createPiRequestGate } from "./request-gate.mjs"
 import { installPiRequestGuards } from "./request-hooks.mjs"
+import { createPiRequestOperations } from "./request-operations.mjs"
 import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { base, pending, fixture } from "../../executor/tests/fixtures/owned-request.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
 afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await cleanup.pop()!() })
-const inputDigest = (text: string) => createHash("sha256").update(JSON.stringify({ text, images: null })).digest("hex")
 
-function respond(response: ServerResponse, content = "synthetic response") {
+function respond(response: ServerResponse, content = "synthetic response", usage?: unknown) {
   if (response.destroyed) return
   response.writeHead(200, { "Content-Type": "text/event-stream" })
   const chunk = (delta: unknown, finish_reason: string | null) => JSON.stringify({
     id: "synthetic", object: "chat.completion.chunk", model: "synthetic-chat",
     choices: [{ index: 0, delta, finish_reason }],
   })
-  response.end(`data: ${chunk({ role: "assistant", content }, null)}\n\ndata: ${chunk({}, "stop")}\n\ndata: [DONE]\n\n`)
+  response.end(`data: ${chunk({ role: "assistant", content }, null)}\n\ndata: ${chunk({}, "stop")}\n\n${usage ? `data: ${JSON.stringify({ choices: [], usage })}\n\n` : ""}data: [DONE]\n\n`)
 }
 
 function respondWithTool(response: ServerResponse) {
@@ -66,7 +65,9 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     return result
   }
   const onPark = vi.fn()
-  const gate = createPiRequestGate({ nativeSessionId: f.owner.record.host_session_id, call, onPark, pollMs: 5, timeoutMs: 3_000 })
+  const operations = createPiRequestOperations()
+  const gate = createPiRequestGate({ nativeSessionId: f.owner.record.host_session_id, call, onPark,
+    onAdmit: (reference: unknown) => operations.admit(reference), pollMs: 5, timeoutMs: 3_000 })
   cleanup.push(() => gate.close())
   const sessionManager = SessionManager.inMemory("/fixture")
   sessionManager.newSession({ id: f.owner.record.host_session_id })
@@ -77,32 +78,18 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     getAll: () => [], find: () => model, isUsingOAuth: () => false }
   const handlers = new Map<string, Array<(...args: any[]) => unknown>>()
   const on = (event: string, handler: (...args: any[]) => unknown) => handlers.set(event, [...handlers.get(event) ?? [], handler])
-  // Test-only operation binding uses the untouched synthetic prompt digest.
-  // It is NOT a general template/recovery/follow-up correlation implementation.
-  const admissions = new Map<string, unknown>()
-  const bindings = new WeakMap<AbortSignal, any>()
-  let beforeAgent = () => {}
+  let beforeAgent: () => unknown | Promise<unknown> = () => {}
   let beforeProvider = (_ctx: any) => {}
+  let command = async () => {}
   let toolEffect = () => {}
   const execute = vi.fn(async () => { toolEffect(); return { content: [{ type: "text", text: "synthetic tool result" }], details: {} } })
-  let manualReference: unknown = null
-  on("input", async (event, ctx) => {
-    const result = await gate.input(event, ctx)
-    if (result.action === "continue") admissions.set(inputDigest(event.text), gate.reference)
-    return result
-  })
-  on("before_agent_start", () => { beforeAgent() })
+  on("input", (event, ctx) => operations.input(event, ctx))
+  on("before_agent_start", async () => { await beforeAgent() })
   on("before_provider_request", (_event, ctx) => { beforeProvider(ctx) })
-  on("context", (event, ctx) => {
-    if (options.bind === false) return
-    if (bindings.has(ctx.signal)) return
-    const user = [...event.messages].reverse().find((message: any) => message.role === "user") as any
-    const text = user?.content?.filter((part: any) => part.type === "text").map((part: any) => part.text).join("")
-    bindings.set(ctx.signal, admissions.get(inputDigest(text)))
-  })
-  installPiRequestGuards({ pi: { on }, gate, referenceFor: (event: any, ctx: any) =>
-    event.type === "session_before_compact" && !ctx.signal ? manualReference : bindings.get(ctx.signal) })
-  const extension = { path: "fixture:actual-agent", handlers, tools: new Map(), commands: new Map(), flags: new Map(),
+  installPiRequestGuards({ pi: { on }, gate, referenceFor: () => options.bind === false ? null : operations.referenceFor() })
+  const extension = { path: "fixture:actual-agent", handlers, tools: new Map(), commands: new Map([
+    ["fixture-cmd", { name: "fixture-cmd", description: "Synthetic command", handler: () => command() }],
+  ]), flags: new Map(),
     shortcuts: new Map(), messageRenderers: new Map() }
   const { session } = await createAgentSession({ cwd: "/fixture", agentDir: "/fixture-unused", model,
     thinkingLevel: "off", ...(options.tool ? { tools: ["synthetic_tool"], customTools: [{
@@ -112,22 +99,72 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
       retry: { enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: 5, provider: { maxRetries: 0 } } }), sessionManager,
     resourceLoader: { getExtensions: () => ({ extensions: [extension], runtime: createExtensionRuntime() }),
       getSystemPrompt: () => "Synthetic fixture", getAppendSystemPrompt: () => [],
-      getSkills: () => ({ skills: [] }), getAgentsFiles: () => ({ agentsFiles: [] }), getPrompts: () => ({ prompts: [] }) },
+      getSkills: () => ({ skills: [] }), getAgentsFiles: () => ({ agentsFiles: [] }), getPrompts: () => ({ prompts: [
+        { name: "fixture", description: "Synthetic", content: "expanded synthetic $1", source: "fixture", filePath: "/fixture-unused" },
+      ] }) },
   } as any)
   cleanup.push(async () => { await session.abort(); session.dispose() })
+  operations.install({ session, gate })
+  cleanup.push(() => operations.close())
   session.extensionRunner!.setUIContext({ notify: vi.fn(), setStatus: vi.fn() } as any)
   gate.enable()
-  return { ...f, gate, session, sessionManager, modelRegistry, requests, sockets, onPark, execute,
-    setBeforeAgent: (callback: () => void) => { beforeAgent = callback },
+  return { ...f, gate, operations, session, sessionManager, modelRegistry, requests, sockets, onPark, execute,
+    setBeforeAgent: (callback: typeof beforeAgent) => { beforeAgent = callback },
     setBeforeProvider: (callback: typeof beforeProvider) => { beforeProvider = callback },
     setServe: (callback: typeof serve) => { serve = callback },
     setToolEffect: (callback: typeof toolEffect) => { toolEffect = callback },
+    setCommand: (callback: typeof command) => { command = callback },
     prompt: (text = "synthetic input", streamingBehavior?: "steer" | "followUp") => session.prompt(text, { expandPromptTemplates: false, streamingBehavior }),
-    compact: async () => { manualReference = gate.reference; try { return await session.compact() } finally { manualReference = null } },
+    compact: () => session.compact(),
   }
 }
 
 describe("real SDK Agent and primary provider approval boundaries", () => {
+  it("correlates template-expanded input without relying on message text", async () => {
+    const f = await agentFixture()
+    await f.session.prompt("/fixture argument")
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0].messages.at(-1).content).toEqual([{ type: "text", text: "expanded synthetic argument" }])
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it.each(["interactive", "rpc"] as const)("never lets an older template input supersede newer %s input before the SDK input hook", async source => {
+    const f = await agentFixture()
+    const old = f.session.prompt("/fixture old argument")
+    const replacement = f.session.prompt("newer explicit input", { source })
+    await Promise.all([old, replacement])
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0].messages.at(-1).content).toEqual([{ type: "text", text: "newer explicit input" }])
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.phase).toBe("active")
+  })
+
+  it("never lets an overlapping same-text pre-start prompt borrow the replacement epoch", async () => {
+    const f = await agentFixture()
+    let arrived!: () => void
+    let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(release)
+    let first = true
+    f.setBeforeAgent(async () => { if (first) { first = false; arrived(); await barrier } })
+    const old = f.prompt("same input")
+    await arrival
+    try {
+      await f.prompt("same input")
+      expect(f.requests).toHaveLength(1)
+    } finally { release(); await old }
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("cannot turn an unbound extension follow-up into explicit human input", async () => {
+    const f = await agentFixture()
+    await f.session.sendUserMessage("unbound extension input", { deliverAs: "followUp" })
+    expect(f.requests).toHaveLength(0)
+    expect(f.owner.record.request_epoch).toBe(0)
+  })
+
   it("completes the real SDK agent loop through inert primary-provider HTTP", async () => {
     const f = await agentFixture()
     await f.prompt()
@@ -138,7 +175,7 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
 
   it("parks before primary HTTP dispatch, then consumes the same input's release once", async () => {
     const f = await agentFixture()
-    f.setBeforeAgent(() => f.setLive(pending))
+    f.setBeforeProvider(() => f.setLive(pending))
     const input = f.prompt()
     await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
     expect(f.session.isStreaming).toBe(true)
@@ -163,9 +200,25 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
     expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
   })
 
+  it("binds RPC input privately and returns defensive reference copies", async () => {
+    const f = await agentFixture()
+    f.setBeforeAgent(() => {
+      const reference = f.operations.referenceFor()!
+      expect(Object.isFrozen(reference)).toBe(true)
+      expect(() => { reference.request_id = "foreign" }).toThrow()
+    })
+    await f.session.prompt("synthetic RPC input", { source: "rpc" })
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.phase).toBe("active")
+    expect(f.gate.reference!.request_id).not.toBe("foreign")
+    expect(() => f.operations.admit(f.gate.reference)).toThrow("Private explicit-input call unavailable")
+    expect(() => f.operations.bind(() => {})).toThrow("Private inherited call unavailable")
+  })
+
   it("native preflight cancellation prevents primary HTTP even though SDK hooks swallow errors", async () => {
     const f = await agentFixture()
-    f.setBeforeAgent(() => f.setLive(pending))
+    f.setBeforeProvider(() => f.setLive(pending))
     const input = f.prompt()
     await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
     const signal = f.session.agent.signal!
@@ -205,7 +258,7 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
     const checkpoint = f.gate.checkpoint.bind(f.gate)
     vi.spyOn(f.gate, "checkpoint").mockImplementation(async (...args) => {
       const result = await checkpoint(...args)
-      if (result) f.sessionManager.newSession()
+      if (result && f.session.isStreaming) f.sessionManager.newSession()
       return result
     })
     await f.prompt()
@@ -364,6 +417,212 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
     expect(f.requests).toHaveLength(2)
     expect(f.owner.record.request_epoch).toBe(1)
     expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+  })
+
+  it("inherits an actual SDK follow-up without minting another human input epoch", async () => {
+    const f = await agentFixture()
+    let follow!: () => Promise<void>
+    f.setBeforeAgent(() => { follow ??= f.operations.bind(() => f.session.sendUserMessage("inherited follow-up", { deliverAs: "followUp" })) })
+    await f.prompt()
+    await follow()
+    expect(f.requests).toHaveLength(2)
+    expect(f.requests[1].messages.at(-1).content).toEqual([{ type: "text", text: "inherited follow-up" }])
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("holds a delayed inherited follow-up and native continue after replacement", async () => {
+    const f = await agentFixture()
+    let follow!: () => Promise<void>
+    let retry!: () => Promise<void>
+    let forged!: () => Promise<void>
+    f.setBeforeAgent(() => {
+      follow ??= f.operations.bind(() => f.session.sendUserMessage("stale follow-up", { deliverAs: "followUp" }))
+      retry ??= f.operations.bind(() => f.session.agent.continue())
+      forged ??= f.operations.bind(() => f.session.prompt("stale pretend human input", { source: "interactive" }))
+    })
+    const started = vi.fn()
+    f.session.agent.subscribe(event => { if (event.type === "agent_start") started() })
+    await f.prompt("old input")
+    await f.prompt("replacement input")
+    await follow()
+    await retry()
+    await forged()
+    expect(f.requests).toHaveLength(2)
+    expect(started).toHaveBeenCalledTimes(2)
+    expect(f.session.pendingMessageCount).toBe(0)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.owner.record.request.phase).toBe("active")
+  })
+
+  it("inherits real SDK threshold compaction's separate provider path", async () => {
+    const f = await agentFixture()
+    for (let index = 0; index < 4; index++) {
+      f.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: `synthetic history ${index}` }], timestamp: Date.now() } as any)
+    }
+    f.session.setAutoCompactionEnabled(true)
+    const ended: any[] = []
+    f.session.subscribe(event => { if (event.type === "compaction_end") ended.push(event) })
+    f.setServe((_body, response, index) => {
+      if (index === 1) { f.setLive(pending); respond(response, "synthetic response", { prompt_tokens: 65_000, completion_tokens: 1, total_tokens: 65_001 }) }
+      else respond(response)
+    })
+    await f.prompt()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
+    expect(f.session.isCompacting).toBe(true)
+    expect(f.requests).toHaveLength(1)
+    f.approve()
+    await vi.waitFor(() => expect(ended).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    expect(ended[0]).toMatchObject({ reason: "threshold", aborted: false, willRetry: false })
+    expect(ended[0].result.summary).toBe("synthetic response\n\n---\n\n**Turn Context (split turn):**\n\nsynthetic response")
+    // Actual SDK split-turn compaction makes summary + turn-prefix calls.
+    expect(f.requests).toHaveLength(3)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+  })
+
+  it.each(["steer", "followUp"] as const)("replacement removes an inherited %s queue before old agent completion", async deliverAs => {
+    const f = await agentFixture()
+    let follow!: () => Promise<void>
+    f.setBeforeAgent(() => { follow ??= f.operations.bind(() => f.session.sendUserMessage("stale queued input", { deliverAs })) })
+    f.setServe((_body, response, index) => {
+      if (index !== 1) { respond(response); return }
+      response.writeHead(200, { "Content-Type": "text/event-stream" }); response.flushHeaders()
+    })
+    const old = f.prompt("old input")
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    await follow()
+    expect(f.session.pendingMessageCount).toBe(1)
+    expect(f.owner.record.request_epoch).toBe(1)
+    const signal = f.session.agent.signal!
+    await f.prompt("replacement input", "followUp")
+    await old
+    expect(signal.aborted).toBe(true)
+    expect(f.requests).toHaveLength(2)
+    expect(f.requests[1].messages.at(-1).content).toEqual([{ type: "text", text: "replacement input" }])
+    expect(JSON.stringify(f.requests[1])).not.toContain("stale queued input")
+    expect(f.session.pendingMessageCount).toBe(0)
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("cannot let an unbound overlapping SDK command borrow manual compaction authority", async () => {
+    const f = await agentFixture()
+    await f.prompt("old input")
+    let arrived!: () => void
+    let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(release)
+    let failure: unknown = null
+    f.setCommand(async () => { arrived(); await barrier; try { await f.session.compact() } catch (error) { failure = error } })
+    const command = f.session.prompt("/fixture-cmd")
+    await arrival
+    try { await f.prompt("replacement input") } finally { release(); await command }
+    expect(failure).toMatchObject({ message: "Owned compaction request unavailable" })
+    expect(f.requests).toHaveLength(2)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.owner.record.request.phase).toBe("active")
+  })
+
+  it("command-only explicit input interrupts the actual old owned Agent before any input hook", async () => {
+    const f = await agentFixture()
+    f.setServe((_body, response) => { response.writeHead(200, { "Content-Type": "text/event-stream" }); response.flushHeaders() })
+    const handled = vi.fn(async () => {})
+    f.setCommand(handled)
+    const old = f.prompt("old input")
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    const signal = f.session.agent.signal!
+    await f.session.prompt("/fixture-cmd")
+    await old
+    expect(handled).toHaveBeenCalledTimes(1)
+    expect(signal.aborted).toBe(true)
+    expect(f.session.isStreaming).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(1)
+    await vi.waitFor(() => {
+      expect(f.owner.record.request.phase).toBe("cancelled")
+      expect(f.owner.record.request.reason).toBe("superseded")
+    }, { timeout: 2_000, interval: 5 })
+  })
+
+  it("never aborts a now-foreign Agent after a synchronous queue listener changes native identity", async () => {
+    const f = await agentFixture()
+    f.setServe((_body, response) => { response.writeHead(200, { "Content-Type": "text/event-stream" }); response.flushHeaders() })
+    const old = f.prompt("old input")
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    const signal = f.session.agent.signal!
+    const abort = vi.spyOn(f.session.agent, "abort")
+    const unsubscribe = f.session.subscribe(event => {
+      if (event.type === "queue_update") f.sessionManager.newSession()
+    })
+    try {
+      await f.session.prompt("/fixture-cmd")
+      expect(abort).not.toHaveBeenCalled()
+      expect(signal.aborted).toBe(false)
+      expect(f.requests).toHaveLength(1)
+    } finally {
+      unsubscribe()
+      f.sockets[0].end("data: [DONE]\n\n")
+      await old
+    }
+  })
+
+  it("delivers private next-turn asides only to an inherited originating request", async () => {
+    const f = await agentFixture()
+    let aside!: () => Promise<void>
+    let follow!: () => Promise<void>
+    f.setBeforeAgent(() => {
+      aside ??= f.operations.bind(() => f.session.sendCustomMessage({ customType: "fixture-aside", content: "owned private aside", display: false }, { deliverAs: "nextTurn" }))
+      follow ??= f.operations.bind(() => f.session.sendUserMessage("inherited follow-up", { deliverAs: "followUp" }))
+    })
+    await f.prompt()
+    await aside()
+    expect(f.requests).toHaveLength(1)
+    await follow()
+    expect(f.requests).toHaveLength(2)
+    expect(JSON.stringify(f.requests[1])).toContain("owned private aside")
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("never transfers old private next-turn asides into replacement input", async () => {
+    const f = await agentFixture()
+    let aside!: () => Promise<void>
+    f.setBeforeAgent(() => { aside ??= f.operations.bind(() => f.session.sendCustomMessage({ customType: "fixture-aside", content: "stale private aside", display: false }, { deliverAs: "nextTurn" })) })
+    await f.prompt("old input")
+    await aside()
+    await f.prompt("replacement input")
+    expect(f.requests).toHaveLength(2)
+    expect(JSON.stringify(f.requests[1])).not.toContain("stale private aside")
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("owned close aborts the actual streaming Agent and holds late inherited work", async () => {
+    const f = await agentFixture()
+    let follow!: () => Promise<void>
+    f.setBeforeAgent(() => { follow ??= f.operations.bind(() => f.session.sendUserMessage("late closed input", { deliverAs: "followUp" })) })
+    f.setServe((_body, response) => { response.writeHead(200, { "Content-Type": "text/event-stream" }); response.flushHeaders() })
+    const input = f.prompt()
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 2_000, interval: 5 })
+    const signal = f.session.agent.signal!
+    await f.operations.close()
+    await input
+    await follow()
+    await f.prompt("after close")
+    expect(signal.aborted).toBe(true)
+    expect(f.session.isStreaming).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request.reason).toBe("disconnected")
+  })
+
+  it("never aborts a foreign native session on carrier close", async () => {
+    const f = await agentFixture()
+    await f.prompt()
+    const abort = vi.spyOn(f.session.agent, "abort")
+    f.sessionManager.newSession()
+    await f.operations.close()
+    await f.prompt("foreign closed input")
+    expect(abort).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request.reason).toBe("disconnected")
   })
 
   it.each(["steer", "followUp"] as const)("replacement %s input waits for real idle and never enters SDK queues", async mode => {

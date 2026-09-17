@@ -46,7 +46,7 @@ async function nativeFixture(options: { parked?: boolean; timeoutMs?: number; en
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), find: vi.fn(), getAll: () => [] }
   const handlers = new Map<string, Array<(...args: any[]) => unknown>>([
     ["input", [(event, ctx) => gate.input(event, ctx)]],
-    ["tool_call", [async (_event, ctx) => await gate.checkpoint(ctx) ? undefined : { block: true, reason: "Native request held" }]],
+    ["tool_call", [async (_event, ctx) => await gate.checkpoint(ctx, undefined, gate.reference) ? undefined : { block: true, reason: "Native request held" }]],
   ])
   const extension = { path: "fixture:request-gate", handlers, tools: new Map(), commands: new Map(),
     flags: new Map(), shortcuts: new Map(), messageRenderers: new Map() }

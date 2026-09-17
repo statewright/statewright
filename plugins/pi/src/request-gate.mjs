@@ -37,7 +37,11 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
       throw new Error("Live native session changed; admission denied");
     }
   }
-  const stop = ctx => { try { assertNative(ctx); Promise.resolve(ctx?.abort?.()).catch(() => {}); } catch { /* never abort a foreign native session */ } };
+  const stop = (ctx, signal) => { try {
+    assertNative(ctx);
+    if (signal && ctx.signal !== signal) return;
+    Promise.resolve(ctx?.abort?.()).catch(() => {});
+  } catch { /* never abort a foreign native session or replacement operation */ } };
   const active = request => !closed && current === request && !request.controller.signal.aborted;
   const notify = (ctx, message) => { try { ctx?.ui?.notify?.(message, "warning"); } catch { /* never fail open */ } };
 
@@ -105,14 +109,23 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
       await cancelRequest(request, reason);
       // SDK contexts resolve abort() against the currently active agent. An
       // old response must not abort the replacement input's agent.
-      if (current === request) stop(ctx);
+      if (current === request) stop(ctx, operationSignal);
       return false;
     }
   }
 
   return {
-    get reference() { return current?.reference ?? null; },
-    get held() { return !current || current.phase !== "active" || !active(current); },
+    get reference() { return current?.reference ? structuredClone(current.reference) : null; },
+    get held() { return !current?.admitted || current.phase !== "active" || !active(current); },
+    canDispatch(ctx, operationSignal, reference, { compaction = false } = {}) {
+      try {
+        assertNative(ctx);
+        return !!current?.admitted && active(current) && current.phase === "active"
+          && !!current.reference && equal(current.reference, reference)
+          && operationSignal instanceof AbortSignal && !operationSignal.aborted
+          && (compaction || ctx.signal === operationSignal);
+      } catch { return false; }
+    },
     enable() { if (!closed) enabled = true; },
     async input(event, ctx) {
       try {
@@ -126,17 +139,29 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
       // Synchronous invalidation precedes every potentially waiting network or
       // idle operation. Old responses cannot become the new input's authority.
       if (previous) void cancelRequest(previous, "superseded");
-      const request = { sequence: ++sequence, controller: new AbortController(), reference: null, identity: null, phase: "parked" };
+      const request = { sequence: ++sequence, controller: new AbortController(), reference: null, identity: null, phase: "parked", admitted: false };
       current = request;
       try {
-        if (previous) await Promise.resolve(ctx?.abort?.()).catch(() => {});
+        if (typeof ctx?.isIdle !== "function") throw new Error("Native idle boundary unavailable; admission denied");
+        if (previous || ctx.isIdle() !== true) stop(ctx);
         const inputDigest = createHash("sha256").update(JSON.stringify({ text: event.text, images: event.images ?? null })).digest("hex");
         const signal = AbortSignal.any([request.controller.signal, AbortSignal.timeout(timeoutMs)]);
         const result = await untilAborted(() => { assertNative(ctx); return call("begin", { native_session_id: nativeSessionId, input_sequence: request.sequence, input_digest: inputDigest }, signal); }, signal);
         if (!active(request)) return { action: "handled" };
         if (!await wait(request, ctx, result)) return { action: "handled" };
+        // SDK ctx.abort() discards its idle promise. Never hand input back to
+        // SDK's steering/follow-up queues while the interrupted agent remains
+        // active, including its awaited agent_end listeners.
+        while (ctx.isIdle() !== true) {
+          signal.throwIfAborted();
+          assertNative(ctx);
+          if (!active(request)) throw new Error("Native input replaced while awaiting idle");
+          await sleep(pollMs, signal);
+        }
+        signal.throwIfAborted();
         assertNative(ctx);
         if (!active(request)) throw new Error("Native input replaced at admission handoff");
+        request.admitted = true;
         return { action: "continue" };
       } catch (error) {
         await cancelRequest(request, error?.name === "TimeoutError" ? "timeout" : "disconnected");
@@ -144,19 +169,25 @@ export function createPiRequestGate({ nativeSessionId, call, onPark = () => {}, 
         return { action: "handled" };
       }
     },
-    async checkpoint(ctx, operationSignal) {
+    async checkpoint(ctx, operationSignal, reference) {
       const request = current;
+      try {
+        if (!request?.admitted || !active(request) || !request.reference || !equal(request.reference, reference)) {
+          // Without the private reference this callback has no authority to
+          // abort either. SDK contexts expose a lazy current-operation signal.
+          return false;
+        }
+      } catch { return false; } // No ownership established: no cancellation.
       try {
         assertNative(ctx);
         operationSignal ??= ctx?.signal;
-        if (!request || !active(request) || !request.reference) { stop(ctx); return false; }
         if (!await wait(request, ctx, null, operationSignal)) return false;
         assertNative(ctx);
         if (!active(request)) throw new Error("Native request replaced at checkpoint handoff");
         return true;
       } catch {
         await cancelRequest(request, "disconnected");
-        if (current === request) stop(ctx);
+        if (current === request) stop(ctx, operationSignal);
         return false;
       }
     },

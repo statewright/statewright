@@ -577,3 +577,201 @@ native identity all remain required. Prove the complete authorized native
 journey separately before activation/promotion; never substitute these fake
 authority/terminal-agent fixtures for that acceptance. Original goal remains
 active, not complete or blocked.
+
+## Slice 5: actual SDK agent/provider boundaries and idle admission
+
+Previous turn: verified progress, local commit
+`96a1dafbd1fdb5f3e87b4b97a2c34c0f7aab02d9`, source-bound gates and closed
+native-identity/cancellation findings. Current status confirms that commit and
+the same unrelated dirty Gateway/usage/canary/supervisor/OMX inventory. Full
+P0/P1 objective remains unchanged; no workflow is queried/loaded/used.
+
+This turn moves beyond terminal fake-agent input evidence: use public
+createAgentSession and its real Agent, primary installed provider implementation
+against a task-owned loopback synthetic streaming server, actual signals and
+queues, private loopback parent protocol and durable owner/journal. No real
+provider credentials, inference, approval resolver, workflow or existing native
+session is used. Follow-up correlation, commands/recovery/effect async boundaries,
+main/observer/extension wiring, restart and full native acceptance remain required
+until actually proved; do not declare completion from this boundary alone.
+
+Owned scope: Pi request gate, reusable native request-hook wiring, actual
+SDK/provider fixtures and ADR 008/this receipt. Extend parent files only for a
+discriminated protocol defect. Preserve every initial dirty artifact. Input
+must invalidate old work, abort and wait for actual native idle outside inference
+before returning to SDK admission, rather than assume ctx.abort awaits idle.
+Provider/tool/compaction boundaries must await the current private receipt and
+fail closed on cancellation, foreign identity or unavailable transport. Prove
+that hook cancellation prevents even primary-provider synthetic HTTP dispatch,
+not only that a mocked abort function was called. No model decision channel.
+
+Provisional observed-only envelope based on prior local gates finishing in
+seconds: one serial implementer, one final clean-context Astra/high read-only
+review (skill-directed exception to no implementation delegation), 45 normal/
+70 worst tool calls, <=16 KiB result per later call, 30-minute warning and
+45-minute handoff, max two distinct repairs per finding. Preserve final third
+for integration/review/recording/commit. At warning stop discovery, focus missing
+proof; at contraction hand off exact remaining original requirements instead of
+activating unproven code. No controller/token/quota enforcement or price claim.
+
+Initial real SDK agent/provider run: two provider park/cancel cases passed;
+normal control failed because primary provider represents user content as typed
+parts rather than a string (fixture expectation repair). Both real agent-end
+barrier cases failed: replacement input settled and entered SDK queues while
+the old agent remained non-idle. Product defect, not an abort-counter proof.
+Gate now explicitly waits native idle outside inference before input admission.
+Checkpoint now requires the immutable private operation reference, preventing
+an old callback from borrowing the latest input merely by reading current state;
+native abort also checks the captured operation signal before touching it.
+
+First combined rerun: 27 passed/6 failed, with two additional cleanup hook
+timeouts. Actual-agent binding used agent_start before the SDK appended the user
+message, so the new fail-closed reference check correctly refused a missing
+binding. Repair fixture correlation at the actual context event after user
+append, never weaken the reference check. Unreleased test-owned agent_end
+barriers then stalled SDK abort in cleanup; always register barrier release
+before assertions. A fake-agent fixture also read a throwing context signal
+outside checkpoint's catch; keep that read inside the gate. These are bounded
+fixture/evidence repairs, not reason to permit missing correlation or increase
+timeout limits. No failed run is a pass; fresh results follow below.
+
+Corrected combined fixture gate: 33/33 passed. Added actual AgentSession
+automatic continue retry (not input/before_agent_start), primary-native drift
+and manual compaction: 8/9 passed. Native drift dispatched one synthetic HTTP
+request, a product guard defect. Returning the denied Proxy from an async
+handler triggered Promise assimilation's `then` lookup inside the SDK catch;
+the SDK retained the original payload. Permit only that inert probe and reject
+payload reads outside the catch. Fresh combined gate: 37/37 passed, including
+zero HTTP on foreign identity and zero aborts of the foreign session.
+
+Further discriminating private-reference/actual-tool cases: 41/41 passed.
+Missing or old private references now deny without abort/cancel authority over
+the current input. A synchronous canDispatch view checks the captured native
+signal/reference/identity after async helpers and on actual payload use. The
+actual-gate wrapper challenge changes native identity after checkpoint resolves;
+fresh combined gate 42/42 passed with zero HTTP/foreign abort. This challenge
+is additive proof, not a recorded red run. Fresh pending-before-real-Agent/auth,
+once-only actual-tool release and actual-manual-compaction release cases follow.
+
+Installed primary-source provenance (all three packages 0.73.0, local Node
+SHA256 over the named installed source, not an upstream pin):
+
+| Package/file | SHA256 |
+| --- | --- |
+| pi-coding-agent/dist/core/sdk.js | effac468f4e9d56e777a0f114e7f6a736b3d7bc53636e2e17183615fbe9d8fec |
+| pi-coding-agent/dist/core/agent-session.js | 84687393bb0db810b93b6e632815ae5e54e1e0ebc17690ec1c4419791c73619f |
+| pi-coding-agent/dist/core/extensions/runner.js | dab1eadccdd73b6bb50bbd22b464461c65eca77f368d2b44e5e9af4cbcc18d4d |
+| pi-agent-core/dist/agent.js | 8dde21e527322191eeb64e6c12b624afdae4dc44abf092b5399c3d86acd7407b |
+| pi-agent-core/dist/agent-loop.js | ef6844bc7ef047a6f58495b753cdcd445df59da573a2717de0b85469d5e097f0 |
+| pi-ai/dist/providers/openai-completions.js | 2e72980aa74e53a61534a71a4461ffa013d71b67fbfbfc25e4e0d2683d64498e |
+
+Actual HTTP fixtures prove only this installed primary adapter and inert
+responses. SDK auth/model registry uses memory/fake credentials. Input binding
+uses a test-only unchanged-text digest captured on admission and bound to the
+actual signal at context after user append. Manual compaction explicitly captures
+its outer reference before the public SDK call. Neither is production generic
+template/command/recovery/follow-up correlation. Guards are registered last in
+the fixture's sole extension; later handlers can override payloads. No full
+native approval journey or universal provider cancellation claim. AgentSession
+retry tests explicitly set nested `retry.provider.maxRetries: 0`; internal
+primary-client retries bypass onPayload and remain an activation requirement.
+Likewise any ownership change after payload serialization across further SDK
+header/routing/transport awaits needs private lease/cancellation proof, not
+another stale cache. ADR 008 records these exact boundaries.
+
+Full original requirement audit at this cut: durable journal/exact ownership,
+parent current epochs/private receipt/nonce/durable consumption and tested
+actual-Agent boundaries are source-bound local prerequisites. Executor main/
+observer and shipped Pi extension remain unwired; ADR 007 hold-only behavior
+remains. General native-operation binding, extension follow-ups/recovery/commands,
+overlapping pre-start input, automatic compaction, SDK internal transport retries,
+all asynchronous effects, close/restart wired lifecycle, broader host parity and
+complete authorized native P0/P1 acceptance remain open. No goal completion,
+live canary, workflow call, resolver/approval, real inference, installed-runtime
+change, existing-session signal, deployment or push is authorized/claimed.
+
+Fresh final focused pre-review gate: 45/45 passed. Isolated staged snapshot
+`b8532a835c503a826cc813405dead457dc7bc09e`, export
+`/tmp/statewright-agent-boundary.slcSkH`: Node integration 281/281 with no
+skips/cancellations; Pi 120 passed/1 pre-existing opt-in live-canary skip;
+native-session gate 2/2. Generated Claude managed-client parity and both Pi
+MJS syntax checks returned exit 0. These gates are superseded by the review
+repair; final source must receive fresh gates.
+
+Clean-context read-only Astra/high reviewer
+`/root/pi_actual_agent_boundary_review` found R1 (high): checkpoint touched
+native identity/lazy signal before checking its captured private reference.
+One synthetic in-memory challenge admitted epochs 1 and 2, then passed epoch
+1's reference with a foreign native context. Result false and no foreign abort,
+but current epoch 2 became held and parent cancellations changed from [1] to
+[1,2]. The old callback acquired cancellation authority from the current cache,
+contradicting the declared cutline. No other finding in the bounded six-path
+review; the reviewer did not repeat broad gates or edit any file.
+
+R1 repair attempt 1: test admitted/private-reference ownership before any
+context getter and return false without cancellation for unbound callbacks.
+Correctly bound native drift still enters fail-closed cancellation. Regression
+combines old/missing reference with foreign identity, throwing identity and
+throwing lazy signal; all assert zero context reads, zero replacement aborts,
+active epoch 2 and no replacement cancellation. Preserve the failed challenge
+and superseded gate above. Fresh focused validation and bounded independent
+recheck required; no expansion into broad implementation/discovery.
+
+R1 independent recheck: closed on staged snapshot
+`65f1117e6d15006e63249c2669d39b763fd428ac`. Repeating the original synthetic
+challenge leaves epoch 2 active: result false, held false, cancellations remain
+[1], aborts remain 1. One read-only tool call; no edits or broad gate rerun.
+Correctly bound native failures still cancel. Root's focused gate 47/47 passed.
+
+Final isolated source gate, same snapshot exported to
+`/tmp/statewright-agent-final.6rjS1a`: approval/Codex/ownership/observer/remote/
+private bridge/generated/native Node integration 281/281, zero failures,
+skips or cancellations (4.58s). Pi 122 passed/1 pre-existing opt-in live-canary
+skip (6.09s); native session 2/2 (1.17s). Generated Claude managed-client parity
+and both Pi MJS syntax checks exit 0. Subsequent changes only extend this
+receipt. The source cut is six paths; every initially unrelated dirty artifact
+remains outside it. No Rust/full-workspace/type-check/live-native or production
+gate is claimed. The two Node native tests also occur in the integration suite;
+do not add these gate counts as unique tests.
+
+Commands from the final staged export (npm commands in plugins/pi):
+
+```sh
+node --test plugins/executor/tests/{human-approval,approval-journal,codex-approval-gate,runtime-approval-service,codex-native-approval-proxy,codex-app-server-transport,managed-ownership-races,executor-approval-mirror,executor-observer,executor-contract,remote-client,host-adapters,executor-session-ownership,adapter-bridge,executor-request-controller,executor-request-bridge}.test.mjs plugins/pi/tests/session-owner.test.mjs plugins/claude-code/tests/managed-client-bundle.test.mjs
+npm test -- --reporter=dot
+npm run test:native
+node plugins/claude-code/scripts/sync-managed-client.mjs --check
+node --check plugins/pi/src/request-gate.mjs
+node --check plugins/pi/src/request-hooks.mjs
+```
+
+Applied manual agentic-engineering controls influenced this inactive cutline,
+ADR, exact source exports, retained failed evidence, scoped Git boundary,
+protected final gates and clean-context adversarial review. Observed review:
+one Astra/high decision pass, one R1 repair, one focused independent recheck;
+no implementation delegation or workflow. No finding exceeded the two-repair
+limit. The normal provisional tool envelope expanded for real SDK red evidence
+and the required review repair; discovery stopped and only focused repair,
+fresh source gates and recording followed. Tool/token/time accounting remains
+manual/observed-only, not cumulative controller/quota enforcement. Next slice
+must budget general operation correlation as a separate prerequisite rather
+than broaden this passed provider fixture with unsafe production cache wiring.
+
+Exact next original input: implement a private immutable native-operation
+binder that survives template expansion and overlapping pre-start awaits,
+distinguishes explicit input from inherited extension/recovery follow-ups and
+never transfers old queued work into a newer epoch. Add actual automatic-
+compaction and internal HTTP-retry/transport cancellation challenges. Then
+wire parent controller into `plugins/executor/statewright-exec.mjs` (currently
+launch-hold/owned Pi SIGTERM, bridge lacks requestController), observer/deferred
+journal clear, exact native readiness and parent close/cancel; wire guarded
+effects into shipped `plugins/pi/src/index.ts` after exclusive final hook
+registration. Its corrective/timeout/retry/embedded-tool paths currently use
+current caches and uncorrelated sendUserMessage, so no activation yet. Audit
+every async declared effect and inference handoff against the captured private
+reference, test restart/new-input/parent-child ownership, then separately prove
+authorized complete native P0/P1 and advertised host parity. This safe local
+progress is not the full requirement audit's success condition. Original goal
+remains active, not complete or blocked; Auldwyrm/installed runtime/live sessions
+remain untouched. No workflow query/load/use, actual decision, real inference,
+external change, deployment or push occurred.

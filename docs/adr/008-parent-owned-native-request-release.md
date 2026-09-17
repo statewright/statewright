@@ -42,22 +42,48 @@ responses return `handled` or block the tool callback; exceptions do not escape
 to the SDK's fail-open hook handling. Transport waits have cancellation and
 timeout bounds even if an injected transport ignores its signal. An obsolete
 callback must not invoke the SDK context's lazy abort against a newer agent.
+Input explicitly waits for `ctx.isIdle()` after abort and before admission,
+including awaited real-agent end listeners. Checkpoints require a captured
+private request reference, not the current reference fetched by a late callback.
+Missing or foreign references cannot authorize either continuation or abort.
 
 Primary source: installed Pi SDK 0.73.0 `dist/core/agent-session.js` and
 `dist/core/extensions/runner.js`. `ExtensionContext.abort()` discards the
 underlying idle promise; it does not prove the old operation has stopped.
-Real public AgentSession/ExtensionRunner + loopback bridge + durable local
-owner/journal fixtures prove pending native input remains before auth,
-compaction and a terminal fake-agent counter, and the same callback continues
-once after the synthetic approved receipt/applied edge. Inference, approval
-authority and compaction are synthetic; no workflow or provider is called.
+The original public AgentSession/ExtensionRunner + loopback bridge + durable
+owner/journal fixtures retain terminal fake-agent evidence. The additive
+`request-agent-native.spec.ts` uses public createAgentSession, actual Agent,
+factory-installed onPayload, primary openai-completions adapter, real SDK tool
+hooks, automatic AgentSession retry and manual compaction. HTTP is task-owned
+loopback with inert SSE/tool-call responses; authority remains synthetic and
+no model inference, real provider, workflow, user config or native session file
+is used. Replacement steer/follow-up input cannot enter real SDK queues while
+an awaited old agent_end listener keeps the old Agent non-idle.
+
+`installPiRequestGuards` requires a private operation correlator; it has no
+current-cache fallback. The SDK catches before_provider_request exceptions and
+has no cancellation result. Guards therefore return a payload proxy that
+allows the inert `then` promise-assimilation probe but rejects denied payload
+use outside that catch. An admitted payload rechecks current reference, native
+identity and captured Agent signal synchronously when consumed. Actual primary
+adapter HTTP fixtures prove the tested holds and identity/cancellation failures
+dispatch zero additional requests, including foreign-session denial without
+aborting that session. Compaction uses its distinct captured event signal.
+Guard registration must be last and managed extension loading exclusive; a
+later handler could replace a payload. These are adapter-specific prerequisites,
+not a supported universal provider cancellation API or a lease across later
+SDK auth/header/routing/transport awaits or internal HTTP retries.
 
 This commit does NOT wire the controller into executor main or the gate into
 the shipped Pi extension. Existing ADR 007 hold behavior remains in force.
-The activation boundary requires actual SDK Agent request/signal, queues,
-provider onPayload, automatic retry and compaction, native shutdown, recovery
-effects/follow-ups and every async boundary to retain the same authoritative
-epoch. The present terminal-agent fixtures do not prove those requirements.
+The actual-agent fixtures correlate only untouched synthetic prompt digests to
+captured signals, plus an explicit outer manual-compaction reference. That is
+test-only, not a general template/recovery/follow-up binder. Automatic compaction,
+extension-source follow-ups, overlapping pre-start prompts, native commands and
+shutdown, recovery effects and every remaining async/SDK transport boundary
+must retain the same authoritative epoch before activation. AgentSession retry
+is tested with primary HTTP client retries explicitly zero; default/internal
+provider retries are not proved. The SDK dependency is not pinned by this slice.
 No live/native authorized approval journey, deployment or promotion is claimed.
 
 ## Consequences and rollback

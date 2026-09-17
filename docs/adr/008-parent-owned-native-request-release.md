@@ -48,7 +48,8 @@ the native tools setter. Configuration fields cannot be reflectively redefined
 or deleted; ordinary SDK assignments remain guarded. The required public SDK
 configuration methods are checked before installation mutates the session.
 Only a privately marked native-configuration denial from an actually superseded
-prompt is handled as obsolete input; current denial and unrelated errors surface.
+or privately native-cancelled prompt is handled as obsolete input; current denial
+and unrelated errors surface.
 
 The owning RPC mode holds a separate configuration-input capability, absent
 from project APIs and SDK session mutators. Its inlet routes only strict
@@ -82,6 +83,53 @@ provider internals, filesystem/process/branch or publication effects. Revisit
 this small adapter when the public SDK offers input/command interception or
 awaits these mutators; remove the inlet substitution then, preserving its native
 RPC race/framing/authority tests. No production or complete-gesture activation.
+
+### Owning native cancellation (Slice17)
+
+Native modes receive a separate runtime/session/Agent view, never installed on
+the real SDK session or exposed to project extension contexts. Its Session.abort
+and Agent.abort invoke a private frontend cancellation capability; inherited
+project scopes cannot use that capability to become human input. SDK0.73.0 RPC
+abort otherwise stops only Agent/retry, leaving parked private input alive.
+Interactive Escape otherwise sees isStreaming=false while input is parked; the
+mode view adds private pending-input visibility so the original SDK key handler
+and queue restoration method use the same native cancellation path. The actual
+SDK prompt/configuration methods remain bound to the real session; do not feed
+the synthetic streaming flag back into its steering/queue decisions.
+
+Cancellation synchronously replaces the private input marker before any wait,
+invalidates final response/queues, cancels the captured gate, and aborts only the
+captured owned Agent whose native signal/reference still match. Signal/queue
+callbacks can start newer input: recheck the private marker and captured handle
+before SDK abort, never re-read latest work after awaiting cancellation. Old
+input completion cannot clear newer pending visibility. Keep readiness enabled
+for a new explicit input; do not resolve approval or clear its durable journal.
+RPC acknowledgement awaits this cancellation boundary, not a detached mutation.
+Interactive void abort callers observe rejection without fallback or new work.
+The private native-cancel marker retains its exact reference for late SDK/project
+callback handling. An explicitly cancelled continuation is obsolete, not a
+current request whose ordinary parked/cancelled phase can hide genuine errors.
+The marked SDK mutation denial is handled without inference; inherited callback
+failures from that obsolete reference cannot revoke newer/native readiness.
+No phase-only failure suppression or project-supplied cancellation marker.
+SDK interactive shortcuts synthesize ctx.abort from the mode session and execute
+outside prompt ALS. Wrap/seal registerShortcut like other project registrations;
+unbound project callbacks enter a private project-unbound scope with no reference,
+never absence-of-scope native input authority. SDK synthesized abort cannot mint
+or cancel input from that callback or its inherited async work. No implicit latest
+reference is assigned. This closes the newly introduced mode-capability exposure,
+not complete owning admission/effect coverage for arbitrary project hotkeys.
+
+Public SDK modes lack a native-control interceptor. A mode-only view preserves
+their original dispatcher/key handlers without a vendor patch, copied dispatcher,
+or treating every raw session abort as human authority. Revisit/remove it when
+the public SDK supports owning cancellation injection; retain native RPC/Escape
+and late-reply/new-input tests. Before a lost begin response the native input is
+invalidated but durable parent reference cancellation is not proved; complete
+crash/restart reconciliation remains required. Raw project abort, compaction/
+retry/branch controls, full TUI gesture/rendering and remaining native effects
+are not collectively proved by this cut. Rollback is a scoped source revert,
+preserving journal/owner/native records; no durable schema or live runtime change.
 
 Installed SDK0.73.0 cycleModel awaits its public registry before writing model,
 history and settings. Its task-owned registry wrapper checkpoints the one
@@ -398,7 +446,8 @@ code interception, malicious-agent isolation or an inference-internals lease.
 Managed pre/post-tool and interrupt routing selects the immutable ownership
 mode, not a later environment value. A post-tool failure rechecks inherited
 ownership before notification or lazy abort. Error suppression applies only to
-an actually superseded reference/arrival (including preflight), not a current
+an actually superseded or privately native-cancelled reference/arrival (including
+preflight), not a current
 request merely parked/cancelled: genuine current SDK callback errors revoke
 readiness even while held. Phase denial is not evidence of supersession.
 

@@ -2,6 +2,221 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 17 entry: owning native input cancellation
+
+Base02fdff6; previous turn verified progress, not wait/no-progress. Fresh main/
+dirty ownership checks retain the seven user changes and Auldwyrm unchanged.
+Full006/012/spec111/116 objective remains active. Manual/no Statewright query,
+load or use overrides skill workflow activation. Root alone implements; the
+skill-required independent read-only review is not implementation delegation.
+
+SDK0.73.0 RPC abort awaits Session.abort, which aborts retry/Agent and waits idle,
+not private parked input. Interactive Escape calls Agent.abort only when native
+isStreaming, which excludes a parked approval. This bounded source cut supplies
+native modes a separate session/Agent view: private cancellation capability,
+pending-input visibility for Escape, synchronous input invalidation before waits,
+captured cancellation/Agent identity rather than any latest-reference lookup
+after awaits. Raw SDK/project methods do not receive native-input authority.
+Keep readiness alive for fresh explicit input; never clear approval journal or
+consume a late grant for cancelled input. Native RPC abort and the actual SDK
+Escape handler must exercise this boundary without patching/vendoring SDK.
+
+Owned scope: request-operations/frontend/mode, actual SDK frontend/mode tests,
+optional exact CLI cancellation tests, ADR008 and this receipt. First add red
+actual SDK cancellation tests; then prove parked prompt/configuration denial,
+pre-hook lookup cancellation, late reply/new-input ordering, current streaming
+Agent abort and project inherited denial. Durable parent cancellation is proved
+only after a private reference is received; cancellation before a lost begin
+reply, compaction/retry/branch controls, interactive configuration selectors,
+remaining effects/publication/recovery and authorized host acceptance stay open.
+No actual authority/decision/inference, live sessions/panes/process signals,
+install/deploy/push. Task-owned inert HTTP/SDK/streams/children only.
+
+Exact staged/exported integration gate: Node308 baseline serial, Pi266 baseline
+plus one existing opt-in live skip, native2, Claude managed parity/mjs syntax,
+then mandatory clean-context Astra/high read-only review. Observed-only envelope:
+100 normal/135 contraction root calls;30-minute warning/45-minute contraction;
+16KiB output target and final-third validation/review reserve. Reviewer10 calls/
+12minutes/two focused checks; fresh finding-only recheck4 calls/5minutes/two
+checks; max2 distinct repairs/finding, two exports plus regression-justified
+third. No controller/provider enforcement, catalog probe or quota-price claim.
+Scoped local commit/revert preserves native/journal evidence and unrelated work.
+
+Retained red baseline: three actual SDK tests fail on missing cancelInput.
+First implementation passes those three. Expanded SDK fixture7/7 passes,
+including actual Escape methods, streaming/new-input cancellation completion
+and cancelled model-registry handoff. Initial in-process RPC fixture2 failed:
+one infinite native-loop await/teardown timeout, one malformed configuration
+payload before admission. Installed rpc-mode.js595 returns a forever promise
+and shutdown owns process.exit; fixture/evidence defect, not product failure.
+Replace only that unsafe fixture with task-owned CLI children and strict native
+payloads, preserving cancellation/journal/late-approval/no-effect assertions.
+Both actual native RPC CLI cancellation cases pass; no timeout enlargement,
+production process interception or positive acceptance weakening. Those local
+gate receipts precede source freeze/integration/review, not full acceptance.
+Discriminating old native-control run: Escape1/1 fails parked streaming visibility;
+actual RPC CLI2/2 fail because abort replies success while parent remains parked.
+Restore only native mode view/dispatch, preserving all assertions. Further root
+red tests cover late SDK/project callback handoff after explicit native cancel;
+ordinary parked/cancelled phase alone must not suppress genuine current errors.
+Both new awaited-handoff tests fail with the guarded SDK systemPrompt denial;
+one also causes the cancelled project's declared-effect failure to revoke owning
+readiness. Product defect, bounded repair1: retain the exact privately native-
+cancelled reference as obsolete context, not phase-only/error-string suppression.
+Existing genuine-current-held-error tests remain required positive controls.
+Expanded root SDK/CLI/inlet gate131/131 passes (91 frontend,27 main,13 inlet),
+including those two repaired handoffs and unchanged genuine-current-error
+controls. Fail-fast changed mjs syntax and Claude managed parity exit0. These
+precede exact-source freeze/integration/review; no Rust/typecheck/lint/build,
+headed TUI or actual reviewer/gateway conformance has been run.
+
+### Slice 17 full-objective audit, not completion
+
+Re-read current006 required nine-row contract,012 numbered1-4/slicesA-D and
+Auldwyrm111 native/reviewer/evidence requirements plus116 conformance/promotion.
+Historical source/staging receipts are not current live verification. All
+original acceptance obligations remain controlling, with these dispositions:
+
+1. Immutable full ticket/artifact digest/policy/reviewer/expiry/revocation remains
+   partial/open; no authority contract or complete ticket implementation added.
+2. Local native UUID/epoch/private capture and experimental parent ownership
+   remain partial; branch/replacement/cross-host lineage is still open. Native
+   cancellation captures the existing reference, not model-supplied latest work.
+3. Pending/no-declared-effect/no-inference gains reachable RPC abort and original
+   SDK Escape cancellation for the tested parked prompt/configuration paths.
+   Interactive configuration selectors/settings/hotkeys, other native settings/
+   registry/queue, filesystem/spawn/branch/provider/publication/rendering and
+   all internal transport/retry/summary continuations remain open.
+4. Query-before-controls/required-reviewer information and entitled native plus
+   website authenticated decision journeys remain unproved here; hosts do not
+   gain a resolver. This slice adds cancellation, never approval/deny authority.
+5. Cancel/dismiss/disconnect retention gains native control cancellation with
+   exact received reference, preserved journal/readiness and fresh explicit
+   input. Cancellation before lost begin reply, complete native cold restart,
+   crash-lock/legacy recovery, parent inflight-drain and permanent SDK teardown
+   failure stay open. Approval decisions are not consumed by cancelled input.
+6. Exact private nonce/tombstone/consume-before-clear fixtures remain partial;
+   real policy/entitlement/artifact reconciliation and exactly-once native
+   delivery across crashes remain open. A late synthetic grant can be consumed
+   only by a fresh explicit request, not the cancelled continuation.
+7. Older continuation/final-response ownership gains cancellation-before-hook,
+   late guarded SDK/project handoff denial and no newer Agent/pending-state
+   interference on old cancellation completion. All native effects and final
+   publication/rendering are not collectively proved; full activation stays open.
+8. Private routing/API keys are not human-click/authentication-strength evidence
+   or malicious same-OS isolation. Complete source/auth-strength provenance is
+   open; no decision submitted or actual human authority verified.
+9. Shared client-neutral reviewer/evidence/retention semantics, installed clean
+   packaging and every advertised client/host acceptance remain open. No website
+   requirement or enterprise/compliance coverage is inferred from local fixtures.
+
+012 A/1 user-dirty Rust pending pre-tool denial preserved/uncommitted and not
+validated here. 2 host-unprivileged/no-decision surface retained; actual trusted
+decision route untested. C/3 experimental parent journal/deferred-clear/close/
+synthetic reopen remain partial, not production cold-native restart. B/4 owning
+RPC/Escape cancellation is reachable in this experimental mode but all effect/
+transport integration and production main activation stay open. D actual native/
+gateway approval, restart and host-parity canaries are not run under explicit
+no-workflow/no-real-decision authority. Spec111 shared native/website/reviewer/
+evidence/cold/new-input journeys and116 clean packaging, desktop/protocol/native
+Windows versus WSL,100 deterministic iterations per supported runtime/24-hour
+staging soak/production promotion are gates, not completed evidence. No workflow,
+actual approval/inference, live sessions, installation, deployment or push.
+
+Exact next bounded source input: trusted interactive configuration gesture
+wiring, capturing private action before selector/registry awaits, binding the
+selection callback to that original scope and awaiting guarded mutation before
+UI success/publication. Do not lend raw setters latest ownership. Then complete
+remaining effects/publication, lost-begin/cold recovery and authorized reviewer/
+host conformance. Safe manual implementation remains; goal is active, neither
+complete nor blocked. Source milestone completion cannot narrow that objective.
+
+Frozen source d09fcb2f899f3b27a93f308f210a1bdfca990ec5 at
+/tmp/statewright-native-cancellation.fbIvBx passes serial Node308/308, Pi277
+passed/one existing live skip, native2/2, fail-fast Claude parity/3mjs syntax0.
+Mandatory read-only reviewer is assessing that source, not implementation.
+Root adjacent primary-source check: SDK InteractiveMode.setupExtensionShortcuts
+1223-1277 synthesizes ctx.abort from native mode session and invokes project
+shortcut outside prompt ALS. Existing frontend registerShortcut was unwrapped.
+New actual SDK shortcut regression distinguishes possible new capability exposure.
+If established, this is a product callback-boundary repair within no-project-
+native-input-authority acceptance, not full hotkey/configuration implementation.
+Actual SDK shortcut regression fails: synthesized ctx.abort resolves instead of
+denial and can cancel parked input. Root finding P2 established; prior source
+gates/review cannot approve this boundary. Repair1 additionally owns
+plugins/pi/src/project-effects.mjs (one wrapper): wrap/seal shortcut registration,
+mask unbound project callbacks with a private no-reference scope. No latest
+request/admission is lent to extension hotkeys. Add captured registration seal
+regression; retain original cancellation/no-effect assertions. A new frozen
+export/integration gate and fresh finding-only independent recheck are required.
+
+Initial clean-context Astra/high /root/pi_native_cancellation_review returned no
+established defect in its bounded pass:8 diagnostics/1 focused invocation,6 tests
+pass/85 unselected (actual Escape/new-input/model/callback/current-error controls),
+scoped diff-check0 and task process terminal. Root's later actual shortcut proof
+supersedes that no-finding disposition; it is not final approval of repaired
+source. Source exports/resources are validation fixtures, not live sessions.
+Root repaired-boundary focused gate6/6 passes (87 unselected), covering the actual
+synthesized shortcut denial, captured registration seal, native Escape, two late
+handoffs and unchanged genuine-current-error control. Added project-effects mjs
+syntax/diff-check0. Freeze the eight owned paths and rerun the declared exact-
+source integration; optional breadth remains stopped, validation/review/recording
+reserve protected. This is the second source export, not another discovery loop.
+
+### Slice 17 final source, review and handoff
+
+Final tested/reviewed tree431411cd309b63efcfac166ed5a11e24b7f7f2ed, exact export
+/tmp/statewright-native-cancellation-repaired.7B3Fbq. Serial Node308/308 (zero
+failures/skips/cancellations); Pi279 passed/one existing opt-in live-canary skip
+(eight files passed/one skipped); native2/2 (zero failures/skips/cancellations).
+Fail-fast Claude managed-client parity and four changed mjs syntax exit0;
+staged diff-check0. No source/ADR delta after this export; final recording is
+receipt-only before the scoped eight-path local Git milestone. Initial red,
+failed-fixture and superseded source/review evidence remain above. Serial gate
+does not assert the prior parallel Codex shutdown-fixture race is fixed.
+
+Fresh clean-context Astra/high /root/pi_native_cancellation_recheck reports no
+established defect within shortcut repair against this exact tree. Independent
+focused test4 passed/89 unselected, exit0,1.32seconds: actual SDK synthesized
+shortcut ctx.abort denial, captured registration seal, original native Escape
+and genuine-current-error control. Four diagnostic commands/one completion poll
+across four tool submissions, one focused invocation; task test process exited
+and fixtures cleaned. Inherited shortcut async denial is supported by ALS but
+not separately exercised in that recheck; root inherited-capability/callback
+tests and full integration are distinct evidence, not an inferred reviewer run.
+Root alone implemented. Initial mandatory reviewer plus fresh finding-only
+recheck matches the declared worst route; no implementation delegation.
+
+Actual SDK/Agent and task-owned CLI fixtures use inert HTTP/synthetic authority;
+Pi client connection diagnostics are mocks. No Rust/workspace typecheck/lint/
+build, headed TUI/rendering, actual reviewer/gateway/native/website canary,
+hosted CI/100-iteration races/24-hour soak or staging/production promotion.
+No Statewright query/load/use, real approval/decision/inference, live sessions/
+panes/process signals, installed SDK patch, installation, deployment or push.
+All nine-row/012/111/116 obligations and exact next input in the full-objective
+audit above stay controlling; native cancellation progress is not complete
+P0/P1 delivery. Goal remains active; safe manual source work remains available.
+
+Manual source/evidence/Git profile stays root-owned; no new production runtime
+control/authority/schema. Main route inherited, independent frontier high;
+observed-only normal100/contraction135calls,30/45-minute thresholds and protected
+validation/review/recording reserve. Two source exports, one bounded repair for
+each distinct late-handoff/shortcut finding; one mandatory review plus one fresh
+finding recheck. Approximately12minutes from source preflight to recheck receipt;
+no wall-time threshold crossed. Aggregate root provider/tool-byte/call totals and
+controller enforcement were not instrumented: do not imply measured hard quota
+compliance or invent pricing/workflow identity. Optional breadth stopped for
+required repair/validation/review. No memory write or production-control baseline.
+
+User-dirty seven-path hash remains
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm diff hash remains
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa,
+HEAD65025b50952e27b38b215b18905ba1c4770fbdb4. User untracked artifacts preserved.
+Rollback: scoped local source commit revert, preserving all native/owner/journal
+evidence; no installed runtime or schema migration to roll back. Durable source/
+receipts remain in canonical Statewright Git, not temporary validation exports.
+
 ## Slice 16 entry: owning native RPC configuration input
 
 Base9c0dc2a; previous turn verified progress, not wait/no-progress. Root freshly

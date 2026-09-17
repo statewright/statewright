@@ -76,7 +76,7 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
             };
             const managed = new Proxy(pi, {
               get(object, key, receiver) {
-                if (!["on", "registerTool", "registerCommand"].includes(key)) {
+                if (!["on", "registerTool", "registerCommand", "registerShortcut"].includes(key)) {
                   return ["exec", "sendUserMessage", "sendMessage", "registerProvider", "unregisterProvider", "setModel",
                     "setThinkingLevel", "setActiveTools", "appendEntry", "setSessionName", "setLabel"].includes(key)
                     ? piProjectMethod(object, key, operations, projectBridge) : Reflect.get(object, key, receiver);
@@ -114,7 +114,7 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
       // Independent public runner listener: UI bindings cannot replace it.
       // SDK catches event errors; successful bind alone is not startup proof.
       session.extensionRunner.onError(() => {
-        if (operations.staleCall()) return; // old callback failure cannot close a newer owned request
+        if (operations.staleCall()) return; // obsolete/specified native-cancelled callback cannot revoke ownership
         invalidate(); void close().catch(() => {});
       });
       const prompt = session.prompt.bind(session);
@@ -161,7 +161,13 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
         }
       });
     };
-    return Object.freeze({ runtime, configuration, get readiness() { observeNative(); return readiness; },
+    const cancelInput = () => {
+      if (!observeNative()) return Promise.reject(new Error("Native cancellation input unavailable"));
+      return operations.cancelInput();
+    };
+    return Object.freeze({ runtime, configuration, cancelInput,
+      get inputPending() { return observeNative() && operations.inputPending(); },
+      get readiness() { observeNative(); return readiness; },
       get finalResponse() { return observeNative() ? operations.finalResponse() : null; }, close });
   } catch (error) {
     await close();

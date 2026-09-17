@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { AuthStorage, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
+import { AuthStorage, InteractiveMode, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
 import { createPiRequestFrontend } from "./request-frontend.mjs"
 import { createPiNativeReadinessPublisher } from "./request-readiness.mjs"
 import { createExecutorNativeReadiness } from "../../executor/lib/executor-native-readiness.mjs"
@@ -12,7 +12,7 @@ import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs"
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs"
 import statewrightExtension, { callStatewrightGateway } from "./index.js"
 import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
-import { runPiRequestMode } from "./request-mode.mjs"
+import { createPiRequestModeRuntime, runPiRequestMode } from "./request-mode.mjs"
 import { createPiRpcInput } from "./request-rpc-input.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
@@ -87,6 +87,210 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("cancels owning native parked input without consuming late approval and accepts only fresh input", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const input = f.session.prompt("cancelled native input")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    await f.frontend.cancelInput()
+    await input
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.frontend.readiness).not.toBeNull()
+    f.approve()
+    expect(f.requests).toHaveLength(0)
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(0)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+    await f.session.prompt("fresh explicit input after cancellation")
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+  })
+
+  it("cancels owning native configuration before parked metadata mutation", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    const changed = f.frontend.configuration({ type: "set_session_name", name: "cancelled native name" })
+    void changed.catch(() => {})
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    await f.frontend.cancelInput()
+    await expect(changed).rejects.toThrow("Native configuration request unavailable")
+    f.approve()
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.requests).toHaveLength(0)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+  })
+
+  it("cancels owning native input before SDK slash lookup reaches the private input hook", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const input = f.session.prompt("/missing-native-command")
+    await f.frontend.cancelInput()
+    await input
+    expect(f.owner.record.request_epoch).toBe(0)
+    expect(f.requests).toHaveLength(0)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("routes the actual native SDK Escape handler to parked owning-input cancellation", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    // Actual SDK key-handler/queue restoration methods, no TUI process/global
+    // terminal takeover. Headed editor/rendering acceptance remains separate.
+    const editor = { onAction: vi.fn(), onEscape: null as any }
+    const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+      runtimeHost: createPiRequestModeRuntime(f.frontend), defaultEditor: editor,
+      ui: {}, compactionQueuedMessages: [], updatePendingMessagesDisplay: vi.fn(),
+    })
+    mode.setupKeyHandlers()
+    const input = f.session.prompt("native Escape cancelled input")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.isStreaming).toBe(false)
+    expect(mode.session.isStreaming).toBe(true)
+    editor.onEscape()
+    await input
+    await vi.waitFor(() => expect(f.owner.record.request.reason).toBe("cancelled"), { timeout: 500 })
+    expect(f.frontend.inputPending).toBe(false)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.frontend.readiness).not.toBeNull()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("denies project inheritance of the owning native cancellation capability", async () => {
+    let cancel!: () => Promise<unknown>
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("capture-cancel", { handler: () => { cancel = ownership.bind(() => f.frontend.cancelInput()) } })
+      pi.registerCommand("newer-cancel-owner", { handler: () => {} })
+    } })
+    await f.bind()
+    await f.session.prompt("/capture-cancel")
+    await expect(cancel()).rejects.toThrow("Native cancellation input unavailable")
+    await f.session.prompt("/newer-cancel-owner")
+    await expect(cancel()).rejects.toThrow("Native cancellation input unavailable")
+    expect(f.owner.record.request).toMatchObject({ phase: "active", reason: null })
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("cannot lend owning native cancellation to the SDK synthesized project shortcut context", async () => {
+    let invocation: Promise<unknown> | null = null
+    const f = await frontendFixture({ parked: true, register: pi => {
+      pi.registerShortcut("f12", { handler: ctx => { invocation = ctx.abort(); return invocation } })
+    } })
+    await f.bind()
+    const editor = { onExtensionShortcut: null as any }
+    const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+      runtimeHost: createPiRequestModeRuntime(f.frontend), defaultEditor: editor,
+      keybindings: { getEffectiveConfig: () => ({}) }, createExtensionUIContext: () => f.uiContext,
+      showError: vi.fn(),
+    })
+    mode.setupExtensionShortcuts(f.session.extensionRunner)
+    const input = f.session.prompt("shortcut cannot cancel native approval input")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(editor.onExtensionShortcut("\u001b[24~")).toBe(true)
+    await vi.waitFor(() => expect(invocation).not.toBeNull(), { timeout: 500 })
+    await expect(invocation).rejects.toThrow("Native cancellation input unavailable")
+    expect(f.owner.record.request.phase).toBe("parked")
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.frontend.readiness).not.toBeNull()
+    f.approve(); await input
+  })
+
+  it("seals native project shortcut registration including a callback captured before readiness", async () => {
+    let late!: (...args: any[]) => unknown
+    const f = await frontendFixture({ register: pi => { late = pi.registerShortcut } })
+    await f.bind()
+    expect(() => late("f12", { handler: () => {} })).toThrow("Managed hook registration is sealed")
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.owner.record.request_epoch).toBe(0)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("does not abort newer streaming input when an older native cancellation finishes", async () => {
+    let arrived!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    const f = await frontendFixture({ streaming: true })
+    await f.bind()
+    const original = f.controller.cancel.bind(f.controller)
+    vi.spyOn(f.controller, "cancel").mockImplementation(async body => {
+      const result = await original(body)
+      arrived(); await barrier
+      return result
+    })
+    const older = f.session.prompt("older streaming cancellation owner")
+    void older.catch(() => {})
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 500 })
+    const signal = f.session.agent.signal!
+    const cancelled = f.frontend.cancelInput()
+    await arrival
+    await older
+    expect(signal.aborted).toBe(true)
+    const newer = f.session.prompt("newer streaming input")
+    void newer.catch(() => {})
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    const replacement = f.session.agent.signal!
+    release(); await cancelled
+    expect(replacement).not.toBe(signal)
+    expect(replacement.aborted).toBe(false)
+    expect(f.frontend.inputPending).toBe(true)
+    expect(f.frontend.readiness).not.toBeNull()
+    await f.frontend.close()
+    await newer
+  })
+
+  it("rejects a cancelled native model selection after its registry await without clearing newer pending visibility", async () => {
+    let release!: (models: any[]) => void; let read!: () => void
+    const reading = new Promise<void>(resolve => { read = resolve })
+    const available = new Promise<any[]>(resolve => { release = resolve })
+    const f = await frontendFixture({ streaming: true, availableModels: () => { read(); return available } })
+    await f.bind()
+    const previous = f.session.model
+    const change = f.frontend.configuration({ type: "set_model", provider: previous.provider, modelId: "cancelled-selection" })
+    void change.catch(() => {})
+    await reading
+    await f.frontend.cancelInput()
+    const newer = f.session.prompt("newer pending native selection owner")
+    void newer.catch(() => {})
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 500 })
+    release([{ ...previous, id: "cancelled-selection" }])
+    await expect(change).rejects.toThrow("Project request unavailable")
+    expect(f.session.model).toBe(previous)
+    expect(f.frontend.inputPending).toBe(true)
+    expect(f.session.agent.signal!.aborted).toBe(false)
+    await f.frontend.close()
+    await newer
+  })
+
+  it.each([false, true])("handles only obsolete owned denial after native cancellation during awaited SDK callback (declared effect %s)", async effect => {
+    let arrived!: () => void; let release!: () => void
+    const arrival = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(() => release())
+    const subsequent = vi.fn()
+    const f = await frontendFixture({ register: pi => {
+      pi.on("before_agent_start", async () => {
+        if (effect) { await dispatchPiProjectEffect(async () => { arrived(); await barrier }); subsequent() }
+        else { arrived(); await barrier }
+      })
+    } })
+    await f.bind()
+    const input = f.session.prompt("cancelled awaited native SDK callback")
+    void input.catch(() => {})
+    await arrival
+    await f.frontend.cancelInput()
+    release()
+    await input
+    expect(f.requests).toHaveLength(0)
+    expect(subsequent).not.toHaveBeenCalled()
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
   it("admits a native RPC configuration gesture without allowing raw SDK mutation or inference", async () => {
     const f = await frontendFixture()
     await f.bind()

@@ -89,12 +89,13 @@ describe("managed owning SDK CLI", () => {
     expect(received).toEqual(["/hooks/request/ready", "/hooks/request/begin", "/hooks/request/status"])
   }, 5_000)
 
-  const scenarios: Array<{ mode: string; parked: boolean; bash: boolean; commandOnly: boolean; configuration?: string }> = [ ...["text", "json", "rpc"].flatMap(mode => [false, true].map(parked => ({ mode, parked, bash: false, commandOnly: false }))),
+  const scenarios: Array<{ mode: string; parked: boolean; bash: boolean; commandOnly: boolean; configuration?: string; cancel?: boolean }> = [ ...["text", "json", "rpc"].flatMap(mode => [false, true].map(parked => ({ mode, parked, bash: false, commandOnly: false }))),
     { mode: "text", parked: false, bash: false, commandOnly: true },
     ...[false, true].map(parked => ({ mode: "rpc", parked, bash: true, commandOnly: false })),
     ...["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "set_session_name"].flatMap(configuration =>
-      [false, true].map(parked => ({ mode: "rpc", parked, bash: false, commandOnly: false, configuration }))) ]
-  for (const { mode, parked, bash, commandOnly, configuration } of scenarios) it(`runs actual ${mode} CLI${bash ? " native bash" : ""}${configuration ? ` native ${configuration}` : ""}${commandOnly ? " command-only final input" : ""}${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
+      [false, true].map(parked => ({ mode: "rpc", parked, bash: false, commandOnly: false, configuration }))),
+    ...[undefined, "set_session_name"].map(configuration => ({ mode: "rpc", parked: true, bash: false, commandOnly: false, configuration, cancel: true })) ]
+  for (const { mode, parked, bash, commandOnly, configuration, cancel } of scenarios) it(`runs actual ${mode} CLI${bash ? " native bash" : ""}${configuration ? ` native ${configuration}` : ""}${cancel ? " native abort cancellation" : ""}${commandOnly ? " command-only final input" : ""}${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
     const f = await fixture({ after: (callback: () => any) => cleanup.push(callback) }, { nativeFile: true, parked })
     const requests: any[] = []
     const server = createServer(async (request, response) => {
@@ -147,12 +148,12 @@ describe("managed owning SDK CLI", () => {
         for (const line of stdout.split("\n")) {
           try {
             const event = JSON.parse(line)
-            if (configuration && event.type === "response" && event.command === configuration && !configurationResponded) {
+            if (!cancel && configuration && event.type === "response" && event.command === configuration && !configurationResponded) {
               configurationResponded = true
               child.stdin.write('{"type":"get_state","id":"owned-configuration-state"}\n')
             }
-            if (event.type === "agent_end" || bash && event.type === "response" && event.command === "bash"
-              || configuration && event.type === "response" && event.id === "owned-configuration-state") child.stdin.end()
+            if (!cancel && (event.type === "agent_end" || bash && event.type === "response" && event.command === "bash"
+              || configuration && event.type === "response" && event.id === "owned-configuration-state")) child.stdin.end()
           } catch { /* partial native JSON line */ }
         }
       }
@@ -184,7 +185,19 @@ describe("managed owning SDK CLI", () => {
         expect(requests).toHaveLength(0)
         if (configuration) expect(configurationResponded).toBe(false)
         expect(await f.mirror.loadCheckpoint()).not.toBeNull()
-        f.approve()
+        if (cancel) {
+          child.stdin.write('{"type":"abort","id":"native-cancel"}\n')
+          await vi.waitFor(() => {
+            expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+            expect(stdout).toContain('"id":"native-cancel"')
+          }, { timeout: 1_500, interval: 10 })
+          expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+          f.approve()
+          child.stdin.write('{"type":"get_state","id":"after-late-approval"}\n')
+          await vi.waitFor(() => expect(stdout).toContain('"id":"after-late-approval"'), { timeout: 500, interval: 10 })
+          expect(requests).toHaveLength(0)
+          child.stdin.end()
+        } else f.approve()
       }
       result = await closed
     } catch (error) {
@@ -192,7 +205,19 @@ describe("managed owning SDK CLI", () => {
         active: bridge.activeRequests, exitCode: child.exitCode, signalCode: child.signalCode }), { cause: error })
     } finally { clearTimeout(timer) }
     expect({ result, stderr, stdout, requests: requests.length, epoch: f.owner.record.request_epoch }).toEqual(expect.objectContaining({ result: [0, null] }))
-    if (configuration) {
+    if (cancel) {
+      const records = stdout.trim().split("\n").map(line => JSON.parse(line))
+      expect(records.filter(record => record.id === "native-cancel")).toEqual([
+        { type: "response", id: "native-cancel", command: "abort", success: true } ])
+      const state = records.find(record => record.id === "after-late-approval")
+      expect(state).toMatchObject({ success: true, data: { isStreaming: false } })
+      expect(state.data.sessionName).not.toBe("native RPC session")
+      if (configuration) expect(records.find(record => record.id === "synthetic-configuration")).toMatchObject({ success: false })
+      expect(stdout).not.toContain("synthetic CLI response")
+      expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+      expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+      expect(f.events.filter((event: string) => event === "clear:approval")).toHaveLength(0)
+    } else if (configuration) {
       const records = stdout.trim().split("\n").map(line => JSON.parse(line))
       const response = records.find(record => record.type === "response" && record.command === configuration)
       const state = records.find(record => record.type === "response" && record.id === "owned-configuration-state")
@@ -211,14 +236,14 @@ describe("managed owning SDK CLI", () => {
     } else if (commandOnly) expect(stdout).not.toContain("synthetic CLI response")
     else expect(stdout).toContain(bash ? "synthetic CLI bash" : "synthetic CLI response")
     if (mode !== "text") for (const line of stdout.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow()
-    expect(requests).toHaveLength(bash || configuration ? 0 : 1)
+    expect(requests).toHaveLength(bash || configuration || cancel ? 0 : 1)
     expect(f.owner.record.request_epoch).toBe(commandOnly ? 2 : 1)
-    if (parked) {
+    if (parked && !cancel) {
       expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
       expect(f.events.filter((event: string) => event === "clear:approval")).toHaveLength(1)
       expect(await f.mirror.loadCheckpoint()).toBeNull()
     }
-    if (!bash && !configuration) expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
+    if (!bash && !configuration && !cancel) expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
     // Bash-only first history flush is SDK-deferred until an assistant exists;
     // this case proves native protocol/admission/exec, not durable bash history.
     expect(readiness.ready).toBe(false)

@@ -10,6 +10,8 @@ export function createPiRequestOperations() {
   let gate = null;
   let closed = false;
   let newestInput = null;
+  let pendingInput = null;
+  let cancelledReference = null;
   let activeAgent = null;
   let activeBash = null;
   let asides = [];
@@ -30,21 +32,26 @@ export function createPiRequestOperations() {
       throw error;
     }
   };
-  const explicit = (text, source, fn) => {
+  const explicit = async (text, source, fn) => {
     if (closed || calls.getStore() || !gate.ownsNative(context())) return Promise.resolve();
     const entry = Symbol("private explicit input");
     newestInput = entry;
+    pendingInput = entry;
     latestResponse = null;
     const run = activeAgent;
     void gate.cancel("superseded").catch(() => {});
     session.clearQueue();
     asides = [];
     const abortContext = context();
-    if (entry !== newestInput || !gate.ownsNative(abortContext)) return Promise.resolve();
+    if (entry !== newestInput || !gate.ownsNative(abortContext)) {
+      if (pendingInput === entry) pendingInput = null;
+      return;
+    }
     if (run && abortContext.signal === run.signal && isDeepStrictEqual(run.reference, gate.reference)) {
       void session.abort().catch(() => {});
     }
-    return calls.run({ kind: "input", text, source, entry, reference: null }, fn);
+    try { return await calls.run({ kind: "input", text, source, entry, reference: null }, fn); }
+    finally { if (pendingInput === entry) pendingInput = null; }
   };
   const admitCommand = async () => {
     const call = calls.getStore();
@@ -64,8 +71,33 @@ export function createPiRequestOperations() {
 
   return {
     isInstalled() { return !!session; },
+    inputPending() { return !closed && pendingInput !== null; },
+    async cancelInput() {
+      // A mode-only native control, never an inherited/project input gesture.
+      if (closed || calls.getStore() || !gate?.ownsNative(context())) throw new Error("Native cancellation input unavailable");
+      const entry = Symbol("private cancelled input");
+      newestInput = entry;
+      pendingInput = null;
+      latestResponse = null;
+      const run = activeAgent;
+      const ref = copy(gate.reference);
+      cancelledReference = ref;
+      // cancel captures the current gate synchronously. Signal/queue callbacks
+      // may start fresh input; never look up their replacement after a wait.
+      const cancelled = gate.cancel("cancelled");
+      session.clearQueue();
+      asides = [];
+      const abortContext = context();
+      if (entry === newestInput && gate.ownsNative(abortContext) && run && activeAgent === run
+        && abortContext.signal === run.signal && isDeepStrictEqual(run.reference, ref)
+        && isDeepStrictEqual(gate.reference, ref)) await session.abort();
+      await cancelled;
+    },
     project(fn) {
       const call = calls.getStore();
+      // Native SDK UI callbacks can run outside prompt/Agent ALS. They remain
+      // project work, never an absence-of-scope native input capability.
+      if (!call) return calls.run({ kind: "project-unbound", reference: null }, fn);
       // SDK construction permission must never flow into project handlers.
       return call?.kind === "native-bootstrap" ? calls.run({ kind: "project-bootstrap", lease: call.lease, reference: null }, fn) : fn();
     },
@@ -102,7 +134,9 @@ export function createPiRequestOperations() {
     },
     ownsCurrent() { return owned(reference()); },
     staleCall() {
-      try { const call = calls.getStore(); return !!call?.reference && gate.isSuperseded(context(), call.reference); }
+      try { const call = calls.getStore(); return !!call?.reference
+        && (gate.isSuperseded(context(), call.reference) || !closed && gate.matchesNative(context())
+          && isDeepStrictEqual(call.reference, cancelledReference)); }
       catch { return false; }
     },
     async dispatch(effect, { observation = false, signal: supplied } = {}) {
@@ -315,7 +349,8 @@ export function createPiRequestOperations() {
           try { return await prompt(text, options); }
           catch (error) {
             // Preserve the held-input contract when a stale SDK continuation
-            // reaches a guarded configuration write after its own await.
+            // reaches a guarded configuration write after its own await,
+            // including a privately native-cancelled originating request.
             if (!error?.[configurationDenied] || !this.staleCall()) throw error;
           }
         };
@@ -400,6 +435,7 @@ export function createPiRequestOperations() {
       let nativeOwned = false;
       try { nativeOwned = !!session && gate.ownsNative(context()); } catch { /* unavailable context cannot authorize abort */ }
       closed = true;
+      pendingInput = null;
       latestResponse = null;
       for (const waiter of outputWaiters) waiter.finish();
       asides = [];

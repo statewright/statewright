@@ -59,7 +59,7 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
         .every(printable)
       || request.identity && !equal(request.identity, [result.state.run_id, result.state.run_session_id, result.state.workflow])
       || ["active", "ready"].includes(result.phase) && result.state.pending_approval != null
-      || (result.phase === "ready" ? !uuid(result.release_nonce) : result.release_nonce !== null)) {
+      || (result.phase === "ready" ? !uuid(result.release_nonce) || !printable(result.approval?.approval_id) : result.release_nonce !== null)) {
       throw new Error("Foreign, stale or malformed parent request status; inference held");
     }
     request.reference ??= result.reference;
@@ -89,8 +89,10 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
         result = validate(result ?? await untilAborted(() => { assertNative(ctx); return call("status", { reference: request.reference }, signal); }, signal), request, ctx);
         if (result.phase === "cancelled") throw new Error("Request rejected or cancelled");
         if (result.phase === "ready") {
+          const approvalId = result.approval.approval_id;
           result = validate(await untilAborted(() => { assertNative(ctx); return call("consume", { reference: request.reference, release_nonce: result.release_nonce }, signal); }, signal), request, ctx);
           if (result.phase !== "active") throw new Error("Parent did not consume the current release");
+          request.consumedApprovalIds.add(approvalId);
         }
         if (result.phase === "active") {
           if (!active(request)) throw new Error("Native input replaced after release");
@@ -126,6 +128,10 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
           && !!current.reference && equal(current.reference, reference);
       } catch { return false; }
     },
+    hasConsumedApproval(ctx, reference, approvalId) {
+      return typeof approvalId === "string" && this.ownsRequest(ctx, reference)
+        && current.consumedApprovalIds.has(approvalId);
+    },
     canDispatch(ctx, operationSignal, reference, { compaction = false } = {}) {
       try {
         assertNative(ctx);
@@ -148,7 +154,8 @@ export function createPiRequestGate({ nativeSessionId, nativeSessionFile, call, 
       // Synchronous invalidation precedes every potentially waiting network or
       // idle operation. Old responses cannot become the new input's authority.
       if (previous) void cancelRequest(previous, "superseded");
-      const request = { sequence: ++sequence, controller: new AbortController(), reference: null, identity: null, phase: "parked", admitted: false };
+      const request = { sequence: ++sequence, controller: new AbortController(), reference: null, identity: null, phase: "parked", admitted: false,
+        consumedApprovalIds: new Set() };
       current = request;
       try {
         if (typeof ctx?.isIdle !== "function") throw new Error("Native idle boundary unavailable; admission denied");

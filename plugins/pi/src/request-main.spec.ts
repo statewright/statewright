@@ -60,8 +60,37 @@ describe("managed owning SDK CLI", () => {
     expect(received).toEqual(["/hooks/request/begin"])
   })
 
-  for (const mode of ["text", "json", "rpc"]) it(`runs actual ${mode} CLI with a bound task-owned child and exact private SDK readiness`, async () => {
-    const f = await fixture({ after: (callback: () => any) => cleanup.push(callback) }, { nativeFile: true })
+  it.each([false, true])("runs delayed private status polling with server connection-close %s", async closeConnection => {
+    const received: string[] = []
+    const server = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* consume the fixed private body */ }
+      received.push(request.url!)
+      response.writeHead(200, { "Content-Type": "application/json", ...(closeConnection ? { Connection: "close" } : {}) }); response.end('{"synthetic":true}')
+    })
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+    cleanup.push(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }))
+    const module = fileURLToPath(new URL("./request-main.mjs", import.meta.url))
+    const script = `import { AsyncLocalStorage } from "node:async_hooks";
+      import { createPiPrivateRequestTransport } from ${JSON.stringify(module)};
+      const call = createPiPrivateRequestTransport(process.env);
+      const signal = AbortSignal.any([new AbortController().signal, AbortSignal.timeout(30000)]);
+      await new AsyncLocalStorage().run({ reference: null }, async () => {
+        for (const action of ["ready", "begin", "status"]) {
+          await call(action, {}, signal);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      });`
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", script], { env: { PATH: process.env.PATH,
+      STATEWRIGHT_ADAPTER_URL: `http://127.0.0.1:${(server.address() as any).port}`, STATEWRIGHT_ADAPTER_TOKEN: "synthetic" }, stdio: "ignore" })
+    const closed = once(child, "close")
+    cleanup.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed })
+    const timer = setTimeout(() => child.kill("SIGTERM"), 3_000)
+    try { expect({ result: await closed, received }).toEqual(expect.objectContaining({ result: [0, null] })) } finally { clearTimeout(timer) }
+    expect(received).toEqual(["/hooks/request/ready", "/hooks/request/begin", "/hooks/request/status"])
+  }, 5_000)
+
+  for (const mode of ["text", "json", "rpc"]) for (const parked of [false, true]) it(`runs actual ${mode} CLI${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
+    const f = await fixture({ after: (callback: () => any) => cleanup.push(callback) }, { nativeFile: true, parked })
     const requests: any[] = []
     const server = createServer(async (request, response) => {
       const chunks: Buffer[] = []
@@ -80,6 +109,8 @@ describe("managed owning SDK CLI", () => {
       if (params.name !== "statewright_get_state") throw new Error("Unexpected project fixture effect")
       return { content: [{ type: "text", text: JSON.stringify(await f.getState()) }] }
     } }, { host: "pi", sessionOwner: f.owner, requestController: f.controller, nativeReadiness: readiness }).start()
+    const bridgeActions: string[] = []
+    bridge.server.on("request", (request: any) => { bridgeActions.push(request.url) })
     cleanup.push(() => bridge.close())
     const cwd = f.owner.record.scope.cwd
     const agentDir = join(cwd, "agent")
@@ -116,12 +147,38 @@ describe("managed owning SDK CLI", () => {
     if (mode === "rpc") child.stdin.write(`${JSON.stringify({ type: "prompt", id: "synthetic-input", message: "synthetic explicit input" })}\n`)
     const timer = setTimeout(() => child.kill("SIGTERM"), 8_000)
     let result
-    try { result = await closed } finally { clearTimeout(timer) }
+    try {
+      if (parked) {
+        await vi.waitFor(async () => {
+          expect(f.owner.record.request_epoch).toBe(1)
+          expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+          expect(f.events.filter((event: string) => event === "read:pending").length,
+            JSON.stringify({ request: f.owner.record.request, stderr, stdout, bridgeActions, active: bridge.activeRequests,
+              exitCode: child.exitCode, signalCode: child.signalCode })).toBeGreaterThanOrEqual(2)
+        }, { timeout: 2_500, interval: 10 })
+        expect(requests).toHaveLength(0)
+        const observations = f.events.filter((event: string) => event === "read:pending").length
+        f.setLive({ run_id: "run", run_session_id: "session", workflow: "fixture", state: "work" })
+        await vi.waitFor(() => expect(f.events.filter((event: string) => event === "read:pending").length).toBeGreaterThan(observations), { timeout: 1_500, interval: 10 })
+        expect(requests).toHaveLength(0)
+        expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+        f.approve()
+      }
+      result = await closed
+    } catch (error) {
+      throw new Error(JSON.stringify({ request: f.owner.record.request, stderr, stdout, bridgeActions,
+        active: bridge.activeRequests, exitCode: child.exitCode, signalCode: child.signalCode }), { cause: error })
+    } finally { clearTimeout(timer) }
     expect({ result, stderr, stdout, requests: requests.length, epoch: f.owner.record.request_epoch }).toEqual(expect.objectContaining({ result: [0, null] }))
     expect(stdout).toContain("synthetic CLI response")
     if (mode !== "text") for (const line of stdout.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow()
     expect(requests).toHaveLength(1)
     expect(f.owner.record.request_epoch).toBe(1)
+    if (parked) {
+      expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+      expect(f.events.filter((event: string) => event === "clear:approval")).toHaveLength(1)
+      expect(await f.mirror.loadCheckpoint()).toBeNull()
+    }
     expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
     expect(readiness.ready).toBe(false)
   }, 12_000)

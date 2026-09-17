@@ -81,8 +81,9 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
               setPrototypeOf: () => unavailable("Managed extension API is read-only"),
             });
             try {
-              await register(managed, Object.freeze({ bind: fn => operations.bind(fn) }));
               on("input", (event, ctx) => operations.input(event, ctx));
+              await register(managed, Object.freeze({ bind: fn => operations.bind(fn), ownsCurrent: () => operations.ownsCurrent(),
+                hasConsumedApproval: id => operations.hasConsumedApproval(id) }));
               installPiRequestGuards({ pi: { on }, gate, referenceFor: () => operations.referenceFor() });
               registered = true;
             } finally { sealed = true; }

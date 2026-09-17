@@ -24,6 +24,11 @@ export function createPiRequestOperations() {
       call.reference = copy(ref);
     },
     referenceFor() { return copy(reference()); },
+    ownsCurrent() { return owned(reference()); },
+    hasConsumedApproval(approvalId) {
+      const ref = reference();
+      return owned(ref) && gate.hasConsumedApproval(context(), ref, approvalId);
+    },
     bind(fn) {
       const ref = copy(reference());
       if (typeof fn !== "function" || !ref) throw new Error("Private inherited call unavailable");

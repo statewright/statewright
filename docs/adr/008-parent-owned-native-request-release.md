@@ -145,7 +145,8 @@ close paths dispose only their owned SDK object, leaving late guards installed.
 Bare SDK effects, project commands/exec, async final output, provider internals
 and full parent close/drain remain unproved. No readiness receipt is a claim
 that these original production acceptance requirements have been satisfied.
-Shipped executor/index/ADR007 hold and installed runtime remain unchanged.
+Shipped executor and installed runtime remain unactivated. ADR007's legacy
+hold stays monotonic; the owned project capability is described below.
 
 The additive private readiness negotiation binds the exact parent owner and
 request controller, existing native UUID/file, executor ID and fresh random
@@ -172,7 +173,7 @@ construction/transport boundary, not every project effect/provider/final-output
 guard or reviewer/human authority. The local bearer transport and a model API
 key are not a new isolation/human-strength proof. A trusted project callback
 with bearer/challenge access is not a cryptographically measured SDK process.
-No cross-process SDK mode/CLI launch is activated by these fixtures. Parent
+No production SDK mode/CLI launch is activated by these fixtures. Parent
 main must explicitly construct this mode and forward its own challenge; it
 still does neither. Protocol-unconfigured legacy bridges retain existing
 behavior; managed activation must require this mode, not silently fall back.
@@ -189,6 +190,25 @@ project registration requires the actual process environment, so its own
 gateway settings cannot diverge from the captured private transport settings.
 Only fixed 127.0.0.1 HTTP request hooks receive its captured local bearer;
 redirects are rejected, response bytes and transport time bounded. The native
+private transport requests Connection:close, owning a per-action connection;
+delayed500ms child polling reproduced a global-fetch-pool idle-reuse stall
+while server-close passed. No timeout enlargement, retry, global dispatcher
+patch or authority fallback. Exact upstream pooling internals are unproven;
+revisit only with a request-owned IPC dispatcher preserving delayed/close and
+authority limits, not a presumed Node-wide fix.
+The private input hook is installed before project input. Only the trusted
+per-call ownership capability can replace a project's monotonic hold only
+after the private gate consumed its exact held approval ID for that request.
+Continued ownership, a new projection, missing/foreign proof or old durable
+tombstones cannot do this. The gate's ephemeral per-request proof is recorded
+only after checked ready->consume->active; outside/stale/closed scopes cannot
+borrow it. Malformed/read-failure holds have no consumable ID and retain explicit
+recovery requirements. Project admission reads recheck ownership before cache mutation;
+obsolete read failures cannot invoke lazy abort or notify for newer input.
+Standalone and legacy managed hold-only registrations have no such capability
+and retain ADR007's monotonic denial. This integrates the owned CLI admission,
+not every later project callback, command effect or final-output boundary.
+The native
 mode itself binds extensions once, awaiting private acknowledgement before
 the gate enables. Registration loads the fixed project TypeScript module with
 the upstream jiti family, explicitly declared/locked2.6.5, no transpilation
@@ -198,8 +218,12 @@ diagnostics report mechanisms, not launch payloads/credentials or prompts.
 
 Actual task-owned subprocess fixtures cover text/JSON/RPC with real SDK and
 private parent bridge and inert HTTP. Interactive dispatch exists but headed
-TUI is unverified. Existing project hold-only hooks still constrain this path;
-pending approval cannot be claimed to re-admit through it yet. Native SDK bare
+TUI is unverified. Project hold-only hooks retain legacy behavior without the
+private ownership capability. Actual owned text/JSON/RPC fixtures now prove
+pending approval waits outside inert HTTP inference and re-admits only after
+its fake private receipt is consumed once; projection clearance alone retains
+the journal and zero provider requests. This is synthetic authority, not a
+real reviewer/gateway canary. Native SDK bare
 commands, navigation, provider internals and stale final-output ownership are
 not collectively guarded/proven. This CLI is uninstalled and unconnected to
 production launcher/main; its launch configuration is not a new activation

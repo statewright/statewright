@@ -1326,7 +1326,8 @@ function evaluateCommandTier(
 
 // --- Extension entry ---
 
-export default async function statewrightExtension(pi: ExtensionAPI) {
+export default async function statewrightExtension(pi: ExtensionAPI, ownership?: Readonly<{ ownsCurrent: () => boolean;
+  hasConsumedApproval?: (approvalId: string | null) => boolean }>) {
   // Per-instance state tracking (scoped to this extension load, not module-level)
   let lastSwitchedModel: string | null = null
   let originalModel: unknown = null  // saved before first statewright-driven switch
@@ -1334,18 +1335,25 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   let lastThinkingLevel: string | null = null
   let currentRunId: string | null = null  // tracks active workflow run for log capture
   let yoloWasEnabled = false  // track if we enabled YOLO so we can restore on deactivate
-  const approvalHold = createPiApprovalHold({
+  function ownsAdmission(): boolean {
+    try { return ownership?.ownsCurrent() === true } catch { return false }
+  }
+  const createApprovalHold = () => createPiApprovalHold({
     readState: async () => {
+      if (ownership && !ownsAdmission()) throw new Error("Private native admission unavailable")
       // Never use refreshState's stale-cache fallback for native admission.
       const raw = await gwCall("statewright_get_state")
+      if (ownership && !ownsAdmission()) throw new Error("Private native admission superseded")
       if (raw && typeof raw.state === "string" && raw.state.trim()) cacheState(raw)
       return raw
     },
     onHold: () => {
+      if (ownership && !ownsAdmission()) return
       disarmInactivityTimer()
       setAutonomousPermissions(false)
     },
   })
+  let approvalHold = createApprovalHold()
 
   function holdCachedApproval(ctx: any): boolean {
     approvalHold.observe(stateCache && { state: stateCache.state, pending_approval: stateCache.pendingApproval }, { required: false })
@@ -1493,6 +1501,17 @@ export default async function statewrightExtension(pi: ExtensionAPI) {
   // Register before gateway initialization: an unavailable managed bridge must
   // not leave a partially loaded extension without its native admission hook.
   pi.on("input", async (_event, ctx) => {
+    if (ownership) {
+      // Mere continued ownership is not a release. Only consumption of this
+      // exact held ticket by the earlier private gate can replace its hold.
+      if (!ownsAdmission()) return { action: "handled" }
+      if (approvalHold.held && ownership.hasConsumedApproval?.(approvalHold.approvalId) === true) approvalHold = createApprovalHold()
+      const result = await approvalHold.input({
+        abort: () => { if (ownsAdmission()) return ctx.abort() },
+        ui: { notify: (...args: any[]) => { if (ownsAdmission()) return (ctx.ui?.notify as any)?.(...args) } },
+      })
+      return ownsAdmission() ? result : { action: "handled" }
+    }
     const managed = Boolean(process.env.STATEWRIGHT_ADAPTER_URL || process.env.STATEWRIGHT_EXECUTOR_ID)
     if (!approvalHold.held && !managed && (dormant || (lazyMode && !lazyInitDone && !stateCache))) return { action: "continue" }
     return approvalHold.input(ctx)

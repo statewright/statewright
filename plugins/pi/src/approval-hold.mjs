@@ -5,6 +5,7 @@
  */
 export function createPiApprovalHold({ readState, onHold = () => {} }) {
   let reason = null;
+  let approvalId = null;
   function hold(message) {
     if (!reason) {
       reason = message;
@@ -26,6 +27,7 @@ export function createPiApprovalHold({ readState, onHold = () => {} }) {
       && [pending.approval_id, pending.event, pending.from_state, pending.to_state]
         .every(value => typeof value === "string" && value.trim().length > 0)
       && pending.from_state === snapshot.state;
+    approvalId = valid ? pending.approval_id : null;
     return hold(valid
       ? `Statewright approval ${pending.approval_id} (${pending.event}) awaits an authorized human decision. Inference remains held; the model cannot approve. Explicit owned-session recovery required.`
       : "Malformed Statewright pending approval; inference remains held. Explicit recovery required.");
@@ -55,5 +57,5 @@ export function createPiApprovalHold({ readState, onHold = () => {} }) {
     stopCurrent(ctx);
     return { block: true, reason };
   }
-  return { get held() { return reason !== null; }, observe, input, blockTool, stopCurrent };
+  return { get held() { return reason !== null; }, get approvalId() { return approvalId; }, observe, input, blockTool, stopCurrent };
 }

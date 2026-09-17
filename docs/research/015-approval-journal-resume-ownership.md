@@ -2,6 +2,185 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 10 entry: private admission before project hold-only hooks
+
+Base5373ca7, canonical Statewright main, preserved user-dirty inventory unchanged.
+Previous turn was verified progress. No Statewright query/load/use, workflow,
+real approval/resolver/provider inference, deploy/push/install or existing native
+session inspection/signals. User manual instruction overrides skill activation;
+root implements serially with mandatory one clean-context Astra/high read-only
+review. Root owns manual source/evidence/Git controls, not a live controller.
+
+Current inspected sources show parent main lacks request/readiness construction
+and its bridge lacks sessionOwner; those integration gaps remain full scope.
+Discriminating blocker in the already-owned CLI: project input is registered
+before private input, so its monotonic hold returns handled before the parent
+can park/consume/re-admit. This cut integrates the private SDK input first and
+allows only its trusted per-call ownership capability to replace the project
+hold after private consumption of its exact held approval ID for that request.
+Legacy unmanaged/hold-only behavior stays closed.
+Fresh project admission reads/cleanup/abort must not act for superseded calls.
+
+Owned files: Pi request-frontend.mjs, request-operations.mjs, request-main.mjs,
+request-gate.mjs, approval-hold.mjs,
+index.ts, focused
+CLI/ownership admission fixtures, ADR008 and this receipt. Acceptance: actual
+owned text/JSON/RPC subprocesses remain parked outside synthetic HTTP inference,
+retain journal despite cleared projection alone, consume one authoritative fake
+receipt/tombstone before one response, and cannot reset legacy hold with missing
+or stale private ownership. No production parent activation or claim that every
+project callback/native effect/final response is guarded. One later integration
+gate remains full approval/new-input/cold-restart/host parity, including parent
+main/observer wiring and preserved gateway work. Do not redefine full acceptance.
+
+Observed-only envelope:70 normal/100 contraction tool calls, returned chunks
+target16KiB,30-minute warning/45-minute contraction, protected final third for
+validation/review/repair/audit/commit. Root provider counters/hard token or
+controller enforcement unavailable; no control-plane probe permitted. Reviewer
+10 calls/12minutes, <=2 focused challenges, finding recheck4 calls/5minutes;
+at most2 distinct repairs/finding,2 full source exports normally+1 justified
+regression export. Warning stops optional discovery; contraction finishes a
+verified integration cut and keeps full goal active. Scoped local revert is
+rollback, no journal/session deletion or fallback activation.
+
+Retained Slice10 baseline: new actual text pending-approval fixture failed1,
+epoch0 (9 filtered); private-first integration advanced to epoch1+durable
+journal but CLI suite7 passed/3 failed because no second pending receipt read.
+Diagnostic stages proved ready/begin received, request parked, status fetch
+queued but no server request. No gateway or provider inference escaped; owned
+children were terminated/awaited. Separate raw transport child probe with100ms
+delay passed;500ms delay failed (3-second owned deadline). Paired500ms probe:
+default server keepalive failed, only ready received; server Connection:close
+passed. This isolates delayed pooled-connection reuse, not hook loading or
+gate schema. Exact upstream fetch internals remain unproven; no Node-wide fix
+or SDK provider behavior is claimed. Private IPC now requests Connection:close
+on every action, owning the connection lifetime rather than relying on shared
+SDK-process fetch pooling. No retry/deadline enlargement/authority fallback.
+Both server policies remain regression cases; parent endpoint/token, redirect
+rejection, cancellation/time/response-byte limits unchanged. Root owns this
+transport decision; revisit only when a request-owned IPC dispatcher proves
+the same delayed/subprocess/close limits without global-pool reliance.
+
+Fresh admission-read supersession fixture initially timed out1 (combined55
+passed): its barrier blocked constructor refresh, not prompt admission. Barrier
+now arms only after construction; focused stale-read case passed1, retaining
+zero-abort/notification/inference/authentication assertions. This is fixture
+ordering repair, not a larger deadline or authorization change. Optional broad
+discovery stopped after the discriminating connection-lifetime challenge;
+remaining envelope is reserved for gates, review, repair and recording.
+
+### Slice 10 independent finding and bounded matching-release repair
+
+Mandatory clean-context Astra/high /root/pi_admission_integration_review used
+9 read-only calls and2 memory-only challenges on e71e6d52. It confirmed P1:
+unconditionally replacing project approvalHold for ownsCurrent allowed inherited
+extension input under the same epoch to discard a project-only pending hold
+after projection clearance. Real exported index+operations+gate, synthetic
+parent active replies: first handled, second continue; actions begin,status;
+same reference, no consume/new begin. No provider/gateway/files/live sessions
+or real authority involved. This is a genuine admission defect, not a broader
+parent-activation limitation or a successful release. Source/evidence retained.
+
+Repair binds reset to the exact held approval ID consumed by the private gate
+for this current call/reference. Hold exposes its first valid ID read-only;
+ready status must supply an ID; only checked ready->consume->active records it
+in the gate's ephemeral per-request set. The immutable ownership capability
+queries that proof only in an owned call. Old/new/closed/outside scopes, missing
+proof and foreign ticket cannot borrow durable historic tombstones. Continued
+ownership/new projection alone is insufficient; malformed/read-failure holds
+have no consumable ID and still require explicit recovery. No model argument
+or hold-helper release API added. Scope expands only gate/hold proof binding,
+not main/observer activation. Negative project projection-only case remains
+handled even when ownership returns true; foreign consume cannot reset; matching
+proof can. Actual SDK proof is true only after its parent consumed the ticket,
+false outside its call and after replacement/close. Recheck is finding-only
+4 calls/5minutes, no full-suite duplication. At most one repair so far.
+
+Finding-only recheck completed on repaired tree6c71c82 with2/4 read-only calls.
+The original real exported index+operations+gate reproduction now returns
+first handled/second handled, actions begin,status, same reference and no
+consume. Independent synthetic challenges also observed wrong approval ID
+consumed remains held; matching ID consumed continues; new reference with
+historic consumed ID remains held/proof false; stale inherited callback is
+suppressed. The reported P1 is closed after one distinct repair. No writes or
+live access by reviewer; no claim that parent activation, all project effects,
+final rendering or restart have been reviewed/validated by this recheck.
+
+Normal70-call envelope was exceeded during discriminating transport diagnosis
+and review reconciliation. Contraction100 is approached; reserve-only exception
+allows10 further root calls for final source gates/recheck/audit/local commit,
+not optional discovery or implementation breadth. Counters are not reset; root
+limits remain observed-only, no provider/controller enforcement claimed.
+
+### Slice 10 isolated gates and current original-scope audit
+
+Initial tested tree e71e6d52f30aaf87324f6cd811bb76602377fb48, source export
+/tmp/statewright-admission-reviewed.9wqIrn. Fresh focused3 files68/68: CLI12,
+legacy/owned admission22, public SDK frontend34. Fresh wider Node297/297,
+zero failures/skips/cancellations; Pi188 passed/1 existing opt-in live skip
+(6 files passed/1 skipped); native2/2; generated Claude parity and syntax
+for request-frontend/request-operations/request-main exit0; staged diff check0.
+SDK0.73.0/dependency installation unchanged and symlinked into the export.
+No package install, whole-workspace Rust/typecheck/lint/build/clean-install,
+migration, headed TUI, real gateway/reviewer/provider or staging/production
+gate claimed. Mocked index gateway diagnostics are not external verification.
+Commands: npm test -- --reporter=dot; npm run test:native in plugins/pi;
+node plugins/claude-code/scripts/sync-managed-client.mjs --check; node --check
+plugins/pi/src/{request-frontend,request-operations,request-main}.mjs; Node
+integration command is the unchanged Slice9 17-suite executor set plus Pi
+session-owner and Claude managed-client bundle. Full source acceptance still
+requires the original integration journey, not these gates alone.
+
+Final repaired tested tree6c71c82aa602e43d644c3f5f050b08ac388efcc1, isolated
+source export /tmp/statewright-admission-repaired.nRD36F supersedes e71e6d52
+for product acceptance. Fresh focused3 files69/69: CLI12, legacy/owned
+admission23, public SDK frontend34. Fresh full exported gates: Node297/297,
+zero failures/skips/cancellations; Pi189 passed/1 existing opt-in live skip
+(6 files passed/1 skipped); native2/2; Claude generated parity plus syntax
+for request-frontend/request-operations/request-main/request-gate/approval-hold
+exit0. Same dependency symlinks, no reinstall or widened gate claims. Every
+root validation handle terminated successfully; task-owned fixtures clean up
+their children/HTTP servers/native temporary resources. Staged owned diff
+check0. Source is frozen; only this receipt changes after export for final
+reporting. Final gates/recheck/audit/commit use the explicit100+10 reserve-only
+exception; optional discovery and implementation breadth remain stopped.
+Root counters/envelopes are manual observations, not provider-enforced limits.
+
+| Original006 requirement | Current evidence | Still required before completion |
+| --- | --- | --- |
+| 1 immutable ticket tenant/client/gateway/run/edge/artifact/policy/reviewer/expiry | Exact journal/run/session/edge and strict native launch checks retained | Complete artifact-digest/policy/expiry/reviewer ticket enforcement and journey |
+| 2 host-owned native thread/lineage/request ID/epoch | Real SDK subprocess binds exact file/UUID and fresh lifetime challenge; opaque per-call capability denies outside/stale/closed borrowing | Parent main/host adapter wiring, authoritative replacements and complete cross-process lineage; no kernel-peer claim |
+| 3 pending has no declared effects/inference; wait outside model | Text/JSON/RPC pending children park before provider; cleared projection alone keeps journal and HTTP0, consumed fake receipt permits HTTP1 | All project/native exec/commands/effects and later provider retry/summary/compaction boundaries; whole park journey |
+| 4 query authority before controls; unauthorized dismiss only | Existing shared entitlement tests retained; no resolver/UI introduced | Real authorized/unauthorized reviewer flow and required-reviewer projection |
+| 5 cancel/dismiss/disconnect leaves journal; cold gate reconciles | Journal/controller/native-readiness tests retained; SDK child teardown observed; project admission stale read cannot abort/notify newer input | Full native cold restart/crash-lock/legacy recovery and parent inflight cancellation/drain/broken SDK cleanup |
+| 6 fresh private authorization/artifact/policy; consume once | Actual owned CLI observes one durable tombstone and one journal clear before one synthetic response; project hold replacement additionally requires this current request's matching private consumption proof; transport has no resolve action | Real entitlement/artifact/policy resolver recheck and authorized once-consumed continuation |
+| 7 newer input invalidates old continuation/final response | Current/stale/outside/closed capability checks, admission read pre/post guards, zero stale abort/notification regression | Every project callback/retry, native stale rendering/recording and complete cross-process newer-input races |
+| 8 decision source/authentication strength | Fake receipt/local bearer/launch challenge explicitly not human proof or hostile-agent isolation | Complete recorded decision provenance/authentication-strength semantics and isolation acceptance |
+| 9 shared reviewer/evidence/retention without mandatory website | Shared parent protocol retained; no new website requirement | Complete shared reviewer/evidence/retention and cross-client/host acceptance |
+
+P1 012: A/1 preserved gateway Rust pending-pre-tool denial remains user-dirty,
+uncommitted and unvalidated here; plan2 no host decision API added, real private
+reviewer credential/entitlement journey open; C/3 durability exists but main's
+bridge does not yet receive sessionOwner and main/observer do not construct
+deferred-clear mirror+requestController+readiness; B/4 actual owning CLI now
+integrates private-first park/re-admit with the fixed project module, while
+legacy hold-only behavior remains monotonic and project holds require matching
+consumption proof, not projection clearance; all native/project effects must
+still be guarded before parent activation. D local gateway/native canary park,
+unprivileged deny, trusted release, restart and host parity is not run. Spec114
+proposed obligations are not accepted from these fixture results. Full goal is
+active; no Statewright query/load/use or real decisions/inference authorized.
+
+Next exact cut: project gateway/adapter/exec/message effects and correctives/
+retry/timer callbacks capture the immutable private call and recheck around
+waits; forward its outer reference to request-owned bridge dispatch, not model
+arguments/current cache. Guard bare SDK command/final-output boundaries, then
+wire descriptor-first parent main/observer/host adapter to this entrypoint,
+deferred-clear mirror/controller/readiness and newly bound owned child without
+legacy adoption. Prove full authorized/new-input/cold-restart/host acceptance
+including preserved gateway work. Source/gates/review must precede local commit;
+only this receipt may differ from the tested source tree for final reporting.
+
 ## Slice 9 entry: owning public-SDK modes and managed CLI
 
 Base `6a08434`, canonical Statewright main; preserved dirty inventory unchanged.

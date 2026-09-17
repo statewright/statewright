@@ -35,8 +35,10 @@ export function createPiPrivateRequestTransport(env, { timeoutMs = 10_000 } = {}
   const origin = url.origin;
   return async (action, body, signal) => {
     if (!["ready", "begin", "status", "consume", "cancel"].includes(action)) throw new Error("Invalid private Pi request action");
+    // Private IPC owns each connection. Delayed status polling must not depend
+    // on the SDK process's shared global fetch pool or its idle reuse lifecycle.
     const response = await fetch(`${origin}/hooks/request/${action}`, { method: "POST", redirect: "error",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Connection: "close" }, body: JSON.stringify(body),
       signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(signal ? [signal] : [])]) });
     if (!response.ok) { await response.body?.cancel(); throw new Error(`Private Pi request refused (${response.status})`); }
     const chunks = []; let size = 0;
@@ -66,7 +68,13 @@ export async function runPiManagedCli({ argv = process.argv.slice(2), env = proc
   trace("intake");
   const mode = parsePiRequestMode(argv);
   const launch = piRequestLaunchConfiguration(env);
-  const call = createPiPrivateRequestTransport(env);
+  const transport = createPiPrivateRequestTransport(env);
+  const call = async (action, body, signal) => {
+    trace(`private ${action} dispatched`);
+    const result = await transport(action, body, signal);
+    trace(`private ${action} received`);
+    return result;
+  };
   const { native_session_id: nativeSessionId, native_session_file: sessionFile } = launch.challenge;
   await assertPiNativeSession({ sessionFile, sessionId: nativeSessionId, cwd: launch.cwd });
   trace("descriptor verified");
@@ -80,7 +88,8 @@ export async function runPiManagedCli({ argv = process.argv.slice(2), env = proc
   const frontend = await createPiRequestFrontend({ nativeSessionId, call,
     target: { cwd: launch.cwd, agentDir: launch.agent_dir, sessionManager },
     servicesOptions: { authStorage, modelRegistry, settingsManager: SettingsManager.create(launch.cwd, launch.agent_dir) },
-    sessionOptions: { model, thinkingLevel: mode.thinkingLevel }, register: async (pi, ownership) => {
+    sessionOptions: { model, thinkingLevel: mode.thinkingLevel },
+    gateOptions: { onPark: () => trace("request parked"), onActive: () => trace("request active") }, register: async (pi, ownership) => {
       trace("project registration started"); await register(pi, ownership); trace("project registered");
     }, onReady: async receipt => { trace("private acknowledgement started"); await onReady(receipt); trace("private acknowledgement received"); } });
   trace("native mode started");

@@ -76,6 +76,45 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("privately admits before project input and never lends current ownership outside its call", async () => {
+    let ownership: any
+    const observed: boolean[] = []
+    const inherited: Array<() => boolean> = []
+    const releaseProof: Array<() => boolean> = []
+    const f = await frontendFixture({ parked: true, register: (pi, privateOwnership) => {
+      ownership = privateOwnership
+      pi.on("input", () => {
+        observed.push(ownership.ownsCurrent())
+        inherited.push(ownership.bind(() => ownership.ownsCurrent()))
+        releaseProof.push(ownership.bind(() => ownership.hasConsumedApproval("approval")))
+        expect(ownership.hasConsumedApproval("foreign-approval")).toBe(false)
+        return ownership.ownsCurrent() ? { action: "continue" } : { action: "handled" }
+      })
+    } })
+    expect(Object.isFrozen(ownership)).toBe(true)
+    expect(ownership.ownsCurrent()).toBe(false)
+    await f.bind()
+    const input = f.session.prompt("parked project input")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
+    expect(observed).toEqual([])
+    expect(f.requests).toHaveLength(0)
+    f.approve()
+    await input
+    expect(observed).toEqual([true])
+    expect(f.requests).toHaveLength(1)
+    expect(ownership.ownsCurrent()).toBe(false)
+    expect(inherited[0]()).toBe(true)
+    expect(releaseProof[0]()).toBe(true)
+    expect(ownership.hasConsumedApproval("approval")).toBe(false)
+    await f.session.prompt("new private input")
+    expect(inherited[0]()).toBe(false)
+    expect(inherited[1]()).toBe(true)
+    expect(releaseProof[0]()).toBe(false)
+    expect(releaseProof[1]()).toBe(false)
+    await f.frontend.close()
+    expect(inherited[1]()).toBe(false)
+  })
+
   it("negotiates exact native file and fresh parent/child lifetimes before actual SDK delivery", async () => {
     const f = await frontendFixture({ handshake: true })
     expect(f.sessionManager.getSessionFile()).toBe(f.owner.record.host_session_file)

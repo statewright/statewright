@@ -8,13 +8,16 @@ import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   appServerHomePrefixForClient,
+  appServerCommandOptions,
   codexAppServerTransportEnabled,
   routeConfigEdits,
+  runCodexAppServerTransport,
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
+import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
@@ -32,6 +35,165 @@ test("Codex App Server transport remains opt-in and supports an explicit environ
   assert.equal(codexAppServerTransportEnabled({
     environment: { STATEWRIGHT_CODEX_TRANSPORT: "app-server" },
   }), true);
+});
+
+test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
+  assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.cmd", "win32"), { shell: true });
+  assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.bat", "win32"), { shell: true });
+  assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.exe", "win32"), { shell: false });
+  assert.deepEqual(appServerCommandOptions("/usr/local/bin/codex", "darwin"), { shell: false });
+});
+
+test("Windows npm Codex shims launch Node directly and preserve argv boundaries", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-windows-npm-shim-"));
+  const command = join(home, "codex.cmd");
+  const entrypoint = join(home, "codex.mjs");
+  try {
+    await writeFile(entrypoint, "export {};\n");
+    await writeFile(command, `@echo off\r\n"${process.execPath}" "%~dp0codex.mjs" %*\r\n`);
+    const launch = await resolveWindowsLaunch(command, "win32");
+    assert.equal(launch.command, process.execPath);
+    assert.deepEqual(launch.prefixArgs, [entrypoint]);
+    assert.equal(launch.shell, false);
+    const providerToml = '{name="qwen private",base_url="http://127.0.0.1:11434/v1"}';
+    assert.deepEqual([...launch.prefixArgs, "-c", `model_providers.qwen_private=${providerToml}`, "app-server", "--listen", "ws://127.0.0.1:41234"], [entrypoint, "-c", `model_providers.qwen_private=${providerToml}`, "app-server", "--listen", "ws://127.0.0.1:41234"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("transport preserves a resolved Windows npm shim entrypoint for its App Server", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-windows-transport-shim-"));
+  const command = join(home, "codex.cmd");
+  const entrypoint = join(home, "codex.mjs");
+  const appServerArgs = join(home, "app-server-args.json");
+  try {
+    await writeFile(entrypoint, `import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "app-server") {
+  writeFileSync(${JSON.stringify(appServerArgs)}, JSON.stringify(args));
+  const target = new URL(args.at(-1));
+  createServer((_request, response) => { response.writeHead(200); response.end("ok"); }).listen(Number(target.port), target.hostname);
+} else process.exit(0);
+`);
+    await writeFile(command, `@echo off\r\n"${process.execPath}" "%~dp0codex.mjs" %*\r\n`);
+    const result = await runCodexAppServerTransport({
+      command,
+      args: [],
+      platform: "win32",
+      home,
+      cwd: home,
+      clientId: "swc_windows_transport_shim",
+      controlDir: home,
+      pollMs: 1,
+      environment: { ...process.env, CODEX_HOME: join(home, ".codex"), STATEWRIGHT_QWEN_ENABLED: "false", STATEWRIGHT_SENTRY_DISABLED: "true" },
+      nextRouteRequest: async () => null,
+      stderr: { write() {} },
+      reporter: { async report() {} },
+    });
+    assert.equal(result, 0);
+    assert.deepEqual(JSON.parse(await readFile(appServerArgs, "utf8")).slice(0, 2), ["app-server", "--listen"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+function npmTemplateShim() {
+  // Exact template npm's cmd-shim dependency writes for Windows JS bin links.
+  return [
+    "@ECHO off",
+    "GOTO start",
+    ":find_dp0",
+    "SET dp0=%~dp0",
+    "EXIT /b",
+    ":start",
+    "SETLOCAL",
+    "CALL :find_dp0",
+    "",
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ") ELSE (",
+    '  SET "_prog=node"',
+    "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+    ")",
+    '"%_prog%"  "%dp0%\\node_modules\\@statewright\\codex\\bin\\codex.mjs"  %*',
+    "",
+  ].join("\r\n");
+}
+
+test("Windows npm-template shims resolve to the local Node interpreter and preserve argv", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-windows-npm-template-"));
+  const command = join(home, "codex.cmd");
+  const entrypoint = join(home, "node_modules/@statewright/codex/bin/codex.mjs");
+  const localNode = join(home, "node.exe");
+  try {
+    await mkdir(join(home, "node_modules/@statewright/codex/bin"), { recursive: true });
+    await writeFile(entrypoint, "export {};\n");
+    await writeFile(command, npmTemplateShim());
+    // A placeholder marks the IF EXIST "%dp0%\node.exe" branch as taken, so
+    // the resolver must prefer the local interpreter over the PATH fallback.
+    await writeFile(localNode, "");
+    const launch = await resolveWindowsLaunch(command, "win32");
+    assert.deepEqual(launch, { command: localNode, prefixArgs: [entrypoint], shell: false });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Windows npm-template shims fall back to PATH Node when no local interpreter exists", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-windows-npm-template-fallback-"));
+  const command = join(home, "codex.cmd");
+  const entrypoint = join(home, "node_modules/@statewright/codex/bin/codex.mjs");
+  try {
+    await mkdir(join(home, "node_modules/@statewright/codex/bin"), { recursive: true });
+    await writeFile(entrypoint, "export {};\n");
+    await writeFile(command, npmTemplateShim());
+    const launch = await resolveWindowsLaunch(command, "win32");
+    assert.deepEqual(launch, { command: "node", prefixArgs: [entrypoint], shell: false });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("transport preserves a resolved npm-template Windows shim entrypoint for its App Server", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-windows-transport-npm-template-"));
+  const command = join(home, "codex.cmd");
+  const entrypoint = join(home, "node_modules/@statewright/codex/bin/codex.mjs");
+  const appServerArgs = join(home, "app-server-args.json");
+  try {
+    await mkdir(join(home, "node_modules/@statewright/codex/bin"), { recursive: true });
+    await writeFile(entrypoint, `import { createServer } from "node:http";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "app-server") {
+  writeFileSync(${JSON.stringify(appServerArgs)}, JSON.stringify(args));
+  const target = new URL(args.at(-1));
+  createServer((_request, response) => { response.writeHead(200); response.end("ok"); }).listen(Number(target.port), target.hostname);
+} else process.exit(0);
+`);
+    await writeFile(command, npmTemplateShim());
+    const result = await runCodexAppServerTransport({
+      command,
+      args: [],
+      platform: "win32",
+      home,
+      cwd: home,
+      clientId: "swc_windows_transport_npm_template",
+      controlDir: home,
+      pollMs: 1,
+      environment: { ...process.env, CODEX_HOME: join(home, ".codex"), STATEWRIGHT_QWEN_ENABLED: "false", STATEWRIGHT_SENTRY_DISABLED: "true" },
+      nextRouteRequest: async () => null,
+      stderr: { write() {} },
+      reporter: { async report() {} },
+    });
+    assert.equal(result, 0);
+    const recorded = JSON.parse(await readFile(appServerArgs, "utf8"));
+    assert.deepEqual(recorded.slice(0, 2), ["app-server", "--listen"]);
+    assert.match(recorded.at(-1), /^ws:\/\/127\.0\.0\.1:\d+$/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("App Server transport creates bounded, filesystem-safe temporary home names", () => {

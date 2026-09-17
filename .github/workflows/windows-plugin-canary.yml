@@ -77,6 +77,16 @@ jobs:
         env:
           STATEWRIGHT_API_KEY: ""
         run: node plugins/executor/tests/windows-plugin-browser-onboarding-canary.mjs
+      - name: Run managed Codex App Server approval protocol canary
+        timeout-minutes: 3
+        run: |
+          $cmd = Get-Command codex.cmd -ErrorAction SilentlyContinue
+          if (-not $cmd) { $cmd = Get-Command codex }
+          $env:CODEX_BIN = $cmd.Source
+          node plugins/executor/tests/windows-managed-app-server-canary.mjs
+      - name: Run managed ownership race canary
+        timeout-minutes: 2
+        run: node --test plugins/executor/tests/managed-ownership-races.test.mjs
       - name: Run authenticated production gateway canary
         if: github.event_name != 'pull_request'
         env:
@@ -129,7 +139,9 @@ jobs:
 
           It also proves that the managed supervisor can run a Windows .cmd launcher through a deterministic Codex route/restart cycle while preserving the quoted route configuration, full continuation prompt, bridge, managed identity, and control-directory lifecycle. Codex, Claude Code, and Cursor exercise their secretless PowerShell browser-launch path.
 
+          The PR-safe App Server protocol fixture launches the real npm-installed Windows Codex launcher with a private `CODEX_HOME` and no vendor credentials. It proves the Statewright-owned App Server proxy can complete JSON-RPC initialization, forward native server notifications, journal a pending approval, present its native elicitation form, retain the checkpoint when that form is dismissed, and prevent the parked turn from reaching inference. A separate PR-safe ownership fixture proves concurrent duplicate-writer refusal, released/stale lease handover, and duplicate-resume refusal before a second Windows child starts.
+
           On trusted `main` pushes and manual dispatches, it also authenticates the executor-owned loopback bridge to production and performs MCP initialization, `tools/list`, and the non-mutating `statewright_get_status` call. Separate steps then submit bounded Codex and Claude Code `ci_canary` adoption events and require explicit endpoint acknowledgements. A manual source must resolve inside trusted `main` history before the secret-bearing steps run. Pull requests exercise only secretless bootstrap and routing. The key is scoped to production-only steps and is never exposed to a child host process.
 
-          It also probes authenticated vendor CLI feasibility: with step-scoped repository secrets it executes a minimal non-interactive `codex exec` / `claude -p` turn against the vendor CLIs installed on the runner. A vendor whose credentials are not provisioned is reported as `not_provisioned` in the receipt without failing the job; a provisioned vendor whose turn fails does fail the job, because that is actionable infeasibility evidence. This still does not claim an interactive vendor session or a Statewright-gated approval loop on Windows; those require an interactive runner and human acceptance.
+          It also probes authenticated vendor CLI feasibility: with step-scoped repository secrets it executes a minimal non-interactive `codex exec` / `claude -p` turn against the vendor CLIs installed on the runner. A vendor whose credentials are not provisioned is reported as `not_provisioned` in the receipt without failing the job; a provisioned vendor whose turn fails does fail the job, because that is actionable infeasibility evidence. The secretless fixture does not establish an authenticated vendor turn, a human-interactive approval decision, WSL behavior, stock desktop-app behavior, or a full native Windows acceptance session; each remains a separately recorded gate.
           '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

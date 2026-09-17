@@ -114,7 +114,15 @@ tasks:
   test:codex-native-approvals:
     desc: "Validate standalone Codex approval parking, authorization, journaling, and native proxy release"
     cmds:
-      - node --test plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs
+      - node --test plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs plugins/executor/tests/managed-ownership-races.test.mjs
+      - git diff --check
+
+  test:windows-w2-fixtures:
+    desc: "Validate portable W2 ownership and App Server fixture syntax before the hosted Windows canary"
+    cmds:
+      - node --test plugins/executor/tests/managed-ownership-races.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs
+      - node --check plugins/executor/tests/windows-managed-app-server-canary.mjs
+      - ruby -e 'require "yaml"; YAML.load_file(".github/workflows/windows-plugin-canary.yml")'
       - git diff --check
 
   test:codex-native-approvals:vendor:

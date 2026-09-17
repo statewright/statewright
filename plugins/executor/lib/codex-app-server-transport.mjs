@@ -5,8 +5,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { routeIdentity, startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
+import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
+
+export function appServerCommandOptions(command, platform = process.platform) {
+  return {
+    // Node does not invoke cmd.exe for a .cmd/.bat target. The managed
+    // supervisor already has this boundary; the owned App Server needs it too.
+    shell: isWindowsCommand(command, platform),
+  };
+}
 
 function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -169,6 +178,7 @@ async function waitForReady(url, appServer) {
 export async function runCodexAppServerTransport({
   command,
   args,
+  platform = process.platform,
   environment = process.env,
   cwd = process.cwd(),
   home = homedir(),
@@ -180,9 +190,11 @@ export async function runCodexAppServerTransport({
   telemetry = async () => {},
   reporter = createErrorReporter({ plugin: "codex", version: "0.3.3", environment }),
 }) {
+  const launch = await resolveWindowsLaunch(command, platform);
   let pendingRoute = null;
   const runtime = await startCodexAppServerRuntime({
     command,
+    launch,
     environment,
     cwd,
     home,
@@ -200,10 +212,11 @@ export async function runCodexAppServerTransport({
   });
   let tui;
   try {
-    tui = spawn(command, [...stripRemoteArgs(args), "--remote", runtime.proxyUrl], {
+    tui = spawn(launch.command, [...launch.prefixArgs, ...stripRemoteArgs(args), "--remote", runtime.proxyUrl], {
       cwd,
       env: environment,
       stdio: "inherit",
+      shell: launch.shell,
     });
     const tuiExit = new Promise((resolveExit, rejectExit) => {
       tui.once("error", rejectExit);
@@ -237,6 +250,7 @@ export async function runCodexAppServerTransport({
  */
 export async function startCodexAppServerRuntime({
   command,
+  launch: providedLaunch = null,
   environment = process.env,
   cwd = process.cwd(),
   home = homedir(),
@@ -262,11 +276,16 @@ export async function startCodexAppServerRuntime({
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
   const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
 
-  const appServer = spawn(command, [...providerArgs, "app-server", "--listen", url], {
+  // Some callers already resolved an npm .cmd shim for their companion TUI.
+  // Keep that complete launch descriptor intact: passing only node.exe loses
+  // the Codex JavaScript entrypoint before this App Server child is spawned.
+  const launch = providedLaunch ?? await resolveWindowsLaunch(command);
+  const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, "app-server", "--listen", url], {
     cwd,
     env: { ...environment, CODEX_HOME: appServerHome },
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
+    shell: launch.shell,
   });
   const appServerClosed = new Promise((resolveClosed) => appServer.once("close", resolveClosed));
   appServer.stderr.on("data", (chunk) => stderr.write(chunk));

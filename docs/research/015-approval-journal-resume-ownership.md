@@ -2,6 +2,171 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 16 entry: owning native RPC configuration input
+
+Base9c0dc2a; previous turn verified progress, not wait/no-progress. Root freshly
+verified main, tracked/untracked ownership and unchanged user/Auldwyrm diff
+hashes. Full006/012/spec111/116 objective stays active. User expressly prohibits
+Statewright workflow query/load/use; apply manual source/evidence/Git controls.
+No actual authority/decision/inference, existing live sessions/panes, install,
+deployment or push. Root sole implementation owner; independent read-only
+review is the skill-required exception, not implementation delegation.
+
+Installed public SDK0.73.0 runRpcMode accepts only runtimeHost, owns process
+stdin/stdout, and invokes thinking/name mutators synchronously (rpc-mode.js
+378-389/481). Session-only async wrappers would report success before a parked
+mutation completes. This cut adds an explicit native RPC input boundary for
+set/cycle model, set/cycle thinking and session name: capture private input
+before registry await, checkpoint before native mutation, response only after
+completion. Never lend latest request to raw SDK/project setters. Other protocol
+records continue to SDK, whose normal startup/readiness/output remain owning.
+Task-owned RPC mode temporarily substitutes its process stdin with the filtered
+inlet and captures raw stdout before SDK takeover; restore on return/failure.
+No SDK/vendor patch, private SDK import or copied full RPC dispatcher. LF-only
+UTF8/CRLF and end-without-LF preserve installed SDK framing. Disconnect cancels
+instead of draining pending authority indefinitely. Interactive selectors and
+other configuration/effect/publication/native restart/host acceptance stay open;
+this experimental source cut is not activation or full native gesture coverage.
+
+Planned owned scope: request-operations/frontend/mode, new RPC inlet/helper tests,
+actual SDK frontend/main tests, ADR008 and this receipt. Focused red/green SDK
+and inlet tests precede one exact-source integration gate: serial Node308 baseline,
+full Pi235 baseline/one existing live skip, native2, Claude parity/mjs syntax.
+Freeze/export before mandatory bounded clean-context Astra/high read-only review.
+Observed-only envelope:100 normal/135 contraction root calls;30-minute warning/
+45-minute contraction;16KiB output target, final-third validation/review reserve.
+Review10 calls/12minutes/two focused checks; fresh repair recheck4 calls/5minutes/
+two checks. Max2 distinct repairs/finding; two exports plus regression-justified
+third. Stop optional breadth at thresholds. No provider/controller enforcement,
+catalog probe, quota-price claim or invented workflow identity. Scoped local
+commit/revert preserves native/journal evidence and all unrelated dirty files.
+
+Retained characterized baseline: two initial actual SDK tests fail because
+9c0dc2a has no native configuration-input capability. First two new SDK checks
+then pass,14 focused SDK/inlet cases pass, and all five actual native RPC actions
+pass in task-owned children both active and approval-pending (10 cases, no
+inference). For a discriminating old-path run restore only the previous direct
+SDK RPC dispatcher: thinking and session-name CLI cases both fail success=true
+assertions with actual native denial responses. Restore inlet without changing
+those assertions. Expanded three-file SDK/CLI/inlet gate116/116 then passes,
+including pending approval arising after model lookup, immutable payloads,
+superseded selections and rejected project inheritance. A final explicit
+close-without-EOF and actual SDK parked-inlet disconnect proof follows, before
+exact-source freeze/review. This is not durable config-only native history proof:
+SDK first history flush can remain deferred until an assistant exists; RPC state
+audits, private durable epoch/journal and settings/model writes are the scoped
+evidence. No native gestural or full original-scope completion claim added.
+Final root focused SDK/inlet93/93 (frontend82/inlet11), including actual SDK
+disconnect retaining durable approval and denying metadata/output; source freeze
+and independent review follow. Broader acceptance remains open.
+
+Initial frozen treebec6fa0c8eee8adcb4326c25af639b3aa991afbe at
+/tmp/statewright-native-rpc-input.FYNdtq: Node308/308 serial, Pi264 passed/one
+existing live skip, native2/2, Claude parity/four changed mjs syntax0. Green
+source receipts are superseded: clean-context Astra/high read-only
+/root/pi_native_rpc_input_review found P2 at inlet75-80: error/close listeners
+are delayed until first filtered read, while actual SDK awaits native bind first.
+Close before reader invokes disconnect0 versus1 after reader; isolated startup
+error child exits1 with unhandled error/no cleanup. Eight diagnostics/two focused
+checks, no edits/full-suite duplication/live authority or sessions. Mixed prompt/
+config ordering passes prebuffered and flowing probes; no other scoped finding.
+
+Root startup close/error regressions both fail against that source (callback0
+and thrown synthetic error). Product-defect repair attempt1 registers terminal
+listeners at inlet construction, preserving deferred command/data consumption,
+exactly-once cancellation and listener cleanup. Fresh repaired-source full gates
+and independent finding-only recheck follow. Installed SDK rpc.md documents abort
+as aborting the current Agent operation; AgentSession.abort stops Agent/retry and
+waits idle, not unrelated configuration. This cut proves replacement/disconnect;
+full native approval cancellation/controls remain open, not inferred from abort.
+
+### Slice 16 final source, review and full-objective audit
+
+Final tested/reviewed tree4a30812cc95337b18bb7d8779fa66b136bf0da1c, exact export
+/tmp/statewright-native-rpc-repaired.RwD8jA: serial Node308/308 (zero failures/
+skips/cancellations), Pi266 passed/one existing opt-in live-canary skip, native2/2
+(zero failures/skips/cancellations), Claude managed-client parity and four changed
+mjs syntax exit0. Staged diff-check0. Pi client diagnostics are mocked; actual
+SDK/CLI children use inert task-owned HTTP/synthetic authority, not real model,
+reviewer or workflow calls. Initial failed and superseded receipts remain above.
+Unchanged parallel Codex shutdown-fixture race remains unproved fixed; serial
+gate is explicit. No full Rust/typecheck/lint/build, headed interactive UI,
+actual gateway/website/native approval canary, hosted CI/soak or promotion.
+
+Fresh clean-context Astra/high read-only /root/pi_native_rpc_input_recheck
+closes the P2 in that exact repaired export: static owning-close/bind review and
+direct Node inlet fault probe,3/3 startup variants (close, destroy(Error), error
+queued before router construction). Each disconnect1, configuration0, replies0,
+forwarded0 after late reader attachment; listeners detach, all task streams
+destroyed, Node exits0. Four diagnostics/two focused checks; incorrect initial
+path reads consumed budget, no independent native integration suite rerun.
+Root full exact-source gates above provide that evidence, not an inferred pass.
+No remaining finding in repair scope; no broader activation/cleanup approval.
+Future review packets must list full export-relative paths at initial dispatch
+to avoid repeating wrong-path work; do not enlarge a review merely to absorb it.
+Root alone implemented; one independent decision pass plus required fresh
+finding recheck, no implementation delegation. Final recording is receipt-only
+delta from tested/reviewed source before the narrow nine-path local commit.
+
+Root re-read current006 nine-row contract/012 numbered plan and Auldwyrm111
+native/reviewer/evidence acceptance plus116 cross-host conformance. Historical
+staging statements are source context, not current live verification. Controlling
+Slice15 full nine-row audit stays intact, with these explicit dispositions:
+
+- Rows1/4/6/8/9 remain open/partial: full ticket/artifact/policy/reviewer/expiry/
+  revocation, entitled native/website decision control, real once-only delivery,
+  human-strength authentication/provenance and shared evidence/retention/hosts.
+- Row2 gains privately captured native RPC action/payload identity before lookup;
+  full branch/replacement/cross-host lineage still open beyond local epochs.
+- Row3 gains five reachable native RPC configuration commands, no false success
+  during pending approval, fresh post-lookup checkpoint and no inference in the
+  tested configuration journey. Interactive selectors/settings/hotkeys, other
+  native settings/registry/queue mutations, filesystem/spawn/branch, publication/
+  rendering and all internal transport/retry/summary continuations remain open.
+- Row5 gains startup terminal-input cleanup and parked RPC disconnect retaining
+  approval; complete native cold restart/crash-lock/legacy/permanent SDK teardown
+  failure and unified native approval-cancel control remain open.
+- Row7 gains native RPC selection/payload/new-input ownership and late-response
+  suppression on disconnect, not every old native effect/final publication.
+
+012 A/1 user-dirty Rust pending pre-tool denial remains unchanged/uncommitted and
+unvalidated here;2 hosts never resolve, real authorized decision path untested.
+C/3 experimental parent journal/deferred-clear/close and synthetic reopen remain
+partial, not complete production native restart. B/4 native RPC prerequisite
+now reachable in the experimental owning CLI, but full effect/transport activation
+open. D actual gateway/native approval/restart/host-parity canary not run under
+no-workflow/no-real-decision authority. Spec111 combined native/website/reviewer/
+cold/new-input journey and116 clean release packaging, native Windows versus WSL,
+desktop/protocol branches,100 race iterations/24-hour staging soak and production
+promotion remain gates. No goal-complete or blocked status is justified; further
+safe manual implementation is available. Original objective is not narrowed to
+the five commands or inactive experimental path.
+
+Next bounded source cut: trusted interactive configuration gesture wiring and
+unified owning native input/control cancellation, capturing before selector/
+registry awaits and awaiting guarded mutation before UI publication. Preserve
+the private-capability/project distinction rather than relaxing raw SDK guards.
+Then finish remaining effects/publication, native cold recovery and actual
+reviewer/host acceptance. Supervision/workflow use remains explicitly disabled.
+
+Manual source/evidence/Git profile stays root-owned; no new production-control
+baseline or runtime authority. Normal one independent Astra/high review, worst
+one fresh finding-only recheck/at most two distinct repairs per finding; observed
+one required repair, two exact-source exports, review8/recheck4 diagnostics, no
+extra full gate beyond superseded-source revalidation. Root inherited route,
+provider-specific token/aggregate tool-byte counting and controller enforcement
+unavailable; numeric call/time/output limits remain observed_only, not quota
+guarantees. Optional breadth stopped once frozen; validation/repair/full audit
+reserve retained, recording reached at about11 minutes after checkout preflight.
+
+Seven tracked user files retain diff hash
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm retains94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+User untracked inventory/other worktrees/existing live sessions unchanged.
+Scoped commit revert preserves journals/native records; no migration or installed
+runtime/live rollback needed. No workflow query/load/use, actual authority/
+approval/real inference, existing native session access, install, deploy or push.
+
 ## Slice 15 entry: native configuration mutation ownership
 
 Base83ac255; root reverified current main, seven tracked user changes, untracked

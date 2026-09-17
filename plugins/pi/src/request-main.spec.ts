@@ -89,10 +89,12 @@ describe("managed owning SDK CLI", () => {
     expect(received).toEqual(["/hooks/request/ready", "/hooks/request/begin", "/hooks/request/status"])
   }, 5_000)
 
-  const scenarios = [ ...["text", "json", "rpc"].flatMap(mode => [false, true].map(parked => ({ mode, parked, bash: false, commandOnly: false }))),
+  const scenarios: Array<{ mode: string; parked: boolean; bash: boolean; commandOnly: boolean; configuration?: string }> = [ ...["text", "json", "rpc"].flatMap(mode => [false, true].map(parked => ({ mode, parked, bash: false, commandOnly: false }))),
     { mode: "text", parked: false, bash: false, commandOnly: true },
-    ...[false, true].map(parked => ({ mode: "rpc", parked, bash: true, commandOnly: false })) ]
-  for (const { mode, parked, bash, commandOnly } of scenarios) it(`runs actual ${mode} CLI${bash ? " native bash" : ""}${commandOnly ? " command-only final input" : ""}${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
+    ...[false, true].map(parked => ({ mode: "rpc", parked, bash: true, commandOnly: false })),
+    ...["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "set_session_name"].flatMap(configuration =>
+      [false, true].map(parked => ({ mode: "rpc", parked, bash: false, commandOnly: false, configuration }))) ]
+  for (const { mode, parked, bash, commandOnly, configuration } of scenarios) it(`runs actual ${mode} CLI${bash ? " native bash" : ""}${configuration ? ` native ${configuration}` : ""}${commandOnly ? " command-only final input" : ""}${parked ? " through pending approval" : ""} with a bound task-owned child and exact private SDK readiness`, async () => {
     const f = await fixture({ after: (callback: () => any) => cleanup.push(callback) }, { nativeFile: true, parked })
     const requests: any[] = []
     const server = createServer(async (request, response) => {
@@ -120,8 +122,9 @@ describe("managed owning SDK CLI", () => {
     await mkdir(agentDir)
     await writeFile(join(agentDir, "models.json"), JSON.stringify({ providers: { "synthetic-provider": {
       baseUrl: `http://127.0.0.1:${(server.address() as any).port}/v1`, api: "openai-completions", apiKey: "synthetic-not-a-secret",
-      models: [{ id: "synthetic-chat", name: "Synthetic", reasoning: false, input: ["text"], contextWindow: 65_536, maxTokens: 1024,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+      models: [{ id: "synthetic-chat", name: "Synthetic", reasoning: !!configuration, input: ["text"], contextWindow: 65_536, maxTokens: 1024,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, ...(configuration ? [{ id: "other-chat", name: "Other", reasoning: true,
+          input: ["text"], contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }] : [])],
     } } }))
     await writeFile(join(agentDir, "settings.json"), JSON.stringify({ compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } }))
     const launch = { schema: "statewright/pi-request-launch/v1", challenge: readiness.challenge, cwd, agent_dir: agentDir, model: { provider: "synthetic-provider", id: "synthetic-chat" } }
@@ -137,17 +140,29 @@ describe("managed owning SDK CLI", () => {
     cleanup.push(async () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed })
     await once(child, "spawn")
     readiness.bindChild(child)
-    let stdout = ""; let stderr = ""
+    let stdout = ""; let stderr = ""; let configurationResponded = false
     child.stdout.on("data", chunk => {
       stdout += chunk
       if (mode === "rpc") {
         for (const line of stdout.split("\n")) {
-          try { const event = JSON.parse(line); if (event.type === "agent_end" || bash && event.type === "response" && event.command === "bash") child.stdin.end() } catch { /* partial native JSON line */ }
+          try {
+            const event = JSON.parse(line)
+            if (configuration && event.type === "response" && event.command === configuration && !configurationResponded) {
+              configurationResponded = true
+              child.stdin.write('{"type":"get_state","id":"owned-configuration-state"}\n')
+            }
+            if (event.type === "agent_end" || bash && event.type === "response" && event.command === "bash"
+              || configuration && event.type === "response" && event.id === "owned-configuration-state") child.stdin.end()
+          } catch { /* partial native JSON line */ }
         }
       }
     })
     child.stderr.on("data", chunk => { stderr += chunk })
-    if (mode === "rpc") child.stdin.write(`${JSON.stringify(bash
+    if (mode === "rpc") child.stdin.write(`${JSON.stringify(configuration ? { type: configuration, id: "synthetic-configuration",
+      ...(configuration === "set_model" ? { provider: "synthetic-provider", modelId: "other-chat" } : {}),
+      ...(configuration === "set_thinking_level" ? { level: "high" } : {}),
+      ...(configuration === "set_session_name" ? { name: "native RPC session" } : {}),
+    } : bash
       ? { type: "bash", id: "synthetic-input", command: `${JSON.stringify(process.execPath)} -e "process.stdout.write('synthetic CLI bash')"` }
       : { type: "prompt", id: "synthetic-input", message: "synthetic explicit input" })}\n`)
     const timer = setTimeout(() => child.kill("SIGTERM"), 8_000)
@@ -162,10 +177,12 @@ describe("managed owning SDK CLI", () => {
               exitCode: child.exitCode, signalCode: child.signalCode })).toBeGreaterThanOrEqual(2)
         }, { timeout: 2_500, interval: 10 })
         expect(requests).toHaveLength(0)
+        if (configuration) expect(configurationResponded).toBe(false)
         const observations = f.events.filter((event: string) => event === "read:pending").length
         f.setLive({ run_id: "run", run_session_id: "session", workflow: "fixture", state: "work" })
         await vi.waitFor(() => expect(f.events.filter((event: string) => event === "read:pending").length).toBeGreaterThan(observations), { timeout: 1_500, interval: 10 })
         expect(requests).toHaveLength(0)
+        if (configuration) expect(configurationResponded).toBe(false)
         expect(await f.mirror.loadCheckpoint()).not.toBeNull()
         f.approve()
       }
@@ -175,17 +192,33 @@ describe("managed owning SDK CLI", () => {
         active: bridge.activeRequests, exitCode: child.exitCode, signalCode: child.signalCode }), { cause: error })
     } finally { clearTimeout(timer) }
     expect({ result, stderr, stdout, requests: requests.length, epoch: f.owner.record.request_epoch }).toEqual(expect.objectContaining({ result: [0, null] }))
-    if (commandOnly) expect(stdout).not.toContain("synthetic CLI response")
+    if (configuration) {
+      const records = stdout.trim().split("\n").map(line => JSON.parse(line))
+      const response = records.find(record => record.type === "response" && record.command === configuration)
+      const state = records.find(record => record.type === "response" && record.id === "owned-configuration-state")
+      expect(records.filter(record => record.type === "response" && record.command === configuration)).toHaveLength(1)
+      expect(response, stderr).toMatchObject({ success: true })
+      expect(state, stderr).toMatchObject({ success: true })
+      if (["set_model", "cycle_model"].includes(configuration)) expect(state.data.model.id).toBe("other-chat")
+      if (configuration === "set_thinking_level") expect(state.data.thinkingLevel).toBe("high")
+      if (configuration === "cycle_thinking_level") {
+        expect(typeof response.data.level).toBe("string")
+        expect(state.data.thinkingLevel).toBe(response.data.level)
+        expect(response.data.level).not.toBe("off")
+      }
+      if (configuration === "set_session_name") expect(state.data.sessionName).toBe("native RPC session")
+      expect(stdout).not.toContain("synthetic CLI response")
+    } else if (commandOnly) expect(stdout).not.toContain("synthetic CLI response")
     else expect(stdout).toContain(bash ? "synthetic CLI bash" : "synthetic CLI response")
     if (mode !== "text") for (const line of stdout.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow()
-    expect(requests).toHaveLength(bash ? 0 : 1)
+    expect(requests).toHaveLength(bash || configuration ? 0 : 1)
     expect(f.owner.record.request_epoch).toBe(commandOnly ? 2 : 1)
     if (parked) {
       expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
       expect(f.events.filter((event: string) => event === "clear:approval")).toHaveLength(1)
       expect(await f.mirror.loadCheckpoint()).toBeNull()
     }
-    if (!bash) expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
+    if (!bash && !configuration) expect(await readFile(f.owner.record.host_session_file, "utf8")).not.toBe(before)
     // Bash-only first history flush is SDK-deferred until an assistant exists;
     // this case proves native protocol/admission/exec, not durable bash history.
     expect(readiness.ready).toBe(false)

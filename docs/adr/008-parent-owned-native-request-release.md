@@ -50,6 +50,39 @@ configuration methods are checked before installation mutates the session.
 Only a privately marked native-configuration denial from an actually superseded
 prompt is handled as obsolete input; current denial and unrelated errors surface.
 
+The owning RPC mode holds a separate configuration-input capability, absent
+from project APIs and SDK session mutators. Its inlet routes only strict
+set/cycle model, set/cycle thinking and session-name records, immediately
+capturing a cloned private explicit input before model-registry lookup can
+await. Inherited/project scopes cannot mint input through this capability;
+normal raw SDK setters still cannot borrow the latest reference. Mutation is
+checkpointed and the correlated RPC response is emitted only after completion,
+with the native SDK response shape and no inference. Invalid authority-bearing
+or malformed configuration fields fail before admission, not through an SDK
+fallback. No RPC decision/resolution operation is added.
+
+SDK0.73.0 public runRpcMode accepts only runtimeHost and uses process.stdin;
+thinking/name methods are synchronous in its command switch. An async session
+proxy would serialize a promise or report success before the parked write.
+The task-owned mode instead temporarily substitutes its filtered stdin and
+captures stdout's raw writer before SDK takeover. Every other JSONL record
+continues through the original SDK dispatcher; bind/readiness, UI dialogs,
+events and shutdown remain SDK-owned. LF-only UTF8/CRLF and final non-LF framing
+match the installed jsonl.js source. Input consumption starts only when the SDK
+attaches its reader after native bind; EOF/error/close synchronously invalidate
+owned continuation and suppress late replies. Restore the process descriptor
+and detach the inlet on return/failure. This is confined to the newly owned RPC
+process, not existing sessions, a vendor patch or a universal process interceptor.
+
+Interactive settings/selectors/hotkeys still require separate trusted gesture
+wiring that captures at invocation rather than after selection awaits. CLI
+startup configuration is already fixed before guarded runtime construction;
+neither that bootstrap nor the native RPC inlet authorizes remaining settings,
+provider internals, filesystem/process/branch or publication effects. Revisit
+this small adapter when the public SDK offers input/command interception or
+awaits these mutators; remove the inlet substitution then, preserving its native
+RPC race/framing/authority tests. No production or complete-gesture activation.
+
 Installed SDK0.73.0 cycleModel awaits its public registry before writing model,
 history and settings. Its task-owned registry wrapper checkpoints the one
 available-model handoff in that private cycle scope, retaining synchronous

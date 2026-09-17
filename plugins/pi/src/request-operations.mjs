@@ -89,6 +89,17 @@ export function createPiRequestOperations() {
       if (!await admitCommand()) return;
       return this.dispatch(() => handler(...args));
     },
+    configuration(text, effect) {
+      // Only the owning native input adapter holds this capability. Project
+      // callbacks (including inherited/detached calls) cannot become input.
+      if (closed || calls.getStore() || !gate?.ownsNative(context())) {
+        return Promise.reject(new Error("Native configuration input unavailable"));
+      }
+      return explicit(text, "rpc", async () => {
+        if (!await admitCommand()) throw new Error("Native configuration request unavailable");
+        return this.dispatch(effect);
+      });
+    },
     ownsCurrent() { return owned(reference()); },
     staleCall() {
       try { const call = calls.getStore(); return !!call?.reference && gate.isSuperseded(context(), call.reference); }

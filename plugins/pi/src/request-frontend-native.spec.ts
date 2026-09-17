@@ -2,6 +2,7 @@ import { createServer } from "node:http"
 import { EventEmitter } from "node:events"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { AuthStorage, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
 import { createPiRequestFrontend } from "./request-frontend.mjs"
@@ -12,6 +13,7 @@ import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mj
 import statewrightExtension, { callStatewrightGateway } from "./index.js"
 import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 import { runPiRequestMode } from "./request-mode.mjs"
+import { createPiRpcInput } from "./request-rpc-input.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
 afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await cleanup.pop()!() })
@@ -85,6 +87,154 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("admits a native RPC configuration gesture without allowing raw SDK mutation or inference", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    expect(() => f.session.setSessionName("unowned")).toThrow("Native configuration request unavailable")
+    await f.frontend.configuration({ type: "set_session_name", name: "native RPC name" })
+    expect(f.sessionManager.getSessionName()).toBe("native RPC name")
+    expect(f.sessionManager.getEntries().length).toBeGreaterThan(before.length)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("parks a native RPC configuration input before metadata mutation and consumes only its private release", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    const changed = f.frontend.configuration({ type: "set_session_name", name: "approved native name" })
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.sessionManager.getSessionName()).not.toBe("approved native name")
+    expect(f.requests).toHaveLength(0)
+    f.approve()
+    await changed
+    expect(f.sessionManager.getSessionName()).toBe("approved native name")
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+  })
+
+  it("captures native RPC model input before registry lookup and rejects its superseded selection", async () => {
+    let release!: (models: any[]) => void
+    let read!: () => void
+    const reading = new Promise<void>(resolve => { read = resolve })
+    const available = new Promise<any[]>(resolve => { release = resolve })
+    const f = await frontendFixture({ availableModels: () => { read(); return available }, register: pi => {
+      pi.registerCommand("replacement", { handler: () => {} })
+    } })
+    await f.bind()
+    const previous = f.session.model
+    const before = f.sessionManager.getEntries()
+    const change = f.frontend.configuration({ type: "set_model", provider: previous.provider, modelId: "old-selection" })
+    void change.catch(() => {})
+    await reading
+    expect(f.owner.record.request_epoch).toBe(1)
+    await f.session.prompt("/replacement")
+    release([{ ...previous, id: "old-selection" }])
+    await expect(change).rejects.toThrow("Project request unavailable")
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("cannot turn a project inherited call into a native RPC configuration gesture", async () => {
+    let invoke!: () => Promise<unknown>
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("capture-native-capability", { handler: () => {
+        invoke = ownership.bind(() => f.frontend.configuration({ type: "set_session_name", name: "borrowed input" }))
+      } })
+    } })
+    await f.bind()
+    await f.session.prompt("/capture-native-capability")
+    const before = f.sessionManager.getEntries()
+    await expect(invoke()).rejects.toThrow("Native configuration input unavailable")
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.phase).toBe("active")
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("rechecks native RPC model input after registry lookup when approval becomes pending", async () => {
+    let release!: (models: any[]) => void
+    let read!: () => void
+    const reading = new Promise<void>(resolve => { read = resolve })
+    const available = new Promise<any[]>(resolve => { release = resolve })
+    const f = await frontendFixture({ availableModels: () => { read(); return available } })
+    await f.bind()
+    const previous = f.session.model
+    const before = f.sessionManager.getEntries()
+    const change = f.frontend.configuration({ type: "set_model", provider: previous.provider, modelId: "approved-selection" })
+    await reading
+    f.setLive(pending)
+    release([{ ...previous, id: "approved-selection" }])
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    f.approve()
+    await change
+    expect(f.session.model.id).toBe("approved-selection")
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("keeps the native RPC configuration payload immutable while parked", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const command = { type: "set_session_name", name: "original selection" }
+    const change = f.frontend.configuration(command)
+    command.name = "replacement value"
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    f.approve()
+    await change
+    expect(f.sessionManager.getSessionName()).toBe("original selection")
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("rejects an older parked native RPC gesture instead of adopting a newer configuration input", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const old = f.frontend.configuration({ type: "set_session_name", name: "obsolete selection" })
+    void old.catch(() => {})
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    const current = f.frontend.configuration({ type: "set_session_name", name: "current selection" })
+    await vi.waitFor(() => expect(f.owner.record.request_epoch).toBe(2), { timeout: 500 })
+    await expect(old).rejects.toThrow("Native configuration request unavailable")
+    expect(f.sessionManager.getSessionName()).not.toBe("obsolete selection")
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    f.approve()
+    await current
+    expect(f.sessionManager.getSessionName()).toBe("current selection")
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("disconnects a parked native RPC inlet without writing metadata or clearing its durable approval", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    const source = new PassThrough()
+    const output = vi.fn()
+    let closing: Promise<unknown> | null = null
+    const router = createPiRpcInput({ input: source, configuration: f.frontend.configuration, output,
+      onDisconnect: () => { closing = f.frontend.close(); return closing } })
+    cleanup.push(() => { router.close(); source.destroy(); router.input.destroy() })
+    router.input.resume()
+    await vi.waitFor(() => expect(source.listenerCount("data")).toBe(1))
+    source.write('{"type":"set_session_name","id":"disconnect","name":"never written"}\n')
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    source.destroy()
+    await vi.waitFor(() => expect(closing).not.toBeNull())
+    await closing
+    expect(f.owner.record.request.reason).toBe("disconnected")
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.requests).toHaveLength(0)
+    expect(output).not.toHaveBeenCalled()
+    expect(f.frontend.readiness).toBeNull()
+  })
+
   it("parks project model configuration before native model, history and settings writes", async () => {
     let change!: () => Promise<unknown>
     let f: Awaited<ReturnType<typeof frontendFixture>>

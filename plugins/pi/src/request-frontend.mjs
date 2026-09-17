@@ -3,6 +3,7 @@ import { createPiRequestGate } from "./request-gate.mjs";
 import { createPiRequestOperations } from "./request-operations.mjs";
 import { installPiRequestGuards } from "./request-hooks.mjs";
 import { piProjectMethod, withPiProjectEffects } from "./project-effects.mjs";
+import { snapshotPiRpcConfiguration } from "./request-rpc-input.mjs";
 
 // Additive owning SDK frontend. Not an extension-context or stock-CLI patch.
 // This lifetime binds exactly one parent-owned native UUID; replacement needs
@@ -138,7 +139,29 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
     dispose = runtime.dispose.bind(runtime);
     runtime.dispose = close;
     for (const method of ["newSession", "switchSession", "fork", "importFromJsonl"]) runtime[method] = freshOwnerRequired;
-    return Object.freeze({ runtime, get readiness() { observeNative(); return readiness; },
+    const configuration = command => {
+      const input = snapshotPiRpcConfiguration(command);
+      if (!observeNative()) return Promise.reject(new Error("Native configuration input unavailable"));
+      return operations.configuration(JSON.stringify(input), async () => {
+        switch (input.type) {
+          case "set_model": {
+            const models = await session.modelRegistry.getAvailable();
+            const model = models.find(value => value.provider === input.provider && value.id === input.modelId);
+            if (!model) throw new Error(`Model not found: ${input.provider}/${input.modelId}`);
+            await session.setModel(model);
+            return model;
+          }
+          case "cycle_model": return await session.cycleModel() ?? null;
+          case "set_thinking_level": session.setThinkingLevel(input.level); return;
+          case "cycle_thinking_level": {
+            const level = session.cycleThinkingLevel();
+            return level ? { level } : null;
+          }
+          case "set_session_name": session.setSessionName(input.name.trim()); return;
+        }
+      });
+    };
+    return Object.freeze({ runtime, configuration, get readiness() { observeNative(); return readiness; },
       get finalResponse() { return observeNative() ? operations.finalResponse() : null; }, close });
   } catch (error) {
     await close();

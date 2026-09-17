@@ -1,4 +1,5 @@
 import { InteractiveMode, runPrintMode, runRpcMode } from "@mariozechner/pi-coding-agent";
+import { createPiRpcInput } from "./request-rpc-input.mjs";
 
 export function parsePiRequestMode(argv) {
   let mode = "interactive";
@@ -51,7 +52,15 @@ export async function runPiRequestMode(frontend, { mode, messages = [] }) {
       } });
       return await runPrintMode(runtime, { mode, messages });
     }
-    if (mode === "rpc") { await runRpcMode(frontend.runtime); return 0; }
+    if (mode === "rpc") {
+      const descriptor = Object.getOwnPropertyDescriptor(process, "stdin");
+      if (!descriptor?.configurable) throw new Error("Owning native RPC input unavailable");
+      const inlet = createPiRpcInput({ input: process.stdin, configuration: frontend.configuration,
+        output: process.stdout.write.bind(process.stdout), onDisconnect: frontend.close });
+      Object.defineProperty(process, "stdin", { configurable: true, value: inlet.input });
+      try { await runRpcMode(frontend.runtime); return 0; }
+      finally { inlet.close(); Object.defineProperty(process, "stdin", descriptor); }
+    }
     await new InteractiveMode(frontend.runtime, { initialMessages: messages }).run();
     return 0;
   } finally { await frontend.close(); }

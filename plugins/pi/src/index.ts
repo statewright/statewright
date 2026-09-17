@@ -2277,7 +2277,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
           originalModel = null
         }
         if (originalTools) {
-          pi.setActiveTools(originalTools)
+          await pi.setActiveTools(originalTools)
           originalTools = null
         }
         ctx.ui.setStatus("!statewright", "")
@@ -2326,7 +2326,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       if (EXPERIMENTAL && isPluginOrchestrated() && createStream && currentModel?.provider?.startsWith("ollama") && currentModel.provider !== "ollama-text") {
         const ollamaBaseUrl = (currentModel.baseUrl || "http://127.0.0.1:11434/v1").replace(/\/v1\/?$/, "").replace(/\/+$/, "")
         try {
-          pi.registerProvider("ollama-text", {
+          await pi.registerProvider("ollama-text", {
             name: "Ollama (text-only, no native tool calls)",
             baseUrl: ollamaBaseUrl,
             apiKey: "ollama",
@@ -2583,7 +2583,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     try {
       if (state.thinkingLevel && state.thinkingLevel !== lastThinkingLevel) {
         const before = pi.getThinkingLevel()
-        pi.setThinkingLevel(state.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0])
+        await pi.setThinkingLevel(state.thinkingLevel as Parameters<typeof pi.setThinkingLevel>[0])
         const after = pi.getThinkingLevel()
         lastThinkingLevel = state.thinkingLevel
         if (after !== state.thinkingLevel) {
@@ -2610,10 +2610,10 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
         const swTools = pi.getActiveTools().filter((t: string) => t.startsWith("statewright_"))
         const activeSet = [...new Set([...piTools, ...swTools])]
         swLog(`tools] state=${state.state} setting active: ${activeSet.join(", ")}`)
-        pi.setActiveTools(activeSet)
+        await pi.setActiveTools(activeSet)
         swLog(`tools] after set, active: ${pi.getActiveTools().join(", ")}`)
       } else if (originalTools) {
-        pi.setActiveTools(originalTools)
+        await pi.setActiveTools(originalTools)
         originalTools = null
       }
     } catch (err) {
@@ -2649,7 +2649,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     if (requiresDeliveryOwner(state.meta)) {
       try {
         if (!(await executorOwnsDelivery())) {
-          pi.setActiveTools(pi.getActiveTools().filter((tool: string) => tool.startsWith("statewright_")))
+          await pi.setActiveTools(pi.getActiveTools().filter((tool: string) => tool.startsWith("statewright_")))
           ctx.ui.notify(
             "[statewright] This workflow requires isolated delivery. Launch it through the Statewright executor so it owns the delivery lifecycle.",
             "error",

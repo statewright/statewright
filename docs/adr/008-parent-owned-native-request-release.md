@@ -34,6 +34,31 @@ still recovery-required, never stolen by PID/age heuristics.
 
 ## Native SDK boundary and activation constraint
 
+Project model/thinking/tools/metadata and runtime provider registration APIs
+checkpoint their private caller before invoking native mutation. Fixed SDK
+bind-time configuration uses a private lease revoked when binding completes;
+project callbacks mask that lease and can only use the designated read-only
+bootstrap observation path. Native configuration writes and metadata appends
+check the original private request before mutation; public configuration views
+are read-only snapshot facades, including frozen model records. Unadmitted
+native UI/RPC configuration gestures still need their own owning input adapter;
+they do not gain authority from the latest request or bootstrap permission.
+Property descriptors return the same guarded views, not raw nested records or
+the native tools setter. Configuration fields cannot be reflectively redefined
+or deleted; ordinary SDK assignments remain guarded. The required public SDK
+configuration methods are checked before installation mutates the session.
+Only a privately marked native-configuration denial from an actually superseded
+prompt is handled as obsolete input; current denial and unrelated errors surface.
+
+Installed SDK0.73.0 cycleModel awaits its public registry before writing model,
+history and settings. Its task-owned registry wrapper checkpoints the one
+available-model handoff in that private cycle scope, retaining synchronous
+public registry reads elsewhere and the SDK's original selection/event logic.
+Scoped cycles use their original no-registry-await path. Native stale-write
+guards recheck ownership at actual mutation after the async handoff. Revisit
+this narrow integration if the SDK changes that public call sequence; not a
+claim that all SDK or SettingsManager/ModelRegistry mutation paths are guarded.
+
 Secondary project HTTP (docs, classifier, custom provider and telemetry/run-log
 helpers) captures the private calling request before dispatch. Initial fetch,
 body decoders and default-reader reads checkpoint that same reference, combine

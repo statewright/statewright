@@ -111,18 +111,27 @@ export async function fetchPiProject(input, init = {}) {
 
 export function piProjectMethod(pi, key, operations, bridge) {
   const method = pi[key];
-  const scoped = callback => (...args) => withPiProjectEffects(operations, () => callback(...args), bridge);
+  const scoped = callback => (...args) => operations.project(() => withPiProjectEffects(operations, () => callback(...args), bridge));
   if (key === "on") return (event, callback) => method.call(pi, event, scoped(callback));
   if (key === "registerTool") return tool => method.call(pi, { ...tool, execute: scoped(tool.execute) });
   if (key === "registerCommand") return (name, command) => method.call(pi, name, { ...command,
     handler: (...args) => operations.command(scoped(command.handler), args) });
-  if (key === "registerProvider") return (name, configuration) => method.call(pi, name, { ...configuration,
+  if (key === "registerProvider") return (name, configuration) => {
+    const value = { ...configuration,
     // A provider is invoked later by the actual Agent, not in its registration
     // epoch. Restore only the project scope; never bind an old request here.
     ...(configuration.streamSimple ? { streamSimple: scoped(configuration.streamSimple) } : {}),
     ...(configuration.stream ? { stream: scoped(configuration.stream) } : {}),
-  });
-  if (!["exec", "sendUserMessage", "sendMessage"].includes(key)) return method;
+    };
+    // Before SDK construction this only declares the trusted fixed factory's
+    // provider. Runtime registrations can mutate registry/native configuration.
+    if (!operations.isInstalled()) return method.call(pi, name, value);
+    const pending = operations.dispatch(() => method.call(pi, name, value));
+    pending.catch(() => {}); // SDK declares a void API; awaited denial still rejects
+    return pending;
+  };
+  if (!["exec", "sendUserMessage", "sendMessage", "setModel", "setThinkingLevel", "setActiveTools",
+    "appendEntry", "setSessionName", "setLabel", "unregisterProvider"].includes(key)) return method;
   return (...args) => {
     // Keep a rejection visible to awaiters while void SDK message callers do
     // not produce an unhandled rejection. Denial never invokes a fallback.

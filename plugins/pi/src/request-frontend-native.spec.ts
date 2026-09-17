@@ -20,6 +20,7 @@ afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await clean
 // SSE. Parent authority is synthetic, owner/journal/bridge are real local code.
 async function frontendFixture(options: { parked?: boolean; streaming?: boolean; register?: (...args: any[]) => unknown;
   onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any;
+  availableModels?: () => any[] | Promise<any[]>;
   beforeCreate?: (fixture: any) => void } = {}) {
   const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, { ...options, nativeFile: options.handshake })
   const requests: any[] = []
@@ -62,7 +63,8 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
     baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, reasoning: false,
     input: ["text"], contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
-    getAll: () => [], find: () => model, isUsingOAuth: () => false, registerProvider: vi.fn() }
+    getAll: () => [], getAvailable: options.availableModels ?? (() => [model]), find: () => model, isUsingOAuth: () => false,
+    registerProvider: vi.fn(), unregisterProvider: vi.fn() }
   const onPark = vi.fn()
   const uiContext = { notify: vi.fn(), setStatus: vi.fn() }
   const publish = nativeReadiness ? createPiNativeReadinessPublisher({ challenge: nativeReadiness.challenge, sessionManager, call }) : null
@@ -83,6 +85,216 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  it("parks project model configuration before native model, history and settings writes", async () => {
+    let change!: () => Promise<unknown>
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    const model = { id: "other-model", provider: "synthetic-provider", api: "openai-completions", reasoning: false }
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("capture-model", { handler: () => { change = ownership.bind(() => pi.setModel({ ...f.session.model, ...model })) } })
+    } })
+    await f.bind()
+    await f.session.prompt("/capture-model")
+    const before = f.sessionManager.getEntries()
+    const previous = f.session.model
+    f.setLive(pending)
+    const changed = change()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    f.approve()
+    await changed
+    expect(f.session.model.id).toBe("other-model")
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("rejects a native model cycle before state mutation after its registry await is superseded", async () => {
+    let cycle!: () => Promise<unknown>
+    let release!: (models: any[]) => void
+    let read!: () => void
+    const reading = new Promise<void>(resolve => { read = resolve })
+    const available = new Promise<any[]>(resolve => { release = resolve })
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ availableModels: () => { read(); return available }, register: (pi, ownership) => {
+      pi.registerCommand("capture-cycle", { handler: () => { cycle = ownership.bind(() => f.session.cycleModel()) } })
+    } })
+    await f.bind()
+    await f.session.prompt("/capture-cycle")
+    const previous = f.session.model
+    const before = f.sessionManager.getEntries()
+    const changed = cycle()
+    void changed.catch(() => {})
+    await reading
+    await f.session.prompt("/capture-cycle")
+    release([previous, { ...previous, id: "obsolete-model" }])
+    await expect(changed).rejects.toThrow("Project request unavailable")
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("checkpoints native model cycle after its registry await before any pending mutation", async () => {
+    let cycle!: () => Promise<unknown>
+    let release!: (models: any[]) => void
+    let read!: () => void
+    const reading = new Promise<void>(resolve => { read = resolve })
+    const available = new Promise<any[]>(resolve => { release = resolve })
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ availableModels: () => { read(); return available }, register: (pi, ownership) => {
+      pi.registerCommand("pending-cycle", { handler: () => { cycle = ownership.bind(() => f.session.cycleModel()) } })
+    } })
+    await f.bind()
+    await f.session.prompt("/pending-cycle")
+    const previous = f.session.model
+    const before = f.sessionManager.getEntries()
+    const changed = cycle()
+    await reading
+    f.setLive(pending)
+    release([previous, { ...previous, id: "released-model" }])
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    f.approve()
+    await changed
+    expect(f.session.model.id).toBe("released-model")
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("denies native metadata and configuration outside a private admitted request", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    const previous = f.session.model
+    expect(() => f.sessionManager.appendCustomEntry("obsolete", { fixture: true })).toThrow("Native configuration request unavailable")
+    expect(() => { f.session.agent.state.model = { ...previous, id: "unowned-model" } }).toThrow("Native configuration request unavailable")
+    expect(f.session.model).toBe(previous)
+    expect(f.sessionManager.getEntries()).toEqual(before)
+  })
+
+  it("supports immutable SDK model records while denying writable configuration aliases", async () => {
+    let change!: () => Promise<unknown>
+    let selected: any
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("immutable-model", { handler: () => { change = ownership.bind(() => pi.setModel(selected)) } })
+    } })
+    await f.bind()
+    expect(f.session.modelRegistry.getAvailable()).toHaveLength(1) // public read stays synchronous
+    selected = Object.freeze({ ...f.session.model, id: "immutable-model", input: Object.freeze(["text"]),
+      cost: Object.freeze({ ...f.session.model.cost }) })
+    await f.session.prompt("/immutable-model")
+    await change()
+    expect(f.session.model.cost).toEqual(selected.cost)
+    expect(() => { f.session.model.cost.input = 100 }).toThrow("Native configuration view is read-only")
+    expect(() => { f.session.agent.state.tools.push({} as any) }).toThrow("Native configuration view is read-only")
+    await f.session.prompt("synthetic immutable-model request")
+    expect(f.requests).toHaveLength(1)
+    expect(f.requests[0].model).toBe("immutable-model")
+  })
+
+  it("does not expose raw model, cost or native tools setters through descriptors", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const previous = f.session.model.id
+    const cost = f.session.model.cost.input
+    const model = Object.getOwnPropertyDescriptor(f.session.agent.state, "model")!
+    expect(() => { model.value.id = "unowned-descriptor" }).toThrow("Native configuration view is read-only")
+    const tools = Object.getOwnPropertyDescriptor(f.session.agent.state, "tools")!
+    expect(() => tools.set!([{ name: "unowned-tool" }])).toThrow("Native configuration request unavailable")
+    const nested = Object.getOwnPropertyDescriptor(f.session.model, "cost")!
+    expect(() => { nested.value.input = 999 }).toThrow("Native configuration view is read-only")
+    expect(f.session.model.id).toBe(previous)
+    expect(f.session.model.cost.input).toBe(cost)
+    expect(f.session.getActiveToolNames()).toEqual([])
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("does not grant SDK bootstrap mutation permission to project startup callbacks", async () => {
+    let f: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ register: pi => pi.on("session_start", () => {
+      f.sessionManager.appendCustomEntry("unadmitted-project", { fixture: true })
+    }) })
+    const before = f.sessionManager.getEntries()
+    await expect(f.bind()).rejects.toThrow("Owned SDK frontend unavailable")
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.frontend.readiness).toBe(null)
+    expect(f.onReady).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it.each(["registerProvider", "unregisterProvider"])("privately checkpoints runtime %s before registry mutation", async key => {
+    const effects: Array<() => Promise<unknown>> = []
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("runtime-provider", { handler: () => effects.push(ownership.bind(() =>
+        pi[key]("inert-runtime-provider", { streamSimple: () => isPiProjectManaged() }))) })
+    } })
+    await f.bind()
+    await f.session.prompt("/runtime-provider")
+    const mutate = f.modelRegistry[key as "registerProvider" | "unregisterProvider"]
+    f.setLive(pending)
+    const changed = effects[0]()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(mutate).not.toHaveBeenCalled()
+    f.approve()
+    await changed
+    expect(mutate).toHaveBeenCalledTimes(1)
+    await f.session.prompt("/runtime-provider")
+    await expect(effects[0]()).rejects.toThrow("Project request unavailable")
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("revokes SDK bootstrap permission from native continuations after binding", async () => {
+    const f = await frontendFixture()
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let late!: Promise<unknown>
+    const original = f.session.extendResourcesFromExtensions.bind(f.session)
+    vi.spyOn(f.session, "extendResourcesFromExtensions").mockImplementation((...args) => {
+      late = held.then(() => f.session.setSessionName("obsolete bootstrap"))
+      return original(...args)
+    })
+    await f.bind()
+    const before = f.sessionManager.getEntries()
+    release()
+    await expect(late).rejects.toThrow("Native configuration request unavailable")
+    expect(f.sessionManager.getEntries()).toEqual(before)
+    expect(f.frontend.readiness).not.toBe(null)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it.each([
+    ["setThinkingLevel", ["off"], "setThinkingLevel"],
+    ["setActiveTools", [[]], "setActiveToolsByName"],
+    ["appendEntry", ["owned-fixture", {}], "appendCustomEntry"],
+    ["setSessionName", ["owned fixture"], "setSessionName"],
+    ["setLabel", ["missing-entry", "fixture"], "appendLabelChange"],
+  ])("privately parks and rejects stale project %s mutations", async (key, args, nativeKey) => {
+    const effects: Array<() => Promise<unknown>> = []
+    const f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("configuration", { handler: async () => {
+        if (key === "setLabel") await pi.appendEntry("label-target", {})
+        const values = key === "setLabel" ? [f.sessionManager.getEntries().at(-1)!.id, "fixture"] : args
+        effects.push(ownership.bind(() => pi[key](...values)))
+      } })
+    } })
+    await f.bind()
+    await f.session.prompt("/configuration")
+    const target = key === "appendEntry" || key === "setLabel" ? f.sessionManager : f.session
+    const mutate = vi.spyOn(target as any, nativeKey as string)
+    f.setLive(pending)
+    const changed = effects[0]()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(mutate).not.toHaveBeenCalled()
+    f.approve()
+    await changed
+    expect(mutate).toHaveBeenCalledTimes(1)
+    await f.session.prompt("/configuration")
+    await expect(effects[0]()).rejects.toThrow("Project request unavailable")
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
   async function docsFixture(response: () => Promise<Response> | Response) {
     const keys = ["STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN", "STATEWRIGHT_WORKFLOW", "STATEWRIGHT_EXECUTOR_ID"]
     const saved = keys.map(key => process.env[key])

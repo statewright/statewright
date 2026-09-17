@@ -76,7 +76,8 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
             const managed = new Proxy(pi, {
               get(object, key, receiver) {
                 if (!["on", "registerTool", "registerCommand"].includes(key)) {
-                  return ["exec", "sendUserMessage", "sendMessage", "registerProvider"].includes(key)
+                  return ["exec", "sendUserMessage", "sendMessage", "registerProvider", "unregisterProvider", "setModel",
+                    "setThinkingLevel", "setActiveTools", "appendEntry", "setSessionName", "setLabel"].includes(key)
                     ? piProjectMethod(object, key, operations, projectBridge) : Reflect.get(object, key, receiver);
                 }
                 return (...args) => {
@@ -122,7 +123,7 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
         if (!observeNative() || bindingStarted) throw new Error("Owned SDK frontend unavailable");
         bindingStarted = true;
         try {
-          await bind(...args);
+          await operations.bootstrap(() => bind(...args));
           if (!native()) throw new Error("Owned SDK frontend unavailable");
           const receipt = Object.freeze({ schema: "statewright/pi-native-readiness/v1", native_session_id: nativeSessionId });
           await onReady(receipt);

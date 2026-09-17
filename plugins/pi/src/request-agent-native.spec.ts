@@ -83,7 +83,7 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     baseUrl: `http://127.0.0.1:${address.port}/v1`, reasoning: false, input: ["text"],
     contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
-    getAll: () => [], find: () => model, isUsingOAuth: () => false }
+    getAll: () => [], getAvailable: () => [model], find: () => model, isUsingOAuth: () => false }
   const handlers = new Map<string, Array<(...args: any[]) => unknown>>()
   const on = (event: string, handler: (...args: any[]) => unknown) => handlers.set(event, [...handlers.get(event) ?? [], handler])
   let preparedHistory: (() => unknown) | null = null

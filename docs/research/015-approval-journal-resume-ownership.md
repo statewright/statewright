@@ -2,6 +2,167 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 15 entry: native configuration mutation ownership
+
+Base83ac255; root reverified current main, seven tracked user changes, untracked
+inventory and both checkout diff hashes. Prior turn is verified progress, not
+wait/no-progress. Continue manual source/evidence/Git controls without any
+Statewright query/load/use. This cut privately checkpoints project configuration
+setters and native model-cycle registry handoff, blocks obsolete native state/
+metadata mutations before write, and grants only revocable fixed SDK bootstrap
+permission hidden from project callbacks. Preserve sync public registry reads
+outside the particular SDK cycle handoff; no SDK/vendor edits or copied cycle
+implementation. Real native SDK/task-owned files/loopback, synthetic authority.
+Native model/thinking UI/RPC gesture admission, other filesystem/spawn/branch/
+render/transport/retry effects and all006/012/spec111/116 full acceptance remain
+open; default stock frontend behavior unchanged, no production activation.
+
+Observed-only envelope:100 normal/135 contraction root calls; 30-minute warning/
+45-minute contraction;16KiB output targets; final-third validation/review reserve.
+Root is sole implementation owner. Skill-required clean-context Astra/high
+read-only review10 calls/12minutes/two checks, fresh finding-only recheck4 calls/
+5minutes/two checks, max2 distinct repairs per finding. Two exact-source exports
+plus one regression-justified export. No controller/provider budget enforcement,
+catalog probe or invented workflow identity; user prohibits workflow use.
+Stop optional breadth at thresholds, preserve required validation/repair/audit.
+Scoped local commit/revert preserves journals. No real authority/decisions/
+inference, existing live sessions, install, deployment or push permitted.
+
+Retained baseline: three new actual SDK tests fail on original83ac255: model
+setter does not park, a superseded registry-awaited cycle resolves with obsolete
+model, and unbound metadata append does not throw. Native write guard then
+correctly denied the stale cycle, but fixture replaced getAvailable after guard
+installation, testing only mutation guard rather than handoff checkpoint.
+Move deferred registry behavior into pre-construction fixture options; retain
+original await/stale assertions. Four critical tests then pass, including a
+pending gate arising during registry await, before model/history changes.
+
+Expanded fixture gate70 initially failed2: bootstrap-continuation probe spied
+on setActiveTools (not called during late bind), and label probe used missing
+entry ID. Native SDK source1608-1663 shows late bind emits startup then calls
+extendResourcesFromExtensions; a subsequent bindCore spy also was not called
+(core binding already occurred during construction). Correct probe to that
+actual native continuation, not grant project bootstrap permission; create
+valid label target through already-admitted project appendEntry. No mutation
+or stale assertion weakened. Frozen-model compatibility probe then fails1:
+proxying frozen native model directly violates nested non-configurable cost
+property invariants. Read-only snapshot facade repair supports immutable SDK
+records and blocks model/tools aliases. Full frontend73/73 now green, including
+runtime provider registration/unregistration checkpointing and bootstrap lease
+masking/revocation. A final inert SDK provider-turn compatibility check and
+exact-source gates/review follow. No production, whole-native-config or real
+authorization claim added; no SDK/vendor edit or cycle implementation copied.
+
+Initial exact tree385b91d598668443e368aa91770b3aaf2a56f714 exported to
+/tmp/statewright-native-config.qQGeIe: serial Node308/308, native2/2, Claude
+managed-client parity/three mjs syntax0. Pi197 passed/37 failed/1 existing opt-in
+live skip: every failure was the older actual-Agent fixture missing the required
+public getAvailable method before installation. Correct its inert registry
+schema, not production capability checks or assertions. This source is superseded.
+
+Independent clean-context Astra/high read-only /root/pi_native_config_review
+confirmed P1: Object.getOwnPropertyDescriptor exposes raw Agent model data,
+native tools accessor setter and nested cost records through the guarded views;
+ordinary assignment denial did not prevent actual native mutation via these
+aliases. Root actual SDK descriptor regression fails against that source.
+Repair attempt1 adds recursive guarded descriptor values/accessors and denies
+configuration-field redefinition/deletion, retaining normal SDK assignments.
+Capability preflight now rejects a missing public configuration method before
+partially installing guards. No vendor edit or malicious-code isolation claim.
+
+Wider corrected SDK gate110 passed/1 failed: the older same-text prompt is now
+correctly denied before its post-await systemPrompt write, but propagates the
+new configuration denial instead of ending as obsolete input. Preserve only
+that contract: privately tag native-configuration denial and handle it only
+when the originating prompt is authoritatively superseded. Current/unrelated
+errors remain visible; no mutation or stale-output assertion weakened. Fresh
+exact-source gates and finding-only independent recheck are required below.
+
+### Slice 15 final source, review and full-objective audit
+
+Corrected root actual SDK gate111/111 (frontend74 and Agent37). Final tested
+tree a7b1570e662d0117eceff308e4cef2adba3f3969, exact export
+/tmp/statewright-native-config-repaired.CMwGJA: serial Node308/308, Pi235 passed/
+1 existing opt-in live-canary skip, native2/2, Claude managed-client parity and
+three mjs syntax exit0. Zero Node/native failures, skips or cancellations.
+Staged diff-check0. No full Rust/typecheck/lint/build, headed native UI, real
+model/approval/workflow journey, hosted CI, production promotion or installation.
+Retained unchanged parallel shutdown-fixture race is not claimed fixed by the
+serial gate. Initial failed and superseded receipts remain above.
+
+Fresh clean-context Astra/high read-only /root/pi_native_config_recheck reviewed
+that exact repaired export: P1 closed, no remaining finding in requested repair
+scope. Two focused checks: descriptor/frozen-model2 and same-text stale prompt1,
+3 passed/108 excluded by filter. Four diagnostics, including an incorrect-path
+lookup; no edits, install, actual authority/controller/workflow or live-session
+interaction. Reviewed recursive descriptor values, guarded tools setter,
+redefinition/deletion denial and private superseded-only error handling. Root
+owns all implementation; review is the skill-required independent exception.
+Final evidence recording is a receipt-only delta from tested/reviewed source.
+
+Root reread current006 required nine-row contract,012 numbered plan/A-D and
+Auldwyrm specs111 native approval and116 cross-host conformance. Historical
+staging receipts in those documents were read, not revalidated or acted upon.
+The complete original goal stays active, not redefined around configuration
+APIs, synthetic authority, the inactive flag or this scoped reviewer result:
+
+1. Immutable full ticket/artifact digest/policy/reviewer/expiry/revocation remains
+   open beyond existing partial shared journal/identity validation.
+2. Durable local UUID/request epoch and experimental parent lifetime remain
+   partial; complete branch/replacement/cross-host lineage remains open.
+3. Pending/no-declared-effect/no-inference coverage gains private project
+   model/thinking/tools/metadata/provider registration and registry-awaited
+   native cycle mutation guards. Owning native UI/RPC configuration gestures,
+   remaining SettingsManager/ModelRegistry setters, filesystem/spawn/branch,
+   rendering/provider publication and every internal transport/retry/summary
+   continuation remain open. No universal interception or activation claim.
+4. Full entitled native/website reviewer controls and authenticated decision
+   authority remain unproved here; no resolver/decision surface added.
+5. Durable cancellation/journal retention and synthetic reopen proofs remain
+   partial, not full native cold restart, crash-lock/legacy recovery or permanent
+   SDK teardown-failure cleanup acceptance.
+6. Private once-only nonce/tombstone and fresh applied-edge consumption are
+   synthetic proofs, not full real entitlement/artifact/policy rechecks or
+   exactly-once native delivery under crash/transport loss.
+7. Old request HTTP/message/native text/bash and configuration mutations are
+   guarded in the tested paths. Every old final publication/rendering and other
+   awaited native effect remains open; a late decision cannot reown old input.
+8. Private managed key routing remains insufficient proof of a human click or
+   isolation from malicious code under the same OS identity; provenance open.
+9. Shared client-neutral reviewer/evidence/retention and all advertised host
+   acceptance remain open. No mandatory website UX or certification asserted.
+
+012 A/1 Rust pending pre-tool denial remains unchanged user-dirty/uncommitted
+and unvalidated here;2 hosts remain unprivileged, actual authorized decision
+journey untested. C/3 experimental parent mirror/deferred-clear/close and synthetic
+native reopen remain partial rather than complete production restart acceptance.
+B/4 full effect/transport activation remains open. D actual gateway/native
+approval/restart/host-parity canary is not run under no-workflow/no-real-decision
+authority. Spec111 full native/website/reviewer/cold/new-input journey and116
+clean packaging/Windows versus WSL/desktop/protocol races/100 race iterations/
+24-hour staging soak/promotion remain gates, not implied by these tests.
+
+Next bounded source cut: an owning native configuration gesture adapter that
+distinguishes trusted explicit user action from project/inherited SDK calls,
+captures its private identity before waits and checkpoints before mutation.
+Do not grant unbound SDK setters the latest reference or leave bootstrap alive;
+the current experimental denial is not the accepted user journey. Follow with
+remaining full effects/native publication and restart/authority/host acceptance.
+User prohibition on workflow use remains controlling. More safe manual source
+work is available; no goal-complete or blocked status is justified.
+
+Seven tracked user-dirty files hash remains
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm tracked diff remains
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+Preserve user untracked inventory and existing sessions; owned commit is eight
+paths only. Scoped commit revert preserves journals/native records and requires
+no installed/live rollback. Manual profile/root ownership, observed-only numeric
+envelope and required validation/review reserve retained; no enforced aggregate
+provider-token budget or quota claim. Optional breadth stopped for repairs and
+full audit. No Statewright workflow query/load/use, real decision/inference,
+existing live session access, deployment, push or installation occurred.
+
 ## Slice 14 entry: secondary project HTTP ownership
 
 Base 765ae8b; full original goal active. Manual source/evidence/Git controls;

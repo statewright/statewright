@@ -15,11 +15,21 @@ export function createPiRequestOperations() {
   let asides = [];
   let latestResponse = null;
   const outputWaiters = new Set();
+  const configurationDenied = Symbol("private native configuration denial");
   const copy = reference => reference ? Object.freeze(structuredClone(reference)) : null;
   const context = () => session.extensionRunner.createContext();
   const reference = () => closed ? null : calls.getStore()?.reference ?? null;
   const inherited = (ref, fn) => calls.run({ kind: "inherited", reference: copy(ref) }, fn);
   const owned = ref => { try { return !closed && !!ref && gate.ownsRequest(context(), ref); } catch { return false; } };
+  const bootstrap = () => !closed && calls.getStore()?.kind === "native-bootstrap"
+    && calls.getStore().lease.active && gate.matchesNative(context());
+  const nativeMutation = () => {
+    if (!owned(reference()) && !bootstrap()) {
+      const error = new Error("Native configuration request unavailable");
+      error[configurationDenied] = true;
+      throw error;
+    }
+  };
   const explicit = (text, source, fn) => {
     if (closed || calls.getStore() || !gate.ownsNative(context())) return Promise.resolve();
     const entry = Symbol("private explicit input");
@@ -53,6 +63,18 @@ export function createPiRequestOperations() {
   };
 
   return {
+    isInstalled() { return !!session; },
+    project(fn) {
+      const call = calls.getStore();
+      // SDK construction permission must never flow into project handlers.
+      return call?.kind === "native-bootstrap" ? calls.run({ kind: "project-bootstrap", lease: call.lease, reference: null }, fn) : fn();
+    },
+    async bootstrap(fn) {
+      if (closed || calls.getStore() || !session || !gate.matchesNative(context())) throw new Error("Native bootstrap unavailable");
+      const lease = { active: true };
+      try { return await calls.run({ kind: "native-bootstrap", lease, reference: null }, fn); }
+      finally { lease.active = false; }
+    },
     admit(ref) {
       const call = calls.getStore();
       if (closed || call?.kind !== "input" || call.entry !== newestInput || call.reference) throw new Error("Private explicit-input call unavailable");
@@ -76,7 +98,8 @@ export function createPiRequestOperations() {
       const ref = copy(reference());
       const unavailable = () => { throw new Error("Project request unavailable"); };
       if (supplied != null && !(supplied instanceof AbortSignal)) unavailable();
-      const control = () => !closed && !calls.getStore() && (!session || gate.matchesNative(context()));
+      const control = () => !closed && (!calls.getStore() || ["native-bootstrap", "project-bootstrap"].includes(calls.getStore().kind)
+        && calls.getStore().lease.active) && (!session || gate.matchesNative(context()));
       // Only designated read-only state observation may precede admission.
       // An explicit input with no admitted reference is not bootstrap control.
       if (!ref) {
@@ -124,15 +147,85 @@ export function createPiRequestOperations() {
       } catch { return { action: "handled" }; } // SDK input exceptions fail open.
     },
     install({ session: target, gate: requestGate }) {
+      const configMutators = ["setThinkingLevel", "cycleThinkingLevel", "setActiveToolsByName", "setSessionName", "setScopedModels"];
+      const configAppends = ["appendThinkingLevelChange", "appendModelChange", "appendCompaction", "appendCustomEntry",
+        "appendSessionInfo", "appendLabelChange"];
       if (session || closed || typeof target?.prompt !== "function" || typeof target?.compact !== "function"
         || typeof target?.clearQueue !== "function" || typeof target?.sendCustomMessage !== "function"
         || typeof target?.extensionRunner?.createContext !== "function"
+        || typeof target?.modelRegistry?.getAvailable !== "function"
+        || [...configMutators, "setModel", "cycleModel"].some(key => typeof target?.[key] !== "function")
+        || configAppends.some(key => typeof target?.sessionManager?.[key] !== "function")
         || ["prompt", "continue", "steer", "followUp"].some(key => typeof target?.agent?.[key] !== "function")
         || ["checkpoint", "ownsNative", "ownsRequest", "cancel"].some(key => typeof requestGate?.[key] !== "function")) {
         throw new Error("Owned public SDK request boundary unavailable");
       }
       session = target;
       gate = requestGate;
+      const configKeys = ["model", "thinkingLevel", "tools", "systemPrompt"];
+      const views = new WeakMap();
+      const readOnly = value => {
+        if (!value || typeof value !== "object") return value;
+        if (views.has(value)) return views.get(value);
+        const reject = () => { throw new Error("Native configuration view is read-only"); };
+        // Snapshot facade avoids proxy invariants on frozen SDK model records.
+        const snapshot = Array.isArray(value) ? [...value] : { ...value };
+        const view = new Proxy(snapshot, { get: (object, key) => readOnly(Reflect.get(object, key, object)),
+          getOwnPropertyDescriptor(object, key) {
+            const descriptor = Reflect.getOwnPropertyDescriptor(object, key);
+            return descriptor && { ...descriptor, value: readOnly(descriptor.value) };
+          },
+          set: reject, defineProperty: reject, deleteProperty: reject, setPrototypeOf: reject });
+        views.set(value, view);
+        return view;
+      };
+      const state = session.agent.state;
+      const guardedState = new Proxy(state, {
+        get: (object, key) => configKeys.includes(key) ? readOnly(Reflect.get(object, key, object)) : Reflect.get(object, key, object),
+        getOwnPropertyDescriptor(object, key) {
+          const descriptor = Reflect.getOwnPropertyDescriptor(object, key);
+          if (!descriptor || !configKeys.includes(key)) return descriptor;
+          if ("value" in descriptor) return { ...descriptor, value: readOnly(descriptor.value) };
+          return { ...descriptor,
+            get: descriptor.get && (() => readOnly(Reflect.get(object, key, object))),
+            set: descriptor.set && (value => { nativeMutation(); Reflect.set(object, key, value, object); }),
+          };
+        },
+        set(object, key, value) { if (configKeys.includes(key)) nativeMutation(); return Reflect.set(object, key, value, object); },
+        // SDK mutators assign these fields; reflective redefinition could seal
+        // a raw alias or remove the guarded native accessor entirely.
+        defineProperty(object, key, descriptor) {
+          if (configKeys.includes(key)) throw new Error("Native configuration view is read-only");
+          return Reflect.defineProperty(object, key, descriptor);
+        },
+        deleteProperty(object, key) {
+          if (configKeys.includes(key)) throw new Error("Native configuration view is read-only");
+          return Reflect.deleteProperty(object, key);
+        },
+        setPrototypeOf(object, value) { nativeMutation(); return Reflect.setPrototypeOf(object, value); },
+      });
+      Object.defineProperty(session.agent, "state", { get: () => guardedState });
+      for (const key of configMutators) {
+        const mutate = session[key].bind(session);
+        session[key] = (...args) => { nativeMutation(); return mutate(...args); };
+      }
+      for (const key of configAppends) {
+        const append = session.sessionManager[key].bind(session.sessionManager);
+        session.sessionManager[key] = (...args) => { nativeMutation(); return append(...args); };
+      }
+      const available = session.modelRegistry.getAvailable.bind(session.modelRegistry);
+      session.modelRegistry.getAvailable = (...args) => {
+        const handoff = calls.getStore()?.cycleRead;
+        const result = available(...args);
+        if (!handoff?.pending) return result; // preserve public synchronous reads
+        handoff.pending = false;
+        return Promise.resolve(result).then(models => this.dispatch(() => models));
+      };
+      const cycle = session.cycleModel.bind(session);
+      session.cycleModel = (...args) => this.dispatch(() => calls.run({ ...calls.getStore(),
+        cycleRead: { pending: session.scopedModels.length === 0 } }, () => cycle(...args)));
+      const model = session.setModel.bind(session);
+      session.setModel = (...args) => this.dispatch(() => model(...args));
       const prompt = session.prompt.bind(session);
       const compact = session.compact.bind(session);
       const custom = session.sendCustomMessage.bind(session);
@@ -207,18 +300,26 @@ export function createPiRequestOperations() {
       };
       session.prompt = (text, options = {}) => {
         const source = options.source ?? "interactive";
+        const invoke = async () => {
+          try { return await prompt(text, options); }
+          catch (error) {
+            // Preserve the held-input contract when a stale SDK continuation
+            // reaches a guarded configuration write after its own await.
+            if (!error?.[configurationDenied] || !this.staleCall()) throw error;
+          }
+        };
         if (closed || !gate.ownsNative(context())) return Promise.resolve();
         if (source === "extension") {
           const ref = reference();
           if (!ref || !owned(ref)) return Promise.resolve();
-          return inherited(ref, () => prompt(text, options));
+          return inherited(ref, invoke);
         }
         if (!["interactive", "rpc"].includes(source)) return Promise.resolve();
         // A delayed inherited/model callback cannot assert user origin merely
         // by changing the source option. User frontends enter outside this scope.
         if (calls.getStore()) return Promise.resolve();
         return explicit(text, source, async () => {
-          const value = await prompt(text, options);
+          const value = await invoke();
           // Only the external input waits for publication. A project message
           // hook can await a nested core turn without awaiting its own queue.
           await drainOutput(copy(reference()));

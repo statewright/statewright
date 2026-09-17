@@ -122,6 +122,31 @@ proved across authority changes. Dependency compatibility is source-bound
 evidence, not a version pin. No full native acceptance is implied.
 No live/native authorized approval journey, deployment or promotion is claimed.
 
+Additive `createPiRequestFrontend` now owns public SDK services/session/runtime
+construction for one exact parent-bound native UUID. One managed extension
+factory registers trusted project hooks first and final admission guards last;
+its namespace is read-only and hook API sealed afterward, including functions
+captured before sealing. Final guard registration uses the privately captured
+original SDK on function, not a setup-replaced property.
+SDK-collected extension errors and an independent public runner error listener
+deny readiness even when the SDK catches handler exceptions. Input stays held
+through awaited session_start, resource discovery and readiness publication.
+A versioned immutable native-identity receipt is produced only by this owned
+construction path; parent private IPC acceptance/delivery wiring is still open.
+Native drift/close/registration violations cannot enable or retain readiness.
+
+SDK reload and runtime new/switch/fork/import are intercepted before underlying
+replacement and require a fresh parent/native binding. The existing parent
+record is exact-UUID-bound, so automatic SDK identity adoption would violate
+ownership; a full authorized replacement protocol remains a later requirement,
+not removed from scope. This frontend has no production CLI entrypoint or mode
+activation yet. Its initial UI binding is once-only; failed constructor and
+close paths dispose only their owned SDK object, leaving late guards installed.
+Bare SDK effects, project commands/exec, async final output, provider internals
+and full parent close/drain remain unproved. No readiness receipt is a claim
+that these original production acceptance requirements have been satisfied.
+Shipped executor/index/ADR007 hold and installed runtime remain unchanged.
+
 ## Consequences and rollback
 
 Safety wins over replay availability: at-most-once durable consumption is

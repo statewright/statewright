@@ -1021,3 +1021,194 @@ Goal remains active, not complete or blocked. Source progress is a reversible
 local milestone only; all unrelated dirty user artifacts and Auldwyrm are
 preserved. Provisional usage limits were observed-only, with extra exports
 explicitly justified above; no controller quota/token/time enforcement claim.
+
+## Slice 7: owned public SDK construction and readiness
+
+Previous turn is verified progress: current HEAD is
+`702840737c0dca051e21ca61ee48d76d226d3924`, no owned paths dirty, unrelated
+inventory unchanged. Manual/no-workflow authority remains controlling; no
+Statewright tools, installed runtime or live/native session are queried.
+
+Next original prerequisite is actual owning public SDK frontend construction,
+not another current-reference cache or extension-context handle that does not
+exist. Installed 0.73.0 exports createAgentSessionServices,
+createAgentSessionFromServices, createAgentSessionRuntime/AgentSessionRuntime.
+The factory must create exclusive managed extension registration, install final
+input/provider/tool/compaction guards, install private operation entry guards,
+and publish exact native readiness only after successful SDK startup binding.
+SDK loadExtensionFactories catches setup errors into getExtensions().errors;
+bindExtensions awaits session_start and resources_discover; reload rebuilds the
+runner and runtime replacement tears down/recreates sessions. These boundaries
+must never silently enable unguarded delivery.
+
+Owned file scope: new request-frontend.mjs and actual SDK fixture, ADR008 and
+this receipt only. Do not activate executor/index, alter user-dirty Rust/canary/
+supervisor paths, installed SDK, or dependency resolution. Create task-owned
+memory SDK settings/auth/session + loopback inert SSE and real durable parent
+fixtures. Characterize no existing owner frontend, then prove readiness/startup
+failures, late hook registration, native drift and lifecycle invalidation.
+The parent currently binds one exact native UUID: /new,/fork,/resume/import and
+reload require a fresh authorized parent/frontend binding; deny before SDK
+replacement rather than auto-adopting a foreign UUID or dropping guards. Full
+replacement/restart protocol remains a required later milestone, not removed
+from the full objective. Arbitrary project command effects, native final output,
+transport awaits and main/observer/index wiring remain open as audited above.
+
+Provisional observed-only envelope: serial root implementation, one mandatory
+clean-context Astra/high final read-only review; 55 normal/85 worst tool calls,
+<=16KiB later output per call, 30-minute discovery warning/45-minute contraction,
+one isolated integration export plus regression-driven repair exports, at most
+two distinct repairs per cited finding. Protect final third for validation,
+review and scoped local commit. No Statewright/model-price/provider-token/usage
+enforcement or workflow identity is invented; user no-workflow override is
+explicit. Passed prior source/dependency evidence is context, not a substitute
+for frontend-specific actual runtime proof.
+
+Characterized baseline: new frontend fixture collection failed because owning
+frontend module does not exist; this is absence evidence, not an existing
+behavioral reproduction. Initial public SDK frontend implementation passed
+10/10 real services/runtime/Agent + durable parent/loopback fixtures. Added
+startup/readiness/late-hook/close diagnostics: 14 passed/1 failed (15), normal
+session_start exception was swallowed by runner and readiness incorrectly
+completed. Product defect, not an assertion mismatch: add an independent public
+ExtensionRunner.onError listener before binding, synchronously revoke frontend
+ownership and begin owned close. It cannot be replaced by UI onError bindings.
+No error payload is persisted; fresh focused and source-bound gates follow.
+
+Fresh frontend focused gate passed 15/15 after that startup-error repair;
+18/18 after awaited resource discovery, failed publication and once-only UI
+binding cases; final focused 19/19 adds an earlier trusted provider hook that
+introduces pending authority, proving the last-installed guard parks before
+actual HTTP and consumes synthetic approval once. Real public SDK services,
+runtime, Agent and primary transport are used; no InteractiveMode UI, production
+CLI launch, private parent readiness IPC or authorized workflow journey is
+claimed. Frontend emits immutable statewright/pi-native-readiness/v1 native ID
+only; parent consumer/close/drain and full effects are still prerequisites.
+
+Primary installed SDK 0.73.0 core source SHA256 provenance:
+
+- agent-session-runtime.js: `ee75a600ffa3cdf37772b4f1a4380e01d647143f3789a335d2f57183ce9d5d44`
+- agent-session-services.js: `7d5af36def75db66dcdb83308acb7b381748c96e0432714fde5c7047a7b91910`
+- resource-loader.js: `9a64314925734e69716e1da9d69dea48bec178778708cf4cfa6d7e0c4f3daf65`
+- extensions/runner.js: `dab1eadccdd73b6bb50bbd22b464461c65eca77f368d2b44e5e9af4cbcc18d4d`
+Source-bound evidence, not a dependency version pin or future compatibility
+promise. Earlier Slice6 provenance remains valid for unchanged operation/gate
+sources; final frontend-specific integration/review is required below.
+
+Root registration integrity diagnostic reproduced a second product defect:
+setup assigning pi.on to a no-op was accepted (1 failed/19 unrelated skipped),
+so the final guard calls could silently do nothing while registered=true.
+Reject mutable managed API namespaces and use privately captured original SDK
+on for both managed setup and final guards. This is accidental/API mutation
+protection, not malicious in-process isolation. Initial unused staged export
+`5a25b223e96dda4728bf7f9a0bc3c682189416af` at
+`/tmp/statewright-frontend.xnG3Ti` is superseded; no integration/review claimed
+against it. One regression-driven repair export follows before the single
+integration gate. Keep failures; no weaker registration success flag is accepted.
+
+Frontend focused 20/20 and exact staged tree
+`fc6b410736a449504fc63416eab914d2e5afb287` at
+`/tmp/statewright-frontend-final.Ij0ta2` passed Node281/281, Pi160 passed/1
+opt-in live-canary skip, native2/2, generated parity and frontend syntax exit0.
+Mandatory clean-context Astra/high `/root/pi_frontend_readiness_review` used
+seven read-only diagnostics and one actual memory SDK/no-provider challenge.
+Found P2: after successful bind, native SessionManager.newSession changes UUID;
+prompt is held with zero transport but readiness getter returns stale old ID.
+Product defect against native-drift readiness contract, not fixture repair.
+
+P2 repair attempt1: fail-closed native identity checks (including throwing
+identity), revoke readiness and begin owned close when getter/prompt/bind
+observes drift. Revocation is monotonic even if UUID is later restored; no
+foreign abort. Add both actual public SDK regressions. Prior green export is
+superseded; fresh focused/source gates and bounded independent P2 recheck are
+required. No parent IPC or complete drift/replacement protocol is claimed.
+
+First P2 repair focused gate was 21 passed/1 failed (22): readiness/null/no-abort
+assertions passed, but the identity getter remained poisoned into SDK dispose,
+which itself reads sessionId and rejected owned cleanup. This fixture probes
+unavailable identity at guard observation, not permanently broken SDK disposal;
+restore only that injection synchronously AFTER exact denial/no-abort checks,
+before awaited teardown, and assert restored identity still cannot reactivate
+readiness/input. Permanent native SDK teardown failure is not proved clean or
+suppressed; production recovery/close-drain remains an open requirement.
+
+Adjacent root close diagnostic with actual streaming Agent and a synchronous
+abort listener calling close reproduced TWO SDK session_shutdown events
+(1 failed/22 unrelated skipped). Product defect: closing promise was assigned
+after operations.close could synchronously invoke abort listeners. Claim its
+completion promise before any close work, retain synchronous invalidation and
+one owned abort/cancellation/disposal sequence, then drain through that promise.
+Add real signal-abort/one-shutdown/durable disconnected cancellation proof.
+No reentrant shutdown handler awaiting its own completion is advertised.
+Extra focused gate/export work is regression-driven; optional discovery remains
+closed and original full-objective/production acceptance unchanged.
+
+### Slice 7 final source, review and audit
+
+Final tested staged tree `31499045b8a071e44d19ea7f6f49e31ee9f2d710`, export
+`/tmp/statewright-frontend-verified.tj2gyQ`: frontend focused23/23; Node wider
+integration281/281 (zero skips/failures/cancellations); Pi163 passed/1 existing
+opt-in live-canary skip; native session suite2/2; generated Claude managed-client
+parity and frontend syntax exit0; staged diff check0. No Rust/workspace-wide
+typecheck/lint/build, headed native mode or actual workflow/decision/real-model
+proof. Pi unit diagnostics use mocked clients. Temporary exports are validation
+fixtures; durable source/evidence is this scoped local Git milestone/receipt.
+
+Independent Astra/high `/root/pi_frontend_readiness_review` final bounded repair
+recheck inspected that exact tree and ran only three cited actual SDK tests:
+3 passed/20 excluded by filter, exit0. P2 closed: getter/prompt/bind observes
+foreign/unavailable identity, readiness revoked monotonically, no foreign or
+unverified abort; old UUID restoration cannot reactivate. Adjacent close repair
+claims completion before synchronous abort listeners and proves one shutdown
+plus durable disconnected cancellation for the tested streaming request.
+No remaining finding within repair boundary; permanently broken SDK disposal
+and full parent close/drain remain unproved. One mandatory independent reviewer,
+no implementation delegation; failed and superseded evidence retained above.
+Final recording is receipt-only delta from tested/reviewed source before commit.
+
+Full original 006 nine-row audit above remains controlling, not redefined around
+frontend success. Rechecked current 006 required contract and 012 numbered plan:
+rows1/4/6/8/9 retain their partial ticket/artifact/policy/authority/reviewer/
+provenance/retention/cross-client obligations; no resolver/human-strength claim
+added. Row2 gains actual owning SDK/native-readiness construction but lacks
+parent IPC delivery, full lineage and authorized replacement/restart. Row3
+gains protected startup/error/registration/last-provider-hook evidence, not all
+project commands/exec/native effects or later transport/internal retry/summary
+subrequests. Row5 retains durable journal/cold-resume fixtures and gains one
+owned streaming close proof, not complete cold native restart/crash-lock/legacy
+recovery or permanent SDK failure cleanup. Row7 gains monotonic frontend
+invalidation; rendering/recording every old native final response is still open.
+
+P1 012: A/1 Rust pending pre-tool denial remains user-dirty/uncommitted and not
+validated here; 2 host-unprivileged/no-decision surface retained, real authorized
+decision path untested; C/3 parent main requestController/deferred-clear/close
+and exact cold native resume remain open; B/4 owning SDK prerequisite now
+implemented/tested but actual launcher/index remains ADR007 hold-only; D native
+approval/restart/host-parity canary and full authorized journey are not run under
+no-workflow authority. Initial frontend readiness is not production activation.
+
+Exact next bounded source milestone: owning SDK mode/CLI entrypoint and private
+parent readiness negotiation, binding the exact existing native descriptor and
+owned child/parent lifetime before delivery. Public SDK main.d.ts MainOptions
+accepts extensionFactories ONLY, not a runtime/session construction injection;
+use public SDK services/runtime and modes, not assume stock main exposes the
+owned handle. Then integrate main requestController/observer deferred-clear/
+close and index's project async effects/correctives/retries with private captures;
+prove native final output, later inference transport boundaries, restart/
+new-input/parent-child races, original reviewer authority and advertised host
+acceptance. No weaker cache/automatic UUID adoption is an activation shortcut.
+
+Rollback is a scoped local commit revert of this additive inactive frontend,
+preserving existing journals/request/owner records; no durable schema change,
+installed runtime or live session to roll back. Manual profile owner is root;
+validation source is exact staged SDK/Node fixtures, independent review is the
+named read-only agent. Initial constructor/registration/readiness controls have
+local operating evidence; production/recovery controls remain gaps. No migration,
+website UX/compliance certification, deployment or push is claimed.
+Observed-only envelope retained with extra exports/gates explicitly justified
+by product regressions; optional discovery stopped, reserve used for repair/
+review/source validation/recording. Provider-token/aggregate budget enforcement
+unavailable; no quota-price claim or invented workflow identity. All unrelated
+dirty artifacts/Auldwyrm preserved; full original goal active, not complete or
+blocked. No workflow load/use, live native session access, resolver, actual
+approval, real inference, installation, deployment or push occurred.

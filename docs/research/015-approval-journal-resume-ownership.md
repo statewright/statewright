@@ -221,6 +221,18 @@ No workflow query/load/use/probe, resolver, live session, genuine decision/provi
 credential, installation, activation, push or deployment. Local source commit
 followed by receipt-only identity recording; no external promotion authority.
 
+### Slice 29 local source commit boundary
+
+Source a251c41f920f5ed4a6cb0d8084b689b34da2c6be commits ONLY the FIVE owned paths.
+All FOUR reviewed/tested source/test/ADR blobs match repaired frozen tree; index
+empty after source commit. Seven unrelated Statewright tracked diff SHA256 and
+whole Auld tracked diff SHA256 match entry values, Auld HEAD unchanged. Preserved
+untracked user research/canary inventory; no unrelated staging, revert, worktree
+cleanup or ambient config edits. All owned test/reviewer handles terminal before
+commit; receipt-only follow-up does not change accepted source. Full original
+goal ACTIVE; no workflow/push/deploy/install/activation. This is progress toward
+native lifecycle recovery, NOT native-writer-verified takeover completion.
+
 ## Slice 28 entry: explicit recovery binding contract, no takeover authority
 
 Previous turn PROGRESS: source8bf7166/receipt9ec1a74 committed real consumed-write/

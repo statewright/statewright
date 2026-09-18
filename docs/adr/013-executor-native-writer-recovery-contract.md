@@ -105,6 +105,45 @@ identity observation, all-writer registration/admission, durable intent/continui
 and exclusive transfer/reconciliation before ANY reclaim API. First generation
 only; permanently holding the prototype reservation is not completed recovery.
 
+### Real owner-parent / root-owned SDK conformance (Slice30)
+
+New TEST-ONLY wiring uses the private authority to spawn both the actual owner/
+controller/bridge process and installed public SDK writer. Preparation creates
+an exact native descriptor and then gracefully releases only its setup lock;
+the real parent opens that same ID and claims its own PID/token. The root compares
+the physical owner-lock PID with the registered hidden-handle-derived parent PID.
+Root-selected broker birth/lease IDs are reserved BEFORE either launch. They are
+deliberately distinct from the real parent's independently random readiness IDs.
+The parent binds exact broker/lease/birth IDs, descriptor and actual role PIDs
+through its separate creator IPC channel before the SDK readiness publication.
+
+The root forwards only its native writer exit callback over that channel. The
+parent's test-only readiness port trusts creator IPC; it is NOT a parent-local
+ChildProcess or independently observed kernel exit, and NEVER a root witness.
+Foreign lease/lifetime/PID, malformed and replayed relay records deny. The writer
+has a different IPC channel, not access to its sibling parent's creator channel.
+This is cooperative trusted-root communication, not a signature or isolation
+claim against malicious same-UID processes. No parent relay release/unlock command
+exists; root cleanup uses only its exact newly created process ports.
+
+Actual parent SIGKILL leaves the SDK alive, with its pending prompt settling null
+after bridge loss. Observed parent exit, prompt settlement and a writer observation
+timeout still cannot issue a witness. Actual SDK SIGKILL then allows one fresh
+exact memory-only metadata witness while the original dead lock/checkpoint/native
+bytes remain unchanged and explicit resume still denies. In the opposite ordering,
+the root's actual SDK exit relay closes real parent readiness/controller and
+durably cancels the request before parent SIGKILL. That relay cannot witness both
+exits while the real parent remains alive. Pending journal/native bytes and zero
+inference are proved in both named cases. Old/stale binding metadata and serialized
+exit assertions cannot substitute for the private witness.
+
+This proves physical PID membership and creator-channel coupling in the named
+fixture, NOT a production broker, canonical observeHost/main-launcher integration,
+all-writer exclusion, broker restart/continuity, held-file identity, durable intent
+or exclusive transfer/reconciliation. The original inert-parent test remains
+narrower registered-pair coverage. No product store/readiness/frontend/authority
+API changes or operational recovery entry point are introduced by Slice30.
+
 ### Required full recovery journeys
 
 Require real task-owned processes and authority, not injected booleans: parent

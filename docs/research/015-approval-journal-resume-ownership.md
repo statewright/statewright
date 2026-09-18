@@ -2,6 +2,165 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 30 entry: registered real owner-parent with root-owned SDK writer
+
+Manual continuation, no workflow query/load/use or controller capability probe.
+Base139d72aa45bc2c56724c994d2144da28cee7cb0e, Auld65025b50952e27b38b215b18905ba1c4770fbdb4,
+writer01a0b0f5-909c-7b61-b632-3375983b613f. Index empty, owned paths quiet;
+seven user Statewright tracked diff55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270
+and Auld tracked diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa unchanged.
+Retained worktrees/user research/canaries untouched. Combined skill read replayed
+fully from stored raw result; required references/testing skill read completely.
+An oversized combined source result required a full ADR reread; truncated spec
+excerpt is not accepted coverage and is recovered before implementation.
+
+Scope: new test-only private parent/relay fixtures, Pi real-parent authority test,
+ADR013 and this receipt. No product store/authority/readiness/frontend/launcher
+API change. Root reserves birth IDs before spawning both roles and keeps actual
+handles. Real parent opens the prepared exact owner ID, owns real private runtime/
+controller/bridge and journal. Private creator IPC binds exact lease/birth IDs,
+descriptor and actual registered PIDs before SDK admission. Parent readiness IDs
+remain independently random: broker birth IDs are NOT readiness challenges.
+Parent relay notifications are trusted creator IPC, not independently observed
+kernel exits; only root authority's hidden native handles may mint exit witnesses.
+
+Accept real owner-lock PID equals registered parent; pending input has no inference/
+native append; parent SIGKILL while SDK survives denies witness; actual writer exit
+permits one fresh exact metadata witness, NOT lock reclaim. Opposite exit ordering
+must close real parent readiness/controller via the root relay. Dead lock/raw
+owner/native/checkpoint bytes remain unchanged on explicit resume denial.
+Existing inert-parent test retained as narrower history. No observer/main-launcher,
+all-contender admission, durable intent/file identity/transfer, provider/interactive
+canary, installation, live auth/approval, Windows/WSL, soak, deployment or push.
+All nine original006/012/Auld111/116 obligations remain OPEN and controlling.
+
+Observed-only envelope: one root integration turn; focused baseline/new tests,
+one frozen export and serial affected Node integration/native wildcard/parity/
+syntax/diff gates. One fresh Astra/high static review with complete hash-bound
+source packet (zero tools); at most one bounded repair and fresh re-review.
+Normal80/hard110 root tool calls; source-output warning280KiB/hard360KiB including
+source packet, not a verified cumulative controller counter. Wall warning30min/
+contraction35min/hard40min from turn entry; review cap5min/packet64KiB/source.
+Protect validation/review/repair/handoff reserve. At warning stop breadth; at hard
+stop optional work and record truthful uncommitted handoff, not completed/blocked
+goal. Provider counters/effective route unavailable for root, no estimated dollars.
+
+Review packet budget revised BEFORE review from64KiB to96KiB source: complete
+changed fixtures/test/ADR plus eight unchanged directly relevant runtime/authority/
+ownership/journal/SDK sources total about85KiB. This adds concrete dependency
+coverage, not discovery breadth or another diagnostic pass. Zero reviewer tools
+and5min boundary remain. Root capture stores full strings and prints only sizes/
+hashes; no repeated combined cat reads or acceptance of truncated review coverage.
+
+### Slice 30 frozen validation and review entry
+
+Baseline: retained inert-parent case1/1 current terminal0. New conformance3/3,
+then new+retained4/4 after assertion strengthening, terminal0/no skips/cancels.
+This is characterization + new real-parent wiring, not a failing-before product
+regression. No existing approval guards weakened or tests removed/skipped.
+Preparation cleanup strengthened before freeze; frozen native wildcard covers it.
+One apply_patch failed an exact receipt-line match and applied no edits; inspected
+the target before a corrected patch. No mutation of owner/lock/native/journal data
+to manufacture a passing case. Diagnostic frontend output truncated; not complete
+source-coverage evidence. It was not copied into the supplied review packet.
+
+Frozen tree405c7ea656f49954af690211c36fc1b38b23f5cf exported to
+/tmp/statewright-real-owner-authority.FAYIfm with existing executor/Pi dependency
+links only, no installation/vendor patch. Actual Node26.5.1, installed Pi0.73.0,
+current Darwin. Four owned code/ADR blobs match source tree/export:
+
+- relay7f875e20de7af0572a2a64f078b0ccce3f71ed80
+- real-parent92d1811730f908e4069aeb677172445965f567bd
+- test76306592d3edf77128b7e32720720b1a216a4df3
+- ADR9095efc84714fb1e18e4be2c12196b7720973d7b
+
+Current frozen gates: declared22-file serial Node integration339/339 (same exact
+command as Slice29), Pi npm run test:native wildcard15/15 including new3 and
+retained12; actual terminal0, fail/skip/cancel0. Serial middle tool output truncated;
+retained final terminal aggregate proves counts, not complete individual-output
+capture. SOURCE Claude parity + three new MJS syntax checks terminal0. Initial
+static group129 used git diff --cached in archive lacking .git: evidence harness
+mislocation, not product defect. Corrected static group with set -e in export and
+staged diff check in actual source both terminal0, no source repair/repeated suite.
+tar/ambient C.UTF-8 locale warnings retained, no environment config masking.
+No new Vitest run: TS/frontend/dependency sources unchanged; historical Pi352+
+one opt-in live skip is not current validation. No headed/native gesture/human
+approval/auth/provider/Windows/WSL/Rust/gateway checkpoint/install/release/soak/
+staging/production/security-scan or migration acceptance performed.
+
+Fresh controller reviewer creation failed agent-thread limit; old terminal agents
+not reused as fresh approval. Scrubbed PATH-only Node launcher starts ephemeral
+read-only Codex with user config/rules/hooks/apps/plugins/MCP/multi-agent disabled,
+requested Astra/high, distinct thread01a0b285-f2df-7552-9cb5-28a55d46a312. Root passes
+complete hash-bound SOURCE DATA for four changed code/ADR + eight relevant
+unchanged dependencies, no author reasoning/desired verdict. Capture JSON90020
+bytes/source85786 bytes, all12 export/tree blobs checked by root; reviewer must use
+ZERO tools and identify complete source/EOF coverage. Independent decision is not
+independent FS/hash/runtime/vendor audit. Actual review result/exit recorded below.
+
+Root minimum captured source/output bytes160470 across four named captures
+(owned diff31778, mirror/journal15504, owner/ADR23168, source packet90020); additional
+reads exist, so this is not a total counter or proof below warning/hard thresholds.
+Optional breadth stopped after packet; protected validation/review/handoff reserve
+retained. No telemetry quota/controller/model capability probe or cost estimate.
+
+### Slice 30 independent result, audit and next source boundary
+
+Fresh supplied-source reviewer01a0b285-f2df-7552-9cb5-28a55d46a312 actual terminal0,
+timeoutfalse, COMPLETE/no must-fix in declared test-only scope. All12 complete
+supplied sources listed and four exact EOF anchors checked by root; ZERO tools/
+diagnostics/writes. Source packet/hash capture is root provenance; reviewer decision
+is independent static analysis, not independent FS/hash/runtime/vendor inspection.
+Usage input39241/cached38528/output895/reasoning516; requested Astra/high, effective
+route unknown. One fallback review55secs observed before final receipt recording,
+under5min boundary. No source repair/re-review or repeated integration/export.
+Only this receipt evolves after frozen validated/reviewed four code/ADR blobs.
+
+Original006/012/Auld111/116 remains controlling, ALL NINE obligations OPEN:
+
+1. Full immutable tenant/client/gateway/run/edge/artifact/policy/reviewer/expiry/
+   revocation + authoritative validation unproved, no narrowed replacement contract.
+2. Named actual owner-lock PID and separate creator-channel registered birth/lease
+   binding now proved; canonical launcher/observer, branches/replacement/cross-host
+   lineage and durable all-contender lease participation still unproved.
+3. Named pending SDK inference0/native bytes unchanged; exhaustive SDK/UI/FS/spawn/
+   auth/provider/WS/backend/queue/every declared-effect coverage still incomplete.
+4. Genuine entitled authenticated reviewer/native/web and unauthorized dismissal-
+   only journeys not performed; synthetic service is never human authority.
+5. Actual owner-parent SIGKILL with surviving SDK holds root witness; opposite exit
+   order drains real controller. No takeover, unknown/legacy writer exclusion,
+   permanent SDK drain, broker continuity or real gateway paused-checkpoint crash
+   persistence; original dead lock still denies before/after memory witness.
+6. Private MEMORY one-use witness remains non-durable metadata, not exactly-once
+   crash delivery or real authz/artifact/policy/reviewer rechecks/recovery ledger.
+7. Prior named input/replay coverage retained; every stale final/publication/native
+   effect across arbitrary replacement/input and cross-host boundaries unproved.
+8. Human-action/decision-source/auth strength and malicious same-OS isolation open.
+   Private creator IPC and API keys are not strong human authentication.
+9. Shared review/evidence/retention/clean standalone installation/all native hosts/
+   providers/Windows-distinct-WSL/100 races per runtime/24h staging soak unachieved.
+
+012A dirty user Rust/all-tool pending-denial and private decisions untouched;
+C gateway paused-checkpoint persistence incomplete; B experimental source owning
+composition inactive/uninstalled; D genuine canaries not run. Auld111 historical
+staging is not current exact-runtime proof;116 proposed thresholds not achieved.
+No workflow, resolver, real auth/approval/provider/native UI, preserved session,
+installation, activation, push or deployment. Seven user tracked changes and all
+untracked research/canaries/Auld edits preserved. Full goal ACTIVE, neither complete
+nor blocked: meaningful safe canonical source work remains available.
+
+Next safe cut: move this private creator-channel composition out of TEST-ONLY
+wiring into an UNACTIVATED canonical executor parent/launcher factory. Root must
+retain actual parent/writer handles and bind physical selected owner PID/descriptor/
+birth lease before SDK admission; prove channel/lifetime loss and unknown/replayed
+events deny, with real observer/controller drain. Do not activate main/installed
+runtime or add reclaim yet. Afterwards implement/review durable one-use intent,
+normal-open/resume/new-writer all-contender admission, held no-follow file identity,
+exclusive crash-safe compare/transfer and authoritative approval reconciliation.
+Never accept this fixture proxy/receipt/hash/kill/PID/age as root recovery authority.
+Rollback only these five source/doc paths, never durable owner/lock/native/journal
+data. Exact local source commit and post-commit preservation recorded below.
+
 ## Slice 29 entry: private task-owned writer exit authority prototype
 
 Previous turn PROGRESS: sourcee1195c3/receipt20ccd4a committed the reviewed closed

@@ -43,13 +43,32 @@ export function installPiOwnedRetry(session, { producer, callerCanCancel, checkp
       if (event.type !== "auto_retry_start") return listener(event);
       const source = producer();
       const captured = structuredClone(event);
+      const eligible = () => active && source && native() && !source.signal.aborted && canPublish(source);
+      const report = error => {
+        // A delayed observer outcome is still the original producer's work.
+        // Do not publish its fault or invalidate a newer/closed frontend.
+        if (!eligible()) return;
+        let details;
+        try {
+          const message = String(error?.message ?? error);
+          if (!eligible()) return; // Getter/coercion may reenter native input.
+          const stack = error?.stack;
+          details = { error: message, stack: typeof stack === "string" ? stack : undefined };
+        } catch {
+          // Failure visibility does not depend on readable arbitrary metadata.
+          // No grant, retry or success result is manufactured by this report.
+          details = { error: "Retry-start observer failed; fault details unavailable" };
+        }
+        if (!eligible()) return;
+        runner.emitError({ extensionPath: "statewright:retry-observer",
+          event: "auto_retry_start", ...details });
+      };
       // Native emits start BEFORE it creates its sleep controller. Projection
       // callbacks must not reenter cancellation in that unabortable interval.
       queueMicrotask(() => {
-        if (!active || !source || !native() || source.signal.aborted || !canPublish(source)) return;
-        try { listener(captured); }
-        catch (error) { runner.emitError({ extensionPath: "statewright:retry-observer",
-          event: "auto_retry_start", error: String(error?.message ?? error), stack: error?.stack }); }
+        if (!eligible()) return;
+        try { Promise.resolve(listener(captured)).catch(report); }
+        catch (error) { report(error); }
       });
     });
     return () => { active = false; unsubscribe(); };

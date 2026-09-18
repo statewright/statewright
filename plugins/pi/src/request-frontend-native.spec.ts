@@ -1,5 +1,6 @@
 import { createServer } from "node:http"
 import { EventEmitter } from "node:events"
+import { AsyncResource } from "node:async_hooks"
 import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { PassThrough } from "node:stream"
@@ -25,13 +26,18 @@ afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await clean
 async function frontendFixture(options: { parked?: boolean; streaming?: boolean; register?: (...args: any[]) => unknown;
   onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any;
   availableModels?: () => any[] | Promise<any[]>; reasoning?: boolean;
-  beforeCreate?: (fixture: any) => void } = {}) {
+  beforeCreate?: (fixture: any) => void; retry?: boolean; retryDelayMs?: number } = {}) {
   const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, { ...options, nativeFile: options.handshake })
   const requests: any[] = []
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
     requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")))
+    if (options.retry && requests.length === 1) {
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+      return
+    }
     response.writeHead(200, { "Content-Type": "text/event-stream" })
     if (options.streaming) { response.flushHeaders(); return }
     const chunk = (delta: unknown, finish_reason: string | null) => JSON.stringify({
@@ -76,7 +82,8 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
   const args = { nativeSessionId: f.owner.record.host_session_id, call,
     target: { cwd, agentDir: join(cwd, "agent"), sessionManager },
     servicesOptions: { authStorage: AuthStorage.inMemory(), modelRegistry,
-      settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false, provider: { maxRetries: 0 } } }) },
+      settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: {
+        enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: options.retryDelayMs ?? 60, provider: { maxRetries: 0 } } }) },
     resources: { noContextFiles: true, noSkills: true, noPromptTemplates: true, noThemes: true, systemPrompt: "Synthetic fixture" },
     sessionOptions: { model, thinkingLevel: "off", noTools: "all" },
     gateOptions: { pollMs: 5, timeoutMs: 3_000, onPark }, register: options.register ?? (() => {}), onReady }
@@ -89,6 +96,154 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  // Actual SDK subscription wiring; renderer is inert, never calls init/run.
+  function retrySubscription(f: Awaited<ReturnType<typeof frontendFixture>>, handler: (event: any) => unknown) {
+    const native = new AsyncResource("fixture-native-retry-observer-control")
+    cleanup.push(() => { native.emitDestroy() })
+    const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+      runtimeHost: createPiRequestModeRuntime(f.frontend),
+      handleEvent: vi.fn(async event => { if (event.type === "auto_retry_start") return await handler(event) }),
+    })
+    mode.subscribeToAgent()
+    cleanup.push(() => mode.unsubscribe())
+    return { native, mode }
+  }
+
+  it("reports current async SDK retry observer failure and closes only its owning frontend", async () => {
+    const f = await frontendFixture({ retry: true })
+    await f.bind()
+    const errors = vi.fn()
+    cleanup.push(f.session.extensionRunner!.onError(errors))
+    const { mode } = retrySubscription(f, async () => { throw new Error("synthetic async native observer failure") })
+    await f.session.prompt("current native retry")
+    expect(mode.handleEvent.mock.calls.some(([event]: any[]) => event.type === "auto_retry_start")).toBe(true)
+    await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.objectContaining({
+      event: "auto_retry_start", error: "synthetic async native observer failure",
+    })), { timeout: 500 })
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.requests).toHaveLength(1)
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.session.isRetrying).toBe(false)
+  })
+
+  it("drops stale async SDK retry observer failure after a newer native command epoch", async () => {
+    const command = vi.fn()
+    const f = await frontendFixture({ retry: true, register: pi => pi.registerCommand("owned", { handler: command }) })
+    await f.bind()
+    const errors = vi.fn()
+    cleanup.push(f.session.extensionRunner!.onError(errors))
+    let reject!: (error: Error) => void
+    const barrier = new Promise<void>((_resolve, fail) => { reject = fail })
+    // Keep rejection observed even if an unrelated red assertion aborts early.
+    barrier.catch(() => {})
+    cleanup.push(() => reject(new Error("synthetic stale native observer failure")))
+    const { mode } = retrySubscription(f, () => barrier)
+    await f.session.prompt("old native retry")
+    expect(mode.handleEvent.mock.calls.some(([event]: any[]) => event.type === "auto_retry_start")).toBe(true)
+    expect(f.requests).toHaveLength(2)
+    await f.session.prompt("/owned replacement")
+    expect(command).toHaveBeenCalledTimes(1)
+    expect(f.owner.record.request_epoch).toBe(2)
+    const ready = f.frontend.readiness
+    reject(new Error("synthetic stale native observer failure"))
+    // Await the actual handler result and one turn for the SDK subscriber chain.
+    await Promise.allSettled(mode.handleEvent.mock.results.map((result: any) => result.value))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(errors).not.toHaveBeenCalled()
+    expect(f.frontend.readiness).toBe(ready)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.requests).toHaveLength(2)
+  })
+
+  it.each(["cancel", "replacement"])("owns async SDK retry-start native %s through factory mode subscription", async action => {
+    const command = vi.fn()
+    const f = await frontendFixture({ retry: true, register: pi => pi.registerCommand("owned", { handler: command }) })
+    await f.bind()
+    let control: Promise<void> | undefined
+    const { native, mode } = retrySubscription(f, () => {
+      control = native.runInAsyncScope(() => action === "cancel" ? mode.session.abort() : mode.session.prompt("/owned replacement"))
+      return control
+    })
+    await f.session.prompt("old native retry")
+    expect(control).toBeDefined()
+    await control
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.session.isRetrying).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    expect(command).toHaveBeenCalledTimes(action === "replacement" ? 1 : 0)
+    expect(f.owner.record.request_epoch).toBe(action === "replacement" ? 2 : 1)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it.each(["cancel", "close", "unsubscribe"])("drops async SDK retry observer fault after its own %s", async action => {
+    const f = await frontendFixture({ retry: true })
+    await f.bind()
+    const errors = vi.fn()
+    cleanup.push(f.session.extensionRunner!.onError(errors))
+    let reject!: (error: Error) => void
+    const barrier = new Promise<void>((_resolve, fail) => { reject = fail })
+    barrier.catch(() => {})
+    cleanup.push(() => reject(new Error("synthetic retired native observer failure")))
+    const { mode } = retrySubscription(f, () => barrier)
+    await f.session.prompt("current native retry")
+    expect(mode.handleEvent.mock.calls.some(([event]: any[]) => event.type === "auto_retry_start")).toBe(true)
+    expect(f.requests).toHaveLength(2)
+    const ready = f.frontend.readiness
+    if (action === "cancel") await f.frontend.cancelInput()
+    else if (action === "close") await f.frontend.close()
+    else mode.unsubscribe()
+    reject(new Error("synthetic retired native observer failure"))
+    await Promise.allSettled(mode.handleEvent.mock.results.map((result: any) => result.value))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(errors).not.toHaveBeenCalled()
+    expect(f.frontend.readiness).toBe(action === "close" ? null : ready)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(2)
+  })
+
+  it.each(["message", "string", "stack"])("cannot publish async SDK observer fault after %s formatting reenters newer native input", async field => {
+    const command = vi.fn()
+    const f = await frontendFixture({ retry: true, register: pi => pi.registerCommand("owned", { handler: command }) })
+    await f.bind()
+    const errors = vi.fn()
+    cleanup.push(f.session.extensionRunner!.onError(errors))
+    let replacement: Promise<void> | undefined
+    const reenter = () => {
+      replacement = native.runInAsyncScope(() => f.session.prompt("/owned replacement"))
+      replacement!.catch(() => {})
+      return "synthetic reentrant formatted observer fault"
+    }
+    const failure = field === "message" ? { get message() { return reenter() } }
+      : field === "string" ? { message: { [Symbol.toPrimitive]: reenter } }
+        : { message: "synthetic native observer fault", get stack() { return reenter() } }
+    const { native } = retrySubscription(f, async () => { throw failure })
+    await f.session.prompt("old native retry")
+    expect(replacement).toBeDefined()
+    await replacement
+    expect(command).toHaveBeenCalledTimes(1)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.frontend.readiness).not.toBeNull()
+    expect(f.requests).toHaveLength(1)
+    expect(f.session.retryAttempt).toBe(0)
+    expect(errors).not.toHaveBeenCalled()
+  })
+
+  it("reports unreadable async SDK observer fault details as an owning failure", async () => {
+    const f = await frontendFixture({ retry: true })
+    await f.bind()
+    const errors = vi.fn()
+    cleanup.push(f.session.extensionRunner!.onError(errors))
+    retrySubscription(f, async () => { throw { get message() { throw new Error("synthetic unreadable fault details") } } })
+    await f.session.prompt("current native retry")
+    await vi.waitFor(() => expect(errors).toHaveBeenCalledWith(expect.objectContaining({
+      event: "auto_retry_start", error: "Retry-start observer failed; fault details unavailable",
+    })), { timeout: 500 })
+    expect(f.frontend.readiness).toBeNull()
+    expect(f.requests).toHaveLength(1)
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.session.isRetrying).toBe(false)
+  })
+
   function interactiveConfiguration(f: Awaited<ReturnType<typeof frontendFixture>>) {
     initTheme("dark", false)
     const previousKeys = getKeybindings()

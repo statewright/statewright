@@ -42,6 +42,28 @@ retry-start observer ordering/exception-policy change, not exact stock API timin
 Pre-existing listeners registered before this wrapper and direct raw listeners/
 SDK-private effects are not covered by it; native headed UI acceptance remains OPEN.
 
+Slice23: the actual SDK InteractiveMode.subscribeToAgent listener is async.
+Observe its returned Promise as well as synchronous throws. Recheck the captured
+original producer, subscription-active flag, physical tuple, epoch signal and
+owned phase before reporting either outcome through public emitError. A stale,
+cancelled, closed or unsubscribed callback cannot publish its fault or invalidate
+newer input. Current failures remain observable and revoke only the owning frontend;
+this is not a fallback grant or suppression of current faults. Actual owning factory
+installs operations before returning runtime/mode construction; SDK RPC/print and
+interactive subscriptions occur afterwards. No retroactive guard of arbitrary
+pre-existing subscribers is claimed. Public interactive subscription probes use
+inert renderer substitution, never init/run; headed/native UI remains unproved.
+
+Root reentrant fault-formatting RED contradicted initial bounded source-review
+PASS: rejected values can have message/stack getters or string coercion which
+start genuine native replacement input after eligibility was checked. Capture
+plain string message/optional string stack, recheck original eligibility after
+message conversion and again immediately before emitError. Never retain mutable
+stack aliases. If metadata access itself throws, report a bounded explicit failure
+with details unavailable only while the original producer still owns publication.
+This is diagnostic failure visibility, not a compatibility grant/retry or a
+success result. Obsolete faults remain dropped even if formatting threw.
+
 Reject disabling retries, copying private retry algorithms, patching vendor files,
 global provider replacement, treating retry attempts as approval, stale-caller
 latest-epoch adoption, or weakening pending/no-effect assertions. Public Agent's

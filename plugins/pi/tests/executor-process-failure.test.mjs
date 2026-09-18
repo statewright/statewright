@@ -198,3 +198,91 @@ test("lost consume HTTP response holds inference and tombstone until fresh expli
     assert.equal(f.requests.length, 1);
     assert.deepEqual(f.unexpected, []);
   });
+
+for (const crash of [false, true]) test(crash
+  ? "crash before journal clear preserves consumed tombstone and checkpoint without recovery"
+  : "held consumed-clear drain reaps SDK before completing real journal clearance",
+  { timeout: 60_000, skip: crash && process.platform === "win32" ? "POSIX forced-signal exit evidence only" : false }, async t => {
+    const f = await fixture(t);
+    const first = await f.launch({ holdConsumedClear: true });
+    const saved = first.ready.owner;
+    const before = await readFile(saved.host_session_file);
+    first.send("prompt", { text: "pending consumed-clear task" });
+    await first.wait("sdk-parked");
+    assert.deepEqual((await f.snapshot(first)).checkpoint, checkpoint);
+    f.authority.decision = "approved"; f.authority.live = { ...base, state: "work" }; // External synthetic decision.
+    const held = await first.wait("consume-clear-held");
+    assert.equal(held.owner.request_epoch, 1);
+    assert.equal(held.owner.request.phase, "active");
+    assert.equal(held.owner.request.approval, null);
+    assert.equal(held.owner.request.release_nonce, null);
+    assert.deepEqual(held.owner.request.consumed_approval_ids, [ticket.approval_id]);
+    assert.deepEqual(held.consumeBody.reference, { schema: "statewright/executor-request-ref/v1",
+      native_session_id: saved.host_session_id, request_id: held.owner.request.request_id, request_epoch: 1 });
+    assert.match(held.consumeBody.release_nonce, /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i);
+    assert.deepEqual(held.checkpoint, checkpoint);
+    assert.deepEqual(JSON.parse(await readFile(first.ready.ownerPath, "utf8")), held.owner);
+    assert.deepEqual(await f.journal(first).load("fixture"), checkpoint);
+    assert.equal(f.requests.length, 0);
+    assert.deepEqual(await readFile(saved.host_session_file), before);
+
+    if (crash) {
+      first.send("reap-sdk-before-clear");
+      const reaped = await first.wait("sdk-reaped-before-clear");
+      assert.equal(reaped.sdkPid, first.ready.sdkPid);
+      assert.equal(reaped.sdkExit.code, null);
+      assert.ok(["SIGTERM", "SIGKILL"].includes(reaped.sdkExit.signal));
+      assert.equal(reaped.owner.request.phase, "cancelled");
+      assert.deepEqual(reaped.owner.request.consumed_approval_ids, [ticket.approval_id]);
+      const ownerBytes = await readFile(first.ready.ownerPath);
+      assert.deepEqual(JSON.parse(ownerBytes), reaped.owner);
+      const lockBytes = await readFile(first.ready.ownerPath + ".lock");
+      const files = (await readdir(dirname(first.ready.ownerPath))).sort();
+      assert.deepEqual(await f.journal(first).load("fixture"), checkpoint);
+      assert.deepEqual(await readFile(saved.host_session_file), before);
+      assert.equal(first.child.kill("SIGKILL"), true); // Native child exited; observer remains held until crash.
+      assert.deepEqual(await first.awaitExit(5_000), { code: null, signal: "SIGKILL" });
+      const rejected = await f.launch({ resumeSessionId: saved.executor_session_id }, { expectReady: false });
+      await assert.rejects(rejected.wait("ready"), /already owned; dead-owner recovery requires native-writer verification/);
+      assert.deepEqual(await rejected.awaitExit(5_000), { code: 1, signal: null });
+      assert.deepEqual(await readFile(first.ready.ownerPath), ownerBytes);
+      assert.deepEqual(await readFile(first.ready.ownerPath + ".lock"), lockBytes);
+      assert.deepEqual((await readdir(dirname(first.ready.ownerPath))).sort(), files);
+      assert.deepEqual(await f.journal(first).load("fixture"), checkpoint);
+      assert.deepEqual(await readFile(saved.host_session_file), before);
+      assert.equal(f.requests.length, 0);
+      assert.deepEqual(f.unexpected, []);
+      return;
+    }
+
+    const released = first.wait("consume-clear-released"); released.catch(() => {});
+    const closing = first.wait("closed"); closing.catch(() => {});
+    assert.deepEqual(await first.close(), { code: 0, signal: null });
+    assert.equal((await released).sdkExited, true);
+    assert.equal((await first.wait("sdk-prompt-settled")).finalResponse, null);
+    const closed = await closing;
+    assert.deepEqual({ code: closed.sdkResult.code, signal: closed.sdkResult.signal }, { code: 0, signal: null });
+    assert.deepEqual(closed.owner.request.consumed_approval_ids, [ticket.approval_id]);
+    assert.equal(closed.owner.request.release_nonce, null);
+    assert.equal(await f.journal(first).load("fixture"), null);
+    await assert.rejects(access(first.ready.ownerPath + ".lock"), { code: "ENOENT" });
+    assert.equal(f.requests.length, 0);
+    assert.deepEqual(await readFile(saved.host_session_file), before);
+    const second = await f.launch({ resumeSessionId: saved.executor_session_id });
+    assert.notEqual(second.child.pid, first.child.pid);
+    assert.notEqual(second.ready.sdkPid, first.ready.sdkPid);
+    assert.notEqual(second.ready.challenge.parent_lifetime_id, first.ready.challenge.parent_lifetime_id);
+    assert.notEqual(second.ready.challenge.child_lifetime_id, first.ready.challenge.child_lifetime_id);
+    assert.deepEqual(second.ready.owner, closed.owner);
+    assert.equal(second.ready.journalClientId, first.ready.journalClientId);
+    assert.equal(await f.journal(second).load("fixture"), null);
+    await denied(second.ready.bridge, "consume", held.consumeBody, /replaced/);
+    await denied(second.ready.bridge, "status", { reference: held.consumeBody.reference }, /replaced/);
+    assert.equal(f.requests.length, 0, "reopen must not redeliver a consumed, aborted input");
+    assert.deepEqual(await readFile(saved.host_session_file), before);
+    assert.deepEqual(await second.close(), { code: 0, signal: null });
+    await assert.rejects(access(second.ready.ownerPath + ".lock"), { code: "ENOENT" });
+    assert.deepEqual(await readFile(saved.host_session_file), before);
+    assert.equal(f.requests.length, 0);
+    assert.deepEqual(f.unexpected, []);
+  });

@@ -2,6 +2,183 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 27 entry: actual consumed-write/pre-journal-clear process boundary
+
+Previous goal turn PROGRESS: source49c0046/receipta61df88 committed forced exits/
+dead-lock denial and consume wire loss AFTER clear. Fresh main base
+a61df885aeaff19210156858bb4b16cb84ad75c5, index empty/owned paths quiet.
+Seven unrelated Statewright tracked binary diff SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+unchanged. Writer session01a0b0f5-909c-7b61-b632-3375983b613f and installed SDK
+0.73.0/current executor ws resolution verified. Instructions and controlling
+006147-172/0121-43/Auld11138-62/202-242/11649-100 reread. Manual combined
+agentic-engineering evidence/usage + testing-expert; explicit user override means
+NO workflow activation/query/load/use/catalog/controller probe. Reuse existing
+experimental manual profile, no production/compliance baseline added. Initial
+source intake truncated; existing failure test/ADR reread fully before editing.
+No repository AGENTS matches; parent AGENTS is parallel-tool example, not agent
+delegation authority. Root only implements, mandatory fresh reviewer only.
+
+Accepted two variants: actual service-clear barrier observes physical consumed
+owner + original journal checkpoint BEFORE real journal.clear, with actual
+controller consumption body captured without changing algorithms. (1) Force and
+observe SDK exit/native readiness close, leave actual observer pending on the
+mirror serialization queue, then SIGKILL exact owned parent. Require consumed
+tombstone + original checkpoint/native bytes/lock persist, new actual parent
+same-ID resume denied without replacing/reclaiming/rewriting anything. Native
+writer is reaped first, not arbitrary simultaneous crash/recovery acceptance.
+(2) Normal held-clear fixture close must first observe SDK exit0, then release
+barrier/drain real observer/bridge/owner, retain consumed tombstone/no inference,
+and cold parent/SDK reopen must not infer automatically. This is fixture cleanup
+regression, not dead-lock recovery or journal-failure masking.
+
+Owned FOUR paths: fixtures/owned-executor-process.mjs, existing
+executor-process-failure.test.mjs, ADR012 and this receipt. Other SDK/IPC fixtures
+and all prior assertions unchanged. External synthetic authority/inert SSE only;
+actual store/mirror/journal/runtime/observeHost/bridge/readiness/public SDK; no
+production/schema/private SDK/vendor/install/activation/live signal/resolver/
+real decision/provider credentials/workflow/push/deploy. Narrow in-place scope
+avoids shared user changes. Barrier is private fixture IPC; cannot rewrite owner,
+auto-adopt UUID/latest ref or steal dead lock by PID/age. Observer queue remaining
+pending is not terminal and cannot count as successful drain in crash case.
+
+Acceptance: focused two new plus seven retained process cases expected9; one exact
+immutable export integration cut with Pi352+existing opt-in live skip, Node308
+SERIAL, native wildcard expected11 Darwin, SOURCE Claude generated parity/two
+changed-mjs syntax/diff check, complete fresh independent source review and scoped
+local source/receipt commits. Existing Pi/executor dependency links preflighted,
+include executor ws link in export from outset, no installation. Root observed-only
+95 normal/130 contraction tools,30min warning/45min contraction,72KiB output
+warning/96KiB contraction targets (mandatory instructions separate), final third
+for gates/review/handoff. Retain prior source/review/output/dependency failure
+accounting; no cumulative reset, enforced quota or exact provider/root counter
+claim. At warning stop optional breadth; at contraction hand off actual state.
+Fresh reviewer one normal/two repair-only worst turns requested Astra/high,
+effective route unverified; six diagnostics/7min/64KiB total/24KiB per attempt,
+two command families, complete THREE source/ADR files + existing diff, no
+history/broad/runtime/suite/network/writes/delegation. Per-attempt target revised
+for expanded failure-test file (288 lines/18,790 raw bytes plus line annotation/
+command overhead exceeds20KiB); aggregate retains prior64KiB envelope.
+Max2 repairs per finding/two exports. Full original nine requirements OPEN/goal
+ACTIVE; named crash boundary cannot stand in for recovery/auth/native/install/
+Windows/CI/soak/promotion proof.
+
+### Slice 27 initial characterization
+
+Focused9/9 passed, zero fail/skip/cancellation, terminal exit0 in11.30s. Two new
+barrier variants plus seven retained cases. Physical owner active/nonce cleared/
+approval null/consumed ID once while original checkpoint remains, primary HTTP0
+and native bytes unchanged. Crash command observes actual forced SDK exit and
+native readiness close only, NOT serialized observer drain; parent then actual
+SIGKILL, new parent explicit dead-owner resume denied/exit1 with raw owner/lock/
+inventory/checkpoint/native unchanged. Normal close observes SDK exit0 before
+barrier release, actual journal clears/observer completes/parent exits0, whole
+parent/SDK reopen preserves tombstone with no inference/history/old-body replay.
+No production defect/repair established; this is real-algorithm characterization,
+not fabricated RED. Strengthen nonce assertion to exact UUID grouping before exact
+export gates; initial permissive character/length assertion is not final evidence.
+
+### Slice 27 exact export gates and full original audit
+
+Frozen tree08e57297bddd5961bae2f3195119318947d52d9d exported at
+/tmp/statewright-consume-clear.lnkibn; all four exported blob pairs match tree.
+Exact focused9/9, native wildcard11/11 Darwin zero fail/skip/cancellation, Node
+308/308 SERIAL zero fail/skip/cancellation, full Pi352 passed/one existing opt-in
+live skip (353); SOURCE Claude generated parity/two changed-mjs syntax/staged
+diff check exit0. All gate handles terminal. Pi printed summary while its handle
+was still live; repolled SAME handle to actual exit0, did not infer termination
+from summary or restart it. Executor/Pi existing-dependency links supplied from
+outset; no repeat of prior ws import failure or installation/upgrade/vendor edit.
+Archive's ambient locale warning nonfatal, actual export blob checks prove source
+parity; no ambient configuration changed. Two receipt-only patch context mismatches
+made no edits; use narrow actual context/unique section header, not source repair.
+
+Mandatory fresh agent spawn failed thread capacity; scrubbed ephemeral read-only
+CLI fallback requested Astra/high, effective route unverified, actual parent
+thread.started01a0b261-09e6-7782-9f03-679f937e9d4d distinct from writer. Source
+review was pending at this gate receipt; cannot call partial coverage
+approval. Three source/ADR files/full diff, historical research receipt excluded;
+no workflow/agents/network/writes/runtime probes or independently accepted native/
+dependency/provider/runtime state. Root runtime gates remain root evidence only.
+
+Current006147-172/0121-43/Auld11138-62/202-242/11649-100 controlling full original
+contract, all nine requirements OPEN, not reduced to these passing cases:
+
+1. Immutable tenant/client/gateway/run/edge/action/artifact/policy/reviewer/
+   expiry/revocation and authoritative validation incomplete/unproved.
+2. Named physical request/readiness/parent/SDK lineage improves, complete branches/
+   replacement/cross-host lineage not proven.
+3. No pending/held-consume/lost-release inference or native bytes in named cases,
+   not exhaustive arbitrary SDK/UI/FS/spawn/auth/provider/WS/backend/queue effects.
+4. Genuine entitled authenticated native/website/reviewer and unauthorized
+   dismissal-only journeys unproved; external synthetic service is not authority.
+5. Named forced-exit pre-clear crash preserves data/dead-lock denial, but verified
+   native-writer recovery/arbitrary simultaneous crashes/legacy/permanent SDK
+   failure drain/actual gateway paused-session crash persistence remain open.
+6. Consumed tombstone AND original still-present checkpoint survive named process
+   crash; normal aborted-drain cold reopen cannot replay old nonce. Exactly-once
+   crash delivery and real authz/entitlement/artifact/policy rechecks unproved.
+7. Named actual old-body denial/fresh explicit same-SDK ownership passes; every
+   final/native effect/publication over arbitrary new inputs unproved.
+8. Decision source/human action/auth-strength/same-OS malicious-agent isolation
+   unproved, PATH-only private IPC/API keys are not strong human authentication.
+9. Shared client-neutral reviewer/evidence/retention/clean standalone installation/
+   all advertised native hosts/providers unproved.114 proposed baseline only,
+   115 separate provenance unchanged; historical staging not current proof.
+
+012 A/1 user-dirty Rust untouched/unvalidated/uncommitted,2 trusted decisions
+untested,C/3 local owner/journal crash boundary improves but actual gateway paused
+checkpoint/crash persistence remains partial,B/4 source experimental/inactive and
+installed/main activation unproved,D genuine canaries not run.111 native/web/
+shared evidence and116 desktop/native Windows distinctWSL/clean release/provider
+auth/100 deterministic race iterations per runtime/24h staging multi-session soak
+remain OPEN. Workspace Rust/lint/type/build/security/migration/headed/native UI/
+real authority/provider/install/CI/staging/soak/promotion not run. No durable schema/
+production/UI/deployment change. New forced case POSIX-only; no Windows acceptance.
+
+Next safe source milestone is a bounded private explicit native-writer-verified
+recovery CONTRACT, not automatic lock deletion or another happy-path substitute:
+bind exact executor scope/run/native descriptor/lock token+content+native digests,
+actual task-owned parent/SDK exit witnesses and one-use recovery intent. Missing/
+foreign/stale/unverified proof must deny without changing durable data; PID/age
+alone or agent-returned assertions are not proof. Review this contract before
+enabling a source recovery API, preserve human approval authority and consumed
+tombstones, reopen original gate only after authoritative reconciliation. No
+workflow/live sessions/resolver/installation/deployment authority implied.
+
+Scoped rollback four conformance/ADR/receipt paths preserves durable native/
+owner/journal data and all unrelated edits. Required current-source intake/reread/
+full staged diff pressure root72/96KiB output targets; aggregate exact counter
+unavailable, prior source/review/dependency failures retained, no hard quota/cost
+or cumulative reset claim. Stop optional breadth, protect review/commit/receipt
+reserve. Full goal ACTIVE/turn PROGRESS, not complete/blocked; no objective dropped.
+
+### Slice 27 complete independent review and commit boundary
+
+Actual fresh CLI process exit0 and final COMPLETE bounded SOURCE review captured
+for thread01a0b261-09e6-7782-9f03-679f937e9d4d, distinct from writer. No actionable
+P0/P1 source findings. Full three files288/213/94 lines including old setup/cleanup/
+assertions, exact base-to-tree diff, minimal unchanged controller/mirror/owner
+durability ordering. Normal clearance waits for actual SDK exit; crash branch
+explicitly leaves observer pending; tests and ADR limits match named boundary.
+Static ONLY, no independent SDK/native/dependency/provider/runtime acceptance,
+no test/network/delegation/signals/mutations/workflow. Root gates all terminal.
+
+Six successful diagnostics in two families, actual output62,023 UTF-8 bytes
+(<64KiB diagnostic target), largest20,806 (<24KiB); mandatory oracle read3,524
+bytes separate. All wrappers exit0, no truncation markers, observed ~3min (<7min).
+Requested Astra/high effective route unverified. Usage input228822/cached-input
+194688/output2200/reasoning1218; no aggregate cost/provider/root exact usage claim.
+One bounded pass plus failed capacity spawn; no source repair/re-review required.
+Prior overruns/failures remain retained, not reset by this observed envelope pass.
+
+Only subsequent receipt text differs from tested/reviewed tree08e57297; all three
+source/ADR blobs unchanged. Stage/commit only four declared owned paths after
+HEAD/ownership/hash checks; follow with receipt-only exact source-SHA record.
+No source rerun claimed for text-only additions. Full objective remains ACTIVE,
+not achieved/blocked; verified recovery contract and all other original gates open.
+
 ## Slice 26 entry: forced exits and lost consume HTTP response
 
 Previous goal turn PROGRESS: source4ba073c/receipt8ee5ea6 committed actual parent/

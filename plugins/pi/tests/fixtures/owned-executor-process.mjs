@@ -24,9 +24,11 @@ let observing;
 let proxy;
 let starting;
 let closing;
+let releaseHeldClear;
+let clearHeld = false;
 const successfulConsumes = [];
 
-async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dropBeginResponse, dropConsumeResponse }) {
+async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dropBeginResponse, dropConsumeResponse, holdConsumedClear }) {
   if (starting || owner || closing) throw new Error("Executor fixture initialization replay");
   const options = { root: join(root, "owners"), cwd: root, host: "pi", workflow: "fixture",
     apiKey: "synthetic-private-key", gatewayUrl: authorityUrl };
@@ -45,6 +47,8 @@ async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dr
       cwd: root, sessionDir: owner.nativeRoot, sessionId: owner.record.host_session_id });
     await owner.bindHost({ sessionId: owner.record.host_session_id, sessionFile });
   }
+  let consumeBody;
+  const heldClear = holdConsumedClear ? new Promise(resolve => { releaseHeldClear = resolve; }) : null;
   mirror = createExecutorApprovalMirror({ ...options, root: join(root, "approvals"), deferClear: true,
     executorSessionId: owner.record.executor_session_id, transportClientId: owner.record.transport_client_id, getState,
     makeService: configuration => {
@@ -60,6 +64,13 @@ async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dr
         async clear(thread, id) {
           const disk = JSON.parse(await readFile(owner.path, "utf8"));
           assert.ok(disk.request.consumed_approval_ids.includes(id));
+          if (heldClear) {
+            clearHeld = true;
+            send("consume-clear-held", { owner: disk, consumeBody, checkpoint: await journal.load(thread) });
+            await heldClear; // Actual owner write finished; real clear has not begun.
+            clearHeld = false;
+            send("consume-clear-released", { sdkExited: control?.exited ?? false });
+          }
           await journal.clear(thread, id);
         } };
     } });
@@ -71,6 +82,7 @@ async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dr
   const nativeBeforeHash = createHash("sha256").update(await readFile(owner.record.host_session_file)).digest("hex");
   const consume = runtime.requestController.consume.bind(runtime.requestController);
   runtime.requestController.consume = async body => {
+    consumeBody = structuredClone(body);
     const result = await consume(body);
     successfulConsumes.push(structuredClone(body));
     return result;
@@ -146,6 +158,8 @@ async function close() {
         finally { if (!control.exited) await control.terminate(); }
       });
     }
+    // Never release a held continuation while a native writer may still run.
+    if (!control || control.exited) releaseHeldClear?.();
     const result = await drain(() => observing);
     await drain(() => runtime?.adapterBridge.close());
     if (proxy) await drain(() => new Promise(resolve => { proxy.close(resolve); proxy.closeAllConnections(); }));
@@ -177,6 +191,15 @@ function dispatch(message) {
       const result = await observing; // Real observer/readiness teardown completes.
       await owner.assertOwner();
       send("sdk-reaped", { sdkPid: control.child.pid, sdkExit, result, owner: owner.record });
+      return;
+    }
+    if (message.type === "reap-sdk-before-clear") {
+      if (!clearHeld) throw new Error("Consumed journal-clear barrier is not held");
+      const sdkExit = await control.terminate();
+      await runtime.nativeReadiness.close();
+      await owner.assertOwner();
+      // Observer is still pending on serialized mirror clear, not fully drained.
+      send("sdk-reaped-before-clear", { sdkPid: control.child.pid, sdkExit, owner: owner.record });
       return;
     }
     if (message.type === "snapshot") {

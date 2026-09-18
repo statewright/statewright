@@ -67,11 +67,28 @@ That new input may use authoritative cleared state, but not the old nonce; its
 one response/history belongs to the fresh text. Whole-parent graceful reopen
 then preserves the consumed tombstone/history and cannot redeliver automatically.
 
+An additional service-clear barrier reads the physical consumed owner and original
+journal checkpoint before invoking real journal.clear. It reports the actual
+controller consume body, not a fabricated nonce/owner mutation. Holding that
+service also holds the mirror serialization queue and observer; the crash-only
+fixture command therefore acknowledges actual SDK exit and native readiness
+closure WITHOUT claiming observer completion. Parent SIGKILL afterward preserves
+both consumed tombstone and still-present checkpoint. Exact-ID new parent refuses
+the dead lock unchanged; no recovery/automatic journal repair is authorized.
+
+Normal fixture close is tested at the same barrier: first require actual SDK exit
+(normal exit0 in this case), only then release the held service and drain the real
+observer/bridge/owner. The release receipt must report SDK exited; journal clear
+can complete after cancellation without admitting the stopped SDK. Tombstone and
+unchanged native bytes survive a whole-parent graceful reopen with no inference.
+This is fixture cleanup conformance, not evidence of permanent failure teardown.
+
 Limits: forced parent crash after native writer reaping is NOT arbitrary crash
 recovery or safe stale-lock reclamation. Consume wire loss AFTER journal clear is
-NOT forced crash between consumption/clear or exactly-once crash-delivery proof.
+distinct from the named consumed-write/pre-clear crash above; neither establishes
+exactly-once crash delivery or native-writer-verified recovery.
 Legacy recovery, permanent failure-drain, authenticated reviewer/UI, installed
 launcher/hosts and all original P0/P1 obligations remain open. No production
 source/schema or native activation. Revisit when verified native-writer recovery,
-consume/clear crash conformance and genuine native acceptance become available;
+complete crash-delivery conformance and genuine native acceptance become available;
 no release certification is implied.

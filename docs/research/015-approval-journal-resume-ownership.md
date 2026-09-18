@@ -176,6 +176,19 @@ acceptance. Remaining raw SDK/reporter FX obligations stay tracked above rather
 than erased. Scoped rollback of four owned changes only, preserve native records/
 journals/user changes. No install/activation/push/deploy/workflow use authorized.
 
+### Slice 23 committed source and handoff
+
+Local sourceb44320467672f4315ab2f5a3c6cb46359f85fa3d, parent
+5f81f8c67471649fda6eee3fedeee51fc9eff357, four owned paths only. Source/ADR/tests
+identical to tested/reviewed9fd89933482066d3f8a2df28260ae28158bfbaa1; receipt/audit
+only67-line delta. Postcommit index empty/owned paths quiet/seven-user-file hash
+unchanged. This addition records immutable source identity, not new validation.
+Root about15min, two source exports/two requestedAstra/high CLI review turns;
+exact provider total/root byte/tool accounting incomplete, observed output target
+overruns retained. All gate/reviewer handles terminal, full goal ACTIVE/nine rows
+OPEN, no workflow/live decisions/install/push/deploy/activation. Next actual cold
+process-resume/lost-begin frontier above; preserve other native/reporter gaps.
+
 ## Slice 22 entry: native retry lifetime and completion handoffs
 
 Previous turn PROGRESS: sourcef4ae56e/receipt727d6a8 committed, validation and

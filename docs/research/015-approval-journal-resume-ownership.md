@@ -2,6 +2,197 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 19 entry: settings and scoped-model configuration input
+
+Basef1b2c75; last turn verified progress. Manual/no Statewright query/load/use
+overrides skill activation/probing. Full006/012/111/116 objective stays active.
+Root implements only; mandatory clean-context Astra/high read-only review.
+Preserve user seven tracked/untracked changes and Auldwyrm unchanged.
+
+SDK0.73.0 SettingsList changes currentValue before invoking callbacks; scoped
+model input changes enabledIds/isDirty/refresh before its unawaited async onChange.
+Guarding callbacks alone cannot prove truthful feedback or pending-no-write.
+Extend ADR009's version-bound private INSTANCE adapter, not private imports or
+vendor patches: capture /settings and /scoped-models before display/registry
+waits; checkpoint original native input before settings/submenu/scoped writes;
+retain original token through async completion, serialize per-selector changes,
+track native callback promises, restore staged local UI while awaited work runs,
+and publish local confirmation only after success. Delayed captured callbacks
+must not become new input. Escape dismissal remains immediate/exact original;
+submenu back is bounded UI resource cleanup, not effect approval.
+
+Owned paths: request-interactive.mjs, new request-configuration-selector.mjs,
+actual SDK frontend tests, optional narrow
+operations adjustment only if regression requires it, ADR009 and this receipt.
+First add red tests. Prove generic settings and submenu mutation, scoped toggle/
+save, delayed registry/current-failure/UI truth, replacement/new-input/dismissal
+and old callback denial, with genuine current positive controls. Scoped selector
+class is not SDK-public-exported; bind only trusted actual mode-created object's
+VERSION0.73.0 private fields/constructor identity shape, never private import.
+Raw project settings/registry/UI/global-theme APIs, remaining effects/internal
+transport/retry/compaction/recovery, headed/native cold acceptance and production
+activation remain open. No full UI/provider/isolation/conformance claim.
+
+Exact staged export gates: Node SERIAL308 baseline, Pi296+one existing opt-in
+live skip, native2, Claude generated parity and changed-mjs syntax. Independent
+review10 diagnostics/12min/2 focused checks; fresh finding-only recheck4/5min/
+2 checks; max2 distinct repairs/finding,2 exports plus regression-justified third.
+Observed-only root envelope100 normal/135 contraction calls,30min warning/45min
+contraction,16KiB output target, final-third review/validation/repair reserve.
+Stop optional breadth at warning/reserve; no controller/provider hard-budget,
+catalog/telemetry probe, invented workflow identity or price/quota conversion.
+Existing manual source/evidence/Git control profile only; no new production or
+compliance baseline. No actual authority/decision/inference, preserved sessions/
+signals, install/deploy/push. Inert task-owned SDK/HTTP only. Scoped local commit/
+coherent revert preserve journals/native records; full goal not complete/blocked.
+
+### Slice 19 retained red/repair evidence
+
+Unchanged-source actual-SDK seven-case gate7/7 failed: native settings/scoped
+submit displayed/cleared before admission, settings changed before park, thinking
+callback lacked ownership, scoped UI changed before async completion, old persist
+wrote after new input, and current failure left false local success. First repair
+6 passed/1 failed (repeated after cleanup refinement): headless global TUI manager
+lacked the SDK app.models.save binding. Fixture now constructs the public native
+manager with TUI defaults and SDK0.73.0 ctrl+s app binding; preserve all persistence
+assertions. Nine-case gate9/9 passed, including ordinary submenu back and scoped
+Escape during registry wait. Add post-backend queued-render failure control;
+commit local value before publication so a renderer error cannot falsify an
+already applied mutation. Frontend120/120 passed before the next refinement.
+
+Two NEW root tests both failed: authority can become pending during registry
+lookup without a new input epoch; scoped write and selector display lacked a
+fresh checkpoint. Repair1 each: private original-reference scope.effect after
+literal-ID immutable model lookup, before synchronous native setScopedModels;
+defer native selector factories until the helper returns, then private checkpoint
+before construction/display (SDK ignores showSelector return). No latest-request
+adoption, policy fallback or private module import. Focused12/12 now pass,
+110 unselected; changed3 mjs syntax, Claude generated parity and diff check0.
+These pre-freeze diagnostics are not the exact-source integration receipt.
+
+### Slice 19 full original requirement audit, not completion
+
+Re-read current006 nine-row contract,012 numbered1-4/slicesA-D and Auldwyrm111/
+116 native/reviewer/evidence and cross-host requirements. Historical live receipts
+are not current verification. Requirement dispositions remain:
+
+1. Immutable ticket/artifact/policy/reviewer/expiry/revocation: OPEN.
+2. Local private UUID/epoch/UI tokens gain native configuration capture; full
+   branch/replacement/cross-host lineage: OPEN.
+3. Settings/submenu/scoped native inputs now checkpoint before guarded writes,
+   including authority becoming pending during registry awaits. Raw project
+   settings/registry/UI/global theme, other FS/spawn/queue/branch/provider FX and
+   internal inference/retry/compaction/summary boundaries: OPEN, not all FX proved.
+4. Authenticated entitled native+website reviewer controls/required-reviewer
+   journeys: OPEN. No resolver, decision or human authority added.
+5. Exact native dismissal/stale callback tests retain journal and deny late
+   work; lost begin replies, full native cold restart, legacy/crash-lock recovery,
+   permanent SDK teardown and in-flight drains: OPEN.
+6. Private consume/tombstone fixtures partial; real authorization/entitlement/
+   artifact/policy revalidation and exactly-once crash delivery: OPEN.
+7. Staged configuration UI now avoids pending/error false-success and rejects
+   obsolete callbacks; every native effect/final publication boundary: OPEN.
+8. Private routing is not human-auth-strength or same-OS isolation; complete
+   decision provenance: OPEN.
+9. Neutral reviewer/evidence/retention, clean standalone packaging and all
+   advertised host acceptance: OPEN. No collective conformance claim.
+
+012 A/1 user-dirty Rust deny remains unvalidated/uncommitted;2 real decision
+route untested;C/3 parent/mirror/cold fixtures partial, not production recovery;
+B/4 this experimental SDK adapter gains bounded configuration ownership, not
+main-runtime activation;D gateway/native approval/restart canaries not run under
+no-workflow/no-real-decision authority.111 combined native/website/reviewer/
+evidence journeys remain separate acceptance.116 clean release, desktop/native
+Windows distinct from WSL, real protocol races100 iterations per advertised
+runtime,24-hour staging soak and provider-authenticated promotion remain OPEN.
+Do not remove a requirement because local tests pass. Full goal stays active;
+safe manual implementation remains, so no blocked or complete disposition.
+
+### Slice 19 independent finding and bounded repair
+
+Initial frozen tree `68bdea6106bbc687152f2668b7925e336444cfda`, export
+`/tmp/statewright-settings-ownership.k8mOMi`: Node serial308/308 no skip/cancel,
+Pi308 passed/1 existing opt-in live skip (122 frontend), native2/2 and fail-fast
+Claude generated parity+3 changed-mjs syntax0. Exact6 owned paths; staged diff
+check0 and preserved user/Auld hashes unchanged. This source is superseded below.
+
+Independent clean-context Astra/high `/root/pi_configuration_ownership_review`
+used8/10 diagnostics,2/2 focused inert actual-SDK invocations, reported under
+12-minute envelope; both processes terminal. Existing focused11/11 passed, but
+independent native Warning submenu reproduction established ONE P2: snapshot
+only restores root items; nested currentValue/state stay changed after synchronous
+persistence failure. No established P0/P1 finding WITHIN this bounded cut, not
+full objective approval. Root's separate native warning failure/reopen/next-toggle
+test1/1 red confirms currentValue false instead of true;122 unselected.
+
+Repair1: snapshot/restore actual nested settings/select list fields, values,
+search and warning state. Native currentWarnings closure updates BEFORE failed
+callback; opening a new actual WarningSettingsSubmenu must rehydrate state/value
+from public current SettingsManager.getWarnings with explicit0.73.0 field/id
+checks, not reuse the attempted-value closure. Keep actual component/callbacks.
+Root focused13/13 passes,110 unselected, including error visibility, failed-write
+truth, back/reopen, next genuine successful persistence and successful reopen.
+Required next: second exact-source integration export and fresh finding-only
+independent review. Root cannot self-close this finding. No weakened gate/fixture,
+fallback or transactional persistence claim. Full original audit remains OPEN.
+
+### Slice 19 final exact-source receipt
+
+Repaired tested tree `0c41adc93fbda68546b1ec044f2d8f301fdb95c1`, export
+`/tmp/statewright-settings-ownership-repaired.3PE7z0`: Node SERIAL308/308 zero
+failure/skip/cancel; Pi309 passed/1 existing opt-in live skip (123 frontend,
+8 files passed/1 skipped); native session2/2; fail-fast Claude generated managed
+parity+3 changed-mjs syntax0. Canonical staged diff check0, owned unstaged source
+quiet0 and exact write-tree match before this receipt. All root gate processes
+terminal. No Rust/typecheck/lint/build, headed TUI, actual decision/inference/
+gateway, installed-main acceptance, full native cold restart, hosted protocol
+race CI or staging soak proof. Initial export superseded; two source exports.
+
+Fresh collaboration agent spawn hit thread limit, not a product failure or
+approval. Use agentic-sdlc's isolated local review fallback: env removes parent
+CODEX_SESSION_ID/THREAD_ID and prescribed Statewright ownership/control bindings;
+codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only,
+gpt-6-astra/high, no child agents, exact export and bounded finding-only packet.
+Distinct captured reviewer thread `01a0b1e7-283f-7792-9bd8-fef20c8b4d90` versus
+implementer `01a0b0f5-909c-7b61-b632-3375983b613f`; final output captured and
+process exit0 before disposition.4/4 diagnostics,0/2 tests, under5min. Runtime
+recheck unavailable in read-only sandbox because fixture creates temporary files;
+root exact-source runtime gates above are separate, not attributed to reviewer.
+All four repair files match frozen blob hashes. Primary installed SDK0.73.0
+Warning state/closed currentWarnings/SettingsManager source confirms restoration
+and authoritative reopen behavior. Finding CLOSED by independent source review;
+no remaining established repair regression WITHIN bounded UI truth, not full
+P0/P1 acceptance or atomic persistence. Reviewer archive-local Git probe lacked
+.git; canonical tree/blob diagnostics established provenance instead. Root
+diagnostic captures included truncated source/log output; terminal gate summaries
+and final review output are captured complete, no output-target compliance claim.
+
+Fallback reported usage133857 input tokens including106496 cached,2027 output,
+292 reasoning output; observed-only, no aggregate hard enforcement/provider quota
+or pricing conversion. Root remains below30-minute warning; optional breadth
+stopped for review/repair/validation/handoff reserve. Final source/ADR unchanged
+from repaired tested/reviewed tree; this recording is receipt-only delta.
+Six owned paths only. Seven user tracked changes retain SHA256
+`55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270`;
+Auldwyrm tracked diff retains
+`94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa`.
+Unrelated untracked artifacts untouched. Coherent scoped rollback preserves
+journals/native owner records. No Statewright query/load/use/workflow, live
+session access, actual approval/resolver/decision, real inference, install/vendor
+patch, deploy or push. Native SDK fixtures/inert loopback only.
+
+Next safe manual cut: internal compaction/summary transport and automatic retry
+ownership/publication. Primary SDK _runAutoCompaction directly invokes compact
+after session_before_compact and bypasses the ordinary provider payload hook;
+its later writes and continue timer are separately guarded but not complete
+no-inference proof. Automatic retry continuation already reaches guarded Agent
+continue, but pre-retry shared state/controller/event races need discriminating
+native tests. These are inspection leads, not newly established acceptance or
+implemented repairs. Remaining raw project settings/UI/registry/every-effect,
+lost-begin/cold recovery and authorized full native/cross-host journeys remain
+OPEN under the full nine-row/012/111/116 audit above. Full goal active, not
+complete or blocked; safe source implementation remains.
+
 ## Slice 18 entry: capture owning interactive configuration gestures
 
 Base998cad2. Continue the full006/012/spec111/116 objective manually, without

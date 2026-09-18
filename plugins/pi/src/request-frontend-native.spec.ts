@@ -15,6 +15,7 @@ import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./p
 import { createPiRequestModeRuntime, runPiRequestMode } from "./request-mode.mjs"
 import * as requestMode from "./request-mode.mjs"
 import { createPiRpcInput } from "./request-rpc-input.mjs"
+import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "@mariozechner/pi-tui"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
 afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await cleanup.pop()!() })
@@ -23,7 +24,7 @@ afterEach(async () => { vi.restoreAllMocks(); while (cleanup.length) await clean
 // SSE. Parent authority is synthetic, owner/journal/bridge are real local code.
 async function frontendFixture(options: { parked?: boolean; streaming?: boolean; register?: (...args: any[]) => unknown;
   onReady?: (...args: any[]) => unknown; handshake?: boolean; acknowledgement?: (value: any) => any;
-  availableModels?: () => any[] | Promise<any[]>;
+  availableModels?: () => any[] | Promise<any[]>; reasoning?: boolean;
   beforeCreate?: (fixture: any) => void } = {}) {
   const f = await fixture({ after: (fn: () => unknown) => cleanup.push(fn) }, { ...options, nativeFile: options.handshake })
   const requests: any[] = []
@@ -63,7 +64,7 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
   const sessionManager = options.handshake ? SessionManager.open(f.owner.record.host_session_file, f.owner.nativeRoot, cwd) : SessionManager.inMemory(cwd)
   if (!options.handshake) sessionManager.newSession({ id: f.owner.record.host_session_id })
   const model = { id: "synthetic-chat", name: "Synthetic", api: "openai-completions", provider: "synthetic-provider",
-    baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, reasoning: false,
+    baseUrl: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`, reasoning: options.reasoning ?? false,
     input: ["text"], contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
     getAll: () => [], getAvailable: options.availableModels ?? (() => [model]), find: () => model, isUsingOAuth: () => false,
@@ -90,25 +91,329 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 describe("owning public SDK frontend readiness", () => {
   function interactiveConfiguration(f: Awaited<ReturnType<typeof frontendFixture>>) {
     initTheme("dark", false)
+    const previousKeys = getKeybindings()
+    // Actual public TUI key manager, task-owned app binding matching SDK0.73.0.
+    // Prototype fixtures do not run SDK constructor/config or terminal startup.
+    setKeybindings(new KeybindingsManager({ ...TUI_KEYBINDINGS,
+      "app.models.save": { defaultKeys: "ctrl+s", description: "Synthetic SDK save" } }))
+    cleanup.push(() => setKeybindings(previousKeys))
     Object.assign(f.modelRegistry, { refresh: vi.fn(), getError: () => undefined })
     const children: any[] = []
     const mode = Object.assign(Object.create(InteractiveMode.prototype), {
       runtimeHost: createPiRequestModeRuntime(f.frontend),
-      ui: { requestRender: vi.fn(), setFocus: vi.fn() },
-      footer: { invalidate: vi.fn() },
+      keybindings: getKeybindings(),
+      ui: { requestRender: vi.fn(), setFocus: vi.fn(), invalidate: vi.fn(), setShowHardwareCursor: vi.fn(), setClearOnShrink: vi.fn() },
+      footer: { invalidate: vi.fn(), setAutoCompactEnabled: vi.fn() },
+      footerDataProvider: { setAvailableProviderCount: vi.fn() },
       editor: { setText: vi.fn(), getText: vi.fn(() => ""), onAction: vi.fn() },
       editorContainer: { clear: vi.fn(() => children.splice(0)), addChild: vi.fn(x => children.push(x)) },
-      chatContainer: { addChild: vi.fn() },
+      chatContainer: { addChild: vi.fn(), children: [], clear: vi.fn() },
+      setupAutocompleteProvider: vi.fn(), rebuildChatFromMessages: vi.fn(),
       showStatus: vi.fn(), showError: vi.fn(), showWarning: vi.fn(), updateEditorBorderColor: vi.fn(),
       maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(), checkDaxnutsEasterEgg: vi.fn(),
     })
     mode.defaultEditor = mode.editor
     mode.feedback = { showStatus: mode.showStatus, showError: mode.showError,
       chatAdd: mode.chatContainer.addChild, footerInvalidate: mode.footer.invalidate,
+      footerAuto: mode.footer.setAutoCompactEnabled,
       requestRender: mode.ui.requestRender, editorText: mode.editor.setText }
     requestMode.installPiInteractiveConfiguration(mode, f.frontend.interactiveGesture)
     return { mode, children }
   }
+
+  it.each(["/settings", "/scoped-models"])("captures actual native %s submit before clear, display or registry writes", async command => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    mode.setupEditorSubmitHandler()
+    const opened = mode.defaultEditor.onSubmit(command)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(children).toHaveLength(0)
+    expect(mode.feedback.editorText).not.toHaveBeenCalled()
+    expect(f.modelRegistry.refresh).not.toHaveBeenCalled()
+    f.approve()
+    await opened
+    expect(children[0]).toBeDefined()
+    expect(children[0]).not.toBe(mode.editor)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("guards actual settings input before local success and permits only current synchronous mutation", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "autocompact")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    f.setLive(pending)
+    const changed = list.handleInput("\r")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(item.currentValue).toBe("false")
+    expect(f.session.autoCompactionEnabled).toBe(false)
+    f.approve()
+    await changed
+    expect(item.currentValue).toBe("true")
+    expect(f.session.autoCompactionEnabled).toBe(true)
+    expect(f.owner.record.request_epoch).toBe(1)
+    await f.frontend.configuration({ type: "set_session_name", name: "newer settings owner" })
+    await list.handleInput("\r")
+    await list.onChange("autocompact", "false")
+    expect(f.session.autoCompactionEnabled).toBe(true)
+    expect(children).toEqual([mode.editor])
+  })
+
+  it("guards actual settings submenu and cancels its parked selection using native Escape", async () => {
+    const f = await frontendFixture({ reasoning: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "thinking")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    await list.handleInput("\r")
+    await list.handleInput("\u001b[B")
+    const oldCallback = list.submenuComponent.selectList.onSelect
+    f.setLive(pending)
+    const changed = list.handleInput("\r")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.thinkingLevel).toBe("off")
+    await list.handleInput("\u001b")
+    await changed
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    f.approve()
+    await oldCallback({ value: "medium" })
+    expect(f.session.thinkingLevel).toBe("off")
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("awaits actual scoped-model callback before local UI confirmation and native save", async () => {
+    let models: any[] = []
+    let release!: (models: any[]) => void
+    const available = vi.fn((): any => models)
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const model = JSON.parse(JSON.stringify(f.session.model))
+    models = [model, { ...model, id: "synthetic-second", name: "Second" }]
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelsSelector()
+    const selector = children[0]
+    available.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const changed = selector.handleInput("\r")
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"), { timeout: 500 })
+    expect(selector.enabledIds).toBeNull()
+    expect(selector.isDirty).toBe(false)
+    expect(f.session.scopedModels).toEqual([])
+    release(models)
+    await changed
+    expect(selector.enabledIds).toEqual([`${model.provider}/${model.id}`])
+    expect(selector.isDirty).toBe(true)
+    expect(f.session.scopedModels).toHaveLength(1)
+    await selector.handleInput("\u0013")
+    expect(f.session.settingsManager.getEnabledModels()).toEqual(selector.enabledIds)
+    expect(selector.isDirty).toBe(false)
+    expect(mode.feedback.showStatus).toHaveBeenCalledWith("Model selection saved to settings")
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("denies old scoped-model awaited mutation and captured persist after replacement input", async () => {
+    let models: any[] = []
+    let release!: (models: any[]) => void
+    const available = vi.fn((): any => models)
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const model = JSON.parse(JSON.stringify(f.session.model))
+    models = [model, { ...model, id: "synthetic-second" }]
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelsSelector()
+    const old = children[0]
+    const persist = old.callbacks.onPersist
+    available.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const changed = old.handleInput("\r")
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"), { timeout: 500 })
+    await f.frontend.configuration({ type: "set_session_name", name: "new scoped owner" })
+    release(models)
+    await changed
+    await persist([`${model.provider}/${model.id}`])
+    expect(f.session.scopedModels).toEqual([])
+    expect(f.session.settingsManager.getEnabledModels()).toBeUndefined()
+    expect(mode.feedback.showStatus).not.toHaveBeenCalled()
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("restores actual settings local value after a genuine current mutation failure", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "autocompact")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    vi.spyOn(f.session, "setAutoCompactionEnabled").mockImplementation(() => { throw new Error("synthetic settings failure") })
+    await list.handleInput("\r")
+    expect(item.currentValue).toBe("false")
+    expect(f.session.autoCompactionEnabled).toBe(false)
+    expect(mode.feedback.showError).toHaveBeenCalledWith("synthetic settings failure")
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("restores actual nested warning failure, reopen and next successful toggle", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "warnings")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    await list.handleInput("\r")
+    const submenu = list.submenuComponent
+    const persist = vi.spyOn(f.session.settingsManager, "setWarnings")
+      .mockImplementationOnce(() => { throw new Error("synthetic warning failure") })
+    await list.handleInput("\r")
+    expect(mode.feedback.showError).toHaveBeenCalledWith("synthetic warning failure")
+    expect(submenu.settingsList.items[0].currentValue).toBe("true")
+    expect(submenu.state.anthropicExtraUsage ?? true).toBe(true)
+    expect(f.session.settingsManager.getWarnings().anthropicExtraUsage ?? true).toBe(true)
+    await list.handleInput("\u001b")
+    await list.handleInput("\r")
+    expect(list.submenuComponent.settingsList.items[0].currentValue).toBe("true")
+    expect(list.submenuComponent.state.anthropicExtraUsage ?? true).toBe(true)
+    await list.handleInput("\r")
+    expect(persist).toHaveBeenCalledTimes(2)
+    expect(f.session.settingsManager.getWarnings().anthropicExtraUsage).toBe(false)
+    expect(list.submenuComponent.settingsList.items[0].currentValue).toBe("false")
+    expect(list.submenuComponent.state.anthropicExtraUsage).toBe(false)
+    await list.handleInput("\u001b")
+    await list.handleInput("\r")
+    expect(list.submenuComponent.settingsList.items[0].currentValue).toBe("false")
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("preserves actual settings submenu back and performs only current successful selection", async () => {
+    const f = await frontendFixture({ reasoning: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "thinking")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    await list.handleInput("\r")
+    await list.handleInput("\u001b[B")
+    await list.handleInput("\u001b")
+    expect(list.submenuComponent).toBeNull()
+    expect(f.session.thinkingLevel).toBe("off")
+    expect(children[0]).not.toBe(mode.editor)
+    await list.handleInput("\r")
+    await list.handleInput("\u001b[B")
+    await list.handleInput("\r")
+    expect(f.session.thinkingLevel).toBe("minimal")
+    expect(item.currentValue).toBe("minimal")
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("dismisses actual scoped-model registry wait with Escape and denies late native save", async () => {
+    let models: any[] = []
+    let release!: (models: any[]) => void
+    const available = vi.fn((): any => models)
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const model = JSON.parse(JSON.stringify(f.session.model))
+    models = [model, { ...model, id: "synthetic-second" }]
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelsSelector()
+    const old = children[0]
+    available.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const changed = old.handleInput("\r")
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"), { timeout: 500 })
+    await old.handleInput("\u001b")
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    release(models)
+    await changed
+    await old.handleInput("\u0013")
+    expect(f.session.scopedModels).toEqual([])
+    expect(f.session.settingsManager.getEnabledModels()).toBeUndefined()
+    expect(children).toEqual([mode.editor])
+    expect(mode.feedback.showStatus).not.toHaveBeenCalled()
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("keeps actual applied settings truth after deferred UI publication fails", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showSettingsSelector()
+    const list = children[0].getSettingsList()
+    const item = list.items.find((item: any) => item.id === "autocompact")
+    list.selectedIndex = list.filteredItems.indexOf(item)
+    mode.feedback.footerAuto.mockImplementation(() => { throw new Error("synthetic footer render failure") })
+    await list.handleInput("\r")
+    expect(f.session.autoCompactionEnabled).toBe(true)
+    expect(item.currentValue).toBe("true")
+    expect(mode.feedback.showError).toHaveBeenCalledWith("synthetic footer render failure")
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("rechecks actual scoped-model authority after registry wait before native scope mutation", async () => {
+    let models: any[] = []
+    let release!: (models: any[]) => void
+    const available = vi.fn((): any => models)
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const model = JSON.parse(JSON.stringify(f.session.model))
+    models = [model, { ...model, id: "synthetic-second" }]
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelsSelector()
+    const selector = children[0]
+    available.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const changed = selector.handleInput("\r")
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"), { timeout: 500 })
+    f.setLive(pending)
+    release(models)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.session.scopedModels).toEqual([])
+    expect(selector.enabledIds).toBeNull()
+    expect(selector.isDirty).toBe(false)
+    f.approve()
+    await changed
+    expect(f.session.scopedModels).toHaveLength(1)
+    expect(selector.enabledIds).toHaveLength(1)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+  })
+
+  it("rechecks actual scoped-model display after saved-pattern registry wait before opening UI", async () => {
+    let models: any[] = []
+    let release!: (models: any[]) => void
+    const available = vi.fn((): any => models)
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const model = JSON.parse(JSON.stringify(f.session.model))
+    models = [model, { ...model, id: "synthetic-second" }]
+    f.session.settingsManager.setEnabledModels([`${model.provider}/${model.id}`])
+    available.mockImplementationOnce(() => models).mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    const { mode, children } = interactiveConfiguration(f)
+    const opened = mode.showModelsSelector()
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"), { timeout: 500 })
+    f.setLive(pending)
+    release(models)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(children).toHaveLength(0)
+    f.approve()
+    await opened
+    expect(children[0]).not.toBe(mode.editor)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
 
   it("admits owning interactive name before native mutation and successful UI feedback", async () => {
     const f = await frontendFixture({ parked: true })

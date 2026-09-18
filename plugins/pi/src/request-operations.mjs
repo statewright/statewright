@@ -150,6 +150,7 @@ export function createPiRequestOperations() {
             signal,
             current,
             owns: () => owned(ref) && !signal.aborted,
+            effect: fn => inherited(ref, () => this.dispatch(fn)),
             run: async fn => {
               if (typeof fn !== "function" || !owned(ref) || signal.aborted || entry !== newestInput) {
                 throw new Error("Native interactive request unavailable");

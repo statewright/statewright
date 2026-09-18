@@ -1,15 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { InteractiveMode, ModelSelectorComponent, VERSION } from "@mariozechner/pi-coding-agent";
+import { InteractiveMode, ModelSelectorComponent, SettingsSelectorComponent, VERSION } from "@mariozechner/pi-coding-agent";
+import { bindPiConfigurationSelector } from "./request-configuration-selector.mjs";
 
 // Explicit private INSTANCE ABI, not a public SDK hook. See ADR009. Never hand
 // this mode-only capability to extension/project contexts or raw SDK sessions.
 export function installPiInteractiveConfiguration(mode, gesture) {
-  const entries = ["cycleThinkingLevel", "cycleModel", "handleModelCommand", "showModelSelector", "handleNameCommand"];
+  const entries = ["cycleThinkingLevel", "cycleModel", "handleModelCommand", "showModelSelector", "handleNameCommand",
+    "showSettingsSelector", "showModelsSelector"];
   const publications = ["showStatus", "showError", "showWarning", "updateEditorBorderColor", "checkDaxnutsEasterEgg"];
   const targets = [[mode.ui, "requestRender"], [mode.ui, "setFocus"], [mode.footer, "invalidate"],
-    [mode.chatContainer, "addChild"], [mode.defaultEditor, "setText"],
+    [mode.chatContainer, "addChild"], [mode.defaultEditor, "setText"], [mode.ui, "invalidate"],
+    [mode.footer, "setAutoCompactEnabled"], [mode.footerDataProvider, "setAvailableProviderCount"],
     ...(mode.editor === mode.defaultEditor ? [] : [[mode.editor, "setText"]])];
   if (VERSION !== "0.73.0" || !(mode instanceof InteractiveMode) || typeof gesture !== "function"
+    || typeof mode.keybindings?.matches !== "function"
     || [...entries, ...publications, "showSelector", "setupEditorSubmitHandler"].some(key => typeof mode[key] !== "function")
     || targets.some(([object, key]) => typeof object?.[key] !== "function")) {
     throw new Error("Owning interactive configuration binding unavailable");
@@ -20,7 +24,12 @@ export function installPiInteractiveConfiguration(mode, gesture) {
   const allowed = () => !uiCalls.getStore() || uiCalls.getStore().owns();
   for (const [object, key] of [...publications.map(key => [mode, key]), ...targets]) {
     const original = object[key].bind(object);
-    object[key] = (...args) => { if (allowed()) return original(...args); };
+    object[key] = (...args) => {
+      if (!allowed()) return;
+      const call = uiCalls.getStore();
+      if (call?.deferPublications) { call.publications.push(() => original(...args)); return; }
+      return original(...args);
+    };
   }
   const observe = (scope, promise) => {
     // Native key/component callers are void. Retain an awaitable for tests and
@@ -34,7 +43,16 @@ export function installPiInteractiveConfiguration(mode, gesture) {
     let scope;
     return observe(null, gesture(text, captured => {
       scope = captured;
-      return uiCalls.run(captured, fn);
+      const call = { ...captured, pendingSelectors: [] };
+      return uiCalls.run(call, async () => {
+        const result = await fn();
+        // Native helpers ignore showSelector's return and may await registry
+        // resolution first. Reconcile authority before constructing/displaying.
+        for (const create of call.pendingSelectors) {
+          await captured.effect(() => uiCalls.run({ ...call, pendingSelectors: null }, create));
+        }
+        return result;
+      });
     }).catch(error => {
       if (scope?.owns()) uiCalls.run(scope, () => mode.showError(error instanceof Error ? error.message : String(error)));
     }));
@@ -46,7 +64,8 @@ export function installPiInteractiveConfiguration(mode, gesture) {
     if (typeof original !== "function") throw new Error("Owning interactive submit binding unavailable");
     mode.defaultEditor.onSubmit = text => {
       const command = typeof text === "string" ? text.trim() : "";
-      if (!["/model", "/name"].some(name => command === name || command.startsWith(name + " "))) return original(text);
+      if (!["/model", "/name"].some(name => command === name || command.startsWith(name + " "))
+        && !["/settings", "/scoped-models"].includes(command)) return original(text);
       // SDK clears the editor before /model lookup and without awaiting /name.
       // Own the outer native callback too, not just its private helper.
       return invoke(JSON.stringify({ gesture: "editor-submit", text: command }), () => original(text));
@@ -55,6 +74,10 @@ export function installPiInteractiveConfiguration(mode, gesture) {
   const selector = mode.showSelector.bind(mode);
   mode.showSelector = create => {
     const scope = uiCalls.getStore();
+    if (scope?.pendingSelectors) {
+      scope.pendingSelectors.push(() => mode.showSelector(create));
+      return;
+    }
     if (!scope) {
       detachSelector?.(true); // Native UI replacement dismisses the captured original gesture too.
       return selector(create); // Other settings/selectors remain outside this bounded cut.
@@ -86,6 +109,14 @@ export function installPiInteractiveConfiguration(mode, gesture) {
       const selectorScope = Object.freeze({ ...scope, owns: () => scope.owns() && selectorToken === token });
       const result = uiCalls.run(selectorScope, () => create(() => finish(false)));
       const component = result.component;
+      if (component instanceof SettingsSelectorComponent || component?.constructor?.name === "ScopedModelsSelectorComponent") {
+        bindPiConfigurationSelector({ component, settings: component instanceof SettingsSelectorComponent,
+          scope, tokenCurrent: () => selectorToken === token, uiCalls, observe, keybindings: mode.keybindings,
+          requestRender: () => mode.ui.requestRender(), session: mode.session,
+          availableProviderCount: count => mode.footerDataProvider.setAvailableProviderCount(count) });
+        scope.signal.addEventListener("abort", revoked, { once: true });
+        return result;
+      }
       if (!(component instanceof ModelSelectorComponent)
         || ["handleSelect", "onSelectCallback", "onCancelCallback"].some(key => typeof component[key] !== "function")) {
         detachSelector();

@@ -41,4 +41,8 @@ export function installPiRequestGuards({ pi, gate, referenceFor }) {
     const valid = await admitted(event, ctx, true);
     if (!valid?.()) return { cancel: true };
   });
+  pi.on("session_before_tree", async (event, ctx) => {
+    const valid = await admitted(event, ctx, true);
+    if (!valid?.()) return { cancel: true };
+  });
 }

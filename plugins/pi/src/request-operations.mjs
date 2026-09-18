@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { createLocalBashOperations } from "@mariozechner/pi-coding-agent";
+import { installPiOwnedCompaction } from "./request-compaction.mjs";
 
 // Private call identity, not prompt text, a model argument or the latest cache.
 // Install only on a task-owned SDK session, before its first prompt.
@@ -236,8 +237,9 @@ export function createPiRequestOperations() {
     install({ session: target, gate: requestGate }) {
       const configMutators = ["setThinkingLevel", "cycleThinkingLevel", "setActiveToolsByName", "setSessionName", "setScopedModels"];
       const configAppends = ["appendThinkingLevelChange", "appendModelChange", "appendCompaction", "appendCustomEntry",
-        "appendSessionInfo", "appendLabelChange"];
+        "appendSessionInfo", "appendLabelChange", "branchWithSummary", "branch", "resetLeaf"];
       if (session || closed || typeof target?.prompt !== "function" || typeof target?.compact !== "function"
+        || typeof target?.navigateTree !== "function"
         || typeof target?.clearQueue !== "function" || typeof target?.sendCustomMessage !== "function"
         || typeof target?.extensionRunner?.createContext !== "function"
         || typeof target?.modelRegistry?.getAvailable !== "function"
@@ -315,6 +317,7 @@ export function createPiRequestOperations() {
       session.setModel = (...args) => this.dispatch(() => model(...args));
       const prompt = session.prompt.bind(session);
       const compact = session.compact.bind(session);
+      const navigateTree = session.navigateTree.bind(session);
       const custom = session.sendCustomMessage.bind(session);
       const subscribe = session.subscribe.bind(session);
       // SDK queues extension processing before public delivery/persistence.
@@ -421,6 +424,14 @@ export function createPiRequestOperations() {
         if (!owned(ref)) return Promise.reject(new Error("Owned compaction request unavailable"));
         return inherited(ref, () => compact(...args));
       };
+      session.navigateTree = (targetId, options = {}) => {
+        const ref = copy(reference());
+        if (!owned(ref)) return Promise.resolve({ cancelled: true });
+        // SDK checks options.summarize again after hooks/auth awaits. Never
+        // retain a caller-owned object that can activate its raw fallback later.
+        const captured = structuredClone(options);
+        return inherited(ref, () => this.dispatch(() => navigateTree(targetId, captured)));
+      };
       session.sendCustomMessage = async (message, options) => {
         const ref = copy(reference());
         if (!owned(ref) || !await gate.checkpoint(context(), undefined, ref) || !owned(ref)) return;
@@ -472,6 +483,7 @@ export function createPiRequestOperations() {
         const enqueue = session.agent[key].bind(session.agent);
         session.agent[key] = (...args) => { if (owned(reference())) return enqueue(...args); };
       }
+      installPiOwnedCompaction(session, this);
     },
     async close() {
       let nativeOwned = false;

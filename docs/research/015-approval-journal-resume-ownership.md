@@ -2,6 +2,425 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 21 entry: immutable SDK summary handoff (continues uncommitted Slice20)
+
+Previous turn classified PROGRESS: authoritative P1 handoff finding plus actual
+SDK RED changed the next action; no unfinished handle restarted. Recheck confirms
+Statewright main HEADbd00adf, eight root-owned staged Slice20 paths and seven
+unrelated user tracked changes unchanged; Auldwyrm HEAD65025b5/diff unchanged.
+Full006 nine-row/012 numbered1-4/slicesA-D/111/116 requirements re-read, not
+redefined around this slice. No workflow/state/tool/catalog/usage query/load/use;
+explicit user override remains authoritative over skill activation doctrine.
+
+Microtask handoff regression revalidated unchanged source:1 failed/55 excluded,
+HTTP2 rather than1, exit1. Root repair attempt1 for this NEW handoff finding:
+freeze actual SDK-retained branch array before hooks; expose deep detached plain
+hook preparation (preserves Sets/Maps), not native array/entry records. Diagnose
+immediate/awaited mutation of original/project views and reference swaps; late
+hook-view mutation is harmless because SDK consumption uses distinct frozen
+array. Do NOT deep-freeze unrelated SessionManager records or patch installed
+SDK. Actual SDK test now challenges BOTH hook-view and raw retained array at
+the microtask window, asserts exact input separation/frozen retained array,
+normal empty-tree continuation/zero summary HTTP and unfrozen native entry.
+Add actual supported TREE custom summary/cancel, default instruction/replace/
+label result controls, not just custom compaction. Direct/hidden replacement
+and existing defaults/custom/cancel/stale tests stay.
+
+Same eight owned paths. Acceptance: actual Agent60 expected/Pi332+existing skip
+only after observed PASS; exact staged export Node308 SERIAL/native2, SOURCE
+Claude parity/three mjs syntax/manifest-lock match; independent clean-context
+Astra/high read-only finding-only review then coherent local eight-path commit.
+No all-provider/retry/drain/recovery/human-authority/host promotion conformance.
+No resolver/decision/real inference/live sessions/install/vendorpatch/deploy/push.
+Source gate SDK0.73.0 public imports and inert local SDK/SSE/synthetic authority.
+
+Manual observed-only profile: root70 normal/100 contraction tools,20min warning/
+30min contraction,24KiB relevant task-output target excluding full mandatory skill
+instructions; final third reserved for validation/review/repair/handoff. Stop
+optional breadth at threshold, preserve failed/superseded evidence. No controller
+probe (forbidden workflow use); requested/effective routing and provider aggregate
+quota not enforced/verified. Root route inherited, sole implementer; review route
+frontier Astra/high justified by no-inference/private ownership boundary, one
+normal/two worst review turns, bounded10 diagnostics/8min/2 focused initial,
+finding-only repair recheck4/5min/2, at most2 repairs per new finding. Two exports
+plus regression-justified third. Do not erase prior Slice20 usage/rework: previous
+turn25m41s,3 exports/3 CLI reviews incl incomplete, output target exceeded; no
+cumulative hard-limit or cost compliance claim. Carry all nine OPEN requirement
+rows, original Slice20 source receipts below and final requirement audit forward.
+
+### Slice 21 exact-source results and independent evidence reconciliation
+
+Canonical actual SDK Agent60/60 passed. Frozen source tree
+22bfec746ea85ba749a4005b7f3fa7916390d6f3, export
+/tmp/statewright-owned-summary-immutable.w0KWbS: Node308/308 SERIAL (zero
+failures/skips/cancellations); Pi332 passed/1 existing opt-in live-test skip
+(8 passed files/1 skipped, Agent60/frontend123); native2/2. SOURCE Claude
+managed-client parity, three changed-mjs syntax and peer manifest/root lock
+consistency/existing pi-ai0.73.0 entry exit0. No install/dependency resolution
+change. No Rust/workspace-wide typecheck/lint/build/GUI/native decision/cold
+restart/installed runtime/CI/staging/soak/promotion proof. Installed Claude
+runtime drift remains known/unrepaired from Slice20; source parity is distinct.
+
+One fresh collaboration spawn hit lifetime thread capacity; no reviewer identity
+reuse. Two independent scrubbed ephemeral read-only CLI reviews, both requested
+Astra/high (effective routing unverified), distinct from root runtime verified
+01a0b0f5-909c-7b61-b632-3375983b613f. Both process exit0/final outputs captured,
+both matched8/8 export blobs. Oracle direct review, no new agents/edits/network
+inference/workflow use. Exact source unchanged between reviews; no second export.
+
+First reviewer01a0b203-e7fc-7af2-a701-70e6ae4f9f01:4 diagnostic attempts,2
+focused invocations, approximately2m12s. Vitest unavailable: tmpdir sandbox
+denial, exit1/zero tests. Inert REAL adapter/PUBLIC native SDK prototype probe
+with substituted operations passed5 cases: late detached mutation, late retained
+array mutation rejected, current empty navigation, custom summary/label, cancel.
+The two late cases asserted native event present, frozen actual retained array,
+detached view, scheduled microtask observed, zero raw fallback and native TypeError
+when appropriate: these are NOT no-op/current-leaf tests. Probe THEN exited1 on
+wrong bare-summary expectation, stock SDK had added its branch preamble. Later
+planned cases did not execute. No confirmed product finding, but probe overall
+FAIL; do not relabel it pass or infer real ownership-gate acceptance from stubs.
+
+Fresh evidence-only reviewer01a0b206-baf1-7651-a182-a6f7feaf12ad:4 diagnostics,
+2 focused invocations, approximately3m32s. First invocation CommonJS resolution
+failed before cases because SDK package exports are import-only; no product
+change. Final public ESM/native prototype probe executed16:12 passed/4 failed,
+6 inert provider calls/20 substituted dispatches/network0, terminal exit1.
+Registry cleanup verified baseline9->final9. Passing: custom summary/label,
+cancel, default additional/replacement instructions with correct stock prefix,
+labels without summarization, six immediate/awaited hook value/reference mutation
+cases, copied Sets/Maps/entry values and unfrozen native record. Four failures:
+default output wrongly expected fromExtension entry field; empty fixture selected
+current leaf, SDK returned before hooks, so empty/handoff tests never exercised
+adapter. Nested completion0/2 is UNPROVED in THIS run, not a contradiction of
+first review's actual executed late cases or root's actual-owner microtask tests.
+No confirmed product finding; overall FAIL/incomplete, not a passing full probe.
+
+Authoritative fixture reconciliation: installed branch-summarization.js149/233
+defines/applies exact stock preamble; session-manager.js857-870 stores fromHook,
+not fromExtension (native local variable name); agent-session.js2149 returns
+immediately on target===oldLeaf. Root actual public SDK tree controls assert
+fromHook true and labels; real microtask tests deliberately branch to ancestor
+THEN select distinct descendant, verify hook/retained inputs and mutation ran.
+These discriminating observations classify failures as fixture/unavailability,
+not repaired product failures or waiver of a known product defect.
+
+Disposition: microtask P1 fixed WITHIN this experimental boundary by root real
+owner tests plus first independent executed late cases; supported overrides/value
+separation supported by root controls plus second independent executed cases.
+Engineering accepts the COMPOSED, source-identical evidence for scoped local
+commit, NOT either overall probe as PASS, NOT production/all-provider acceptance.
+Independent reviews both found no confirmed defect; their unavailable/incorrect
+fixture paths and substituted-owner limits remain recorded. No third reviewer/
+duplicate broad gate/optimistic self-close of an untested handoff. Source finding
+repair count1, one source export, two review turns (declared worst path).
+
+Provider counters reported first input137567/cache102400/output3970/reasoning870;
+second input135647/cache101376/output5896/reasoning985. These are observed review
+facts, not full-goal aggregate quota or price conversion. Review source output
+targets exceeded (33391 and42684 bytes vs20KiB target); root output/call accounting
+incomplete, task-output target exceeded, no hard-budget/compliance claim. Prior
+Slice20 usage/rework retained, not erased. Final recording is RESEARCH RECEIPT-
+ONLY delta from tested/reviewed source. Source/ADR/tests/manifest unchanged.
+
+### Slice 21 full original completion audit: all nine requirements remain OPEN
+
+Re-read authoritative006147-172,0121-43,11119-62/202-242,11649-100. Evidence
+above proves the named SDK summary handoffs, not full original completion:
+
+1. Immutable tenant/client/session/run/edge/action/artifact/policy/reviewer/
+   expiry/revocation ticket: OPEN; no complete authoritative proof.
+2. Private original SDK caller/epoch/UUID captured; complete parent/child/branch/
+   restart/replacement/cross-host lineage and owning tree gestures: OPEN.
+3. Default summary stream/payload/HTTP/immutable-handoff tests operating locally;
+   all settings/UI/registry/FS/spawn/queue/auth/provider FX, fixed Codex retries/
+   WS/auth internals and native core retry state/controllers/events: OPEN.
+4. Actual authenticated entitled native/website/required-reviewer journey: OPEN;
+   no resolver/decision/human authority added or exercised.
+5. Synthetic durable pending/cancel/late proofs partial; lost begin/cold native
+   restart/legacy/crash-lock/permanent SDK failure/in-flight drain: OPEN.
+6. Nonce/tombstone primitives partial; real authorization/entitlement/artifact/
+   policy revalidation and exactly-once crash delivery: OPEN.
+7. Tested summary final persistence and stale/cancel guards improved; every
+   native effect/final response ownership and publication: OPEN.
+8. Decision source/authentication-strength provenance: OPEN; routing/API keys/
+   discoverable aliases are not a human click or same-OS isolation.
+9. Client-neutral reviewer/evidence/retention, clean standalone install and
+   every advertised runtime/provider/native acceptance: OPEN.
+
+012 A/1 user-dirty Rust denial unchanged/unvalidated/uncommitted;2 trusted decision
+path unproved;C/3 parent/mirror/cold fixtures partial;B/4 inactive experimental
+owner adapter, installed/main activation not proved;D authorized gateway/native
+decision/restart canaries not run.111 shared native/website/evidence journey and
+116 desktop/native Windows vsWSL/clean release/protocol100-iteration per-runtime/
+24h multi-session/provider-authenticated promotion remain OPEN. Historical
+staging receipts not current evidence. Full goal ACTIVE, not complete/blocked.
+
+Next bounded source frontier: SDK native core retry state and lifetime ownership.
+Installed agent-session.js1934-2003 mutates retry attempt/promise, emits retry
+events, removes message, assigns shared abort controller, awaits sleep, then
+clears shared fields/schedules continue. Existing inference-continue guards do
+not prove all those effects/replacement/cancellation/drain races. Build actual
+SDK/native input RED around retry sleep/new input and old controller/finally
+cleanup before accepting a source fix; no disable-retry mask, copied algorithm,
+latest-scope adoption or weaker pending assertion. Broader authority/recovery/
+host obligations above remain controlling. Rollback: scoped local revert of
+eight-path additive experimental source, preserve journals/native records.
+No push/install/activation/deploy/live native session/workflow use occurred.
+
+## Slice 20 entry: owned default compaction and branch summary inference
+
+Basebd00adf; previous turn progress committed and exact-source verified. Continue
+full006/012/111/116 contract manually, no Statewright query/load/use/workflow.
+Preserve seven user tracked/untracked changes and Auldwyrm. Root sole implementer;
+mandatory independent clean-context Astra/high read-only final review, isolated
+scrubbed ephemeral CLI fallback if collaboration thread capacity unavailable.
+
+SDK0.73.0 manual/automatic compaction and branch summary directly call public
+compact/generateBranchSummary -> completeSimple, bypassing ordinary Agent payload
+hook. Existing before-compaction admission does not lease later provider awaits
+or final publication; branch summary lacks a native guard. Bind public runner.emit
+aggregate result boundary on the owned session, preserve explicit cancel/custom
+results, and supply default summaries using the SAME public SDK algorithms with
+an ephemeral PRIVATE API alias. Alias delegates captured original public provider;
+no builtin/global registration overwrite, private SDK import, installed patch or
+session.model API rewrite. Require exact SDK version/shape and original private
+call at alias invocation; fresh checkpoint before stream, after payload callback
+await and before final native publication. Combined SDK/epoch signal, stale result
+denial and exact alias unregister; disable uncheckpointed client-side retries
+where public provider option supports it. Native fromExtension records adapter-
+supplied SDK default summaries explicitly; no claim they came from stock path.
+
+Owned scope: new request-compaction.mjs, operations install, request-hooks tree
+guard, actual SDK Agent/native tests, paired public pi-ai peer manifest/lock
+metadata if required, new ADR010 and this receipt. Red first: pending after payload
+await and HTTP completion, replacement/cancellation/late callbacks, automatic
+compaction, branch summary, current failure and positive SDK defaults/custom
+overrides. Public provider onPayload contract backed by installed builtin sources;
+not all transports/retry internals, headed recovery, every effect, policy/artifact/
+reviewer/authorization/native restart or cross-host acceptance proved collectively.
+No real authority/resolver/decision/inference, live sessions/signals, installs,
+vendor patches, deploy/push. Inert task-owned SDK/loopback fixtures only.
+
+Exact staged export gates: Node SERIAL308 baseline, Pi309+existing live skip,
+native2, Claude generated parity and changed-mjs syntax. Root observed-only
+100 normal/135 contraction tool calls,30min warning/45min contraction,16KiB output
+target, final-third reserve. Stop optional breadth at warning/reserve; no catalog/
+controller usage probe, invented workflow identity, hard provider/aggregate quota
+or price conversion. Reviewer10 diagnostics/12min/2 focused invocations; fresh
+finding-only recheck4/5min/2, max2 repairs/finding and2 exports plus a regression-
+justified third. Existing manual source/evidence/Git control profile only, no new
+production/compliance baseline. Coherent scoped commit/revert preserves journals/
+native owner records. Full requirement audit before any completion disposition;
+safe implementation remains, so goal active, not complete or blocked.
+
+### Slice 20 retained red/repair evidence
+
+Initial4-case gate4/4 failed; two cases were fixture-invalid (unadmitted slash
+command cannot bind original reference), with one5s test and two10s cleanup hook
+timeouts. Retain this failure, not proof of those paths. Fixture now captures
+automatic/tree callbacks inside actual before_agent_start after native admission,
+preserves default captured history and releases task-owned provider waits BEFORE
+SDK drain on red. Corrected unchanged-source gate4/4 failed on missing onPark:
+manual/automatic payload await, post-HTTP compaction and branch payload wait all
+escaped fresh authority. All jobs terminal; no preserved/live session access.
+
+First implementation six-case gate2 passed/4 failed: snapshot lost native Set
+fileOps, causing fileOps.edited not iterable. Preserve actual Sets/Maps, no relaxed
+algorithm/persistence assertions;6/6 passed including old manual controls. Full
+Agent48-case gate46 passed/2 failed +one unhandled rejection: natural auto split
+starts two summaries, second rejected when sibling parks; combined branch test
+invented second approval incompatible with single-ticket fixture. Repair distinct
+causes: serialize original alias siblings, keep exact SDK-derived summary count;
+separate registry/post-HTTP race fixtures, attach rejection observation promptly.
+Agent49/49 passed. New native event-kind mutation test1/1 RED: compaction resolved
+from raw SDK fallback instead of rejecting. Snapshot kind/signal/preparation and
+reject changed envelope; no fallback. Add completed-callback denial even SAME
+original private request via lease expiry. Pre-freeze Pi323 passed/1 existing live
+skip, including51 Agent and123 frontend tests; this is not exact export proof.
+Model/preparation/provider context/payload snapshots prevent post-wait retargeting;
+custom compaction/cancel and genuine500 error/no extra OpenAI retry controls stay.
+ADR010 records public algorithms, temporary alias/global registry boundaries,
+fromExtension provenance, native branch guards and known retry/internal gaps.
+
+### Slice 20 independent finding and bounded repair
+
+Initial exact tree c0e32d0f1d3ef9b3372a39068e9ebe5ea626b9a8 at
+/tmp/statewright-owned-summary.qVuPVW passed Node308/308 SERIAL, Pi323 passed/1
+existing live skip (Agent51/frontend123), native2/2, Claude parity/three changed
+mjs syntax/peer-root-lock consistency exit0. Independent collaboration spawn
+hit thread capacity; no identity reuse. Scrubbed read-only ephemeral CLI fallback
+requested Astra/high, effective model unverified; distinct thread
+01a0b1f4-902e-7d93-996e-e4b4abe8c91e, process exit0 and final output captured.
+Reviewer used10 diagnostic attempts (one read-only sandbox-refused heredoc), two
+inert focused probes, approximately4m15s; no edits/network inference/new agents.
+All eight export files matched frozen blobs. P1: hook changes initially empty
+branch entries array; adapter returns no summary from empty snapshot, SDK later
+uses live nonempty array and dispatches raw provider while pending/auth awaits.
+Both source-only probes reproduced one pending provider invocation/no payload
+guard/zero writes, including actual request operations plus SDK navigateTree.
+Native append guard worked, not sufficient to close escaped inference dispatch.
+
+Root actual SDK/loopback regressions2/2 RED (51 excluded), exit1: mutated empty
+preparation resolved via raw summary instead of rejection; caller options changed
+summarize false->true while hook awaited caused HTTP count2 rather than1. Second
+is a distinct adjacent fallback cause, not reviewer-reported direct evidence.
+Repair attempt1 each: fail closed on preparation changes after aggregate hooks
+AND after all owned dispatch waits; snapshot public navigateTree options before
+first await under its original private caller and fresh checkpoint. No latest
+adoption/unbound tree gesture activation. Supported result overrides preserved;
+raw preparation mutation intentionally rejected, disclosed ADR010 compatibility
+restriction. Initial green tree superseded. Fresh focused/export/review gates
+required; failed outcomes retained, no weaker summary/no-inference assertions.
+
+### Slice 20 repaired exact-source gates
+
+Root actual SDK Agent53/53 passed (new regressions2, total Slice20new16). Second
+frozen tree ae8a22a18ca025dc174e292cee2734ce4e0122ae at
+/tmp/statewright-owned-summary-repaired.sNVjZg passed Node308/308 SERIAL (zero
+failures/skips/cancellations), Pi325 passed/1 existing opt-in live-test skip
+(8 passed files/1 skipped, Agent53/frontend123), native2/2. Claude generated
+managed-client source parity, three changed-mjs syntax and peer-manifest/root-lock
+consistency (existing pi-ai0.73.0 lock entry) exit0. Canonical staged diff check0;
+all eight export blobs compared equal to exact tree; staged tree unchanged.
+
+Retain two root parity command errors: guessed scripts/sync-runtime.mjs does not
+exist (exit1); corrected sync-runtime --check unexpectedly includes installed
+Claude runtimes and reported pre-existing stale hook/supervisor/model-ladder/
+remote-client/windows-command files (exit1). No sync/install/overwrite performed.
+Required SOURCE parity uses plugins/claude-code/scripts/sync-managed-client.mjs
+--check, passed exit0; installed runtime parity remains unproved/known stale, not
+waived by source success. No Rust/workspace-wide typecheck/lint/build, headed/live
+native approval, cold restart, installed launcher, CI/staging/soak/promotion proof.
+Seven unrelated Statewright tracked changes retain SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm HEAD65025b5 and tracked diff SHA256
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa unchanged.
+Temporary exports are exact validation fixtures; durable proof is local source/
+scoped Git milestone and this receipt. Fresh independent finding-only review
+required before local commit; broader original goal remains active.
+
+### Slice 20 retained-reference regression and final repair
+
+First fresh repair CLI thread01a0b1fb-1f37-7fa3-b308-84609b4dd40d distinct from
+root; process exit0/final captured. Four diagnostic commands, zero focused,
+statuses0/1/0/1. No finding in inspected source, but explicitly INCOMPLETE:
+SDK package path guessed incorrectly, sandbox refused heredoc, output truncated,
+frozen-blob comparison not reached. Requested Astra/high unverified. Do not count
+this as independent repair acceptance; label supplied by reviewer is not its
+runtime identity (parent captured actual thread.started UUID above).
+
+Root retained-reference challenge: hook mutates original entries, then swaps
+visible preparation OR just entries property to a clean equal-valued copy.
+Against first repair, focused3-case gate1 passed/2 failed (52 excluded), exit1;
+both replacements still resolved through raw SDK summary. Values-only comparison
+against latest event view was insufficient because SDK retained original array.
+Repair attempt2 for original P1: capture native preparation AND branch entries
+object identities, reject replacement of either, validate ORIGINAL preparation
+values after hooks/owned waits. No latest-view comparison/adoption. Caller-options
+repair remains attempt1. Third export explicitly regression-justified; second
+green source superseded. Fresh exact gates and independent source-bound review
+required. All failures retained; original full contract remains OPEN.
+
+### Slice 20 latest review: OPEN immutable-handoff finding, no commit
+
+Third frozen tree2f4aee6344c69919cc81bc89033b725d43079537 at
+/tmp/statewright-owned-summary-final.90objb passed Node308/308 SERIAL (zero
+failure/skip/cancel), Pi327 passed/1 existing live skip (Agent55/frontend123),
+native2/2, Claude SOURCE managed-client parity, three mjs syntax and peer/root
+lock consistency exit0. Root matched all eight exported blobs, owned unstaged
+quiet, exact staged tree unchanged before review. These GREEN gates do NOT close
+the subsequent adversarial finding or validate the latest staged RED regression.
+
+Independent scrubbed ephemeral/read-only CLI, requested Astra/high (effective
+selection unverified), runtime thread captured by parent
+01a0b1fd-9498-7630-95be-01d836f868d1, distinct from root
+01a0b0f5-909c-7b61-b632-3375983b613f. Process exit0/final output captured.
+Oracle direct review:4 diagnostic attempts, terminal statuses0/1/0/0, one focused
+invocation/ten inert cases, approximately2m03s; wrong root lockfile path failed
+once then correct plugin lock verified. All eight frozen blobs matched. Six hook/
+dispatch direct/hidden replacement cases rejected; microtask handoff depth1
+returned undefined with retained array populated/raw fallback condition true.
+P1 at request-compaction.mjs final unchanged() -> async resolution -> SDK source
+agent-session.js2210. Dispatch queues a microtask which queues mutation: validation
+runs BEFORE mutation but SDK resumes AFTER. Source-only inert probe used real
+adapter with dispatch substitute; native fallback inferred from inspected actual
+SDK, not independently executed with operations/provider. Counts/limits honest;
+no broader goal acceptance. Reviewer lacked runtime ID visibility; parent
+thread.started above is authoritative, not invented reviewer label.
+
+Root actual SDK/REAL request operations regression schedules the same nested
+microtask after the real dispatch completes (spy preserves checkpoint/effect),
+with genuine original native entries. One focused test FAILED (55 excluded),
+exit1: HTTP count2 rather than1; native navigation resolved via raw fallback.
+This proves the handoff cause at the real SDK boundary, not just synthetic emit.
+Attempting immutable-array mutation may be denied; fixture observes that denial
+without unrelated unhandled microtask errors. No network model inference, real
+authority or preserved sessions: task-owned loopback SSE/synthetic journal only.
+
+NO COMMIT: HEAD remains bd00adf6d743003ebb341e2ca017bfd919c7d93c. Eight owned
+paths pending/staged, root-owned continuation; implementation source remains third
+reviewed tree, with latest RED test/ADR OPEN finding/receipt added. Original P1
+two comparisons/identity repair attempts and three source exports consumed this
+declared slice envelope; stop additional breadth/export churn, leave explicit
+failed handoff for the NEXT bounded manual source slice, not self-accept. New
+microtask finding repair not attempted yet. No required objective dropped.
+
+Exact next safe source work: make the ACTUAL SDK-retained branch array immutable
+BEFORE exposing hooks, not merely another comparison/snapshot/proxy of latest
+event view. Avoid freezing unrelated SessionManager records or patching vendor;
+preserve empty/current/default/custom/cancel semantics and original private caller.
+Keep this actual handoff RED and direct/hidden replacement tests; expect Agent56/
+Pi328+existing skip only after real passing evidence, then fresh exact export
+Node308/native2/source parity and independent finding-only review before coherent
+eight-path commit. Native core retry ownership follows, plus full006/012/111/116
+audit below. Full goal ACTIVE, not complete or blocked; safe source work remains.
+
+Observed-only usage envelope, no hard provider/controller/aggregate quota; root
+call/output accounting incomplete,16KiB output target exceeded by diagnostics.
+Do not assert budget compliance. Initial failed/incomplete reviews retained, no
+model-price conversion, no workflow probe/load/use, no live resolver/decision/
+approval/inference/install/deploy/push. Preservation hashes below rechecked at
+handoff; no product changes outside eight owned paths, Auldwyrm untouched.
+
+### Slice 20 full original requirement audit, not completion
+
+Re-read current006 nine-row/012 numbered1-4 and slicesA-D, Auldwyrm111 native/
+shared reviewer/evidence contract and116 cross-host promotion. Historical staging
+receipts not current verification. All original requirements stay in scope:
+
+1. Immutable ticket/artifact/policy/reviewer/expiry/revocation: OPEN.
+2. Private original epoch/UUID/native summary/tree calls gain capture; complete
+   parent/branch/replacement/cross-host lineage and owning tree gestures: OPEN.
+3. SDK default compaction/branch summary stream/payload/HTTP-completion handoffs
+   now reconcile fresh; natural split auto positive/stale/cancel cases tested.
+   LATEST microtask retained-array -> raw fallback handoff finding remains OPEN;
+   this experimental slice is NOT independently accepted or committed.
+   Other raw settings/UI/registry/FS/spawn/queue/auth/provider FX, backend WS/retry
+   internals (including fixed Codex response retries), core automatic retry shared
+   state/controllers/events and all declared effect coverage: OPEN.
+4. Entitled authenticated native+website reviewer/required-reviewer journeys:
+   OPEN. No resolver/decision/human input authority introduced.
+5. Observed pending cancellation retains journal and rejects late callback;
+   lost begin reply/full cold native restart/legacy/crash-lock/permanent SDK
+   teardown/in-flight drain recovery: OPEN.
+6. Private nonce/tombstone primitives partial; real policy/artifact/authz/
+   entitlement revalidation and exactly-once crash delivery: OPEN.
+7. Protected summary final persistence/branch handoffs and captured callbacks
+   reject old/held work; every native effect/final publication: OPEN.
+8. Routing/API credentials/discoverable aliases are not human-auth strength or
+   same-OS isolation. Full decision provenance: OPEN.
+9. Neutral reviewer/evidence/retention, clean standalone install and advertised
+   runtime/provider acceptance: OPEN; no collective conformance claim.
+
+012 A/1 user-dirty Rust pending deny unvalidated/uncommitted;2 actual trusted
+decision route untested;C/3 parent/mirror/cold fixtures partial not production
+restart;B/4 experimental owning adapter improved, main activation not done;
+D gateway/native decision/restart canaries not authorized/run.111 native+website/
+reviewer/evidence journeys unproved;116 clean release/desktop/native Windows vs
+WSL/protocol races100 per supported runtime/24h multi-session soak/provider-
+authenticated promotion unproved. Full goal active, not complete or blocked;
+safe remaining source implementation exists and no requirement removed by green.
+
 ## Slice 19 entry: settings and scoped-model configuration input
 
 Basef1b2c75; last turn verified progress. Manual/no Statewright query/load/use

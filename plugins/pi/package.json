@@ -18,6 +18,7 @@
     "test:native": "node --test tests/*.test.mjs"
   },
   "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*"
   },
   "devDependencies": {

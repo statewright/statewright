@@ -2,6 +2,8 @@ import { createServer, type ServerResponse } from "node:http"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Type } from "typebox"
 import { AuthStorage, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
+import { getApiProvider, getApiProviders, registerApiProvider, unregisterApiProviders } from "@mariozechner/pi-ai"
+import { randomUUID } from "node:crypto"
 import { createPiRequestGate } from "./request-gate.mjs"
 import { installPiRequestGuards } from "./request-hooks.mjs"
 import { createPiRequestOperations } from "./request-operations.mjs"
@@ -34,7 +36,8 @@ function respondWithTool(response: ServerResponse) {
 // Public SDK factory installs actual Agent, onPayload and primary provider
 // transport. Responses are inert loopback SSE, not model inference. No native
 // session files, user settings, provider credentials or workflow are used.
-async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?: boolean; bind?: boolean; history?: "initial" | "after" } = {}) {
+async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?: boolean; bind?: boolean; api?: string;
+  autoCompact?: boolean; history?: "initial" | "after" } = {}) {
   const f = await fixture({ after: (fn: () => Promise<void>) => cleanup.push(fn) }, options)
   const requests: any[] = []
   const sockets: ServerResponse[] = []
@@ -79,7 +82,7 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     }
   }
   if (options.history === "initial") seedHistory()
-  const model = { id: "synthetic-chat", name: "Synthetic", api: "openai-completions", provider: "synthetic-provider",
+  const model = { id: "synthetic-chat", name: "Synthetic", api: options.api ?? "openai-completions", provider: "synthetic-provider",
     baseUrl: `http://127.0.0.1:${address.port}/v1`, reasoning: false, input: ["text"],
     contextWindow: 65_536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }
   const modelRegistry = { hasConfiguredAuth: vi.fn(() => true), getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "synthetic-not-a-secret" })),
@@ -87,16 +90,22 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
   const handlers = new Map<string, Array<(...args: any[]) => unknown>>()
   const on = (event: string, handler: (...args: any[]) => unknown) => handlers.set(event, [...handlers.get(event) ?? [], handler])
   let preparedHistory: (() => unknown) | null = null
+  let captureInput = () => {}
   let beforeAgent: () => unknown | Promise<unknown> = () => {
     if (options.history === "after") preparedHistory ??= operations.bind(seedHistory)
+    captureInput()
   }
   let beforeProvider = (_ctx: any) => {}
+  let beforeCompact = (_event: any, _ctx: any): unknown => undefined
+  let beforeTree = (_event: any, _ctx: any): unknown => undefined
   let command = async () => {}
   let toolEffect = () => {}
   const execute = vi.fn(async () => { toolEffect(); return { content: [{ type: "text", text: "synthetic tool result" }], details: {} } })
   on("input", (event, ctx) => operations.input(event, ctx))
   on("before_agent_start", async () => { await beforeAgent() })
   on("before_provider_request", (_event, ctx) => { beforeProvider(ctx) })
+  on("session_before_compact", (event, ctx) => beforeCompact(event, ctx))
+  on("session_before_tree", (event, ctx) => beforeTree(event, ctx))
   installPiRequestGuards({ pi: { on }, gate, referenceFor: () => options.bind === false ? null : operations.referenceFor() })
   const extension = { path: "fixture:actual-agent", handlers, tools: new Map(), commands: new Map([
     ["fixture-cmd", { name: "fixture-cmd", description: "Synthetic command", handler: () => command() }],
@@ -106,7 +115,7 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
     thinkingLevel: "off", ...(options.tool ? { tools: ["synthetic_tool"], customTools: [{
       name: "synthetic_tool", label: "Synthetic", description: "Inert fixture counter", parameters: Type.Object({}), execute,
     }] } : { noTools: "all" }), authStorage: AuthStorage.inMemory(), modelRegistry,
-    settingsManager: SettingsManager.inMemory({ compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 1 },
+    settingsManager: SettingsManager.inMemory({ compaction: { enabled: options.autoCompact ?? false, reserveTokens: 1024, keepRecentTokens: 1 },
       retry: { enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: 5, provider: { maxRetries: 0 } } }), sessionManager,
     resourceLoader: { getExtensions: () => ({ extensions: [extension], runtime: createExtensionRuntime() }),
       getSystemPrompt: () => "Synthetic fixture", getAppendSystemPrompt: () => [],
@@ -125,7 +134,10 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
       return preparedHistory()
     },
     setBeforeAgent: (callback: typeof beforeAgent) => { beforeAgent = callback },
+    setCaptureInput: (callback: typeof captureInput) => { captureInput = callback },
     setBeforeProvider: (callback: typeof beforeProvider) => { beforeProvider = callback },
+    setBeforeCompact: (callback: typeof beforeCompact) => { beforeCompact = callback },
+    setBeforeTree: (callback: typeof beforeTree) => { beforeTree = callback },
     setServe: (callback: typeof serve) => { serve = callback },
     setToolEffect: (callback: typeof toolEffect) => { toolEffect = callback },
     setCommand: (callback: typeof command) => { command = callback },
@@ -135,6 +147,444 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
 }
 
 describe("real SDK Agent and primary provider approval boundaries", () => {
+  function payloadWait() {
+    const source = randomUUID()
+    const api = `fixture-summary-${source}`
+    const primary = getApiProvider("openai-completions")!
+    let released!: () => void
+    let arrived!: () => void
+    let block = false
+    const ready = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { released = resolve })
+    const callbacks: any[] = []
+    const stream = (model: any, context: any, options: any) => primary.streamSimple({ ...model, api: "openai-completions" }, context, {
+      ...options,
+      onPayload: async (payload: any, nativeModel: any) => {
+        if (block) { block = false; callbacks.push(options?.onPayload); arrived(); await barrier }
+        return await options?.onPayload?.(payload, nativeModel)
+      },
+    })
+    registerApiProvider({ api, stream, streamSimple: stream } as any, source)
+    cleanup.push(() => { released(); unregisterApiProviders(source) })
+    return { api, ready, release: released, block: () => { block = true }, callbacks }
+  }
+
+  it.each([false, true])("parks actual SDK summary after payload wait before wire (automatic=%s)", async automatic => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "after", api: wait.api })
+    cleanup.push(wait.release) // Release task-owned provider waits before SDK drain, even on red.
+    let summary!: () => Promise<unknown>
+    if (automatic) f.setCaptureInput(() => {
+      summary = f.operations.bind(() => (f.session as any)._runAutoCompaction("threshold", false))
+    })
+    await f.prompt()
+    f.seedHistory()
+    wait.block()
+    // Bind the native automatic method to a genuine originating private request;
+    // do not replace its compaction implementation or provider transport.
+    const changed = automatic ? summary() : f.compact()
+    const settled = changed.then(() => null, error => error)
+    await wait.ready
+    f.setLive(pending)
+    wait.release()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    f.approve()
+    expect(await settled).toBeNull()
+    expect(f.requests).toHaveLength(2)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+  })
+
+  it("rechecks actual SDK compaction after HTTP completion before native append", async () => {
+    const f = await agentFixture({ history: "after" })
+    await f.prompt()
+    f.seedHistory()
+    f.setServe(() => {})
+    const changed = f.compact()
+    const settled = changed.then(() => null, error => error)
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    f.setLive(pending)
+    respond(f.sockets[1])
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    f.approve()
+    expect(await settled).toBeNull()
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1)
+    expect(f.requests).toHaveLength(2)
+  })
+
+  it("guards actual SDK branch summary payload wait before inference and preserves current positive", async () => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "after", api: wait.api })
+    cleanup.push(wait.release)
+    let navigate!: () => Promise<any>
+    let target!: string
+    f.setCaptureInput(() => {
+      navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true }))
+    })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    wait.block()
+    const beforeLeaf = f.sessionManager.getLeafId()
+    const changed = navigate()
+    const settled = changed.then(value => value, error => error)
+    await wait.ready
+    f.setLive(pending)
+    wait.release()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getLeafId()).toBe(beforeLeaf)
+    f.approve()
+    expect(await settled).toMatchObject({ cancelled: false })
+    expect(f.requests).toHaveLength(2)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(1)
+  })
+
+  it("parks natural SDK automatic compaction after Agent completion before summary wire", async () => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "initial", api: wait.api, autoCompact: true })
+    cleanup.push(wait.release)
+    let expected = 1
+    f.setBeforeCompact(event => {
+      const p = event.preparation
+      expected = p.isSplitTurn && p.turnPrefixMessages.length && p.messagesToSummarize.length ? 2 : 1
+    })
+    f.setServe((_body, response, index) => {
+      if (index === 1) { wait.block(); respond(response, "synthetic response", { prompt_tokens: 64_514, completion_tokens: 1, total_tokens: 64_515 }) }
+      else respond(response)
+    })
+    const input = f.prompt()
+    await wait.ready
+    f.setLive(pending)
+    wait.release()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    f.approve()
+    await input
+    await vi.waitFor(() => expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1))
+    expect(f.requests).toHaveLength(1 + expected)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+  })
+
+  it("cancels parked SDK summary and denies its late payload callback without clearing journal", async () => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "after", api: wait.api })
+    cleanup.push(wait.release)
+    await f.prompt()
+    f.seedHistory()
+    wait.block()
+    const changed = f.compact().then(() => null, error => error)
+    await wait.ready
+    f.setLive(pending)
+    wait.release()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    await f.gate.cancel("dismissed")
+    expect(await changed).toBeInstanceOf(Error)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    f.approve()
+    await expect(wait.callbacks[0]({ stream: true })).rejects.toThrow("Owned summary payload unavailable")
+    expect(f.requests).toHaveLength(1)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("rejects old SDK summary after a newer native configuration and keeps original API records", async () => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "after", api: wait.api })
+    cleanup.push(wait.release)
+    const primary = getApiProvider("openai-completions")
+    const originalApi = getApiProvider(wait.api)
+    await f.prompt()
+    f.seedHistory()
+    wait.block()
+    const changed = f.compact().then(() => null, error => error)
+    await wait.ready
+    await f.operations.configuration("synthetic newer native configuration", () => f.session.setSessionName("new owner"))
+    wait.release()
+    expect(await changed).toBeInstanceOf(Error)
+    await expect(wait.callbacks[0]({ stream: true })).rejects.toThrow("Owned summary payload unavailable")
+    expect(f.sessionManager.getSessionName()).toBe("new owner")
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    expect(f.session.model!.api).toBe(wait.api)
+    expect(getApiProvider("openai-completions")).toBe(primary)
+    expect(getApiProvider(wait.api)).toBe(originalApi)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("preserves genuine current SDK summary HTTP failure without implicit client retries", async () => {
+    const f = await agentFixture({ history: "after" })
+    await f.prompt()
+    f.seedHistory()
+    const events: any[] = []
+    f.session.subscribe(event => events.push(event))
+    f.setServe((_body, response) => { response.writeHead(500, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error: { message: "synthetic summary failure" } })) })
+    await expect(f.compact()).rejects.toThrow("synthetic summary failure")
+    expect(f.requests).toHaveLength(2)
+    expect(events.find(event => event.type === "compaction_end").errorMessage).toContain("synthetic summary failure")
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it.each([false, true])("preserves explicit SDK compaction override or cancel (cancel=%s)", async cancel => {
+    const f = await agentFixture({ history: "after" })
+    await f.prompt()
+    f.seedHistory()
+    f.setBeforeCompact(event => cancel ? { cancel: true } : { compaction: {
+      summary: "synthetic custom summary", firstKeptEntryId: event.preparation.firstKeptEntryId,
+      tokensBefore: event.preparation.tokensBefore, details: { custom: true },
+    } })
+    if (cancel) await expect(f.compact()).rejects.toThrow("Compaction cancelled")
+    else expect(await f.compact()).toMatchObject({ summary: "synthetic custom summary", details: { custom: true } })
+    expect(f.requests).toHaveLength(1)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("rechecks native branch summary after registry wait before inference and leaf mutation", async () => {
+    const f = await agentFixture({ history: "after" })
+    let target!: string
+    let navigate!: () => Promise<any>
+    f.setCaptureInput(() => { navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true })) })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    let release!: () => void
+    let arrived!: () => void
+    const ready = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(release)
+    f.modelRegistry.getApiKeyAndHeaders.mockImplementationOnce(async () => {
+      arrived(); await barrier; return { ok: true, apiKey: "synthetic-not-a-secret" }
+    })
+    f.setServe(() => {})
+    const leaf = f.sessionManager.getLeafId()
+    const changed = navigate().then(value => value, error => error)
+    await ready
+    f.setLive(pending)
+    release()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.requests).toHaveLength(1)
+    f.approve()
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    respond(f.sockets[1])
+    expect(await changed).toMatchObject({ cancelled: false })
+    expect(f.requests).toHaveLength(2)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(1)
+  })
+
+  it("rechecks native branch summary after final HTTP before leaf mutation", async () => {
+    const f = await agentFixture({ history: "after" })
+    let target!: string
+    let navigate!: () => Promise<any>
+    f.setCaptureInput(() => { navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true })) })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    f.setServe(() => {})
+    const leaf = f.sessionManager.getLeafId()
+    const changed = navigate().then(value => value, error => error)
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    f.setLive(pending)
+    respond(f.sockets[1])
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.sessionManager.getLeafId()).toBe(leaf)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(0)
+    f.approve()
+    expect(await changed).toMatchObject({ cancelled: false })
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(1)
+  })
+
+  it("fails closed on changed native summary event rather than falling back to raw SDK inference", async () => {
+    const f = await agentFixture({ history: "after" })
+    await f.prompt()
+    f.seedHistory()
+    f.setBeforeCompact(event => { event.type = "session_before_tree" })
+    await expect(f.compact()).rejects.toThrow("Owned summary event changed")
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it.each([false, true])("preserves supported tree summary override or cancel with detached preparation (cancel=%s)", async cancel => {
+    const f = await agentFixture({ history: "after" })
+    let target!: string
+    let navigate!: () => Promise<any>
+    f.setCaptureInput(() => { navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true })) })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    const leaf = f.sessionManager.getLeafId()
+    f.setBeforeTree(() => cancel ? { cancel: true } : {
+      summary: { summary: "synthetic custom branch", details: { custom: true } }, label: "synthetic branch label",
+    })
+    const result = await navigate()
+    expect(result.cancelled).toBe(cancel)
+    if (cancel) {
+      expect(f.sessionManager.getLeafId()).toBe(leaf)
+      expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(0)
+    } else {
+      expect(result.summaryEntry).toMatchObject({ summary: "synthetic custom branch", details: { custom: true }, fromHook: true })
+      expect(f.sessionManager.getLabel(result.summaryEntry.id)).toBe("synthetic branch label")
+    }
+    expect(f.requests).toHaveLength(1)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("preserves supported tree instruction and label result overrides in default SDK summary", async () => {
+    const f = await agentFixture({ history: "after" })
+    let target!: string
+    let navigate!: () => Promise<any>
+    f.setCaptureInput(() => { navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true })) })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    f.setBeforeTree(() => ({ customInstructions: "synthetic replacement summary instruction", replaceInstructions: true,
+      label: "synthetic default label" }))
+    const result = await navigate()
+    expect(result).toMatchObject({ cancelled: false, summaryEntry: { fromHook: true } })
+    expect(f.requests).toHaveLength(2)
+    expect(JSON.stringify(f.requests[1].messages)).toContain("synthetic replacement summary instruction")
+    expect(f.sessionManager.getLabel(result.summaryEntry.id)).toBe("synthetic default label")
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it.each(["same-array", "replacement-array", "replacement-preparation"])("rejects mutated empty branch preparation before raw SDK fallback (%s)", async mutation => {
+    const f = await agentFixture({ history: "after" })
+    let ancestor!: string
+    let target!: string
+    let rewind!: () => void
+    let navigate!: () => Promise<any>
+    f.setCaptureInput(() => {
+      rewind = f.operations.bind(() => f.sessionManager.branch(ancestor))
+      navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true }))
+    })
+    await f.prompt()
+    ancestor = f.sessionManager.getLeafId()!
+    f.seedHistory()
+    target = f.sessionManager.getLeafId()!
+    rewind()
+    f.setBeforeTree(event => {
+      expect(event.preparation.entriesToSummarize).toHaveLength(0)
+      const clean = structuredClone(event.preparation)
+      event.preparation.entriesToSummarize.push(f.sessionManager.getEntry(ancestor))
+      if (mutation === "replacement-array") event.preparation.entriesToSummarize = clean.entriesToSummarize
+      if (mutation === "replacement-preparation") event.preparation = clean
+    })
+    await expect(navigate()).rejects.toThrow("Owned summary preparation changed")
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getLeafId()).toBe(ancestor)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(0)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("captures tree options before awaiting hooks so later mutation cannot activate raw summary fallback", async () => {
+    const f = await agentFixture({ history: "after" })
+    let target!: string
+    let navigate!: () => Promise<any>
+    const options = { summarize: false }
+    f.setCaptureInput(() => { navigate = f.operations.bind(() => f.session.navigateTree(target, options)) })
+    await f.prompt()
+    f.seedHistory()
+    target = f.sessionManager.getEntries().find(entry => entry.type === "message")!.id
+    let release!: () => void
+    let arrived!: () => void
+    const ready = new Promise<void>(resolve => { arrived = resolve })
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    cleanup.push(release)
+    f.setBeforeTree(async event => {
+      expect(event.preparation.userWantsSummary).toBe(false)
+      expect(event.preparation.entriesToSummarize.length).toBeGreaterThan(0)
+      arrived(); await barrier
+    })
+    const changed = navigate().then(value => value, error => error)
+    await ready
+    options.summarize = true
+    release()
+    expect(await changed).toMatchObject({ cancelled: false })
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(0)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it.each(["hook-view", "native-retained"])("prevents retained branch array mutation between aggregate validation and SDK consumption (%s)", async mutation => {
+    const f = await agentFixture({ history: "after" })
+    let ancestor!: string
+    let target!: string
+    let rewind!: () => void
+    let navigate!: () => Promise<any>
+    let preparation: any
+    let nativePreparation: any
+    let mutationError: unknown
+    let queued = false
+    f.setCaptureInput(() => {
+      rewind = f.operations.bind(() => f.sessionManager.branch(ancestor))
+      navigate = f.operations.bind(() => f.session.navigateTree(target, { summarize: true }))
+    })
+    await f.prompt()
+    ancestor = f.sessionManager.getLeafId()!
+    f.seedHistory()
+    target = f.sessionManager.getLeafId()!
+    rewind()
+    const emit = f.session.extensionRunner!.emit.bind(f.session.extensionRunner)
+    vi.spyOn(f.session.extensionRunner!, "emit").mockImplementation((event: any) => {
+      if (event.type === "session_before_tree") nativePreparation = event.preparation
+      return emit(event)
+    })
+    f.setBeforeTree(event => {
+      expect(event.preparation.entriesToSummarize).toHaveLength(0)
+      preparation = event.preparation
+      expect(preparation).not.toBe(nativePreparation)
+      expect(preparation.entriesToSummarize).not.toBe(nativePreparation.entriesToSummarize)
+      expect(Object.isFrozen(nativePreparation.entriesToSummarize)).toBe(true)
+    })
+    const dispatch = f.operations.dispatch.bind(f.operations)
+    vi.spyOn(f.operations, "dispatch").mockImplementation((effect: any, options: any) => dispatch(effect, options).then(value => {
+      if (preparation && !queued) {
+        queued = true
+        queueMicrotask(() => queueMicrotask(() => {
+          // A future immutable SDK input may reject mutation; observe that
+          // denial without creating an unrelated unhandled microtask error.
+          const entries = (mutation === "native-retained" ? nativePreparation : preparation).entriesToSummarize
+          try { entries.push(f.sessionManager.getEntry(ancestor)) } catch (error) { mutationError = error }
+        }))
+      }
+      return value
+    }))
+    expect(await navigate()).toMatchObject({ cancelled: false })
+    expect(queued).toBe(true)
+    if (mutation === "native-retained") expect(mutationError).toBeInstanceOf(TypeError)
+    else expect(preparation.entriesToSummarize).toHaveLength(1)
+    expect(nativePreparation.entriesToSummarize).toHaveLength(0)
+    expect(Object.isFrozen(f.sessionManager.getEntry(ancestor))).toBe(false)
+    expect(f.requests).toHaveLength(1)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "branch_summary")).toHaveLength(0)
+    expect(getApiProviders().filter(provider => provider.api.startsWith("statewright-summary-"))).toEqual([])
+  })
+
+  it("denies completed summary callback even from its original private request", async () => {
+    const wait = payloadWait()
+    const f = await agentFixture({ history: "after", api: wait.api })
+    cleanup.push(wait.release)
+    let late!: () => Promise<unknown>
+    f.setCaptureInput(() => { late = f.operations.bind(() => wait.callbacks[0]({ stream: true })) })
+    await f.prompt()
+    f.seedHistory()
+    wait.block()
+    const changed = f.compact()
+    await wait.ready
+    wait.release()
+    await changed
+    await expect(late()).rejects.toThrow("Owned summary payload unavailable")
+    expect(f.owner.record.request.phase).toBe("active")
+    expect(f.requests).toHaveLength(2)
+  })
+
   it("correlates template-expanded input without relying on message text", async () => {
     const f = await agentFixture()
     await f.session.prompt("/fixture argument")

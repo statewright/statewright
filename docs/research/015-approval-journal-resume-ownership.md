@@ -132,7 +132,19 @@ do not enable reclaim from today's matcher or callback/agent assertion. Future
 authority failure/restart remains held, no automatic unlock or nonce redelivery.
 Goal ACTIVE, not complete/blocked. No workflow/session/credential/resolver/human
 decision/installed runtime/deployment/push changes. Four-path rollback never
-deletes durable data. Final scoped source and receipt commit IDs recorded below.
+deletes durable data. Final source commit recorded below; receipt-only follow-up
+is identifiable from Git history.
+
+### Slice 28 local source commit and post-commit boundary
+
+Source e1195c3ee7a55076a7ac08fad7e08b7c43f3fd6e commits ONLY the four owned paths.
+All three reviewed/tested source/test/ADR blob IDs still match frozen tree;
+receipt-only updates do not alter that evidence. Seven unrelated tracked
+Statewright diff SHA256 and whole Auld tracked diff SHA256 equal entry values,
+untracked user research/canary inventory retained, index empty after source
+commit. All root gate/reviewer handles observed terminal0; no background native
+fixture/live session adopted or left running. Follow-up changes ONLY this receipt.
+Full original goal remains ACTIVE. No workflow/push/deploy/activation/install.
 
 ## Slice 27 entry: actual consumed-write/pre-journal-clear process boundary
 

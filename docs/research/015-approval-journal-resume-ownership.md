@@ -230,6 +230,18 @@ Preserve all broader unresolved controls; no workflow/live user process/resolver
 installed runtime/push/deploy authority added. Scoped rollback only these four
 additive conformance/evidence paths, preserving all durable native/journal records.
 
+### Slice 24 committed source and handoff
+
+Local source0fb2c492f6dc6bbd580ae5711f0676e86c64bd8a, parent
+ad2cb45d5d2b93ca40d1574ff8098332c3f79f6c, four owned paths only. Three source/ADR
+blobs identical to tested/reviewed53d7e714e92749213513c472e2da06f904aed190;
+research015 final receipt-only55-line delta. Post-source-commit index empty/owned
+paths quiet; unrelated Statewright/Auld changes preserved. This addition records
+immutable source identity, not new tests or native acceptance. All job/review
+handles terminal; full goal ACTIVE/nine rows OPEN. Next full-parent-process
+reopen/lost-HTTP/crash-delivery boundary above, no workflow/live sessions/decisions/
+installation/runtime activation/push/deployment authority expanded.
+
 ## Slice 23 entry: asynchronous native retry observer ownership
 
 Previous turn PROGRESS: sourceab8aeb9/receipt5f81f8c committed. Fresh preflight

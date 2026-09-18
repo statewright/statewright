@@ -173,6 +173,22 @@ SDK/vendor mutation or weaker pending assertion. Broader ticket/authority/cold/
 native conformance obligations remain controlling. No native SDK init/run, real
 sessions, decisions or release/install permission inferred from this source cut.
 
+### Slice 22 committed source and handoff
+
+Local source commitab8aeb92933a7bed3df98337d4bdc8add9512e28 on Statewright main,
+parent727d6a8122645417c60093c65fa45f75ce6a9057, exactly six owned paths. Compared
+with tested/reviewed tree621e111b449064aa6beaa3b684ca18d0b6ce804c, source/ADR/tests
+are identical; only research receipt/full audit appended71 lines. Pre-receipt
+postcommit index empty/all six owned paths quiet, seven-user-file hash unchanged.
+This final addition records that immutable source commit, not a new algorithm
+or validation result. Both reviewers and all gate processes terminal; root elapsed
+about24min, two source exports/two clean-context requestedAstra/high CLI turns,
+bounded budgets/output targets observed-only with overruns/incomplete accounting
+retained above. No push/install/activation/deploy/workflow/live decision occurred.
+Rollback only scoped six-path experimental changes; preserve owner journals,
+native files, user dirt and unrelated changes. Next frontier/full audit above
+remain controlling: full goal ACTIVE and all original requirements in scope.
+
 Observed-only manual envelope root85 normal/120 contraction tools,30min warning/
 45min contraction,24KiB task-output target excluding mandatory skill reads,
 final third reserved for validation/review/repair/handoff. No hard provider/quota/

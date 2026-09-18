@@ -50,9 +50,28 @@ child ignoring close/SIGTERM proves this fixture behavior, not SDK resistance or
 permanent product teardown recovery. Normal SDK/parent acceptance still requires
 exit0/no signal; emergency-reaped processes cannot satisfy those assertions.
 
-Limits: full-parent graceful reopen and begin wire loss are conformance targets,
-not forced parent crash or exactly-once crash-delivery proof. Stale locks, legacy
-recovery, permanent failure-drain, authenticated reviewer/UI, installed launcher/
-hosts and all original P0/P1 obligations remain open. No production source/schema
-or native activation. Revisit when task-owned full-parent crash conformance and
-genuine native acceptance become available; no release certification is implied.
+Failure cases additionally force the SDK's actual owned handle to exit and await
+the real observer/readiness teardown, then SIGKILL root's actual parent handle
+while its owner lock remains held. The SDK is reaped before parent crash to avoid
+leaving an orphan native writer. Request cancellation precedes parent crash;
+approval checkpoint/native bytes remain unchanged. A new actual parent explicitly
+resuming that ID must fail and exit1, preserving raw owner/lock bytes and file
+inventory. No PID/age-based lock reclamation, replacement or recovery is added.
+
+A separate proxy destroys the consume response only after the real bridge has
+completed durable consumption and journal clear. Lost delivery must settle with
+no inference/history/final response, retain the consumed approval tombstone, and
+deny exact consumed-body/status/cancel replay. The test-only SDK driver permits
+fresh explicit input only after its actual previous SDK prompt promise settles.
+That new input may use authoritative cleared state, but not the old nonce; its
+one response/history belongs to the fresh text. Whole-parent graceful reopen
+then preserves the consumed tombstone/history and cannot redeliver automatically.
+
+Limits: forced parent crash after native writer reaping is NOT arbitrary crash
+recovery or safe stale-lock reclamation. Consume wire loss AFTER journal clear is
+NOT forced crash between consumption/clear or exactly-once crash-delivery proof.
+Legacy recovery, permanent failure-drain, authenticated reviewer/UI, installed
+launcher/hosts and all original P0/P1 obligations remain open. No production
+source/schema or native activation. Revisit when verified native-writer recovery,
+consume/clear crash conformance and genuine native acceptance become available;
+no release certification is implied.

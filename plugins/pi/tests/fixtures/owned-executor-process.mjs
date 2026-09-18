@@ -26,7 +26,7 @@ let starting;
 let closing;
 const successfulConsumes = [];
 
-async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dropBeginResponse }) {
+async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dropBeginResponse, dropConsumeResponse }) {
   if (starting || owner || closing) throw new Error("Executor fixture initialization replay");
   const options = { root: join(root, "owners"), cwd: root, host: "pi", workflow: "fixture",
     apiKey: "synthetic-private-key", gatewayUrl: authorityUrl };
@@ -87,6 +87,11 @@ async function initialize({ root, authorityUrl, providerUrl, resumeSessionId, dr
       if (dropBeginResponse && request.url === "/hooks/request/begin" && upstream.ok) {
         send("begin-dropped", { reference: JSON.parse(body).reference });
         response.destroy(); // No acknowledgement bytes delivered to the SDK.
+        return;
+      }
+      if (dropConsumeResponse && request.url === "/hooks/request/consume" && upstream.ok) {
+        send("consume-dropped", { consumeBody: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+        response.destroy(); // Real consumption completed; no response bytes delivered.
         return;
       }
       response.writeHead(upstream.status, { "Content-Type": "application/json" });
@@ -167,6 +172,13 @@ function dispatch(message) {
     if (message.type === "close") return close();
     if (!control || closing) throw new Error("Executor fixture not ready");
     if (message.type === "prompt") return control.send("prompt", { text: message.text });
+    if (message.type === "reap-sdk") {
+      const sdkExit = await control.terminate(); // Exact child; force and observe exit.
+      const result = await observing; // Real observer/readiness teardown completes.
+      await owner.assertOwner();
+      send("sdk-reaped", { sdkPid: control.child.pid, sdkExit, result, owner: owner.record });
+      return;
+    }
     if (message.type === "snapshot") {
       await owner.assertOwner();
       send("snapshot", { owner: owner.record, checkpoint: await mirror.loadCheckpoint(), successfulConsumes });

@@ -75,7 +75,9 @@ function dispatch(message) {
       throw new Error("Invalid fixture IPC command");
     }
     prompt = frontend.runtime.session.prompt(message.text).then(() => {
-      send("prompt-settled", { finalResponse: frontend.finalResponse });
+      const finalResponse = frontend.finalResponse;
+      prompt = null; // Actual SDK promise settled; allow fresh explicit input.
+      send("prompt-settled", { finalResponse });
     });
     prompt.catch(fail);
   })().catch(fail);

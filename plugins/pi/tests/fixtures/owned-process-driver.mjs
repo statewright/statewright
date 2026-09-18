@@ -59,5 +59,5 @@ export function ownedProcessDriver(child, { schema, timeoutMs = 15_000 }) {
       return awaitExit(killMs);
     }
   };
-  return { child, wait, send, close, terminate, exit, get exited() { return exited; } };
+  return { child, wait, send, close, terminate, awaitExit, exit, get exited() { return exited; } };
 }

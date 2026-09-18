@@ -1,5 +1,7 @@
 import { InteractiveMode, runPrintMode, runRpcMode } from "@mariozechner/pi-coding-agent";
 import { createPiRpcInput } from "./request-rpc-input.mjs";
+import { installPiInteractiveConfiguration } from "./request-interactive.mjs";
+export { installPiInteractiveConfiguration } from "./request-interactive.mjs";
 
 export function parsePiRequestMode(argv) {
   let mode = "interactive";
@@ -81,7 +83,9 @@ export async function runPiRequestMode(frontend, { mode, messages = [] }) {
       try { await runRpcMode(runtime); return 0; }
       finally { inlet.close(); Object.defineProperty(process, "stdin", descriptor); }
     }
-    await new InteractiveMode(runtime, { initialMessages: messages }).run();
+    const interactive = new InteractiveMode(runtime, { initialMessages: messages });
+    installPiInteractiveConfiguration(interactive, frontend.interactiveGesture);
+    await interactive.run();
     return 0;
   } finally { await frontend.close(); }
 }

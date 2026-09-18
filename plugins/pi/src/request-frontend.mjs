@@ -165,7 +165,11 @@ export async function createPiRequestFrontend({ nativeSessionId, call, target, s
       if (!observeNative()) return Promise.reject(new Error("Native cancellation input unavailable"));
       return operations.cancelInput();
     };
-    return Object.freeze({ runtime, configuration, cancelInput,
+    const interactiveGesture = (text, effect) => {
+      if (!observeNative()) return Promise.reject(new Error("Native interactive input unavailable"));
+      return operations.interactiveGesture(text, effect);
+    };
+    return Object.freeze({ runtime, configuration, cancelInput, interactiveGesture,
       get inputPending() { return observeNative() && operations.inputPending(); },
       get readiness() { observeNative(); return readiness; },
       get finalResponse() { return observeNative() ? operations.finalResponse() : null; }, close });

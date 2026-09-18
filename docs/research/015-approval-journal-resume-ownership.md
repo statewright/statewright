@@ -2,6 +2,168 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 18 entry: capture owning interactive configuration gestures
+
+Base998cad2. Continue the full006/012/spec111/116 objective manually, without
+Statewright query/load/use. Preserve the seven user changes and Auldwyrm; root
+alone implements, with skill-required independent clean-context read-only review.
+SDK0.73.0 has no public interactive gesture hook: its private mode helpers perform
+model/name/thinking mutations, and public ModelSelectorComponent.handleSelect
+saves the default BEFORE its callback. Callback-only guarding is insufficient.
+
+Bounded cut: separate mode-only interactive admission before selector/registry
+waits; immutable original-reference callback scopes, checkpoint before selector
+default/native writes, stale result/status/render suppression, exact-selector
+cleanup on revocation and cancel retaining journal. Use the public SDK classes
+with an explicit version-checked private INSTANCE binding (ADR009), not private
+module imports, vendor patching or a claimed public hook. Thinking/model cycle,
+/model search and selector, /name are in scope. Settings/scoped-model editing,
+other effects/retries/provider internals, headed TUI/cold restart and production
+activation remain open; no weakened native/project guards or latest-lease adoption.
+
+Owned paths: Pi operations/frontend/mode, new interactive adapter, actual SDK
+frontend tests, ADR009 and this receipt. Add discriminating tests before source;
+freeze exact staged export for Node serial308 baseline, Pi279+existing live skip,
+native2, Claude generated parity and changed-mjs syntax, then Astra/high review.
+Observed-only envelope:100 normal/135 contraction calls,30-minute warning/
+45-minute contraction,16KiB output target, final-third review/validation reserve.
+Reviewer10 diagnostics/12minutes/two focused checks; finding-only recheck4/
+5minutes/two checks; max2 distinct repairs/finding, two exports plus regression-
+justified third. No provider/controller hard enforcement or catalog probe.
+No authority decisions/inference, real sessions/signals, install/deploy/push.
+Only inert task-owned SDK/HTTP fixtures and scoped local commit; rollback is
+coherent scoped revert preserving native/journal records. Full goal stays active.
+
+Retained red/repair evidence: initial unchanged source6/6 selected tests fail
+on missing interactive admission/binding. First adapter8-case gate6 failed/
+2 passed: original spies were hidden by wrappers and native selector+setModel
+each save the default. Preserve original feedback spies; expect both authorized
+native saves, not one. Next7 passed/1 failed because SDK construction already
+records a model_change; compare exact before/after entries, not zero lifetime
+entries. These are fixture corrections, not relaxed stale-write acceptance.
+Further root pending-selection gate2 passed/1 failed: Escape could not see a
+callback parked at checkpoint. Keep exact original gesture pending across its
+callback, clear only its own pending marker. Focused10/10 then passed.
+Actual SDK outer submit gate1 passed/2 failed: /model and /name cleared editor
+before admission. Bind the outer callback and reuse its admission in helpers;
+13/13 passed. Frontend full106/106 passed before later UI-lease refinement.
+Root covers exact selector replacement without a new epoch and delayed/capturable
+callback denial; constructor rendering captures the exact selector UI token.
+Counterfactual regression removes ONLY the pre-selector callback checkpoint,
+retaining native setModel's checkpoint and all test assertions:1/1 fails because
+default model is written once while approval is pending. Restore that dispatch
+before freeze; this proves a callback-only/native-setter gate is insufficient,
+not that the previous HEAD had this newly added gesture capability.
+
+### Slice 18 independent findings and bounded repairs
+
+Initial frozen tree `d1531a6d0bbd9ed83ac514c4436b504860e5da7f`, export
+`/tmp/statewright-interactive-gesture.1v6b9U`: Node serial308/308, Pi293 passed/
+1 existing opt-in live skip, native2/2, fail-fast Claude parity+4 mjs syntax0.
+Independent clean-context Astra/high `/root/pi_interactive_gesture_review`
+used8/10 diagnostics and2/2 focused inert actual-SDK checks; own processes
+terminal. TWO HIGH findings established, not an approved source disposition:
+
+1. `selected=true` denies SDK selector Escape/Ctrl+C during pending checkpoint;
+   even ordinary dismissal requires a checkpoint and can itself park. Root own
+   red actual owner/journal test1/1 leaves phase parked/reasonnull, not cancelled.
+   Repair1: separate exact-original-current identity from active-effect owns;
+   immediate private cancellation while parked, no admission/checkpoint, exact
+   signal/token cleanup. Root tests now use actual SDK handleInput Escape and
+   Ctrl+C, not only direct frontend.cancelInput. Journal/late grant/readiness
+   and fresh ownership assertions remain required.
+2. Token checked only before awaited checkpoint: different native selector can
+   replace the model selector in the same epoch, then obsolete selection writes
+   default. Root own new test1/1 reproduces exactly one forbidden default save.
+   Repair1: token recheck immediately inside checkpointed effect before native
+   helper; native UI replacement retires/cancels ONLY captured original gesture,
+   removing its cleanup listener before showing replacement. Late approval must
+   not be consumed/cleared; replaced UI cannot be removed by old completion.
+
+Initial review source is superseded. Fresh finding-only clean-context review and
+exact repaired-source integration are required before scoped commit. These are
+two distinct repair paths, each first repair; do not claim root self-approval.
+
+### Slice 18 full original requirement audit, not completion
+
+Re-read current006 nine-row contract,012 numbered1-4/slicesA-D, Auldwyrm111
+native/shared reviewer/evidence contract and116 cross-host promotion requirements.
+Their historical staging receipts are not current live verification. Dispositions:
+
+1. Full immutable ticket/artifact/policy/reviewer/expiry/revocation remains open.
+2. Local UUID/epoch/private captures improve interactive gesture ordering; full
+   branch/replacement/cross-host lineage remains open.
+3. Protected interactive name/thinking/model helper/selector/outer-submit paths
+   gain pending-before-effect capture and original callback guards. Settings/
+   scoped-model edits, other registry/queue/FS/spawn/branch/provider effects and
+   internal inference/retry/compaction/summary paths remain open; not all FX proved.
+4. Entitled authenticated native+website reviewer controls/required-reviewer
+   journeys remain unproved. No resolver, decision or human authority added.
+5. Tested original selector dismissal/pending checkpoint retains observed journal
+   and denies late continuation. Lost begin replies, full native cold restart,
+   legacy/crash-lock recovery, permanent SDK failure/drains remain open.
+6. Existing private consume/tombstone primitives remain partial; real policy/
+   entitlement/artifact revalidation and exactly-once crash delivery remain open.
+7. Original configuration results/status and exact selector async rendering gain
+   guarded stale denial; all native final effects/publication remain unproved.
+8. Private routing/capabilities are not human-auth-strength or same-OS isolation.
+   Complete decision provenance remains open.
+9. Shared neutral reviewer/evidence/retention, clean standalone packaging and all
+   advertised host acceptance remain open; no collective conformance claim.
+
+012 A/1 user-dirty Rust pending denial remains unvalidated/uncommitted;2 actual
+trusted decision route untested;C/3 experimental parent/mirror/cold fixtures are
+partial, not full native recovery;B/4 this experimental SDK mode gains bounded
+interactive ownership, not production activation;D gateway/native approval/
+restart canaries not run under no-workflow/no-real-decision authority.111 combined
+native/website/reviewer/evidence journeys remain separate acceptance;116 clean
+release/desktop/native-Windows-vs-WSL/protocol races,100 deterministic iterations
+per advertised runtime and24-hour staging soak/promotion remain unproved.
+No live requirement removed because local tests pass. Full goal active.
+
+### Slice 18 final exact-source receipt
+
+Repaired tested tree `bf1bbbef875f379cf898f8b70a9153ab7eec2939`, export
+`/tmp/statewright-interactive-gesture-repaired.3siS7U`: Node serial308/308,
+zero fail/skip/cancel; Pi296 passed/1 existing opt-in live skip (8 files pass/
+1 skipped), including110 frontend tests; native session2/2; fail-fast Claude
+generated managed parity+4 changed-mjs syntax exit0. Canonical staged diff
+check0, source unstaged diff quiet0 and write-tree exact match before receipt.
+An extra staged-Git diagnostic mistakenly ran in the source archive (no .git),
+exit129; this is a validation-location error, not a product gate result. Rerun
+the staged/unstaged/tree checks at canonical Git root, all0/exact bf1bbbe.
+No Rust/typecheck/lint/build, headed TUI, real decision/inference/gateway,
+installed acceptance, cold restart, hosted protocol CI or staging soak proof.
+
+Fresh independent clean-context Astra/high `/root/pi_interactive_gesture_recheck`
+inspected only the frozen repair diff/primary sources:3/4 diagnostic commands,
+1/2 focused safe test invocations, under5minutes. Actual-SDK focused8 passed/
+102 excluded by filter, exit0; own process terminal/fixture cleanup completed.
+No established remaining finding WITHIN the two repaired boundaries; not an
+approval of full P0/P1 acceptance. One oversized read was truncated; required
+dispatch/fixture text was retrieved in a subsequent focused read. Real SDK
+Escape/Ctrl+C during parked selection, replacement during checkpoint, obsolete
+callbacks/exact UI cleanup, one selection and current error controls exercised.
+Both initial HIGH findings closed by separately captured fresh review; root
+did not self-approve. Final source/ADR unchanged from tested/reviewed tree;
+this final recording is receipt-only delta before the scoped local commit.
+
+Seven owned paths only. User's seven tracked changes retain SHA256
+`55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270`;
+Auldwyrm tracked diff retains
+`94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa`.
+Unrelated untracked artifacts untouched. Two source exports; initial reviewed
+source superseded by findings, repaired source verified. Observed-only budget,
+no controller/provider hard enforcement or price/quota claim; root below the
+30-minute warning, protected reserve spent on repairs/review/validation/handoff.
+No Statewright query/load/use/workflow, live session access, actual approval,
+resolver/decision, real inference, install/vendor patch, deployment or push.
+Rollback is a coherent scoped revert retaining journals/native owner records.
+Next safe bounded work: interactive settings/scoped-model gestures, then
+remaining native effect/internal transport/publication and recovery boundaries;
+authoritative live/cross-host acceptance requires its own permitted journey.
+The full nine-row/012/111/116 objective is active, not complete or blocked.
+
 ## Slice 17 entry: owning native input cancellation
 
 Base02fdff6; previous turn verified progress, not wait/no-progress. Fresh main/

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { PassThrough } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { AuthStorage, InteractiveMode, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
+import { AuthStorage, InteractiveMode, SessionManager, SettingsManager, initTheme } from "@mariozechner/pi-coding-agent"
 import { createPiRequestFrontend } from "./request-frontend.mjs"
 import { createPiNativeReadinessPublisher } from "./request-readiness.mjs"
 import { createExecutorNativeReadiness } from "../../executor/lib/executor-native-readiness.mjs"
@@ -13,6 +13,7 @@ import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mj
 import statewrightExtension, { callStatewrightGateway } from "./index.js"
 import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 import { createPiRequestModeRuntime, runPiRequestMode } from "./request-mode.mjs"
+import * as requestMode from "./request-mode.mjs"
 import { createPiRpcInput } from "./request-rpc-input.mjs"
 
 const cleanup: Array<() => unknown | Promise<unknown>> = []
@@ -87,6 +88,338 @@ async function frontendFixture(options: { parked?: boolean; streaming?: boolean;
 }
 
 describe("owning public SDK frontend readiness", () => {
+  function interactiveConfiguration(f: Awaited<ReturnType<typeof frontendFixture>>) {
+    initTheme("dark", false)
+    Object.assign(f.modelRegistry, { refresh: vi.fn(), getError: () => undefined })
+    const children: any[] = []
+    const mode = Object.assign(Object.create(InteractiveMode.prototype), {
+      runtimeHost: createPiRequestModeRuntime(f.frontend),
+      ui: { requestRender: vi.fn(), setFocus: vi.fn() },
+      footer: { invalidate: vi.fn() },
+      editor: { setText: vi.fn(), getText: vi.fn(() => ""), onAction: vi.fn() },
+      editorContainer: { clear: vi.fn(() => children.splice(0)), addChild: vi.fn(x => children.push(x)) },
+      chatContainer: { addChild: vi.fn() },
+      showStatus: vi.fn(), showError: vi.fn(), showWarning: vi.fn(), updateEditorBorderColor: vi.fn(),
+      maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(), checkDaxnutsEasterEgg: vi.fn(),
+    })
+    mode.defaultEditor = mode.editor
+    mode.feedback = { showStatus: mode.showStatus, showError: mode.showError,
+      chatAdd: mode.chatContainer.addChild, footerInvalidate: mode.footer.invalidate,
+      requestRender: mode.ui.requestRender, editorText: mode.editor.setText }
+    requestMode.installPiInteractiveConfiguration(mode, f.frontend.interactiveGesture)
+    return { mode, children }
+  }
+
+  it("admits owning interactive name before native mutation and successful UI feedback", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const { mode } = interactiveConfiguration(f)
+    const changed = mode.handleNameCommand("/name approved interactive name")
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.sessionManager.getSessionName()).toBeUndefined()
+    expect(mode.feedback.chatAdd).not.toHaveBeenCalled()
+    f.approve()
+    await changed
+    expect(f.sessionManager.getSessionName()).toBe("approved interactive name")
+    expect(mode.feedback.chatAdd).toHaveBeenCalledTimes(2)
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("admits actual interactive thinking/model cycle helpers without Promise-shaped success", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode } = interactiveConfiguration(f)
+    await mode.cycleThinkingLevel()
+    expect(mode.feedback.showStatus).toHaveBeenCalledWith("Current model does not support thinking")
+    await mode.cycleModel("forward")
+    expect(mode.feedback.showStatus).toHaveBeenCalledWith("Only one model available")
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("captures interactive model search before registry await and never publishes its stale result", async () => {
+    let release!: (models: any[]) => void
+    const available = vi.fn(() => new Promise<any[]>(resolve => { release = resolve }))
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const { mode } = interactiveConfiguration(f)
+    const modelEntries = f.sessionManager.getEntries().filter((entry: any) => entry.type === "model_change")
+    const searched = mode.handleModelCommand("synthetic-chat")
+    await vi.waitFor(() => expect(available).toHaveBeenCalled(), { timeout: 500 })
+    expect(f.owner.record.request_epoch).toBe(1)
+    await f.frontend.configuration({ type: "set_session_name", name: "newer search owner" })
+    release([f.session.model])
+    await searched
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(mode.feedback.showStatus).not.toHaveBeenCalled()
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    expect(mode.feedback.footerInvalidate).not.toHaveBeenCalled()
+    expect(f.sessionManager.getEntries().filter((entry: any) => entry.type === "model_change")).toEqual(modelEntries)
+  })
+
+  it("captures native model selector before construction and guards its pre-callback default write", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    const opened = mode.showModelSelector()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(children).toHaveLength(0)
+    expect(f.modelRegistry.refresh).not.toHaveBeenCalled()
+    f.approve()
+    await opened
+    const selector = children[0]
+    expect(selector).toBeDefined()
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    await selector.handleSelect(f.session.model)
+    // Native selector and native Session.setModel each persist the default.
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(mode.feedback.showStatus).toHaveBeenCalledWith("Model: synthetic-chat")
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("revokes only old selector and denies old selection/default/render after newer native input", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const old = children[0]
+    await mode.showModelSelector()
+    const current = children[0]
+    expect(current).not.toBe(old)
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    mode.feedback.requestRender.mockClear()
+    await old.handleSelect(f.session.model)
+    await old.onSelectCallback(f.session.model)
+    await old.onCancelCallback()
+    expect(save).not.toHaveBeenCalled()
+    expect(children).toEqual([current])
+    expect(mode.feedback.requestRender).not.toHaveBeenCalled()
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    await current.handleSelect(f.session.model)
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("keeps model selector registry rendering bound to its original gesture after await", async () => {
+    let release!: (models: any[]) => void
+    const available = vi.fn(() => new Promise<any[]>(resolve => { release = resolve }))
+    const f = await frontendFixture({ availableModels: available })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    expect(children[0]).not.toBe(mode.editor)
+    await f.frontend.configuration({ type: "set_session_name", name: "newer selector owner" })
+    mode.feedback.requestRender.mockClear()
+    release([f.session.model])
+    await new Promise(resolve => setImmediate(resolve))
+    expect(mode.feedback.requestRender).not.toHaveBeenCalled()
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request_epoch).toBe(2)
+  })
+
+  it("dismisses exact interactive selector retaining journal and denying late callbacks", async () => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    const opened = mode.showModelSelector()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    f.approve()
+    await opened
+    const selector = children[0]
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    await selector.onCancelCallback()
+    await selector.handleSelect(f.session.model)
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    expect(save).not.toHaveBeenCalled()
+    expect(children).toEqual([mode.editor])
+    expect(f.frontend.readiness).not.toBeNull()
+    // Admission consumed/cleared the synthetic approval before opening. Dismiss
+    // does not perform an additional journal clear or approval consumption.
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+    expect(f.owner.record.request.consumed_approval_ids).toHaveLength(1)
+  })
+
+  it("cannot borrow interactive gesture admission from a project callback", async () => {
+    let invoke!: () => Promise<unknown>
+    let f!: Awaited<ReturnType<typeof frontendFixture>>
+    f = await frontendFixture({ register: (pi, ownership) => {
+      pi.registerCommand("capture-interactive", { handler: () => {
+        invoke = ownership.bind(() => f.frontend.interactiveGesture("/name forged", () => f.session.setSessionName("forged")))
+      } })
+    } })
+    await f.bind()
+    await f.session.prompt("/capture-interactive")
+    await expect(invoke()).rejects.toThrow("Native interactive input unavailable")
+    expect(f.sessionManager.getSessionName()).toBeUndefined()
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it("parks native selector before its default write and exposes pending selection to Escape cancellation", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const selector = children[0]
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    f.setLive(pending)
+    const selected = selector.handleSelect(f.session.model)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(save).not.toHaveBeenCalled()
+    expect(mode.session.isStreaming).toBe(true)
+    await f.frontend.cancelInput()
+    await selected
+    expect(f.frontend.inputPending).toBe(false)
+    expect(save).not.toHaveBeenCalled()
+    expect(mode.feedback.showStatus).not.toHaveBeenCalled()
+    expect(children).toEqual([mode.editor])
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(0)
+    expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" })
+    expect(f.frontend.readiness).not.toBeNull()
+    f.approve()
+    await selector.handleSelect(f.session.model)
+    expect(save).not.toHaveBeenCalled()
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+  })
+
+  it("permits only one native selector selection even while its checkpoint waits", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const selector = children[0]
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    f.setLive(pending)
+    const first = selector.handleSelect(f.session.model)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    await selector.handleSelect(f.session.model)
+    expect(save).not.toHaveBeenCalled()
+    f.approve()
+    await first
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(mode.feedback.showStatus).toHaveBeenCalledTimes(1)
+    expect(children).toEqual([mode.editor])
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(1)
+  })
+
+  it.each(["/model", "/name submitted name"])("owns actual SDK editor submit %s before editor clear or configuration effects", async text => {
+    const f = await frontendFixture({ parked: true })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    mode.setupEditorSubmitHandler()
+    const submitted = mode.defaultEditor.onSubmit(text)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(mode.feedback.editorText).not.toHaveBeenCalled()
+    expect(mode.feedback.chatAdd).not.toHaveBeenCalled()
+    expect(f.modelRegistry.refresh).not.toHaveBeenCalled()
+    f.approve()
+    await submitted
+    expect(mode.feedback.editorText).toHaveBeenCalledWith("")
+    expect(f.owner.record.request_epoch).toBe(1)
+    if (text === "/model") expect(children[0]).not.toBe(mode.editor)
+    else expect(f.sessionManager.getSessionName()).toBe("submitted name")
+    expect(f.requests).toHaveLength(0)
+  })
+
+  it("admits actual SDK configuration key handlers and preserves genuine current errors", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode } = interactiveConfiguration(f)
+    mode.setupKeyHandlers()
+    const action = mode.defaultEditor.onAction.mock.calls.find(([name]: [string]) => name === "app.thinking.cycle")[1]
+    await action()
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(mode.feedback.showStatus).toHaveBeenCalledWith("Current model does not support thinking")
+    vi.spyOn(f.sessionManager, "appendSessionInfo").mockImplementation(() => { throw new Error("synthetic native persistence unavailable") })
+    await mode.handleNameCommand("/name failed persistence")
+    expect(mode.feedback.showError).toHaveBeenCalledWith("synthetic native persistence unavailable")
+    expect(mode.feedback.chatAdd).not.toHaveBeenCalled()
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
+  it("retires exact old model-selector UI lease when a different native selector replaces it", async () => {
+    let release!: (models: any[]) => void
+    const f = await frontendFixture({ availableModels: () => new Promise<any[]>(resolve => { release = resolve }) })
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const old = children[0]
+    const other = { name: "other native selector" }
+    mode.showSelector(() => ({ component: other, focus: other }))
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    mode.feedback.requestRender.mockClear()
+    release([f.session.model])
+    await new Promise(resolve => setImmediate(resolve))
+    await old.handleSelect(f.session.model)
+    await old.onSelectCallback(f.session.model)
+    await old.onCancelCallback()
+    expect(save).not.toHaveBeenCalled()
+    expect(mode.feedback.requestRender).not.toHaveBeenCalled()
+    await f.frontend.cancelInput()
+    expect(children).toEqual([other])
+    expect(f.owner.record.request_epoch).toBe(1)
+  })
+
+  it.each([["Escape", "\u001b"], ["Ctrl+C", "\u0003"]])("dismisses a selector selection already parked via actual SDK %s without waiting for human approval", async (_, key) => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const selector = children[0]
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    f.setLive(pending)
+    const selection = selector.handleSelect(f.session.model)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    selector.handleInput(key)
+    await vi.waitFor(() => expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" }), { timeout: 500 })
+    await selection
+    expect(children).toEqual([mode.editor])
+    expect(f.frontend.inputPending).toBe(false)
+    expect(save).not.toHaveBeenCalled()
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(0)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+    expect(f.frontend.readiness).not.toBeNull()
+    f.approve()
+    await selector.onSelectCallback(f.session.model)
+    await selector.handleSelect(f.session.model)
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it("revokes selector replaced during checkpoint before stale default write or approval consumption", async () => {
+    const f = await frontendFixture()
+    await f.bind()
+    const { mode, children } = interactiveConfiguration(f)
+    await mode.showModelSelector()
+    const old = children[0]
+    const save = vi.spyOn(f.session.settingsManager, "setDefaultModelAndProvider")
+    f.setLive(pending)
+    const selection = old.handleSelect(f.session.model)
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    const other = { name: "newer selector during old checkpoint" }
+    mode.showSelector(() => ({ component: other, focus: other }))
+    f.approve()
+    await selection
+    expect(save).not.toHaveBeenCalled()
+    expect(children).toEqual([other])
+    expect(mode.feedback.showStatus).not.toHaveBeenCalled()
+    expect(mode.feedback.showError).not.toHaveBeenCalled()
+    expect(f.owner.record.request.consumed_approval_ids).toEqual([])
+    expect(f.events.filter(event => event === "clear:approval")).toHaveLength(0)
+    expect(await f.mirror.loadCheckpoint()).not.toBeNull()
+    await vi.waitFor(() => expect(f.owner.record.request).toMatchObject({ phase: "cancelled", reason: "cancelled" }), { timeout: 500 })
+    expect(f.owner.record.request_epoch).toBe(1)
+    expect(f.frontend.readiness).not.toBeNull()
+  })
+
   it("cancels owning native parked input without consuming late approval and accepts only fresh input", async () => {
     const f = await frontendFixture({ parked: true })
     await f.bind()

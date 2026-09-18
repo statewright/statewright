@@ -132,6 +132,47 @@ export function createPiRequestOperations() {
         return this.dispatch(effect);
       });
     },
+    interactiveGesture(text, effect) {
+      if (closed || calls.getStore() || !gate?.ownsNative(context()) || typeof text !== "string"
+        || text.length > 16_384 || typeof effect !== "function") {
+        return Promise.reject(new Error("Native interactive input unavailable"));
+      }
+      return explicit(text, "interactive", async () => {
+        if (!await admitCommand()) throw new Error("Native interactive request unavailable");
+        const entry = calls.getStore().entry;
+        return this.dispatch(({ reference: ref, signal }) => {
+          const current = () => {
+            try { return !closed && !signal.aborted && entry === newestInput
+              && gate.ownsNative(context()) && isDeepStrictEqual(gate.reference, ref); }
+            catch { return false; }
+          };
+          const scope = Object.freeze({
+            signal,
+            current,
+            owns: () => owned(ref) && !signal.aborted,
+            run: async fn => {
+              if (typeof fn !== "function" || !owned(ref) || signal.aborted || entry !== newestInput) {
+                throw new Error("Native interactive request unavailable");
+              }
+              pendingInput = entry;
+              try { return await inherited(ref, () => this.dispatch(fn)); }
+              finally { if (pendingInput === entry) pendingInput = null; }
+            },
+            cancel: async () => {
+              // Dismissal is cancellation, not an effect needing approval. The
+              // original captured reference may be current while parked.
+              if (!current()) return;
+              newestInput = Symbol("private dismissed gesture");
+              pendingInput = null;
+              latestResponse = null;
+              cancelledReference = copy(ref);
+              await gate.cancel("cancelled");
+            },
+          });
+          return effect(scope);
+        });
+      });
+    },
     ownsCurrent() { return owned(reference()); },
     staleCall() {
       try { const call = calls.getStore(); return !!call?.reference

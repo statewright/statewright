@@ -202,6 +202,26 @@ treat a later shell command's exit0 as successful hash evidence or change ambien
 configuration. Full original contract remains OPEN/goal ACTIVE, next bounded
 milestone is crash/consume-response-loss characterization above, not release.
 
+### Slice 25 committed handoff
+
+Source commit4ba073c5cd2ca294096ef9faff80324ad515eee4 on canonical local main,
+parent97091d190e790ea71650e9488a78429a6750c011, exactly seven owned paths. Tested/
+reviewed source/ADR blobs identical to treed63bb5f7983238443e08f111a9557e1503743854;
+only this receipt gained final review/audit/accounting text afterward. Focused5/5,
+native7/7 Darwin, Node308/308 SERIAL, Pi352 passed/one existing opt-in live skip,
+SOURCE Claude parity/syntax/diff check passed, fresh independent COMPLETE static
+source review no actionable findings. Review-output target overruns retained.
+No independent runtime review or installed/native Windows/live acceptance claim.
+
+Post-source index empty and owned paths quiet; Statewright unrelated seven-path
+binary diff55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270,
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+preserved. No installation/activation/push/deploy/workflow/real decision/signal.
+Next receipt-only commit records this source SHA; source gates not rerun for text.
+Turn classification PROGRESS, full goal ACTIVE and all nine requirements OPEN.
+Continue directly with bounded task-owned full-parent crash/dead-owner-lock and
+consume-response-loss characterization; no authority expansion or workflow use.
+
 ## Slice 24 entry: task-owned SDK process cold resume
 
 Manual-only continuation, combined agentic-engineering evidence/usage controls;

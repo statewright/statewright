@@ -34,9 +34,25 @@ initialization or weakening no-inference/history/once-only assertions. No durabl
 schema or production runtime changes are intended. Roll back the scoped fixtures/
 ADR/receipt commit without deleting native files, journals or ownership records.
 
-Limits: SDK child-process restart is real; parent owner/controller reopen remains
-same-process, not full executor-process crash/restart. Forced crashes, stale locks,
-legacy recovery, actual socket-dropped begin responses, failure-drain, authenticated
-reviewer/UI/installed hosts and all original P0/P1 obligations remain open. Revisit
-when task-owned full-parent crash conformance and genuine native acceptance become
-available; these fixtures cannot serve as release certification.
+Original cases: SDK child-process restart is real; parent owner/controller reopen
+remains same-process. Added full-parent cases run actual store/mirror/runtime and
+observeHost in separate parent processes, each supervising the same public SDK
+driver. The external synthetic authority and provider survive both lifetimes.
+One task-owned proxy destroys the begin response socket only after the real
+private bridge completed/fsynced parking; this is actual HTTP acknowledgement
+loss, not adapter-result withholding. Normal SDK/parent exit precedes explicit
+same-owner reopen and strict descriptor/journal/readiness/epoch reconciliation.
+The shared IPC helper extraction preserves the earlier child test semantics.
+Emergency reap is bounded separately: exact owned handle gets SIGTERM, then
+SIGKILL if its actual exit is not observed before the grace deadline. A second
+deadline fails as unreaped, never as successful termination. An inert POSIX
+child ignoring close/SIGTERM proves this fixture behavior, not SDK resistance or
+permanent product teardown recovery. Normal SDK/parent acceptance still requires
+exit0/no signal; emergency-reaped processes cannot satisfy those assertions.
+
+Limits: full-parent graceful reopen and begin wire loss are conformance targets,
+not forced parent crash or exactly-once crash-delivery proof. Stale locks, legacy
+recovery, permanent failure-drain, authenticated reviewer/UI, installed launcher/
+hosts and all original P0/P1 obligations remain open. No production source/schema
+or native activation. Revisit when task-owned full-parent crash conformance and
+genuine native acceptance become available; no release certification is implied.

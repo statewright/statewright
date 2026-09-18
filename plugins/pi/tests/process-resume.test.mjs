@@ -7,6 +7,7 @@ import { createExecutorNativeReadiness } from "../../executor/lib/executor-nativ
 import { AdapterBridge } from "../../executor/lib/adapter-bridge.mjs";
 import { assertPiNativeSession } from "../../executor/lib/host-adapters.mjs";
 import { fixture, pending } from "../../executor/tests/fixtures/owned-request.mjs";
+import { ownedProcessDriver } from "./fixtures/owned-process-driver.mjs";
 
 const schema = "statewright/pi-process-fixture/v1";
 
@@ -18,55 +19,6 @@ async function denied(bridge, action, body, expected) {
   const result = await response.json();
   assert.equal(response.ok, false, `Stale ${action} must fail at the actual private HTTP bridge`);
   assert.match(result.error, expected);
-}
-
-function driver(child) {
-  const inbox = [];
-  const waiting = new Set();
-  let output = "";
-  let exited = false;
-  child.stdout.on("data", chunk => { output = (output + chunk).slice(-8192); });
-  child.stderr.on("data", chunk => { output = (output + chunk).slice(-8192); });
-  const exit = new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      exited = true;
-      for (const waiter of waiting) waiter.reject(new Error(`Owned SDK child exited ${code}/${signal}: ${output}`));
-      resolve({ code, signal });
-    });
-  });
-  exit.catch(() => {});
-  child.on("message", message => {
-    if (message?.schema !== schema || message.pid !== child.pid) return;
-    for (const waiter of waiting) {
-      if (message.type === "failure") waiter.reject(new Error(message.error));
-      else if (waiter.type === message.type) { waiter.resolve(message); return; }
-    }
-    inbox.push(message);
-  });
-  const wait = type => new Promise((resolve, reject) => {
-    const failure = inbox.find(value => value.type === "failure");
-    if (failure) { reject(new Error(failure.error)); return; }
-    const index = inbox.findIndex(value => value.type === type);
-    if (index >= 0) { resolve(inbox.splice(index, 1)[0]); return; }
-    if (exited) { reject(new Error(`Owned SDK child already exited: ${output}`)); return; }
-    const waiter = { type, resolve: value => { clearTimeout(timer); waiting.delete(waiter); resolve(value); },
-      reject: error => { clearTimeout(timer); waiting.delete(waiter); reject(error); } };
-    const timer = setTimeout(() => waiter.reject(new Error(`Owned SDK child ${type} timeout: ${output}`)), 15_000);
-    waiting.add(waiter);
-  });
-  const send = (type, value = {}) => child.send({ schema, type, ...value });
-  const close = async () => {
-    if (exited) return exit;
-    send("close");
-    let timer;
-    try {
-      return await Promise.race([exit, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Owned SDK exit timeout: ${output}`)), 15_000);
-      })]);
-    } finally { clearTimeout(timer); }
-  };
-  return { child, wait, send, close, exit, get exited() { return exited; } };
 }
 
 for (const withholdBegin of [false, true]) test(`actual SDK process resume preserves pending gate after ${withholdBegin ? "lost begin acknowledgement" : "normal parked close"}`,
@@ -115,12 +67,12 @@ for (const withholdBegin of [false, true]) test(`actual SDK process resume prese
       const childEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
       const child = fork(new URL("./fixtures/owned-sdk-process.mjs", import.meta.url), [], {
         cwd: f.owner.record.scope.cwd, env: childEnv, execArgv: [], stdio: ["ignore", "pipe", "pipe", "ipc"] });
-      const control = driver(child);
+      const control = ownedProcessDriver(child, { schema });
       readiness.bindChild(child);
       cleanup.push(async () => {
         try { await control.close(); } finally {
           // Exact fixture child only; emergency cleanup is not successful exit evidence.
-          if (!control.exited) { child.kill("SIGTERM"); await control.exit; }
+          if (!control.exited) await control.terminate();
         }
       });
       control.send("initialize", { options: { challenge: readiness.challenge, cwd: f.owner.record.scope.cwd,

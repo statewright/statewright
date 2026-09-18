@@ -167,6 +167,25 @@ host obligations above remain controlling. Rollback: scoped local revert of
 eight-path additive experimental source, preserve journals/native records.
 No push/install/activation/deploy/live native session/workflow use occurred.
 
+### Slice 21 committed source and handoff
+
+Implementation commit f4ae56eff941ff3e533d1be9d81260e42d084239 on Statewright
+main, parent bd00adf6d743003ebb341e2ca017bfd919c7d93c, eight owned paths.
+Post-commit tested-tree22bfec.. -> implementation commit diff is ONLY this
+research receipt; source/ADR/tests/manifest/lock unchanged from exact gates and
+independent reviews. Index empty, eight owned paths unstaged quiet, diff check0.
+Seven unrelated tracked Statewright changes remain exactly SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auldwyrm HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/unchanged tracked diff
+SHA25694f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa.
+User untracked012/013/014/canary artifacts preserved. All gate/review processes
+terminal; no inherited writer identity or live reviewer handle retained.
+Commit-identity recording is a separate RESEARCH-ONLY follow-up; no new product
+source or validation claim. Source baseline for next retry-ownership slice is
+f4ae56e; all nine original requirements above remain OPEN. No activation/push/
+deployment/full-goal completion. Observed entry wall approximately14min before
+final recording, under20min warning; tool accounting incomplete/no cap guarantee.
+
 ## Slice 20 entry: owned default compaction and branch summary inference
 
 Basebd00adf; previous turn progress committed and exact-source verified. Continue

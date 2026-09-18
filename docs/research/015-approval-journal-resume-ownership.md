@@ -179,6 +179,27 @@ HEAD/ownership/hash checks; follow with receipt-only exact source-SHA record.
 No source rerun claimed for text-only additions. Full objective remains ACTIVE,
 not achieved/blocked; verified recovery contract and all other original gates open.
 
+### Slice 27 committed handoff
+
+Source commit8bf71662ac75a2d1b2c6e6f8100cc3d0247b89e9 on canonical local main,
+parenta61df885aeaff19210156858bb4b16cb84ad75c5, exactly four owned scoped paths.
+All three source/ADR blobs identical to tested/reviewed tree08e57297bddd5961bae2f3195119318947d52d9d;
+only research receipt gained final gate/audit/review accounting afterward.
+Post-source index empty and owned paths quiet. Exact focused9/9, Pi352+existing
+opt-in live skip, Node308/308 SERIAL, native11/11 Darwin, SOURCE Claude parity/
+two syntax/diff checks passed; fresh COMPLETE independent static source review
+no actionable P0/P1 findings. No independent runtime/provider/native acceptance.
+Controlled export excludes unrelated user tracked changes, does not validate them.
+
+Statewright seven-path entry diff55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270,
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+preserved; no workflow/installation/activation/push/deploy/real decision/live
+signal. Receipt-only follow-up records this SHA, source gates not repeated for
+text. Classification PROGRESS/full goal ACTIVE, all original nine requirements
+OPEN. Next safe direct source milestone: bounded private explicit recovery contract
+with exact lock/native/owner binding and actual process-exit witnesses, independent
+review before API enabling; never automatic lock/UUID/reference adoption.
+
 ## Slice 26 entry: forced exits and lost consume HTTP response
 
 Previous goal turn PROGRESS: source4ba073c/receipt8ee5ea6 committed actual parent/

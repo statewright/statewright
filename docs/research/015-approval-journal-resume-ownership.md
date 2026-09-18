@@ -2,6 +2,234 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 24 entry: task-owned SDK process cold resume
+
+Manual-only continuation, combined agentic-engineering evidence/usage controls;
+user override forbids Statewright workflow activation/query/load/use. Canonical
+main basead2cb45d5d2b93ca40d1574ff8098332c3f79f6c, index empty/owned paths quiet.
+Seven unrelated tracked Statewright changes retain binary diff SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270;
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/full tracked diff SHA256
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa unchanged.
+Parent/repository instructions and original006147-172/0121-43/11138-62/
+11649-100 read. No implementation delegation; narrow in-place fixture additions
+avoid overlapping user paths. All original nine requirements remain OPEN.
+
+Accepted slice: two actual task-owned public SDK child-process restart cases,
+normal parked close and begin response withheld after real parent durable park.
+Use the installed0.73.0 public owning factory/services, exact owner/native JSONL,
+real private loopback bridge/readiness, synthetic authority and inert SSE only.
+Require distinct child PIDs and readiness lifetimes, unchanged native descriptor/
+pending ticket, settled old prompt/normal exit, stale epoch denial and precisely
+one synthetic-approved continuation/consumption. Reopen parent owner/controller
+objects explicitly; this is NOT an actual parent-process restart or headed UI.
+No production repair unless a discriminating real SDK regression requires it.
+
+Owned paths: new plugins/pi/tests/fixtures/owned-sdk-process.mjs and
+plugins/pi/tests/process-resume.test.mjs, ADR012 task-owned process conformance,
+this receipt; production gate/controller/readiness only if an actual RED warrants
+separate recorded repair. No durable schema, resolver/human decision, workflow,
+live session/signal, provider credentials, raw/private SDK import, vendor patch,
+install, activation, push or deployment. Rollback scoped fixture/ADR/receipt
+commit, preserving all durable native/journal/owner records and unrelated edits.
+
+Acceptance: focused process tests, affected full Pi, native wildcard suite, wider
+Node308 SERIAL, Claude SOURCE generated parity, changed-mjs syntax/diff check,
+exact immutable export, fresh independent clean-context read-only source review.
+Reuse observed-only root85 normal/120 contraction tools,30min warning/45min
+contraction,24KiB task-output target (mandatory instruction reads separate), final
+third reserved for validation/review/receipt. Reviewer4 diagnostic attempts/5min/
+two focused command families; one normal/two worst requested Astra/high reviews,
+max2 repairs per finding. Stop optional discovery at reserve; prior output target
+overruns remain recorded, no enforced/provider aggregate quota or price claim.
+No controller/catalog probe or invented workflow identity. Full original audit
+required at handoff; safe source work remains, goal ACTIVE not complete/blocked.
+
+### Slice 24 characterization and retained fixture failures
+
+First actual process run failed both cases before restart: expected checkpoint
+incorrectly included workflow (journal contract persists thread/client separately,
+state contains run/run-session/state/pending ticket). Original fixture registered
+owner/root cleanup before child/bridge cleanup; after assertions failed, remaining
+handles kept the runner alive. No SDK child remained in exact read-only process
+inspection. Stopped ONLY task-owned runner PID68797 with SIGTERM; terminal exit1,
+two failures/one cancellation, approximately27.4s. Not runtime defect evidence.
+Two wrong-cwd rg commands also failed; corrected root-relative diagnostics once.
+
+Correct LIFO cleanup includes the owner callback last, drains every cleanup even
+after one fails, and reports aggregate errors. Use actual request.reason and
+complete persisted checkpoint contract. Second run two failures/zero cancellations
+exit1, approximately2.7s: restart/park/approve worked, but finalResponse is the
+actual assistant MESSAGE, not text. Assert role/stop reason/exact content and two
+native message roles; no dropped no-inference/history/once-only assertion. Third
+run two passed/zero failures/skips/cancellations exit0, approximately2.7s. All jobs
+terminal; no production source repair justified. Add actual private HTTP stale
+readiness/status/cancel/consumed-release denial controls before exact export gates.
+
+### Slice 24 immutable source gates
+
+Frozen staged tree3989db693366a413aee9286478a573a9a96546e9, export
+/tmp/statewright-process-resume.Rh9dEK; all four exported blobs matched exact tree,
+index/tree unchanged before review. Installed public SDK package verified0.73.0.
+Actual process focused2/2 (HTTP denial controls included), native wildcard4/4
+zero failure/skip/cancellation, Pi352 passed/one pre-existing opt-in live-test
+skip (353 total), wider Node308/308 SERIAL zero failure/skip/cancellation. Exact
+export Claude generated managed-client SOURCE parity and both new-mjs syntax0;
+canonical staged diff check0. New cases enter existing test:native wildcard,
+not the Vitest count or the unchanged308 explicit Node list. Temporary archive
+uses existing dependency symlinks, no install or source edits in export.
+
+No Rust/workspace lint/type/build, migration (no schema change), full parent
+process crash/socket-drop/lock recovery, headed UI, real authority/provider,
+standalone installed-runtime, Windows/CI/staging/soak/promotion proof. Synthetic
+state literals and mocked gateway log strings are not workflow execution. Initial
+runner signal and fixture failures retained; all gate handles terminal. Third
+wrong-path diagnostic guessed116 filename; rg found authoritative
+116-statewright-cross-host-approval-conformance.md and corrected read completed.
+Seven unrelated Statewright/Auld hashes and Auld HEAD unchanged.
+
+Mandatory fresh review spawn hit collaboration thread capacity, no stale agent
+identity reused. Scrubbed ephemeral read-only CLI requested Astra/high with
+multi-agent disabled and env routing/session bindings removed. Parent captured
+actual new thread01a0b239-87b7-7612-83cc-089d4755a8c3, distinct from writer
+01a0b0f5-909c-7b61-b632-3375983b613f; effective model/reasoning routing unverified.
+Review still pending here, NOT acceptance; record final disposition separately.
+
+### Slice 24 independent findings and repair
+
+Initial independent CLI thread01a0b239-87b7-7612-83cc-089d4755a8c3 terminal
+exit0/final captured, visible child CODEX_THREAD_ID agrees with parent thread.started.
+Static review, no runtime probes. Two medium evidence findings: fabricated nonce
+could test invalid nonce rather than consumed-release replay; copied process.env
+kept ambient provider credentials despite synthetic routing. Initial green export
+is superseded, NOT source acceptance. Dependency inspection incomplete; archive
+has no Git metadata so base/tree not independently verified (root blob pairs did
+match). Four diagnostic attempts reported, including blocked heredoc; parent
+captured three diagnostic command wrappers exit0 after mandatory oracle read,
+some inner Git failures omitted by first wrapper, later explicit no-Git error.
+Do not invent successful independent Git/dependency/native verification.
+Reviewer reports22,885 source characters, approximately2.35KiB over20KiB target;
+parent successful wrapper sum23,004 characters, slight accounting gap retained.
+CLI usage input129475/cache104960/output3022/reasoning809; requested route only.
+
+Repair attempt1 each: observe only successful actual public controller consume
+calls, preserve original algorithm/result and clone their real body, replay exact
+consumed nonce/reference via private HTTP, require successful call count stay1.
+Replace child env copy/denylist with explicit PATH-only allowlist; ready receipt
+reports actual process.env KEY NAMES and parent requires exactly PATH. No secret
+values exposed, no HOME/common-shell-variable repurpose or production mutation.
+ADR clarifies both evidence boundaries. Fresh focused/export/full gates and
+fresh independent review required; first review not reused as repaired acceptance.
+
+First repair-focused run2/2 failed exit1/zero cancellations in1.5s, before any
+prompt: Darwin supplied __CF_USER_TEXT_ENCODING despite PATH-only env options.
+Read-only task-owned bare Node execFile with EXACT same PATH-only env and no SDK
+imports reproduced keys PATH + __CF_USER_TEXT_ENCODING. Correct strict actual
+ready-key assertion ONLY for this observed Darwin runtime metadata key; other
+platforms still exactly PATH, no arbitrary-key/credential allowance. The first
+allowlist itself was already correct, no production fallback or permission mask.
+No source export made from the failing staged intermediate8af5bd2f599e9020e415766f0fe692048638c4cc.
+
+### Slice 24 repaired exact-source gates
+
+Repaired frozen tree53d7e714e92749213513c472e2da06f904aed190, export
+/tmp/statewright-process-resume-repair.Px5eWx. Four blob pairs match exact tree;
+staged tree unchanged before fresh review. Process focused2/2, native wildcard4/4,
+full Pi352 passed/one existing live-test skip (353), wider Node308/308 SERIAL,
+all exit0 with zero unexpected skips/failures/cancellations. Exact export SOURCE
+Claude generated parity and two new-mjs syntax0, canonical staged diff check0.
+Actual successful nonce replay and strict child environment controls included.
+All repaired gate handles terminal; initial green/failing intermediate retained
+above, not reused as final acceptance. Review result still pending separately.
+
+Fresh scrubbed ephemeral/read-only CLI requested Astra/high, no agents/workflow
+or inherited routing/session bindings. Parent captured new actual thread.started
+01a0b23d-f69e-7523-a10d-0c77b8a16616, distinct from writer and first reviewer.
+Same4-diagnostic/5min/20KiB observed-only review envelope; effective route unknown.
+Root24KiB task-output target exceeded by required source intake/full staged diff
+inspection alone; exact total/root provider-token/tool accounting incomplete.
+Stop optional source breadth; reserve only review/receipt/scoped Git boundary.
+No hard aggregate quota, budget enforcement, cost conversion or compliance claim.
+
+### Slice 24 repaired independent source acceptance
+
+Fresh thread01a0b23d-f69e-7523-a10d-0c77b8a16616 terminal process exit0 and final
+SOURCE PASS captured by parent; actual thread.started distinct from writer/first
+reviewer. No actionable defect within three source/ADR files. Both prior medium
+evidence findings closed at static source boundary: actual successful consumed
+body replayed/rejected over private HTTP with successful count1; child launch
+PATH-only and actual ready-key assertion limited to PATH/observed Darwin metadata.
+Runtime/native/version/provenance/Darwin reproduction NOT independently run;
+unchanged upstream inspection partial/capped. Root exact runtime gates above are
+separate supplied evidence, not independent native conformance. Full original
+scope/provider/authenticated/installed acceptance remains OPEN.
+
+Reviewer reports4 diagnostics including1 read-only shell failure; parent captured
+3 successful diagnostic wrappers after full oracle read, all wrapper exit0. No
+runtime probes/tests/network/mutations/agents. Successful source output24,314
+characters including labels/cap metadata, over20KiB target; exact aggregate/tool
+attempt accounting gap retained, not enforced compliance. Last upstream excerpt
+capped. Usage input129062/cache107008/output3215/reasoning1549; requested Astra/
+high only, effective route/aggregate enforcement unverified. One repair per
+finding plus Darwin expectation correction, two source exports/two fresh CLI
+reviews total; no third export/review or optional source breadth. Root selected
+source-intake/full-diff bodies90,131 characters alone exceed24KiB target; actual
+root total/tool/token accounting incomplete, no price conversion. About13min to
+this acceptance; all validation/reviewer handles terminal.
+
+Final receipt/audit-only delta from tested/reviewed53d7e714 tree is research015;
+three source/ADR blobs unchanged. Scope commit preserves all unrelated seven
+Statewright tracked changes and Auld checkout/records. No workflow activation/
+load/use, user session signals, resolver/real decision/provider, install/runtime
+activation, push/deploy/promotion. Original nine-row audit below remains the
+controlling full goal, ACTIVE not complete/blocked. Next safe full-parent-process
+source milestone is not replaced by this narrower green conformance slice.
+
+### Slice 24 full original requirement audit and next source boundary
+
+Re-read006147-172/0121-43 and Auld111 shared evidence202-242/11649-100. Existing
+historical staging receipts are not current acceptance. All original rows OPEN:
+
+1. Complete immutable tenant/client/gateway/run/edge/action/artifact/policy/
+   reviewer/expiry/revocation ticket and authoritative validation remain unproved.
+2. This slice binds real SDK process/native UUID/file/fresh readiness/epoch, but
+   complete parent-process/branch/replacement/cross-host lineage remains open.
+3. Startup/pending inference and native history are zero for these process cases;
+   exhaustive raw SDK/project/UI/FS/spawn/auth/provider/WS/backend/queue effects
+   and arbitrary pre-wrapper/native listeners remain open.
+4. Real authenticated entitled native/website and unauthorized required-reviewer/
+   dismissal-only journeys remain open; no real resolver or credentials exercised.
+5. Real SDK child PROCESS reopen now characterized with exact pending checkpoint
+   and lost adapter acknowledgement, not full executor-process cold/crash restart,
+   network-dropped responses, stale locks/legacy recovery/permanent failure drain.
+6. Named synthetic once-only consumption/stale HTTP controls pass; real authz/
+   entitlement/artifact/policy recheck and exactly-once crash delivery remain open.
+7. Old epoch/status/cancel/release denied here; every final response/publication/
+   native effect against new user input remains open.
+8. Decision source/authentication strength/human action/same-OS isolation unproved;
+   private fixture IPC/bridge keys are NOT strong human provenance.
+9. Shared reviewer/evidence/retention/clean standalone install and every advertised
+   native host/provider remain open.114 proposed baseline not certification;
+   115 separate provenance unchanged.
+
+012 A/1 user-dirty Rust denial untouched/unvalidated/uncommitted;2 trusted decision
+surface untested;C/3 improves actual SDK child restart but parent/paused-session
+process persistence still partial;B/4 experimental owning source inactive, actual
+installed/main activation unproved;D genuine authorized canaries not run.111
+native/web/shared evidence and116 desktop/native Windows distinctWSL/clean release/
+provider auth/100 deterministic iterations per runtime/24h multi-session soak OPEN.
+Full goal ACTIVE, not complete/blocked; no objective removed to fit green tests.
+
+Next safe manual source milestone: a task-owned FULL executor-parent process
+reopen around the real SDK child/private bridge/owner/journal, with synthetic
+authority held externally across parent lifetimes. Start with explicit graceful
+release/reopen to prove exact owner/journal/native descriptor reconciliation, then
+discriminating lost-HTTP/forced-crash delivery and dead-owner lock denial. Never
+steal a stale lock based only on PID/age or automatically adopt latest reference.
+Preserve all broader unresolved controls; no workflow/live user process/resolver/
+installed runtime/push/deploy authority added. Scoped rollback only these four
+additive conformance/evidence paths, preserving all durable native/journal records.
+
 ## Slice 23 entry: asynchronous native retry observer ownership
 
 Previous turn PROGRESS: sourceab8aeb9/receipt5f81f8c committed. Fresh preflight

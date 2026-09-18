@@ -18,7 +18,8 @@ compares a candidate against a separately selected expected intent and returns a
 frozen scalar copy. It does not read files, establish provenance, verify process
 exit, register writers, consume an intent, reconcile approval or reclaim locks.
 Matching JSON remains replayable and must NEVER serve as recovery authorization.
-No current runtime imports it; no store/bridge/CLI recovery entry point is added.
+No current production runtime imports it; no store/bridge/CLI recovery entry point
+is added. The experimental writer authority below uses it privately.
 
 The binding includes executor UUID, scope digest, exact transport client/session
 and run, native UUID/absolute normalized file, existing owner token, raw owner/
@@ -38,7 +39,8 @@ expected intents fail. Case/alias/path normalization cannot hide a mismatch.
    retain actual OS-backed handles or equivalently strong process-lifetime proof
    for EVERY native writer. Registration precedes native admission. Exit is an
    observed terminal event, not a kill request, timeout, PID probe or IPC assertion.
-   Current parent-local readiness is insufficient; this broker does not exist.
+   Current parent-local readiness is insufficient; the production outliving
+   broker does not exist. The unactivated pair prototype below is not that broker.
 2. Exclusive writer admission must persist through proof and transfer. Every
    normal open/resume AND recovery contender participates in the same authority.
    Legacy/unregistered writers are unsupported; source/file-version knowledge
@@ -68,6 +70,43 @@ expected intents fail. Case/alias/path normalization cannot hide a mismatch.
 
 ## Acceptance before recovery API
 
+### Experimental registered-pair exit authority (Slice29)
+
+`createExecutorWriterAuthority` is trusted-root-only, unactivated source. It
+reserves registered executor scope/native UUID/lexical file, launches its own
+PATH-only Node parent/writer children and keeps their actual ChildProcess handles
+private. Read-only ports forward native lifecycle events without leaking the
+handle through callback `this`; no PID/handle adoption or `emit` surface exists.
+An accepted signal, IPC assertion, close/spawn error, observer timeout or readiness
+revocation is not writer exit. Require both spawned registered roles' actual
+terminal exit events without launch errors before issuing an opaque witness.
+
+Stable lineage is reserved before launch. Recovery intent's owner token/raw-byte
+digests/request epoch/intent ID can change while children work: select and bind a
+fresh exact snapshot only after quiescence. One private witness/intent per pair,
+identity lookup, exact comparison and synchronous consumption deny copies/replay.
+Consumption returns binding metadata, NOT a store recovery capability, and retains
+reservation; no replacement generation or transfer/release API is implemented.
+Authority close revokes proofs but does not claim exit or kill arbitrary processes;
+owned ports remain signal/exit-observation-capable for explicit bounded cleanup.
+Ledger and handles are memory-only; a new broker lifetime cannot adopt old proofs.
+
+Actual Node actors test these boundaries. A separate installed public SDK child
+uses real durable owner/controller/journal/private bridge/readiness, parks input
+with no inference/history, and cannot witness exit merely from registered parent-
+role actor exit or readiness closure. Actual normal SDK exit permits one witness
+without changing pending checkpoint/lock or enabling resume. The parent role actor
+is INERT, not the actual executor owner/controller process. This is registered-pair
+prototype conformance, not full executor-parent crash recovery or durable-owner
+PID/process membership validation. Current launcher/normal open/resume do not use
+it; unknown/unregistered descendants/writers, lexical aliases and same-OS malicious
+processes are not excluded by it. The producer still needs trusted raw-byte/file-
+identity observation, all-writer registration/admission, durable intent/continuity
+and exclusive transfer/reconciliation before ANY reclaim API. First generation
+only; permanently holding the prototype reservation is not completed recovery.
+
+### Required full recovery journeys
+
 Require real task-owned processes and authority, not injected booleans: parent
 death with surviving writer must hold; parent AND all registered writers observed
 exited may transfer once; missing/foreign/replayed/expired witnesses, changed raw
@@ -83,6 +122,6 @@ readiness (issuer died, replay); hash-only unlink (no exclusion, TOCTOU); persis
 agent-readable signature alone (no issuer/lease continuity or malicious-user
 isolation). Permanently denying dead locks is safe interim behavior, not completion.
 
-Rollback only the new validator/tests/ADR/receipt source paths; never delete or
+Rollback only experimental validator/authority/tests/ADR/receipt source paths; never delete or
 rewrite durable owner, lock, native or journal data. No workflow/live session,
 human/provider decision, installation, production activation or deployment.

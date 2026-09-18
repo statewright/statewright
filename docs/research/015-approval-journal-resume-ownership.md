@@ -2,6 +2,225 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 29 entry: private task-owned writer exit authority prototype
+
+Previous turn PROGRESS: sourcee1195c3/receipt20ccd4a committed the reviewed closed
+recovery-binding contract and25 tests. Fresh main20ccd4a00a5b8c7fb17a3034d1e0dbabced73b6c,
+index empty/owned paths quiet. Seven unrelated tracked Statewright diff SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270 and whole Auld
+tracked diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+unchanged; Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4. Same writer
+01a0b0f5-909c-7b61-b632-3375983b613f, Node26.5.1. Full selected skills/required
+references read; initial combined skill output truncated, replayed complete
+stored body before task actions. Parent AGENTS is parallel-tool example only,
+no subagent implementation mandate. A zsh loop variable named path accidentally
+changed that one command's PATH; fresh shell with instruction_file corrected
+instructions/status/worktree inventory. Guessed nonhidden Auld spec/source paths
+failed; --hidden file discovery found exact .claude/specs/111/116. No environment
+config/fallback/state changes; retained prunable worktrees untouched.
+
+Manual agentic-engineering evidence/usage + direct root oracle analysis and
+testing-expert. User instruction prohibits workflow activation/query/load/use/
+catalog/probe; no quota/controller/model-catalog claims. Reuse experimental manual
+profile, no new production/compliance baseline. Full006/012 and current Auld111/
+116 accepted boundaries reread, all nine original obligations remain OPEN.
+Existing ExecutorLease is heartbeat metadata, not OS-backed writer lifecycle proof.
+
+Owned FIVE paths: new executor-writer-authority.mjs and Node test, new Pi native
+authority test, ADR013 amendment, this receipt. Trusted-root-only prototype must
+spawn its own Node children, retain private actual handles, never adopt supplied
+PID/duck handle/callback/serialized exit receipt; reserve exact registered scope/
+native descriptor before admission. Require observed parent AND writer exit before
+one-use opaque exit witness; signal acceptance/killed/timeout/IPC is not exit.
+Preserve reservation after witness consumption. Fresh recovery snapshot is bound
+AFTER quiescence (owner/journal bytes may change during native work), with exact
+reserved stable lineage. Reject foreign/stale/copied witnesses, duplicate intent,
+new registered writer after sealing and authority-close/lifetime loss.
+
+Acceptance: focused actual Node child races/denials; public installed SDK child
+under the private authority with real owner/controller/bridge/readiness, pending
+input/no inference/native-history and stopped-writer witness; exact frozen-source
+affected serial Node integration + same focused native case, SOURCE parity/syntax/
+diff checks, fresh independent source review, scoped local commits. Registered
+parent role actor is inert, NOT full actual executor-parent ownership/crash proof;
+durable-owner PID/byte/file identity binding, unregistered writers, real existing
+launcher participation, durable one-use ledger, broker restart continuity, transfer,
+approval reconciliation/auth/UI/install/Windows/soak remain later requirements.
+No recovery/store API or existing host activation. No native headed mode, workflow,
+real provider/decision/session/credentials, resolver/vendor/deployment/push changes.
+
+Observed-only root65 normal/95 contraction tools,25min warning/40min contraction,
+64KiB source-output warning/88KiB contraction, instructions separate. Stop breadth
+at warning; preserve final third for gates/review/handoff. One normal/two repair-only
+review turns Astra/high requested/effective unverified, six diagnostics/7min/64KiB
+aggregate/24KiB each; fully read four owned source/test/ADR files in split commands,
+scoped ADR diff + narrow existing fixtures only, no runtime/suites/network/workflow/
+agents/writes. Two distinct repairs per finding/two exports. Root oracle analysis
+not delegated; fresh SDLC review remains mandatory. Goal ACTIVE, not complete.
+
+### Slice 29 baseline and focused characterization
+
+New authority Node test first failed collection ERR_MODULE_NOT_FOUND: missing
+new primitive, not reproduction of an old product behavior. Initial four actual
+Node actor cases4/4 terminal0; five5/5 after direct reserved-lineage/role/opaque-
+port and duplicate-intent assertions. Initial actualSDK1/1 terminal0. Strengthen
+native snapshot to hash RAW physical journal bytes using the existing namespace,
+not normalized restored JSON; no weaker producer claim accepted. Final combined
+six6/6 terminal0, zero failures/skips/cancellations. Actual normal SDK/parent-role
+exit0, pending checkpoint bytes/native history unchanged, inference0 and original
+lock still denies resume; private witness consumption once does not unlock/clear.
+Readiness cancellation changes owner/epoch as expected but is NOT native exit.
+Supporting mirror combined diagnostic truncated; full3034-token file reread
+alone before relying on end-to-end journal behavior. No fixture exit receipt or
+signal result substitutes for actual native handle terminal event.
+
+### Slice 29 first export and mandatory review repair
+
+First treeb80104d8de4343de6c8e74aa22e89479c314981c at
+/tmp/statewright-writer-authority.MJc3ti ALL FIVE blob pairs matched. Serial Node
+338/338 and native wildcard12/12 terminal0, zero failures/skips/cancellations;
+SOURCE parity/three new MJS syntax/staged diff checks0. Functional green was NOT
+accepted as private-handle safety proof: independent review found a real P1 leak.
+
+Fresh agent spawn thread-capacity failure; scrubbed PATH-only ephemeral/read-only
+CLI requested Astra/high, effective route unverified, new actual thread
+01a0b275-8eef-7972-ac22-3bf12ed7497b distinct from writer, final terminal0. Reviewer
+reported COMPLETE but second combined native-test/ADR diagnostic TRUNCATED and
+was not reread. Root rejects claimed full source coverage: INCOMPLETE review,
+finding evidence usable only with root reproduction, not independent approval.
+Five diagnostics42,416 UTF8bytes, largest17,055, one truncation marker retained;
+no false full-coverage credit. Usage input151316/cached119552/output1878/reasoning622.
+
+P1: onMessage's unsubscribe arrow returned child.removeListener's ChildProcess
+return value. Port holder could obtain actual handle then emit fabricated exit
+and poison private exited state despite living writers. Root regression baseline
+failed0/1 at detach-return assertion, no fake exit emitted/process left orphaned.
+Fix causal leak by discarding removeListener return, not weakening actual exit
+or hiding public assertions. Regression checks void unsubscribe return and native
+IPC/exit callbacks' this receivers are undefined. Existing port/replay/lineage/
+once-only/no-inference/journal assertions retained. Repair receives fresh focused,
+second exact export gates and new clean reviewer with explicit full-read/truncation
+denial instructions; no source commit/approval until those complete.
+
+### Slice 29 repaired export and coverage recovery
+
+Repair focused7/7 terminal0. Second exact tree35351816795b3b0eeacfa87275754bd5799a7556
+at /tmp/statewright-writer-authority-fixed.mY5HKa ALL FIVE export blob pairs match.
+Final serial Node339/339 and current native wildcard12/12 terminal0, zero failure/
+skip/cancellation; SOURCE Claude parity/three new MJS syntax/staged diff checks0.
+No installed dependency change; SDK0.73.0/current Node26.5.1 verified. Functional
+gates do not replace review. Initial338/12 gates retained as superseded source.
+
+Fresh repair reviewer thread01a0b277-bda6-7bb0-8658-2985a3216879 distinct from root/
+first reviewer, terminal0. Again reported COMPLETE/full without truncation despite
+second command containing literal '2044 tokens truncated' and only9,303 output
+bytes for17,293 source bytes. Root rejects coverage claim as INCOMPLETE; static
+repair direction alone not approval. Five diagnostics46,836 UTF8bytes, largest
+18,304, one truncation marker, no corrected reread; input153776/cached121088/output
+1733/reasoning534. Both failed coverage receipts preserved. Explicit >=8000-token
+read instruction did not prevent truncation in the actual captured tool-result
+surface; effective requested read cap unavailable. No root-cause claim about
+unseen underlying adapter config. Repeating the same read plan is not useful.
+
+Bounded REVIEW COVERAGE recovery revises reserve to ONE additional fresh decision-
+only review, no new exports/source edits/runtime reruns/diagnostics or discovery.
+Root captures FULL FOUR changed sources plus FOUR exact direct dependencies/
+fixtures from the SAME immutable export, eight verified blob IDs/52,135 source
+bytes (<64KiB), complete JSON capture without truncation. Full packet supplied
+directly rather than relying on the failing combined-read result channel. Root-
+produced byte/blob provenance, not independent filesystem/runtime verification.
+New ephemeral PATH-only read-only thread01a0b279-e384-7743-85b4-580368cd8fe5,
+Astra/high requested/effective unverified, zero diagnostics/7min envelope. Review
+must cover all supplied sources and repair with terminal content anchors; cannot
+claim checkout reads/tests/native acceptance. It was confirmed live while gates
+were terminal; SAME review handle polled, no timeout-based restart.
+
+Root source-output88KiB contraction target EXCEEDED: known THREE captured
+diagnostics alone98,835 UTF8bytes (owned diff32,531 + full mirror11,500 + complete
+packet JSON54,804), lower bound not whole-run counter. Mandatory coverage recovery
+uses protected reserve; all optional breadth stopped. Earlier skill/source/read
+truncation/error accounting remains cumulative. Child read diagnostics aggregate
+89,252 bytes across first TWO incomplete reviewers; third packet52,135 source
+input bytes is separate from diagnostics, not a reset. Manual targets not hard
+controller/quota or provider cost guarantees. No further discovery/runtime work;
+only final review/receipt/commit. Full original P0/P1 goal remains ACTIVE.
+
+### Slice 29 final supplied-source review, audit and next boundary
+
+Coverage-recovery reviewer actual terminal0/COMPLETE supplied-source verdict,
+no actionable must-fix in declared unactivated registered-pair scope. All EIGHT
+complete source strings, FOUR changed file terminal anchors returned correctly,
+zero tools/diagnostics/writes; did NOT claim independently reading checkout/blobs
+or using root runtime results. Root source-packet capture/provenance separate from
+independent static decision. P1 unsubscribe repair causally accepted by source;
+root failing-before/passing-after actual regression remains runtime evidence.
+Final review usage input29985/cached10624/output2188/reasoning1552, route requested
+Astra/high/effective unknown. Three reviewer usage totals input335077/cached251264/
+output5799/reasoning2708, no reset after incomplete coverage. Third pass justified
+ONLY for localized coverage-channel failure, not broad new scope. No product-source
+change after final tree; only this receipt evolves. All gate/review handles terminal.
+
+Full original006/012/Auld111/116 contract remains controlling, ALL NINE OPEN:
+
+1. Immutable tenant/client/gateway/run/edge/artifact/policy/reviewer/expiry/
+   revocation and authoritative validation not fully implemented/proved.
+2. Private registered-pair lineage improves; complete real executor-parent,
+   branch/replacement/cross-host lineage and durable-owner PID membership unproved.
+3. Named actual pendingSDK has inference0/native bytes unchanged, not exhaustive
+   SDK/UI/FS/spawn/auth/provider/WS/backend/queue/every declared effect proof.
+4. Genuine entitled authenticated native/web/reviewer and unauthorized dismissal-
+   only journeys unproved; synthetic fixture service is not human authority.
+5. Prototype proves registered terminal events, not actual executor-parent crash
+   takeover, unknown/legacy writers, permanent SDK drain, broker continuity or
+   actual gateway paused-session crash persistence. Existing locks still deny.
+6. One private MEMORY witness consumption not durable recovery intent ledger,
+   exactly-once crash delivery or real authz/artifact/policy/reviewer rechecks.
+7. Existing named new-input/body replay cases retained, every stale final/native
+   effect/publication across arbitrary input/replacement not proved.
+8. Decision-source/human-action/auth-strength/same-OS malicious-agent isolation
+   unproved; API keys/private ports are not strong human authentication.
+9. Shared client-neutral review/evidence/retention/clean standalone installation/
+   all advertised native hosts/providers unproved. Proposed114 unchanged and
+   115 provenance separate; historical staging not current acceptance.
+
+012A user-dirty Rust ALL-tool pending deny/decisions untouched and unvalidated;
+C local real journal proof improves but actual gateway checkpoint/crash partial;
+B source experimental/inactive/installed-main launch unproved; D genuine canaries
+not run. Auld111 native+website shared authority and116 desktop/native Windows vs
+WSL/clean release/provider auth/100 deterministic races each runtime/24h staging
+multi-session soak OPEN. Full Vitest Pi gates were NOT rerun: index/frontend/SDK/
+dependencies unchanged, prior352+existing opt-in skip historical only. Rust/type/
+lint/build/security/migration/UI/live authority/provider/CI/install/deploy not run.
+Current native12 Darwin proves declared task-owned cases, not Windows acceptance.
+
+Exact final gate commands, from repaired export (npm from its plugins/pi):
+
+```sh
+node --test --test-concurrency=1 plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs plugins/executor/tests/managed-ownership-races.test.mjs plugins/executor/tests/executor-approval-mirror.test.mjs plugins/executor/tests/executor-observer.test.mjs plugins/executor/tests/executor-contract.test.mjs plugins/executor/tests/remote-client.test.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/executor-session-ownership.test.mjs plugins/executor/tests/executor-request-controller.test.mjs plugins/executor/tests/executor-request-bridge.test.mjs plugins/executor/tests/executor-native-readiness.test.mjs plugins/executor/tests/executor-pi-parent.test.mjs plugins/executor/tests/adapter-bridge.test.mjs plugins/executor/tests/executor-recovery-contract.test.mjs plugins/executor/tests/executor-writer-authority.test.mjs plugins/pi/tests/session-owner.test.mjs plugins/claude-code/tests/managed-client-bundle.test.mjs
+npm run test:native
+node plugins/claude-code/scripts/sync-managed-client.mjs --check
+node --check plugins/executor/lib/executor-writer-authority.mjs
+node --check plugins/executor/tests/executor-writer-authority.test.mjs
+node --check plugins/pi/tests/writer-authority-native.test.mjs
+```
+
+Next safe source milestone: replace INERT parent-role fixture with real task-owned
+executor-parent privately coupled to outliving authority BEFORE SDK admission.
+Root broker must own actual parent AND SDK handles and authenticate lease/event
+relay; persisted owner lock PID/descriptor/lifetime must bind the registered real
+parent, not caller JSON or this cut's Root-owned owner plus unrelated actor.
+Prove real parent crash while SDK survives holds witness/journal/inference, then
+observed actual SDK exit permits only fresh exact intent with original dead lock
+still unchanged. No reclaim yet: durable one-use ledger, all normal-open/resume/
+writer contenders, held-byte/file-identity revalidation and exclusive crash-safe
+transfer/approval reconciliation still required. Never use today's returned
+metadata, callback true, serialized exit assertion or kill/PID/age as authority.
+Full goal ACTIVE, not complete/blocked. Scoped five-path rollback preserves durable
+data, all seven user-tracked changes/untracked research/canaries/Auld untouched.
+No workflow query/load/use/probe, resolver, live session, genuine decision/provider
+credential, installation, activation, push or deployment. Local source commit
+followed by receipt-only identity recording; no external promotion authority.
+
 ## Slice 28 entry: explicit recovery binding contract, no takeover authority
 
 Previous turn PROGRESS: source8bf7166/receipt9ec1a74 committed real consumed-write/

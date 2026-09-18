@@ -2,6 +2,138 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 28 entry: explicit recovery binding contract, no takeover authority
+
+Previous turn PROGRESS: source8bf7166/receipt9ec1a74 committed real consumed-write/
+pre-clear process conformance. Current main9ec1a747ea803fbb17f3a3399ce237b6efe347fc,
+index empty; seven unrelated tracked changes retain SHA256
+55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270.
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4 and tracked diff SHA256
+94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa unchanged.
+Same writer01a0b0f5-909c-7b61-b632-3375983b613f; full selected skills and required
+references read. Manual agentic-engineering evidence/usage, root-only oracle
+architecture analysis and testing-expert; user prohibition overrides workflow
+activation/query/load/use/catalog/probe. No new production/compliance baseline.
+All nine controlling 006147-172/0121-43/Auld111/116 obligations remain OPEN.
+
+Current parent-local readiness has the SDK ChildProcess handle, but that handle
+dies with the parent. Persisted owner lock contains only parent PID/token; neither
+PID/age nor serialized challenge/exit receipt can establish surviving native
+writer exclusion. No independent lifecycle broker or normal-open recovery mutex
+exists. Settle that trust boundary before adding a reclaim API.
+
+Owned FOUR paths: new executor-recovery-contract.mjs, its Node test, ADR013,
+and this receipt. Accept closed versioned exact metadata binding, frozen copy,
+foreign/stale/malformed rejection and real-store unchanged lock denial even for
+matching/replayed metadata. This PURE validator cannot mint/consume a witness,
+verify native exit, reconcile authority or read/write/unlock durable state. ADR
+must require outliving lifecycle authority, all-writer lease, one-use private
+intent and exclusive revalidated transfer before any future takeover. Missing
+issuer/lease state must deny; no PID fallback, callback-returns-true recovery,
+weakened approval, fresh UUID adoption or installation/runtime activation.
+
+Acceptance: focused real validator/store tests, affected serial Node integration,
+SOURCE Claude parity, syntax/diff checks, fresh independent scoped source review
+and local source/receipt commits. No current runtime imports or bundle list changes;
+prior Pi/native gates remain historical, not newly executed acceptance. No actual
+workflow, user session, credential, resolver, provider/human decision, deployment,
+push or broker implementation. Observed-only 50 normal/80 contraction tools,
+25min warning/40min contraction, 48KiB source-output warning/72KiB contraction,
+instructions separate; reserve final third for gates/review/handoff. Initial
+combined source diagnostic and an overbroad research-context search truncated;
+generator and current receipt were reread narrowly, no truncated result accepted
+as review. Stop optional breadth. Fresh reviewer one normal/two repair-only worst
+turns, Astra/high requested/effective unverified, six diagnostics/7min/64KiB total/
+24KiB per diagnostic; no source writes/runtime/network/workflow/delegation. Root
+oracle analysis is not delegated; mandatory SDLC independent review is separate.
+Goal ACTIVE: executable binding contract is not native-writer recovery success.
+
+### Slice 28 implementation and exact-source gates
+
+Implemented closed20-field scalar matcher, strict schema/shape/accessor handling,
+all-field exact comparison and detached frozen result; no effectful API/import.
+Twenty-five behavior tests cover each foreign/stale field, malformed candidate
+AND expected intent, getters/symbols/nonenumerables, UUID case, absence and replay.
+Real store binds run/native descriptor and physically consumes an approval once;
+repeated matching metadata cannot change its held lock/owner/native bytes or
+inventory and cannot remove its consumed tombstone or restore nonce.
+The checkpoint digest and lifecycle/lease IDs in that test are synthetic data,
+NOT actual retained journal or registered native-writer proof. Slice27 remains
+the prior actual retained-checkpoint proof; neither cut establishes recovery.
+
+Initial focused25 run:24 pass/1 fail, ENOENT writing native fixture file because
+the store intentionally does not create nativeRoot. Correct new fixture mkdir
+and consolidate cleanup to release owner before deleting its task-owned temp
+root. No product repair/behavior change or weakened assertion. Final focused
+25/25, zero fail/skip/cancellation, terminal0. Root output-accounting helper also
+failed on unavailable V8 TextEncoder AFTER recording a live integration handle;
+use explicit UTF8 code-point counting, retain/reap SAME handle, no product fault.
+
+Frozen tree7a005f2a1f75f53a4e481ebe826307f6936d7ee2 exported at
+/tmp/statewright-recovery-binding.2OfBrW with existing executor/Pi dependency
+links, no installation. ALL FOUR export blobs match exact tree. First selected
+serial gate330/330 terminal0 omitted adapter-bridge from original integration
+closure; expand SAME immutable tree command to include it, final333/333 terminal0
+zero failures/skips/cancellations. Includes308 retained tests plus25 new, not
+333 new tests. SOURCE Claude parity, both new MJS syntax checks and staged diff
+check exit0. Ambient archive locale warning retained; export actual exit0 and
+blob verification required. Current literal imports/usages searched under plugins
+excluding dependencies: only new module/test, no runtime import found.
+Full Pi/headed/native wildcard/Windows/installer/CI/real authority/provider/
+staging/soak/build/Rust/lint/security/migration acceptance NOT run this cut.
+Prior352+opt-in-skip Pi/11 Darwin native cases are historical only.
+
+Exact final integration command, from immutable export:
+
+```sh
+node --test --test-concurrency=1 plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/approval-journal.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/runtime-approval-service.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/codex-app-server-transport.test.mjs plugins/executor/tests/managed-ownership-races.test.mjs plugins/executor/tests/executor-approval-mirror.test.mjs plugins/executor/tests/executor-observer.test.mjs plugins/executor/tests/executor-contract.test.mjs plugins/executor/tests/remote-client.test.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/executor-session-ownership.test.mjs plugins/executor/tests/executor-request-controller.test.mjs plugins/executor/tests/executor-request-bridge.test.mjs plugins/executor/tests/executor-native-readiness.test.mjs plugins/executor/tests/executor-pi-parent.test.mjs plugins/executor/tests/executor-recovery-contract.test.mjs plugins/pi/tests/session-owner.test.mjs plugins/claude-code/tests/managed-client-bundle.test.mjs plugins/executor/tests/adapter-bridge.test.mjs
+node plugins/claude-code/scripts/sync-managed-client.mjs --check
+node --check plugins/executor/lib/executor-recovery-contract.mjs
+node --check plugins/executor/tests/executor-recovery-contract.test.mjs
+```
+
+### Slice 28 fresh independent source review and remaining goal
+
+Fresh mandatory agent spawn failed thread capacity. PATH-only ephemeral CLI
+fallback ignores user config/rules, read-only sandbox and explicit no MCP/apps/
+hooks/agents/project-doc config requested; Astra/high requested, effective route
+unverified. Actual fresh thread01a0b26b-baf6-7700-802a-5f8e44950356 distinct from
+writer; terminal process0/COMPLETE scoped source verdict, no must-fix findings.
+Full THREE changed source/test/ADR files, existing owner/request record, scoped
+three-file staged diff and bounded readiness contexts read. Static-only: no tests,
+prior root gate evidence, runtime/dependency/provider/native/installed acceptance,
+or independent repo-wide runtime-import absence. Six diagnostics57,536 UTF8bytes,
+largest19,574, no truncation markers, under requested64KiB/24KiB. One guessed
+supporting filename failed exit2, corrected sixth diagnostic; no seventh/broad
+probe. Usage reported input183681/cached161024/output1514/reasoning630; effective
+provider/cumulative root accounting unknown. Full root source intake/research
+truncations and earlier retained review/dependency failures remain recorded, not
+reset or relabeled green. Root optional discovery stopped; manual targets are
+not enforced quota/cost limits. Source review does NOT certify full P0/P1 goal.
+
+All original nine obligations remain OPEN: immutable authoritative approval
+bindings; complete private lineage/host replacement; exhaustive no-effects;
+genuine entitled authenticated reviewer/native/web journeys; arbitrary crash/
+legacy/dead-owner/permanent-drain recovery; once-only crash delivery and authz/
+artifact/policy recheck; every new-input/publication/effect invalidation;
+human-action provenance/auth-strength/same-OS malicious isolation; shared review/
+retention/clean standalone/all-host/provider parity. 012A dirty Rust/decisions
+untouched, C gateway paused-checkpoint persistence incomplete, B experimental
+source inactive/installed activation unproved, D genuine canaries not run.
+Auld111/116 native/web/Windows-distinct-WSL/clean release/provider auth/100 races
+per runtime/24h multi-session staging soak remain required, unachieved.
+
+Next safe source work: a private task-owned lifecycle-authority prototype that
+owns ACTUAL newly spawned ChildProcess handles and keeps writer exclusion across
+executor-parent death. Prove surviving/unknown/foreign writers cannot produce a
+valid exit witness, and observed terminal exits are not kill requests/PID probes.
+This must precede durable one-use intent and exclusive all-contender transfer;
+do not enable reclaim from today's matcher or callback/agent assertion. Future
+authority failure/restart remains held, no automatic unlock or nonce redelivery.
+Goal ACTIVE, not complete/blocked. No workflow/session/credential/resolver/human
+decision/installed runtime/deployment/push changes. Four-path rollback never
+deletes durable data. Final scoped source and receipt commit IDs recorded below.
+
 ## Slice 27 entry: actual consumed-write/pre-journal-clear process boundary
 
 Previous goal turn PROGRESS: source49c0046/receipta61df88 committed forced exits/

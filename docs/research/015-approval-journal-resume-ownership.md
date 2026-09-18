@@ -161,6 +161,19 @@ Never accept this fixture proxy/receipt/hash/kill/PID/age as root recovery autho
 Rollback only these five source/doc paths, never durable owner/lock/native/journal
 data. Exact local source commit and post-commit preservation recorded below.
 
+### Slice 30 local source commit identity
+
+Sourcec975cf9a0d3c1042562cb923af3ba6d141d73622 commits ONLY the five owned paths;
+all four reviewed/tested code/ADR blobs match frozen tree405c7ea6 unchanged.
+Post-source index empty, owned paths quiet, remaining seven user tracked diff
+SHA25655c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270
+and Auld diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+equal entry values; untracked research/canary inventory retained. All gate/review
+execution handles terminal, fixture cleanup observed; frozen source export retained.
+Observed root elapsed595secs before this identity-only receipt follow-up, not a
+provider token or cumulative full-goal time claim. No activation/workflow/push/
+deployment. Receipt-only follow-up commit is identifiable in local Git history.
+
 ## Slice 29 entry: private task-owned writer exit authority prototype
 
 Previous turn PROGRESS: sourcee1195c3/receipt20ccd4a committed the reviewed closed

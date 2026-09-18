@@ -4,6 +4,7 @@ import { Type } from "typebox"
 import { AuthStorage, createAgentSession, createExtensionRuntime, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent"
 import { getApiProvider, getApiProviders, registerApiProvider, unregisterApiProviders } from "@mariozechner/pi-ai"
 import { randomUUID } from "node:crypto"
+import { AsyncResource } from "node:async_hooks"
 import { createPiRequestGate } from "./request-gate.mjs"
 import { installPiRequestGuards } from "./request-hooks.mjs"
 import { createPiRequestOperations } from "./request-operations.mjs"
@@ -37,7 +38,7 @@ function respondWithTool(response: ServerResponse) {
 // transport. Responses are inert loopback SSE, not model inference. No native
 // session files, user settings, provider credentials or workflow are used.
 async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?: boolean; bind?: boolean; api?: string;
-  autoCompact?: boolean; history?: "initial" | "after" } = {}) {
+  autoCompact?: boolean; retryDelayMs?: number; history?: "initial" | "after" } = {}) {
   const f = await fixture({ after: (fn: () => Promise<void>) => cleanup.push(fn) }, options)
   const requests: any[] = []
   const sockets: ServerResponse[] = []
@@ -116,7 +117,7 @@ async function agentFixture(options: { parked?: boolean; retry?: boolean; tool?:
       name: "synthetic_tool", label: "Synthetic", description: "Inert fixture counter", parameters: Type.Object({}), execute,
     }] } : { noTools: "all" }), authStorage: AuthStorage.inMemory(), modelRegistry,
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: options.autoCompact ?? false, reserveTokens: 1024, keepRecentTokens: 1 },
-      retry: { enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: 5, provider: { maxRetries: 0 } } }), sessionManager,
+      retry: { enabled: options.retry ?? false, maxRetries: 1, baseDelayMs: options.retryDelayMs ?? 5, provider: { maxRetries: 0 } } }), sessionManager,
     resourceLoader: { getExtensions: () => ({ extensions: [extension], runtime: createExtensionRuntime() }),
       getSystemPrompt: () => "Synthetic fixture", getAppendSystemPrompt: () => [],
       getSkills: () => ({ skills: [] }), getAgentsFiles: () => ({ agentsFiles: [] }), getPrompts: () => ({ prompts: [
@@ -846,6 +847,176 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
     expect(await f.mirror.loadCheckpoint()).not.toBeNull()
   })
 
+  it.each(["cancel", "replacement"])("settles old SDK retry sleep before a native %s can leave stale retry work", async action => {
+    const f = await agentFixture({ retry: true, retryDelayMs: 60 })
+    let arrived!: () => void
+    const ready = new Promise<void>(resolve => { arrived = resolve })
+    f.session.subscribe(event => { if (event.type === "auto_retry_start") arrived() })
+    f.setServe((_body, response, index) => {
+      if (index !== 1) return // Hold replacement response, not an artificial old retry.
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    let settled = false
+    const old = f.prompt("old native input").then(() => { settled = true }, () => { settled = true })
+    await ready
+    expect(f.session.isRetrying).toBe(true)
+    let replacement: Promise<void> | undefined
+    if (action === "cancel") await f.operations.cancelInput()
+    else {
+      replacement = f.prompt("replacement native input")
+      await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    }
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 300 })
+    expect(f.session.isRetrying).toBe(false)
+    expect(f.session.retryAttempt).toBe(0)
+    if (replacement) {
+      respond(f.sockets[1])
+      await replacement
+      expect(f.owner.record.request_epoch).toBe(2)
+    }
+    await old
+    expect(f.requests).toHaveLength(action === "cancel" ? 1 : 2)
+  })
+
+  it("holds native retry events and error persistence while approval is pending", async () => {
+    const f = await agentFixture({ retry: true })
+    const events: any[] = []
+    f.session.subscribe(event => { events.push(event) })
+    f.setServe((_body, response, index) => {
+      if (index !== 1) { respond(response); return }
+      f.setLive(pending)
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    const input = f.prompt()
+    await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 500 })
+    expect(events.filter(event => event.type === "auto_retry_start")).toHaveLength(0)
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(0)
+    expect(f.requests).toHaveLength(1)
+    f.approve()
+    await input
+    expect(events.filter(event => event.type === "auto_retry_start")).toHaveLength(1)
+    expect(f.requests).toHaveLength(2)
+    expect(f.owner.record.request.consumed_approval_ids).toEqual(["approval"])
+  })
+
+  it("denies an old private abortRetry callback against a newer natural native retry", async () => {
+    const f = await agentFixture({ retry: true, retryDelayMs: 80 })
+    let oldAbort!: () => unknown
+    f.setBeforeAgent(() => { oldAbort ??= f.operations.bind(() => f.session.abortRetry()) })
+    await f.prompt("old completed input")
+    let arrived!: () => void
+    const ready = new Promise<void>(resolve => { arrived = resolve })
+    f.session.subscribe(event => { if (event.type === "auto_retry_start") arrived() })
+    f.setServe((_body, response, index) => {
+      if (index !== 2) { respond(response); return }
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    const current = f.prompt("new native input")
+    await ready
+    expect(f.session.isRetrying).toBe(true)
+    oldAbort()
+    expect(f.session.isRetrying).toBe(true)
+    await current
+    expect(f.requests).toHaveLength(3)
+    expect(f.owner.record.request_epoch).toBe(2)
+    expect(f.session.retryAttempt).toBe(0)
+  })
+
+  it("blocks native retry consumption after the final aggregate return microtask", async () => {
+    const f = await agentFixture({ retry: true })
+    const native = new AsyncResource("fixture-native-cancellation")
+    cleanup.push(() => { native.emitDestroy() })
+    let cancelled: Promise<void> | undefined
+    const emit = f.session.extensionRunner!.emit.bind(f.session.extensionRunner)
+    f.session.extensionRunner!.emit = async event => {
+      const result = await emit(event)
+      if (event.type === "agent_end") queueMicrotask(() => {
+        cancelled = native.runInAsyncScope(() => f.operations.cancelInput())
+      })
+      return result
+    }
+    const events: any[] = []
+    f.session.subscribe(event => { events.push(event) })
+    f.setServe((_body, response) => {
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    await f.prompt()
+    expect(cancelled).toBeDefined()
+    await cancelled
+    expect(events.filter(event => event.type === "auto_retry_start")).toHaveLength(0)
+    expect(f.requests).toHaveLength(1)
+    expect(f.session.isRetrying).toBe(false)
+    expect(f.session.retryAttempt).toBe(0)
+  })
+
+  it("preserves native retry exhaustion and final error events", async () => {
+    const f = await agentFixture({ retry: true })
+    const events: any[] = []
+    f.session.subscribe(event => { events.push(event) })
+    f.setServe((_body, response) => {
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    await f.prompt()
+    expect(f.requests).toHaveLength(2)
+    expect(events.filter(event => event.type === "auto_retry_start")).toHaveLength(1)
+    expect(events.filter(event => event.type === "auto_retry_end")).toEqual([
+      expect.objectContaining({ success: false, attempt: 1, finalError: expect.stringContaining("503") }),
+    ])
+    expect(f.session.isRetrying).toBe(false)
+    expect(f.session.retryAttempt).toBe(0)
+  })
+
+  it.each(["cancel", "replacement"])("settles reentrant native %s from retry-start without leaving old attempts", async action => {
+    const f = await agentFixture({ retry: true, retryDelayMs: 60 })
+    const native = new AsyncResource("fixture-native-retry-start-input")
+    cleanup.push(() => { native.emitDestroy() })
+    let control: Promise<void> | undefined
+    let first = true
+    f.session.subscribe(event => {
+      if (event.type !== "auto_retry_start" || !first) return
+      first = false
+      control = native.runInAsyncScope(() => action === "cancel" ? f.operations.cancelInput() : f.prompt("replacement from retry-start"))
+      control!.catch(() => {})
+    })
+    f.setServe((_body, response, index) => {
+      if (index !== 1) return // Keep replacement response held until old cleanup is proved.
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    await f.prompt("old reentrant input")
+    expect(control).toBeDefined()
+    if (action === "replacement") await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 500 })
+    else await control
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.session.isRetrying).toBe(false)
+    if (action === "replacement") { respond(f.sockets[1]); await control }
+    expect(f.requests).toHaveLength(action === "cancel" ? 1 : 2)
+  })
+
+  it("reports retry-start observer failure without corrupting native retry cleanup", async () => {
+    const f = await agentFixture({ retry: true })
+    const errors = vi.fn()
+    const unsubscribe = f.session.extensionRunner!.onError(errors)
+    cleanup.push(unsubscribe)
+    f.session.subscribe(event => { if (event.type === "auto_retry_start") throw new Error("synthetic observer failure") })
+    f.setServe((_body, response, index) => {
+      if (index !== 1) { respond(response); return }
+      response.writeHead(503, { "Content-Type": "application/json" })
+      response.end(JSON.stringify({ error: { message: "Synthetic 503 overload" } }))
+    })
+    await f.prompt()
+    expect(f.requests).toHaveLength(2)
+    expect(errors).toHaveBeenCalledWith(expect.objectContaining({ event: "auto_retry_start", error: "synthetic observer failure" }))
+    expect(f.session.retryAttempt).toBe(0)
+    expect(f.session.isRetrying).toBe(false)
+  })
+
   it("guards actual SDK manual compaction before its separate provider path", async () => {
     const f = await agentFixture({ history: "after" })
     await f.prompt()
@@ -924,11 +1095,14 @@ describe("real SDK Agent and primary provider approval boundaries", () => {
       if (index === 1) { f.setLive(pending); respond(response, "synthetic response", { prompt_tokens: 65_000, completion_tokens: 1, total_tokens: 65_001 }) }
       else respond(response)
     })
-    await f.prompt()
+    const input = f.prompt()
     await vi.waitFor(() => expect(f.onPark).toHaveBeenCalled(), { timeout: 2_000, interval: 5 })
-    expect(f.session.isCompacting).toBe(true)
+    // Final response itself is now held before persistence/automatic compaction.
+    expect(f.session.isCompacting).toBe(false)
+    expect(f.sessionManager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "assistant")).toHaveLength(0)
     expect(f.requests).toHaveLength(1)
     f.approve()
+    await input
     await vi.waitFor(() => expect(ended).toHaveLength(1), { timeout: 2_000, interval: 5 })
     expect(ended[0]).toMatchObject({ reason: "threshold", aborted: false, willRetry: false })
     expect(ended[0].result.summary).toBe("synthetic response\n\n---\n\n**Turn Context (split turn):**\n\nsynthetic response")

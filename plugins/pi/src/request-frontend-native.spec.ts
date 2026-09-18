@@ -1593,8 +1593,11 @@ describe("owning public SDK frontend readiness", () => {
     await f.bind()
     const old = f.session.prompt("/owned old")
     await vi.waitFor(() => expect(f.owner.record.request_epoch).toBe(1), { timeout: 1_000, interval: 5 })
+    // Epoch publication precedes begin's authority/journal reconciliation.
+    await vi.waitFor(() => expect(f.owner.record.request.phase).toBe("parked"), { timeout: 1_000, interval: 5 })
     const newer = f.session.prompt("/owned replacement")
     await vi.waitFor(() => expect(f.owner.record.request_epoch).toBe(2), { timeout: 1_000, interval: 5 })
+    await vi.waitFor(() => expect(f.owner.record.request.phase).toBe("parked"), { timeout: 1_000, interval: 5 })
     f.approve()
     await old; await newer
     expect(handler).toHaveBeenCalledTimes(1)

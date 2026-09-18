@@ -2,6 +2,189 @@
 
 Date: 2026-09-17. Status: implementation in progress; no release or live approval claim.
 
+## Slice 22 entry: native retry lifetime and completion handoffs
+
+Previous turn PROGRESS: sourcef4ae56e/receipt727d6a8 committed, validation and
+independent partial/failed probe limits retained. Current Statewright main
+HEAD727d6a8122645417c60093c65fa45f75ce6a9057; index empty, previous owned paths
+quiet, seven unrelated tracked changes exact hash unchanged. Auldwyrm HEAD/
+tracked diff unchanged. Full006147-172/0121-43/111 native shared milestones/
+11649-100 re-read; nine original requirements remain OPEN. No workflow/state/
+catalog/usage tool query/load/use; explicit user override remains authoritative.
+
+Primary installed SDK0.73.0 native events synchronously create a retry promise
+on agent_end, then queue completion processing. Native retry later mutates
+attempt/message/controller fields, emits retry events, sleeps and schedules
+continue. Existing inference guards are not proof of completion publication or
+idle retry teardown. Actual SDK/real owner/loopback RED: cancel during60ms native
+retry sleep leaves old prompt unsettled after300ms; replacement control PASSED
+via native input abort. Two-case gate1 failed/1 passed (60 excluded), exit1;
+do not invent a replacement defect. Add discriminating pending retry-event/error
+persistence case before source acceptance.
+
+Proposed bounded source direction: preserve native retry algorithm, public APIs
+only/no private imports/vendor patch/copied retry loop. Capture original private
+producer epoch signal at public Agent completion before async native queue;
+track retry promise/lifetime with public wait/abort methods, exact private slot
+cleanup, epoch cancellation and stale-caller denial. Guard native message_end/
+agent_end aggregate awaits before publication/core retry effects, and actual
+event type consumption across return microtasks against original epoch cancellation.
+Do not adopt latest caller/global retry fields as authority, disable retry, weaken
+pending/no-effect assertions, or claim all backend/internal/native effects.
+
+Owned scope: request-operations.mjs, new request-retry.mjs,
+actual request-agent-native.spec.ts, request-frontend-native.spec.ts, new ADR011,
+this receipt (six paths; frontend fixture added after exact-export timing RED). Root
+sole implementer. Source acceptance: actual natural native retry positive/error/
+pending/cancel/replacement/stale caller/late event controls; affected Pi suite;
+exact staged export Node308 SERIAL/Pi baseline332+existing skip/native2, SOURCE
+Claude parity/all changed mjs syntax; mandatory independent clean-context Astra/
+high read-only review, scrubbed ephemeral CLI if thread cap remains. Record
+failed/unavailable evidence, source-identical fixture reconciliation only, no
+full-goal/installed/native GUI/real decision/recovery/host conformance claim.
+
+Retained RED/repair: pending case failed with auto_retry_start1 vs0 (exit1).
+Initial event-type consumption getter broke passive lifecycle observers and
+early user-message checkpoints interfered with before-provider parking; native
+suite61 passed/5 failed/2 unhandled, exit1. Removed that invalid approach, not
+diagnostic assertions. Overbroad settings-read denial then blocked synchronous
+initial promise preparation (53 passed/13 failed, unhandled rejections, exit1). Private
+producer-object completion WeakSet separates that preparation from later queued
+retry consumption; subsequent65 passed/1 threshold test timeout, exit1, no
+unhandled errors. Threshold fixture awaited a prompt now legitimately held at
+assistant completion before it could grant: retain an input promise, prove no
+assistant persistence/no compaction/no second HTTP while pending, grant, then
+await it and original genuine split-turn compaction/result assertions. This is
+a stronger pending assertion, not disabling retries or loosening no-effect proof.
+Actual source now guards only assistant-message/agent-end aggregates and the
+productive completed-producer retry settings read, no event-type getter. SeeADR011.
+
+Pre-export actual SDK gate:66/66 passed, exit0, including idle cancel/replacement,
+pending retry event/error-persistence/grant, stale abortRetry, aggregate-return
+microtask cancellation and genuine native exhaustion. Retry algorithm, enabled
+setting, maxRetries1 and actual loopback503 remain intact. Threshold compaction
+stronger pending fixture retains native split-turn result/three HTTP proof.
+
+First exact export tree7772e356b07972fd20f4d34cefc28eff9991ebad at
+/tmp/statewright-owned-retry.4tvADX, all five blob pairs match frozen index;
+Node308 SERIAL/native2/SOURCE parity/two changed-mjs syntax exit0. FullPi first
+337 passed/1 failed/1 existing skip, exit1: superseded parked slash fixture had
+empty consumed IDs. Same source focused1/1 and whole338+existingSkip exit0.
+Primary owner.beginRequest publishes epoch before controller.begin awaits
+status/journal reconciliation. Fixture f.approve after epoch2 alone could race
+that first journal park. Strengthen both old/replacement to await actual durable
+request.phase=parked before replacing/granting; no production gate or expected
+consume/clear/effect assertion loosened. This justified sixth owned test path.
+
+Mandatory clean-context spawn failed thread cap; scrubbed ephemeral read-only CLI
+review requestedAstra/high, effective route unverified. Parent captured actual
+thread.started01a0b21e-e7ce-7b43-bfc2-3add823b1b7f (child env same UUID), distinct
+from writer01a0b0f5-909c-7b61-b632-3375983b613f; terminal process/final output exit0.
+Eight diagnostics, initial inert harness exit13/unsettled top-level await then
+corrected actual SDK/real operations/substitute-authority probe exit0. Not real
+owner/journal acceptance or independent Vitest. Reviewer cannot verify export tree
+without Git metadata; parent five exact blob pairs above provide source provenance.
+Review P1: reentrant auto_retry_start cancellation clears promise before controller
+creation, leaves attempt1 and next request loses its one retry. SDK actual inert
+control during established sleep attempt0/two next streams vs reentrant attempt1/
+one next stream. Initial export rejected for this finding, not accepted on greens.
+Observed reviewer usage input390142/cache333184/output5720/reasoning1547, not cost/
+full-goal quota/effective-route proof. Review/task output targets exceeded; root
+cumulative byte/tool accounting incomplete, no hard-envelope compliance claim.
+
+Root actual SDK/real owner/loopback RED both reentrant cancel/replacement failed
+attempt1 vs0, exit1 (66 excluded). Repair only owned public retry-start subscriber
+delivery: captured original producer/event, defer one microtask until SDK controller
+exists, exact original private owned-phase check/drop stale or unsubscribed,
+public runner error reporting for observer failures. No copy/disable of algorithm,
+new latest-scope grant, or raw private controller mutation. Compatibility timing/
+exception policy and pre-wrapper/raw listener limits disclosedADR011. Actual69/69
+passed, exit0, including both reentrant controls and observable observer error with
+genuine native retry/reset. Freeze repaired source for full gates/fresh4-call review.
+
+Repaired exact export tree621e111b449064aa6beaa3b684ca18d0b6ce804c at
+/tmp/statewright-owned-retry-repair.XLC5sl. All six staged/export blob pairs match;
+owned unstaged source quiet. FullPi341 passed/one pre-existing live skip (342),
+Node308 SERIAL/native2/SOURCE Claude parity/two changed-mjs syntax all exit0.
+No install/live inference/workflow use/decision/deployment or fallback was needed.
+
+Fresh independent repair recheck requestedAstra/high through new scrubbed ephemeral
+read-only CLI, effective route unverified. Parent captured actual thread.started
+01a0b222-d503-7602-b601-04f12e9cd79a, distinct from writer/initial reviewer, terminal
+process/final output exit0. Four diagnostics; one combined read command exit1 at
+trailing no-match AGENTS search, not a SDK/test failure. Final bounded PASS SOURCE
+REVIEW ONLY: no concrete introduced defect in inspected retry-ordering/completion
+authority paths. Explicit partial fixture inspection, no test/inert prototype run;
+69/69 remains root actual SDK/real owner/loopback evidence. Parent six-blob match
+and exact-export341/308/2 gates above reconcile source provenance. Do not turn this
+into independent runtime, all-provider/native, security or activation acceptance.
+Observed usage input113490/cache96768/output2028/reasoning1066. Review raw output
+exceeded20KiB target despite narrower packet; root output/tool accounting remains
+incomplete, no hard-cap/cost/quota/effective model proof. Engineering disposition:
+accept this bounded six-path experimental source cut, original nine rows OPEN.
+Initial P1 reentrancy finding repaired by real SDK RED/GREEN plus fresh clean-context
+source review, not erased by initial green gates or substituted-authority PASS.
+
+Both immutable exports retained; no source/ADR/test change after repaired freeze,
+only this receipt/full original audit appended. Unrelated Statewright seven-file
+binary diff55c81137fb1ab1c4ce10632d5ac5c62c46c050a3a766a38ab8b9b995512f0270 and
+Auld HEAD65025b50952e27b38b215b18905ba1c4770fbdb4/diff94f585de57d915f93623de690dca8ebad3ffec018fbdf85e24617da4510547aa
+reverified unchanged. All validation/reviewer processes terminal before handoff.
+
+### Slice 22 full original requirement audit and continuation
+
+Authoritative006147-172/0121-43 and Auld11119-62/202-242,11649-100 re-read.
+All nine original requirements remain OPEN; no full-goal completion disposition:
+
+1. Immutable tenant/client/session/run/edge/action/artifact/policy/reviewer ticket,
+   expiry/revocation: OPEN; no authoritative complete binding proof added.
+2. Original private producer/epoch and user replacement improved; complete parent/
+   child/thread/branch/restart/cross-host lineage and owning tree gestures: OPEN.
+3. Named retry lifetime/assistant-end guards proven; exhaustive SDK/native state/
+   pre-wrapper/direct listener/UI/FS/spawn/auth/provider/WS/fixed backend FX: OPEN.
+4. Actual authenticated entitled native/website/required-reviewer journeys: OPEN;
+   no real decision/resolver/authentication boundary exercised or weakened.
+5. Local cancellation/held and durable fixtures partial; lost begin/cold native/
+   legacy/crash locks/permanent failed-provider drain/foreign-tuple teardown: OPEN.
+6. Synthetic once-only release primitives partial; actual reauthorization/
+   entitlement/artifact/policy and exactly-once crash delivery: OPEN.
+7. Named assistant/retry event/persistence and stale guards improved; every final
+   response/native effect/publication against newer input: OPEN.
+8. Decision source/authentication-strength/human provenance: OPEN; routing/API
+   keys/owned aliases are not human authority or same-OS malicious-agent isolation.
+9. Client-neutral evidence/review/retention, clean standalone install and every
+   advertised native host/provider acceptance: OPEN.
+
+012 A/1 user-dirty Rust denial preserved/unvalidated/uncommitted;2 trusted decisions
+unproved;C/3 parent/journal/cold fixtures partial;B/4 source experimental, installed/
+main activation unproved;D real canaries not run.111 native+website/shared evidence
+and116 desktop, native Windows distinct fromWSL, clean release,100 deterministic
+iterations/runtime/provider-authenticated acceptance/24h multi-session staging
+soak remain OPEN. Historical staging is not current evidence.114 proposed baseline
+not certification;115 separate provenance unchanged. Full goal ACTIVE, not blocked.
+
+Next safe manual source frontier: retry lifecycle effects through listeners already
+registered before owned installation, raw native completion/state reduction and
+foreign-tuple teardown. First inspect real owning factory/mode installation order;
+do not claim the public subscription barrier retroactively guards prior listeners.
+Build genuine task-owned SDK/owner reentrant/drain RED and reconcile baseline vs
+introduced effects; no copied private loop, disable-retry mask, latest-epoch grant,
+SDK/vendor mutation or weaker pending assertion. Broader ticket/authority/cold/
+native conformance obligations remain controlling. No native SDK init/run, real
+sessions, decisions or release/install permission inferred from this source cut.
+
+Observed-only manual envelope root85 normal/120 contraction tools,30min warning/
+45min contraction,24KiB task-output target excluding mandatory skill reads,
+final third reserved for validation/review/repair/handoff. No hard provider/quota/
+controller probe (workflow use forbidden); inherited root route, one normal/two
+worst Astra/high review turns justified by ownership/no-inference boundary;
+initial8 diagnostics/8min/2 focused, repair recheck4/5min/2, max2 repairs/finding,
+2 source exports plus regression-justified third. Stop optional breadth at
+threshold; do not erase prior Slice20/21 usage/rework. Reuse existing manual
+control profile, no production/compliance baseline. No real resolver/decision/
+approval/inference/live sessions/signals/install/deploy/push. Temporary SDK/SSE/
+synthetic owner/journal fixtures only. Full goal active, safe source work remains.
+
 ## Slice 21 entry: immutable SDK summary handoff (continues uncommitted Slice20)
 
 Previous turn classified PROGRESS: authoritative P1 handoff finding plus actual

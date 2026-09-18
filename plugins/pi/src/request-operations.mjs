@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { createLocalBashOperations } from "@mariozechner/pi-coding-agent";
 import { installPiOwnedCompaction } from "./request-compaction.mjs";
+import { installPiOwnedRetry } from "./request-retry.mjs";
 
 // Private call identity, not prompt text, a model argument or the latest cache.
 // Install only on a task-owned SDK session, before its first prompt.
@@ -17,6 +18,7 @@ export function createPiRequestOperations() {
   let activeBash = null;
   let asides = [];
   let latestResponse = null;
+  let retryControl = null;
   const outputWaiters = new Set();
   const configurationDenied = Symbol("private native configuration denial");
   const copy = reference => reference ? Object.freeze(structuredClone(reference)) : null;
@@ -469,7 +471,8 @@ export function createPiRequestOperations() {
           cancelSignal.addEventListener("abort", finish, { once: true });
           let run = null;
           try {
-            const result = calls.run({ kind: "agent", reference: ref, outputToken }, () => start(...args));
+            const result = calls.run({ kind: "agent", reference: ref, outputToken,
+              producer: { reference: ref, signal: cancelSignal } }, () => start(...args));
             const signal = session.agent.signal;
             run = signal && signal !== previousSignal ? { reference: ref, signal } : null;
             if (run) activeAgent = run;
@@ -483,6 +486,17 @@ export function createPiRequestOperations() {
         const enqueue = session.agent[key].bind(session.agent);
         session.agent[key] = (...args) => { if (owned(reference())) return enqueue(...args); };
       }
+      retryControl = installPiOwnedRetry(session, {
+        producer: () => calls.getStore()?.producer ?? null,
+        current: ref => !closed && isDeepStrictEqual(gate.reference, ref),
+        canPublish: source => owned(source.reference) && !source.signal.aborted,
+        checkpoint: source => gate.checkpoint(context(), source.signal, source.reference),
+        callerCanCancel: ref => {
+          const call = calls.getStore();
+          return !call || call.kind === "input" && call.entry === newestInput
+            || !!ref && isDeepStrictEqual(call.reference, ref);
+        },
+      });
       installPiOwnedCompaction(session, this);
     },
     async close() {
@@ -494,6 +508,7 @@ export function createPiRequestOperations() {
       for (const waiter of outputWaiters) waiter.finish();
       asides = [];
       const cancelled = gate?.cancel("disconnected");
+      retryControl?.close();
       if (nativeOwned) await session.abort();
       await cancelled;
       // Keep guards installed: late SDK timers must remain held after close.

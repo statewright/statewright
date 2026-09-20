@@ -526,37 +526,41 @@ case "$ENDPOINT" in
 
     STATEWRIGHT_ALLOWED_TOOLS="$ALLOWED"
 
+    if statewright_uses_unsupported_shell "$TOOL_NAME" "$HOOK_INPUT"; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy."}}'
+      exit 0
+    fi
+
     # Normalize concrete Codex tool names to workflow capabilities before
     # applying policy. Read-only shell use is admitted only by the strict
     # classifier; broader shell use continues through Bash discernment below.
     if statewright_tool_allowed "$TOOL_NAME" "$HOOK_INPUT"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
-      # to prevent bypass of Write/Edit/Destructive restrictions via shell redirects
+      # to prevent bypass of Write/Destructive restrictions via shell redirects
       if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] || [ "$STATEWRIGHT_TOOL_MODE" = "readonly_shell" ]; then
-        COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+        COMMAND=$(statewright_input_command "$HOOK_INPUT")
         if [ -n "$COMMAND" ]; then
-          # Check for file write operations (redirects, heredocs) when Write/Edit not allowed
+          # Check for file write operations (redirects, heredocs) when Write is not allowed.
           HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
-          HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
-          if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
+          if [ "$HAS_WRITE" = "no" ]; then
             if statewright_has_file_write_redirect "$COMMAND"; then
-              REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+              REASON="Bash command blocked: output redirect detected but Write is not in allowed tools for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
             if statewright_has_inplace_file_modify "$COMMAND"; then
-              REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
+              REASON="Bash command blocked: in-place file modification detected but Write is not in allowed tools for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
             if statewright_has_file_write_primitive "$COMMAND"; then
-              REASON="Bash command blocked: file-writing command detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+              REASON="Bash command blocked: file-writing command detected but Write is not in allowed tools for '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
             # Block scripting interpreters that can write files
             if echo "$COMMAND" | grep -qE '^\s*(python|python3|ruby|node|perl|php)\s'; then
-              REASON="Bash command blocked: scripting interpreter not permitted without Write/Edit in '$CURRENT' phase."
+              REASON="Bash command blocked: scripting interpreter not permitted without Write in '$CURRENT' phase."
               jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
               exit 0
             fi
@@ -634,17 +638,17 @@ case "$ENDPOINT" in
       printf '%s' "$HOOK_INPUT" | bash "${STATEWRIGHT_CAPTURE_SCRIPT:-$SCRIPT_DIR/capture.sh}" >/dev/null 2>&1 &
     fi
 
-    # --- Interrupt detection for file-changing tools (Edit, Write, MultiEdit) ---
+    # --- Interrupt detection for file-changing tools (normalized as Write) ---
     if [ -f "$ACTIVE_FILE" ] && [ -z "$SW_ACTION" ] && [ -f "$CACHE_FILE" ]; then
       FILE_PATH=""
       case "$TOOL_NAME" in
-        Edit|Write|MultiEdit|apply_patch|edit_file|write_file|create_or_update_file)
+        Edit|Write|MultiEdit|apply_patch|patch_file|edit_file|write_file|create_file|create_or_update_file)
           FILE_PATH=$(echo "$HOOK_INPUT" | jq -r '.tool_input.file_path // .tool_input.path // .tool_input.file // empty' 2>/dev/null || true)
           ;;
       esac
 
       if [ -n "$FILE_PATH" ]; then
-        # Normalize to relative path (Edit/Write pass absolute paths)
+        # Normalize to a relative path (native Write-family tools may pass absolute paths)
         # Try cwd first, then strip any leading path up to pattern match
         CWD_PREFIX="$(pwd)/"
         REL_PATH="$FILE_PATH"

@@ -844,6 +844,33 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
+        // Approval gate (P1): a parked workflow denies ALL tool traffic —
+        // including tools the state whitelist would admit — until an
+        // authorized reviewer decides the pending approval. Hosts observe
+        // the gate through the state projection; they never decide it.
+        if let Some(pending) = &session.pending_approval {
+            return json!({
+                "decision": "deny",
+                "approval_pending": true,
+                "approval_id": pending.approval_id,
+                "state": session.current_state,
+                "reason": format!(
+                    "APPROVAL PENDING (id: {}): the workflow is parked at state '{}' awaiting a human decision on event '{}' ({}). All tool calls are blocked until an authorized reviewer approves or rejects the pending approval; do not attempt further tool calls or transitions.",
+                    pending.approval_id,
+                    session.current_state,
+                    pending.event,
+                    pending.message.clone().unwrap_or_else(|| "Review before proceeding".into())
+                ),
+            });
+        }
+        if let Some(reason) = enforcement::unsupported_shell_dialect_reason(tool_name, tool_input) {
+            return json!({
+                "decision": "deny",
+                "reason": reason,
+                "available_tools": statewright_agent::tool_enforcer::get_allowed_tools(&session.definition, &session.current_state).unwrap_or_default(),
+                "state": session.current_state,
+            });
+        }
         let policy_tool_name =
             enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input);
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
@@ -901,7 +928,7 @@ impl Gateway {
             }
         };
 
-        let interceptor = interceptors::pre_call_check(&session, &policy_tool_name, tool_input);
+        let interceptor = interceptors::pre_call_check(&session, tool_name, tool_input);
         match interceptor {
             PreCallDecision::Block(reason) => json!({
                 "decision": "deny",
@@ -950,7 +977,7 @@ impl Gateway {
             }],
             is_error,
         };
-        let update = interceptors::post_call_annotations(&policy_tool_name, tool_input, &result);
+        let update = interceptors::post_call_annotations(tool_name, tool_input, &result);
         let edited_path = update.file_edited.clone();
         if let Some(ref path) = edited_path {
             self.session_manager
@@ -2943,7 +2970,7 @@ mod tests {
                     "name": "statewright_adapter_pre_tool",
                     "arguments": {
                         "tool_name": "Bash",
-                        "tool_input": {"command": "sed -n '1,12p' src/lib.rs"}
+                        "tool_input": {"command": "rg -n '^' src/lib.rs"}
                     }
                 })),
                 id: Some(json!(2)),
@@ -2953,6 +2980,25 @@ mod tests {
         let readonly_shell = tool_result_json(readonly_shell);
         assert_eq!(readonly_shell["decision"], "allow");
         assert_eq!(readonly_shell["policy_tool_name"], "read_file");
+
+        let zsh = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {"command": "rg -n '^' src/lib.rs", "shell": "/bin/zsh"}
+                    }
+                })),
+                id: Some(json!(3)),
+            })
+            .await
+            .unwrap();
+        let zsh = tool_result_json(zsh);
+        assert_eq!(zsh["decision"], "deny");
+        assert!(zsh["reason"].as_str().unwrap().contains("Use Bash"));
 
         let denied = gateway
             .handle_message(JsonRpcRequest {
@@ -3891,6 +3937,47 @@ mod tests {
         );
         assert_eq!(saved["session"]["transition_count"], 13);
         pool.close().await;
+    }
+
+    #[test]
+    fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
+        let mut gw = approval_gateway();
+        gw.session_manager.set_pending_approval(
+            "approval-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_gate".into(),
+                event: "DEPLOY".into(),
+                from_state: "working".into(),
+                to_state: "deployed".into(),
+                new_context: json!({}),
+                message: Some("Review before deploy".into()),
+            },
+        );
+
+        // A tool the state whitelist admits is still denied while the gate
+        // is parked: the approval gate outranks the state whitelist.
+        let result = gw.adapter_pre_tool("read_file", &json!({ "path": "x" }));
+        assert_eq!(result["decision"], "deny");
+        assert_eq!(result["approval_pending"], true);
+        assert_eq!(result["approval_id"], "apr_gate");
+        assert_eq!(result["state"], "working");
+        let reason = result["reason"].as_str().unwrap();
+        assert!(reason.starts_with("APPROVAL PENDING (id: apr_gate)"));
+        assert!(reason.contains("Review before deploy"));
+
+        // The state projection still reports the gate so hosts can observe
+        // and long-poll it.
+        let state = gw.current_state_snapshot(false).unwrap();
+        assert_eq!(state["pending_approval"]["approval_id"], "apr_gate");
+
+        // An authorized reviewer resolves the gate; tool traffic is
+        // admitted again under the normal state rules.
+        let cleared = gw.session_manager.clear_pending_approval("approval-session");
+        assert!(cleared.is_some());
+        assert_eq!(cleared.unwrap().approval_id, "apr_gate");
+        let admitted = gw.adapter_pre_tool("read_file", &json!({ "path": "x" }));
+        assert_eq!(admitted["decision"], "allow");
+        assert!(admitted.get("approval_pending").is_none());
     }
 
     #[tokio::test]

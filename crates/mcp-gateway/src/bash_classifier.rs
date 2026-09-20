@@ -7,15 +7,15 @@
 /// Operation class for a shell command segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpClass {
-    /// Writing new content to a file (requires Write or Edit).
+    /// Writing new content to a file (requires Write).
     FileWrite,
-    /// Modifying a file in-place (requires Edit).
+    /// Modifying a file in-place (requires Write).
     FileModify,
     /// Reading file contents (requires Read).
     FileRead,
-    /// Searching file contents (requires Grep).
+    /// Searching file contents (requires Read).
     ContentSearch,
-    /// Searching for files by name/path (requires Glob).
+    /// Searching for files by name/path (requires Read).
     FileSearch,
     /// Destructive operations — always blocked in restricted states.
     Destructive,
@@ -35,11 +35,14 @@ impl OpClass {
     /// Returns `&["__BLOCKED__"]` for operations that require an explicit approval gate.
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
-            OpClass::FileWrite => &["Write", "Edit"],
-            OpClass::FileModify => &["Edit"],
+            OpClass::FileWrite | OpClass::FileModify => &["Write"],
             OpClass::FileRead => &["Read"],
-            OpClass::ContentSearch => &["Grep"],
-            OpClass::FileSearch => &["Glob"],
+            // Read is the provider-neutral umbrella for native search/glob
+            // calls as well as read-only shell searches.  Grep and Glob are
+            // retained here solely for legacy state definitions: they were
+            // narrower read capabilities, not write authority.
+            OpClass::ContentSearch => &["Read", "Grep"],
+            OpClass::FileSearch => &["Read", "Glob"],
             OpClass::Destructive => &["__DESTRUCTIVE__"],
             OpClass::Network => &["WebFetch"],
             OpClass::GitWrite => &["__GIT_WRITE__"],
@@ -143,6 +146,9 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
         let segment = segment.trim();
         let first = segment.split_whitespace().next()?;
         if first.contains('=') {
+            return None;
+        }
+        if readonly_search_has_external_hook(segment) {
             return None;
         }
         let capability = match classify_segment(segment) {
@@ -249,11 +255,26 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     match executable {
         "sha256sum" | "shasum" if readonly_checksum_args(executable, &tokens[1..]) => Some("Read"),
         "ls" | "pwd" | "stat" | "file" | "wc" | "du" | "dirname" | "basename" | "realpath"
-        | "jq" | "cut" | "tr" | "sort" | "uniq" | "which" | "true" | "false" | "sed" | "awk"
-        | "gawk" => Some("Read"),
+        | "jq" | "cut" | "tr" | "sort" | "uniq" | "which" | "true" | "false" => Some("Read"),
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
+}
+
+/// Ripgrep's `--pre` option starts an arbitrary preprocessor for each searched
+/// file. It is safe only under explicit Bash authority, never when a shell
+/// invocation is borrowing the provider-neutral Read capability.
+fn readonly_search_has_external_hook(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return true;
+    };
+    let Some(executable) = tokens.first().and_then(|token| token.rsplit('/').next()) else {
+        return true;
+    };
+    matches!(executable, "rg" | "ripgrep")
+        && tokens[1..]
+            .iter()
+            .any(|argument| argument == "--pre" || argument.starts_with("--pre="))
 }
 
 // Match the Codex hook's narrow checksum-generation surface. In particular,
@@ -365,8 +386,23 @@ fn classify_segment(segment: &str) -> OpClass {
         // Content search
         "grep" | "rg" | "ag" | "ack" | "ripgrep" => OpClass::ContentSearch,
 
-        // File search
-        "find" | "fd" | "locate" | "mdfind" => OpClass::FileSearch,
+        // File search. `find` can execute or write, so its action forms are
+        // never admitted as a provider-neutral read operation.
+        "find" => {
+            if find_has_action(segment) {
+                OpClass::Destructive
+            } else {
+                OpClass::FileSearch
+            }
+        }
+        "fd" => {
+            if fd_has_execution(segment) {
+                OpClass::Destructive
+            } else {
+                OpClass::FileSearch
+            }
+        }
+        "locate" | "mdfind" => OpClass::FileSearch,
 
         // File modify (in-place)
         "sed" => {
@@ -417,6 +453,38 @@ fn classify_segment(segment: &str) -> OpClass {
     }
 }
 
+/// Detect write/execute actions after shell quoting and escapes have been
+/// resolved. A parser failure is unsafe for classification and fails closed.
+fn find_has_action(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return true;
+    };
+    tokens.iter().skip(1).any(|token| {
+        matches!(token.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fls" | "-fprint" | "-fprint0" | "-fprintf")
+    })
+}
+
+/// fd can execute an arbitrary command through either long or short exec
+/// flags. As with find actions, parsing ambiguity fails closed.
+fn fd_has_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return true;
+    };
+    tokens.iter().skip(1).any(|token| {
+        matches!(token.as_str(), "-x" | "-X")
+            // fd accepts short option clusters.  Treat any cluster containing
+            // its exec switches as executable rather than trying to interpret
+            // the remaining short options.
+            || (token.starts_with('-')
+                && !token.starts_with("--")
+                && token[1..].chars().any(|flag| matches!(flag, 'x' | 'X')))
+            || token == "--exec"
+            || token.starts_with("--exec=")
+            || token == "--exec-batch"
+            || token.starts_with("--exec-batch=")
+    })
+}
+
 /// Classify a git command by its subcommand.
 fn classify_git(tokens: &[&str]) -> OpClass {
     // Find the git subcommand (skip flags like -C, -c)
@@ -424,7 +492,17 @@ fn classify_git(tokens: &[&str]) -> OpClass {
 
     match subcmd.map(|s| *s) {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
-        | Some("branch") | Some("tag") | Some("stash") | Some("reflog") => OpClass::GitRead,
+        | Some("reflog") => OpClass::GitRead,
+
+        Some("branch") => git_ref_listing_only(tokens, "branch"),
+        Some("tag") => git_ref_listing_only(tokens, "tag"),
+        Some("stash") => {
+            if tokens.iter().any(|token| matches!(*token, "list" | "show")) {
+                OpClass::GitRead
+            } else {
+                OpClass::GitWrite
+            }
+        }
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -442,6 +520,22 @@ fn classify_git(tokens: &[&str]) -> OpClass {
         Some("clone") | Some("fetch") | Some("pull") => OpClass::Network,
         Some("add") => OpClass::Passthrough, // staging is local, not a write
         _ => OpClass::Passthrough,
+    }
+}
+
+/// Ref creation is mutating.  Keep the read classifier deliberately small:
+/// no positional ref means a listing, and explicit list/show flags are reads.
+fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
+    let Some(index) = tokens.iter().position(|token| *token == subcommand) else {
+        return OpClass::GitWrite;
+    };
+    let args = &tokens[index + 1..];
+    if args.is_empty()
+        || args.iter().any(|token| matches!(*token, "-l" | "--list" | "--show-current"))
+    {
+        OpClass::GitRead
+    } else {
+        OpClass::GitWrite
     }
 }
 
@@ -545,9 +639,23 @@ mod tests {
     }
 
     #[test]
+    fn find_actions_are_not_read_operations() {
+        assert!(classify("find . -delete").contains(&OpClass::Destructive));
+        assert!(classify("find . -exec touch marker \\;").contains(&OpClass::Destructive));
+        assert!(classify("find . '-exec' touch marker \\;").contains(&OpClass::Destructive));
+        assert!(readonly_capabilities("find . '-exec' touch marker \\;").is_none());
+        assert!(classify("find . -fprintf result.txt '%p\\n'").contains(&OpClass::Destructive));
+    }
+
+    #[test]
     fn fd_is_file_search() {
         let classes = classify("fd '*.rs'");
         assert!(classes.contains(&OpClass::FileSearch));
+        assert!(classify("fd -x touch marker").contains(&OpClass::Destructive));
+        assert!(classify("fd '--exec' touch marker").contains(&OpClass::Destructive));
+        assert!(readonly_capabilities("fd -X touch marker").is_none());
+        assert!(classify("fd -HIx echo {}").contains(&OpClass::Destructive));
+        assert!(readonly_capabilities("fd -HIx echo {}").is_none());
     }
 
     #[test]
@@ -597,6 +705,18 @@ mod tests {
     fn git_push_is_git_write() {
         let classes = classify("git push origin main");
         assert!(classes.contains(&OpClass::GitWrite));
+    }
+
+    #[test]
+    fn git_read_lookalikes_with_mutating_flags_are_git_writes() {
+        assert!(classify("git branch feature").contains(&OpClass::GitWrite));
+        assert!(classify("git tag v1").contains(&OpClass::GitWrite));
+        assert!(classify("git branch -d old").contains(&OpClass::GitWrite));
+        assert!(classify("git tag -d v1").contains(&OpClass::GitWrite));
+        assert!(classify("git stash").contains(&OpClass::GitWrite));
+        assert!(classify("git stash list").contains(&OpClass::GitRead));
+        assert!(classify("git branch --list feature*").contains(&OpClass::GitRead));
+        assert!(classify("git tag --list v*").contains(&OpClass::GitRead));
     }
 
     #[test]
@@ -732,13 +852,20 @@ mod tests {
 
     #[test]
     fn cat_allowed_when_read_in_tools() {
-        let allowed = vec!["Read".into(), "Grep".into(), "Glob".into()];
+        let allowed = vec!["Read".into()];
         assert!(check_against_allowed("cat src/main.rs", &allowed).is_ok());
     }
 
     #[test]
+    fn search_and_glob_are_allowed_with_read() {
+        let allowed = vec!["Read".into()];
+        assert!(check_against_allowed("rg needle src", &allowed).is_ok());
+        assert!(check_against_allowed("find src -name '*.rs'", &allowed).is_ok());
+    }
+
+    #[test]
     fn cat_redirect_blocked_when_write_not_in_tools() {
-        let allowed = vec!["Read".into(), "Grep".into(), "Glob".into()];
+        let allowed = vec!["Read".into()];
         let result = check_against_allowed("cat > file.rs << 'EOF'\ncontent\nEOF", &allowed);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("FileWrite"));
@@ -752,7 +879,7 @@ mod tests {
 
     #[test]
     fn rm_always_blocked_in_restricted_state() {
-        let allowed = vec!["Read".into(), "Write".into(), "Edit".into(), "Bash".into()];
+        let allowed = vec!["Read".into(), "Write".into(), "Bash".into()];
         let result = check_against_allowed("rm -rf /", &allowed);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Destructive"));
@@ -780,8 +907,8 @@ mod tests {
     }
 
     #[test]
-    fn sed_inplace_allowed_with_edit() {
-        let allowed = vec!["Read".into(), "Bash".into(), "Edit".into()];
+    fn sed_inplace_allowed_with_write() {
+        let allowed = vec!["Read".into(), "Bash".into(), "Write".into()];
         assert!(check_against_allowed("sed -i 's/old/new/' file.rs", &allowed).is_ok());
     }
 
@@ -909,7 +1036,7 @@ mod tests {
     fn readonly_capabilities_reuse_command_classification_without_bash_escalation() {
         assert_eq!(
             readonly_capabilities("sed -n '1,12p' README.md"),
-            Some(vec!["Read"]),
+            None,
         );
         assert_eq!(
             readonly_capabilities("cat README.md | rg Statewright"),
@@ -918,5 +1045,10 @@ mod tests {
         assert_eq!(readonly_capabilities("printf x > marker.txt"), None);
         assert_eq!(readonly_capabilities("python3 -c 'print(1)'"), None);
         assert_eq!(readonly_capabilities("rm marker.txt"), None);
+        assert_eq!(readonly_capabilities("awk 'BEGIN { system(\"touch marker\") }'"), None);
+        assert_eq!(readonly_capabilities("git branch feature"), None);
+        assert_eq!(readonly_capabilities("git tag v1"), None);
+        assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
+        assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
     }
 }

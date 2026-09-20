@@ -138,7 +138,15 @@ async fn handle_pre_tool(
         session.max_iterations().unwrap_or(0)
     );
 
-    match enforcement::enforce_tool_call(&session, &req.tool_name) {
+    if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
+        return Json(PreToolResponse {
+            decision: "deny".into(),
+            additional_context: Some(format!("BLOCKED: {}", reason)),
+            status_message: Some(status),
+        });
+    }
+    let policy_tool_name = enforcement::resolve_adapter_tool_name(&session, &req.tool_name, &req.tool_input);
+    match enforcement::enforce_tool_call(&session, &policy_tool_name) {
         EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None),
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),

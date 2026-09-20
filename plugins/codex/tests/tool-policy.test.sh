@@ -22,6 +22,8 @@ assert_denied() {
 }
 
 shell_input() { jq -n --arg command "$1" '{tool_input:{command:$command}}'; }
+cmd_input() { jq -n --arg command "$1" '{tool_input:{cmd:$command}}'; }
+zsh_input() { jq -n --arg command "$1" '{tool_input:{command:$command,shell:"/bin/zsh"}}'; }
 
 for capability in Bash bash Read Grep Glob; do
   assert_allowed "$capability" write_stdin '{"tool_input":{"session_id":42,"chars":""}}'
@@ -35,10 +37,33 @@ done
 assert_denied "Write" write_stdin '{"tool_input":{"session_id":42,"chars":""}}'
 assert_allowed "write_stdin" write_stdin '{"tool_input":{"session_id":42,"chars":"yes\n"}}'
 
-assert_allowed "Read" Bash "$(shell_input 'sed -n "1,12p" README.md')"
-assert_allowed "Grep" exec_command "$(shell_input "rg -n 'needle' src")"
-assert_allowed "Glob" Bash "$(shell_input "find src -name '*.rs'")"
+assert_allowed "Read" Bash "$(shell_input 'cat README.md')"
+assert_allowed "Read" exec_command "$(shell_input "rg -n 'needle' src")"
+assert_allowed "Read" Bash "$(shell_input "find src -name '*.rs'")"
+assert_allowed "Read" exec_command "$(cmd_input "rg -n 'needle' src")"
+for native in Read read_file Grep grep search_files Glob glob find find_files ls list_directory; do
+  assert_allowed "Read" "$native" '{}'
+done
+assert_denied "Read" Bash '{}'
 assert_denied "Read" Bash "$(shell_input 'printf x > marker.txt')"
+assert_denied "Read" Bash "$(shell_input 'sed -n "1,12p" README.md')"
+assert_denied "Read" Bash "$(shell_input 'git branch feature')"
+assert_denied "Read" Bash "$(shell_input 'git tag v1')"
+assert_denied "Read" Bash "$(shell_input 'rg --pre /bin/cat needle README.md')"
+assert_denied "Read" Bash "$(shell_input 'ripgrep --pre=/bin/cat needle README.md')"
+assert_denied "Read" Bash "$(shell_input $'rg\t--pre\t/bin/cat needle README.md')"
+assert_denied "Read" Bash "$(shell_input "rg '--pre' /bin/cat needle README.md")"
+assert_denied "Read" Bash "$(shell_input 'rg --p""re /bin/cat needle README.md')"
+assert_denied "Read" Bash "$(shell_input "find . '-exec' touch marker \\;")"
+assert_denied "Read" Bash "$(shell_input 'find . -e""xec /bin/echo {} +')"
+assert_denied "Read" Bash "$(shell_input $'find .\t-exec\ttouch marker \\;')"
+assert_denied "Read" Bash "$(shell_input 'find . -fprintf result.txt %p')"
+assert_denied "Read" Bash "$(shell_input 'fd -x touch marker')"
+assert_denied "Read" Bash "$(shell_input "fd '--exec' touch marker")"
+assert_denied "Read" Bash "$(shell_input 'fd -X touch marker')"
+assert_denied "Read" Bash "$(shell_input 'fd -HIx echo {}')"
+assert_denied "Bash" exec_command "$(zsh_input 'rg -n needle README.md')"
+assert_allowed "Read" Read '{"tool_input":{"shell":"/bin/zsh"}}'
 if ! statewright_has_file_write_redirect 'cat missing 2> errors.txt'; then
   echo "expected stderr redirect to be a file write" >&2
   exit 1
@@ -98,7 +123,10 @@ for command in \
   assert_denied "Read" exec_command "$(shell_input "$command")"
 done
 assert_denied "Read" Bash "$(shell_input 'git stash')"
-assert_allowed "Edit" apply_patch '{}'
+assert_allowed "Write" apply_patch '{}'
+assert_allowed "Write" Edit '{}'
+assert_allowed "Write" MultiEdit '{}'
+assert_denied "Edit" apply_patch '{}'
 assert_allowed "WebSearch" webrun '{"tool_input":{"search_query":[{"q":"Statewright"}]}}'
 assert_allowed "WebFetch" webrun '{"tool_input":{"open":[{"ref_id":"x"}]}}'
 assert_allowed "ImageGen" image_genimagegen '{}'

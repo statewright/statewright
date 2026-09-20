@@ -22,18 +22,42 @@ pub enum EnforcementDecision {
 
 fn adapter_tool_family(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
-        "read" | "read_file" => Some("read"),
-        "edit" | "edit_file" | "apply_patch" | "patch_file" | "multiedit" => Some("edit"),
-        "write" | "write_file" | "create_file" => Some("write"),
-        "grep" | "search_files" => Some("grep"),
-        "glob" | "find" | "find_files" => Some("glob"),
-        "ls" | "list_directory" => Some("list"),
+        "read" | "read_file" | "grep" | "search_files" | "glob" | "find"
+        | "find_files" | "ls" | "list_directory" => Some("read"),
+        "edit" | "edit_file" | "apply_patch" | "patch_file" | "multiedit"
+        | "write" | "write_file" | "create_file" | "create_or_update_file" => Some("write"),
         "bash" | "exec_command" | "run_command" | "shell" => Some("command"),
         "run_test" => Some("test"),
         "webfetch" | "fetch" | "http_request" => Some("fetch"),
         "websearch" | "web_search" => Some("search"),
         "agent" | "subagent" => Some("agent"),
         _ => None,
+    }
+}
+
+/// Return the policy error for a shell dialect that Statewright does not
+/// inspect.  Native adapters can name their shell tool `exec_command` while
+/// selecting zsh in the input, so checking only the tool name is insufficient.
+pub fn unsupported_shell_dialect_reason(
+    requested_tool: &str,
+    tool_input: &serde_json::Value,
+) -> Option<&'static str> {
+    let native_shell = matches!(
+        requested_tool.to_ascii_lowercase().as_str(),
+        "bash" | "zsh" | "exec_command" | "run_command" | "shell"
+    );
+    if !native_shell {
+        return None;
+    }
+    let requested_shell = tool_input
+        .get("shell")
+        .and_then(|value| value.as_str())
+        .and_then(|shell| shell.split_whitespace().next())
+        .and_then(|shell| shell.rsplit('/').next());
+    if requested_tool.eq_ignore_ascii_case("zsh") || requested_shell.is_some_and(|shell| shell.eq_ignore_ascii_case("zsh")) {
+        Some("Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy.")
+    } else {
+        None
     }
 }
 
@@ -91,6 +115,13 @@ pub fn resolve_adapter_tool_name(
 
 /// Evaluate whether a tool call should be permitted, blocked, or trigger an implicit transition.
 pub fn enforce_tool_call(session: &GatewaySession, tool_name: &str) -> EnforcementDecision {
+    if tool_name.eq_ignore_ascii_case("zsh") {
+        return EnforcementDecision::Block {
+            reason: "Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy.".into(),
+            available_tools: tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
+                .unwrap_or_default(),
+        };
+    }
     // Final states block everything
     if session.is_final() {
         return EnforcementDecision::Block {
@@ -337,7 +368,7 @@ mod tests {
             resolve_adapter_tool_name(
                 &session,
                 "exec_command",
-                &json!({"cmd": "sed -n '1,12p' README.md"}),
+                &json!({"cmd": "cat README.md"}),
             ),
             "read_file",
         );
@@ -359,5 +390,37 @@ mod tests {
             resolve_adapter_tool_name(&testing, "run_test", &json!({})),
             "run_test"
         );
+    }
+
+    #[test]
+    fn normalized_capabilities_admit_native_read_and_write_tools() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "normalized",
+            "initial": "working",
+            "states": {
+                "working": {
+                    "allowed_tools": ["Read", "Write", "Bash"],
+                    "on": { "DONE": "completed" }
+                },
+                "completed": { "type": "final" }
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let session = GatewaySession::new("normalized".into(), definition);
+
+        for native in ["Read", "grep", "Glob", "find_files", "ls"] {
+            assert_eq!(resolve_adapter_tool_name(&session, native, &json!({})), "Read");
+        }
+        for native in ["Edit", "apply_patch", "patch_file", "MultiEdit", "write_file", "create_or_update_file"] {
+            assert_eq!(resolve_adapter_tool_name(&session, native, &json!({})), "Write");
+        }
+        match enforce_tool_call(&session, "Zsh") {
+            EnforcementDecision::Block { reason, .. } => assert!(reason.contains("Use Bash")),
+            other => panic!("Zsh must be explicitly blocked, got {other:?}"),
+        }
+        assert!(unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/zsh"})).is_some());
+        assert!(unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/bash"})).is_none());
+        assert!(unsupported_shell_dialect_reason("Read", &json!({"shell": "/bin/zsh"})).is_none());
     }
 }

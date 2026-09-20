@@ -981,10 +981,15 @@ describe("handleStop", () => {
     originalFetch = globalThis.fetch
     ;(existsSync as Mock).mockReturnValue(false)
     ;(readFileSync as Mock).mockImplementation(() => { throw new Error("ENOENT") })
+    // Statewright-managed sessions export STATEWRIGHT_STOP_CONTINUATION=0 to
+    // suppress Stop nudges; pin the default so inherited environment cannot
+    // void the standalone continuation assertions (docs/research/003, W2-R4).
+    vi.stubEnv("STATEWRIGHT_STOP_CONTINUATION", "1")
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
+    vi.unstubAllEnvs()
   })
 
   it("allows Codex to stop when there is no active workflow", async () => {

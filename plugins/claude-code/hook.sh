@@ -30,6 +30,35 @@ TRANSCRIPT_TELEMETRY="${SCRIPT_DIR}/scripts/transcript-telemetry.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+# Provider-neutral workflow capabilities. Keep the native name for the shell
+# guard, but map concrete Claude/Codex file and search tools to Read/Write.
+statewright_capability_for_tool() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    read|read_file|grep|search_files|glob|find|find_files|ls|list_directory) printf '%s' Read ;;
+    edit|edit_file|apply_patch|patch_file|multiedit|write|write_file|create_file|create_or_update_file) printf '%s' Write ;;
+    bash) printf '%s' Bash ;;
+    zsh) printf '%s' Zsh ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+statewright_allowed_capability() {
+  printf '%s\n' "$2" | grep -Fqx "$(statewright_capability_for_tool "$1")"
+}
+
+statewright_uses_unsupported_shell() {
+  local tool_name="$1" hook_input="$2" shell
+  case "$tool_name" in
+    Bash|bash|exec_command|run_command|shell|Zsh|zsh) ;;
+    *) return 1 ;;
+  esac
+  [ "$tool_name" = "Zsh" ] || [ "$tool_name" = "zsh" ] && return 0
+  shell=$(printf '%s' "$hook_input" | jq -r '.tool_input.shell // empty' 2>/dev/null || true)
+  shell=${shell%%[[:space:]]*}
+  shell=${shell##*/}
+  [ "$shell" = "zsh" ]
+}
+
 # Session-scoped state: use session_id from hook input or CLAUDE_SESSION_ID env
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
 SESSION_KEY="${HOOK_SESSION:-${CLAUDE_SESSION_ID:-$(printf '%s' "$PWD" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "default")}}"
@@ -541,12 +570,22 @@ case "$ENDPOINT" in
       exit 0  # No allowed_tools list = no enforcement
     fi
 
-    # Check if tool is allowed
-    if echo "$ALLOWED" | grep -qx "$TOOL_NAME"; then
+    if statewright_uses_unsupported_shell "$TOOL_NAME" "$HOOK_INPUT"; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy."}}'
+      exit 0
+    fi
+
+    # Check the provider-neutral capability while retaining the native name
+    # for shell discernment below.
+    if statewright_allowed_capability "$TOOL_NAME" "$ALLOWED"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
-      # to prevent bypass of Write/Edit/Destructive restrictions via shell redirects
+      # to prevent bypass of Write/Destructive restrictions via shell redirects
       if [ "$TOOL_NAME" = "Bash" ]; then
-        COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
+        COMMAND=$(echo "$HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null || true)
+        if [ -z "$COMMAND" ]; then
+          jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash invocation is missing command/cmd."}}'
+          exit 0
+        fi
         if [ -n "$COMMAND" ]; then
           # Check for destructive operations first (always blocked regardless of allowed_commands)
           if echo "$COMMAND" | grep -qE '^\s*(rm|rmdir|shred|truncate|unlink)\s'; then
@@ -573,27 +612,26 @@ case "$ENDPOINT" in
           else
             # Default heuristics when no explicit allowed_commands
             HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
-            HAS_EDIT=$(echo "$ALLOWED" | grep -qx "Edit" && echo "yes" || echo "no")
-            if [ "$HAS_WRITE" = "no" ] && [ "$HAS_EDIT" = "no" ]; then
+            if [ "$HAS_WRITE" = "no" ]; then
               COMMAND_SURFACE=$(printf '%s' "$COMMAND" | sed -E "s/'[^']*'//g; s/\"[^\"]*\"//g" | sed -E -e 's/(^|[[:space:]])[012]?>[[:space:]]*\/dev\/null([[:space:]]|$)/ /g' -e 's/(^|[[:space:]])2>&1([[:space:]]|$)/ /g')
               if echo "$COMMAND_SURFACE" | grep -qE '(^|[^0-9])>[^>&]|>>\s*\S'; then
-                REASON="Bash command blocked: output redirect detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+                REASON="Bash command blocked: output redirect detected but Write is not in allowed tools for '$CURRENT' phase."
                 jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
               if echo "$COMMAND_SURFACE" | grep -qE '(^|[;&|[:space:]])(sed[[:space:]]+-[^[:space:]]*i|perl[[:space:]]+-p?i)([[:space:]]|$)'; then
-                REASON="Bash command blocked: in-place file modification detected but Edit not in allowed tools for '$CURRENT' phase."
+                REASON="Bash command blocked: in-place file modification detected but Write is not in allowed tools for '$CURRENT' phase."
                 jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
               if echo "$COMMAND_SURFACE" | grep -qE '(^|[;&|[:space:]])(tee|dd|cp|mv|ln|install|rsync|mkdir|touch|chmod|chown)([[:space:]]|$)'; then
-                REASON="Bash command blocked: file-writing command detected but Write/Edit not in allowed tools for '$CURRENT' phase."
+                REASON="Bash command blocked: file-writing command detected but Write is not in allowed tools for '$CURRENT' phase."
                 jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
               # Block scripting interpreters that can write files
               if echo "$COMMAND" | grep -qE '^\s*(python|python3|ruby|node|perl|php)\s'; then
-                REASON="Bash command blocked: scripting interpreter not permitted without Write/Edit in '$CURRENT' phase."
+                REASON="Bash command blocked: scripting interpreter not permitted without Write in '$CURRENT' phase."
                 jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
                 exit 0
               fi
@@ -692,17 +730,17 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- Interrupt detection for file-changing tools (Edit, Write, MultiEdit) ---
+    # --- Interrupt detection for file-changing tools (normalized as Write) ---
     if [ -f "$ACTIVE_FILE" ] && [ -z "$SW_ACTION" ] && [ -f "$CACHE_FILE" ]; then
       FILE_PATH=""
       case "$TOOL_NAME" in
-        Edit|Write|MultiEdit|edit_file|write_file|create_or_update_file)
+        Edit|Write|MultiEdit|apply_patch|patch_file|edit_file|write_file|create_file|create_or_update_file)
           FILE_PATH=$(echo "$HOOK_INPUT" | jq -r '.tool_input.file_path // .tool_input.path // .tool_input.file // empty' 2>/dev/null || true)
           ;;
       esac
 
       if [ -n "$FILE_PATH" ]; then
-        # Normalize to relative path (Edit/Write pass absolute paths)
+        # Normalize to a relative path (native Write-family tools may pass absolute paths)
         # Try cwd first, then strip any leading path up to pattern match
         CWD_PREFIX="$(pwd)/"
         REL_PATH="$FILE_PATH"
@@ -1040,7 +1078,7 @@ case "$ENDPOINT" in
       exit 0  # No allowed_tools = no enforcement
     fi
 
-    if ! echo "$ALLOWED" | grep -qx "$TOOL_NAME"; then
+    if statewright_uses_unsupported_shell "$TOOL_NAME" "$HOOK_INPUT" || ! statewright_allowed_capability "$TOOL_NAME" "$ALLOWED"; then
       # Tool NOT in allowed_tools — deny
       jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'
       exit 0
@@ -1048,11 +1086,10 @@ case "$ENDPOINT" in
 
     # Tool IS in allowed_tools. Now evaluate the command (Bash-specific).
     if [ "$TOOL_NAME" = "Bash" ]; then
-      COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // empty' 2>/dev/null || true)
+      COMMAND=$(echo "$TOOL_INPUT" | jq -r '.command // .cmd // empty' 2>/dev/null || true)
 
       if [ -z "$COMMAND" ]; then
-        # No command = allow (shouldn't happen but fail-open for non-Bash)
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'
         exit 0
       fi
 
@@ -1142,7 +1179,7 @@ case "$ENDPOINT" in
     fi
 
     # Non-Bash tool that IS in allowed_tools — auto-allow
-    # (Read, Edit, Write, Grep, Glob, etc.)
+    # (provider-neutral Read or Write, and other explicitly admitted capabilities)
     jq -n '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
     exit 0
     ;;

@@ -19,6 +19,9 @@ pub fn pre_call_check(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> PreCallDecision {
+    if let Some(reason) = crate::enforcement::unsupported_shell_dialect_reason(tool_name, arguments) {
+        return PreCallDecision::Block(reason.into());
+    }
     let state_def = match session.definition.states.get(&session.current_state) {
         Some(s) => s,
         None => return PreCallDecision::Allow,
@@ -43,39 +46,45 @@ pub fn pre_call_check(
     // 2. Bash guard: check command against allowed_commands whitelist
     if let Some(ref allowed_cmds) = state_def.allowed_commands {
         let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
-        if tool_name.eq_ignore_ascii_case(bash_tool) {
-            if let Some(command) = extract_command(arguments) {
-                let allowed = allowed_cmds
-                    .iter()
-                    .any(|allowed| bash_classifier::matches_allowed_command(&command, allowed));
-                if !allowed {
-                    return PreCallDecision::Block(format!(
-                        "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
-                        command,
-                        session.current_state,
-                        allowed_cmds.join(", ")
-                    ));
-                }
+        if is_shell_tool(tool_name, bash_tool) {
+            let Some(command) = extract_command(arguments) else {
+                return PreCallDecision::Block(format!(
+                    "Shell invocation is missing command/cmd in state '{}'.",
+                    session.current_state
+                ));
+            };
+            let allowed = allowed_cmds
+                .iter()
+                .any(|allowed| bash_classifier::matches_allowed_command(&command, allowed));
+            if !allowed {
+                return PreCallDecision::Block(format!(
+                    "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
+                    command,
+                    session.current_state,
+                    allowed_cmds.join(", ")
+                ));
             }
         }
     }
 
     // 2b. Bash operation classifier: when allowed_commands is NOT set but Bash is allowed,
     // classify the command and block operations that require tools not in allowed_tools.
-    // This prevents agents from bypassing Write/Edit restrictions via Bash redirects/sed -i.
+    // This prevents agents from bypassing Write restrictions via Bash redirects/sed -i.
     if state_def.allowed_commands.is_none() {
         let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
-        if tool_name.eq_ignore_ascii_case(bash_tool) {
+        if is_shell_tool(tool_name, bash_tool) {
             if let Some(ref allowed_tools) = state_def.allowed_tools {
-                if let Some(command) = extract_command(arguments) {
-                    if let Err(reason) =
-                        bash_classifier::check_against_allowed(&command, allowed_tools)
-                    {
-                        return PreCallDecision::Block(format!(
-                            "Bash command blocked in state '{}': {}",
-                            session.current_state, reason
-                        ));
-                    }
+                let Some(command) = extract_command(arguments) else {
+                    return PreCallDecision::Block(format!(
+                        "Shell invocation is missing command/cmd in state '{}'.",
+                        session.current_state
+                    ));
+                };
+                if let Err(reason) = bash_classifier::check_against_allowed(&command, allowed_tools) {
+                    return PreCallDecision::Block(format!(
+                        "Bash command blocked in state '{}': {}",
+                        session.current_state, reason
+                    ));
                 }
             }
         }
@@ -177,6 +186,9 @@ fn is_edit_tool(name: &str) -> bool {
         || lower == "edit_file"
         || lower == "write_file"
         || lower == "multiedit"
+        || lower == "apply_patch"
+        || lower == "patch_file"
+        || lower == "create_file"
         || lower == "create_or_update_file"
 }
 
@@ -211,8 +223,15 @@ fn estimate_edit_lines(arguments: &serde_json::Value) -> Option<u32> {
 fn extract_command(arguments: &serde_json::Value) -> Option<String> {
     arguments
         .get("command")
+        .or_else(|| arguments.get("cmd"))
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
+}
+
+fn is_shell_tool(tool_name: &str, configured_tool: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(configured_tool)
+        || (configured_tool.eq_ignore_ascii_case("Bash")
+            && matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "exec_command" | "run_command" | "shell"))
 }
 
 fn extract_file_path(arguments: &serde_json::Value) -> Option<String> {
@@ -245,7 +264,7 @@ mod tests {
                     "on": { "READY": "implementing" }
                 },
                 "implementing": {
-                    "allowed_tools": ["Read", "Edit"],
+                    "allowed_tools": ["Read", "Write"],
                     "on": { "DONE": "completed" }
                 },
                 "completed": { "type": "final" }
@@ -300,6 +319,28 @@ mod tests {
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Block(msg) => assert!(msg.contains("not in the allowed commands")),
             _ => panic!("should block rm"),
+        }
+    }
+
+    #[test]
+    fn exec_command_cmd_is_checked_against_the_bash_whitelist() {
+        let s = session();
+        let allowed = json!({ "cmd": "pytest -x tests/" });
+        assert!(matches!(pre_call_check(&s, "exec_command", &allowed), PreCallDecision::Allow));
+
+        let denied = json!({ "cmd": "rm -rf /" });
+        match pre_call_check(&s, "exec_command", &denied) {
+            PreCallDecision::Block(msg) => assert!(msg.contains("not in the allowed commands")),
+            _ => panic!("cmd-based exec_command must be checked"),
+        }
+    }
+
+    #[test]
+    fn shell_calls_without_command_or_cmd_are_blocked() {
+        let s = session();
+        match pre_call_check(&s, "Bash", &json!({})) {
+            PreCallDecision::Block(msg) => assert!(msg.contains("missing command/cmd")),
+            _ => panic!("missing shell input must fail closed"),
         }
     }
 
@@ -382,11 +423,11 @@ mod tests {
             "initial": "planning",
             "states": {
                 "planning": {
-                    "allowed_tools": ["Read", "Grep", "Glob"],
+                    "allowed_tools": ["Read"],
                     "on": { "READY": "implementing" }
                 },
                 "implementing": {
-                    "allowed_tools": ["Read", "Edit", "Write", "Bash"],
+                    "allowed_tools": ["Read", "Write", "Bash"],
                     "on": { "DONE": "completed" }
                 },
                 "completed": { "type": "final" }
@@ -445,7 +486,7 @@ mod tests {
                     msg
                 );
             }
-            _ => panic!("should block sed -i when Edit not in allowed_tools"),
+            _ => panic!("should block sed -i when Write is not in allowed_tools"),
         }
     }
 

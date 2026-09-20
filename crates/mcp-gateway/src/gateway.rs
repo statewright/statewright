@@ -1954,6 +1954,80 @@ impl Gateway {
                     .unwrap(),
                 )
             }
+            "statewright_get_workflow" => {
+                let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                if workflow_name.is_empty() {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(
+                            "Workflow name is required".to_string(),
+                        ))
+                        .unwrap(),
+                    );
+                }
+                // Workflows in memory are parsed MachineDefinitions. Returning one would
+                // normalize away any valid extension fields, making a subsequent
+                // create_workflow(overwrite=true) lossy. The durable JSON record is the
+                // only safe source for a read-modify-overwrite cycle.
+                #[cfg(feature = "metering")]
+                let definition = if let Some(pool) = &self.db_pool {
+                    match sqlx::query_scalar::<_, serde_json::Value>(
+                        "SELECT definition FROM workflows WHERE owner = $1 AND name = $2",
+                    )
+                    .bind(&self.owner_id)
+                    .bind(workflow_name)
+                    .fetch_optional(pool)
+                    .await
+                    {
+                        Ok(Some(definition)) => definition,
+                        Ok(None) => {
+                            return JsonRpcResponse::success(
+                                id,
+                                serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                    "Workflow '{}' was not found in durable storage. Use statewright_list_workflows to discover available names.",
+                                    workflow_name
+                                )))
+                                .unwrap(),
+                            );
+                        }
+                        Err(error) => {
+                            return JsonRpcResponse::error(
+                                id,
+                                -32603,
+                                format!("Failed to read workflow definition: {}", error),
+                            );
+                        }
+                    }
+                } else {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32600,
+                        "statewright_get_workflow requires durable workflow storage",
+                    );
+                };
+                #[cfg(not(feature = "metering"))]
+                {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32600,
+                        "statewright_get_workflow requires a gateway built with durable workflow storage",
+                    );
+                }
+                #[cfg(feature = "metering")]
+                {
+                    let result = json!({
+                        "name": workflow_name,
+                        "definition": definition,
+                    });
+                    JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::text(
+                            serde_json::to_string_pretty(&result).unwrap(),
+                        ))
+                        .unwrap(),
+                    )
+                }
+            }
             "statewright_load_workflow" => {
                 let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let resume = arguments
@@ -2820,6 +2894,7 @@ mod tests {
                 "statewright_get_state",
                 "statewright_get_usage",
                 "statewright_list_workflows",
+                "statewright_get_workflow",
             ] {
                 assert_eq!(
                     tools.iter().find(|t| t["name"] == name).unwrap()["annotations"],
@@ -2959,7 +3034,7 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         let names: Vec<String> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap().into())
@@ -2967,6 +3042,7 @@ mod tests {
         assert!(names.contains(&"statewright_transition".to_string()));
         assert!(names.contains(&"statewright_get_state".to_string()));
         assert!(names.contains(&"statewright_get_usage".to_string()));
+        assert!(names.contains(&"statewright_get_workflow".to_string()));
     }
 
     #[tokio::test]
@@ -3218,6 +3294,24 @@ mod tests {
         let state: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(state["state"], "planning");
         assert_eq!(state["workflow"], "test");
+    }
+
+    #[tokio::test]
+    async fn tools_call_get_workflow_fails_closed_without_durable_storage() {
+        let mut gw = test_gateway();
+        let before = gw.session_manager.get("test-session").unwrap().checkpoint();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_get_workflow",
+                "arguments": { "name": "test" }
+            })),
+            id: Some(json!(1)),
+        };
+        let response = gw.handle_message(req).await.unwrap();
+        assert_eq!(response.error.unwrap().code, -32600);
+        assert_eq!(gw.session_manager.get("test-session").unwrap().checkpoint(), before);
     }
 
     #[tokio::test]
@@ -3575,6 +3669,66 @@ mod tests {
             "string"
         );
         assert_eq!(wire["inputSchema"]["properties"]["run_id"]["minLength"], 1);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn get_workflow_returns_owner_scoped_raw_json_without_changing_session() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMP TABLE workflows (owner text, name text, definition json)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let raw_definition = json!({
+            "id": "test",
+            "initial": "planning",
+            "states": { "planning": { "type": "final" } },
+            "x_preserved_extension": { "routing": ["terra", "sol"] }
+        });
+        let other_definition = json!({"id": "other", "initial": "done", "states": { "done": { "type": "final" } }});
+        sqlx::query("INSERT INTO workflows (owner, name, definition) VALUES ($1, $2, $3), ($4, $5, $6)")
+            .bind("owner-a").bind("test").bind(&raw_definition)
+            .bind("owner-b").bind("test").bind(&other_definition)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut gateway = test_gateway();
+        gateway.owner_id = "owner-a".into();
+        gateway.db_pool = Some(pool.clone());
+        let before_checkpoint = gateway.session_manager.get("test-session").unwrap().checkpoint();
+        let before_session_id = gateway.session_id.clone();
+        let before_active = gateway.active_workflow.clone();
+
+        let response = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_get_workflow",
+                    "arguments": { "name": "test" }
+                })),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
+        let response = tool_result_json(response);
+        assert_eq!(response["name"], "test");
+        assert_eq!(response["definition"], raw_definition);
+        assert_eq!(gateway.session_manager.get("test-session").unwrap().checkpoint(), before_checkpoint);
+        assert_eq!(gateway.session_id, before_session_id);
+        assert_eq!(gateway.active_workflow, before_active);
+        pool.close().await;
     }
 
     #[cfg(feature = "metering")]

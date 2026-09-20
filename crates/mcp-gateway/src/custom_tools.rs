@@ -328,6 +328,25 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations::read_only()),
+            name: "statewright_get_workflow".into(),
+            description: Some(
+                "Get the complete definition for one named workflow. Use it before create_workflow(overwrite=true) to preserve existing routing and controls.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Exact workflow name returned by statewright_list_workflows."
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+        },
+        ToolInfo {
             annotations: None,
             name: "statewright_load_workflow".into(),
             description: Some(
@@ -505,6 +524,7 @@ pub fn is_custom_tool(name: &str) -> bool {
             | "statewright_get_usage"
             | "statewright_report_runtime_usage"
             | "statewright_list_workflows"
+            | "statewright_get_workflow"
             | "statewright_load_workflow"
             | "statewright_deactivate"
             | "statewright_pause"
@@ -642,11 +662,12 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_usage"));
         assert!(tools.iter().any(|t| t.name == "statewright_list_workflows"));
+        assert!(tools.iter().any(|t| t.name == "statewright_get_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_load_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_status"));
@@ -664,6 +685,7 @@ mod tests {
             "statewright_get_state",
             "statewright_get_usage",
             "statewright_list_workflows",
+            "statewright_get_workflow",
         ];
         for tool in custom_tool_definitions()
             .into_iter()

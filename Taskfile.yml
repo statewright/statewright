@@ -156,6 +156,11 @@ tasks:
     cmds:
       - "{{.CARGO}} test -p statewright-engine -p statewright-mcp-gateway --no-default-features --lib"
 
+  test:gateway-metering:
+    desc: "Compile and run gateway tests with durable workflow storage enabled"
+    cmds:
+      - "{{.CARGO}} test -p statewright-mcp-gateway --features metering --lib"
+
   build:
     desc: "Build all binaries"
     cmds:

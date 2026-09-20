@@ -145,6 +145,95 @@ impl Gateway {
         )
     }
 
+    /// When durable storage is configured, persist the owner-bound checkpoint
+    /// before presenting an approval. Memory-only gateways retain the existing
+    /// approval behavior, but cannot recover it across a process replacement.
+    pub(crate) async fn persist_approval_checkpoint(&self) -> Result<(), &'static str> {
+        #[cfg(feature = "metering")]
+        if let Some(pool) = &self.db_pool {
+            let run_id = self.current_run_id.as_deref().ok_or("Approval has no durable run")?;
+            let session = self.session_manager.get(&self.session_id).ok_or("Workflow unavailable")?;
+            let saved = sqlx::query(
+                "UPDATE workflow_runs SET final_state = $1, context_snapshot = $2, updated = $3 \
+                 WHERE id = $4 AND owner = $5 AND session_id = $6 AND status = 'running'",
+            )
+            .bind(&session.current_state)
+            .bind(session.checkpoint())
+            .bind(chrono::Utc::now().to_rfc3339())
+            .bind(run_id)
+            .bind(&self.owner_id)
+            .bind(&self.transport_session_id)
+            .execute(pool)
+            .await;
+            if !matches!(saved, Ok(ref result) if result.rows_affected() == 1) {
+                return Err("Approval checkpoint could not be saved");
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore only the exact pending approval owned by this transport. Never
+    /// hydrate an arbitrary active run, or replace another live workflow.
+    pub(crate) async fn recover_pending_approval(
+        &mut self,
+        run_id: &str,
+        approval_id: &str,
+    ) -> Result<(), &'static str> {
+        if self.current_run_id.is_some() || self.active_workflow.is_some() {
+            return Err("A different workflow already owns this session");
+        }
+        #[cfg(feature = "metering")]
+        {
+            let pool = self.db_pool.as_ref().ok_or("Approval recovery requires durable storage")?;
+            let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<serde_json::Value>)>(
+                "SELECT workflow_name, project_id, final_state, context_snapshot FROM workflow_runs \
+                 WHERE id = $1 AND owner = $2 AND session_id = $3 AND status = 'running'",
+            )
+            .bind(run_id)
+            .bind(&self.owner_id)
+            .bind(&self.transport_session_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| "Approval checkpoint lookup failed")?
+            .ok_or("No owned running approval checkpoint")?;
+            let (workflow, project_id, state, checkpoint) = row;
+            let state = state.ok_or("Approval checkpoint has no state")?;
+            let restored = crate::session::GatewaySession::from_checkpoint(
+                checkpoint.ok_or("Approval checkpoint unavailable")?,
+                &self.session_id,
+                &state,
+            )
+            .map_err(|_| "Invalid approval checkpoint")?;
+            if restored.pending_approval.as_ref().map(|pending| pending.approval_id.as_str())
+                != Some(approval_id)
+                || statewright_engine::validate_definition(&restored.definition).is_err()
+            {
+                return Err("Approval checkpoint identity or definition changed");
+            }
+            self.session_manager.restore(restored);
+            self.active_workflow = Some(workflow);
+            self.project_id = project_id;
+            self.current_run_id = Some(run_id.to_string());
+            Ok(())
+        }
+        #[cfg(not(feature = "metering"))]
+        {
+            let _ = (run_id, approval_id);
+            Err("Approval recovery requires durable storage")
+        }
+    }
+
+    pub(crate) async fn ensure_pending_approval(
+        &mut self,
+        run_id: &str,
+        approval_id: &str,
+    ) -> Result<(), &'static str> {
+        if self.current_run_id.as_deref() == Some(run_id) {
+            return Ok(());
+        }
+        self.recover_pending_approval(run_id, approval_id).await
+    }
+
     pub(crate) fn apply_approval_receipt(
         &mut self,
         run_id: &str,
@@ -379,6 +468,13 @@ impl Gateway {
         if let Some(pool) = &self.db_pool {
             let pool = pool.clone();
             let now = chrono::Utc::now().to_rfc3339();
+            // A terminal approval may be replayed after a gateway replacement
+            // if the receipt was applied but the checkpoint save failed. Key
+            // its audit entry by approval ID within the owned run so replay
+            // cannot double-count the same human decision.
+            let approval_id = data.get("approval_id").and_then(|value| value.as_str()).map(str::to_owned);
+            let owner = self.owner_id.clone();
+            let session_id = self.transport_session_id.clone();
             let transition = serde_json::json!({"from": from, "to": audit_to, "event": event, "timestamp": now, "data": data});
             tokio::spawn(async move {
                 let _ = sqlx::query(
@@ -386,11 +482,17 @@ impl Gateway {
                      SET transitions = (transitions::jsonb || $1::jsonb)::json, \
                          transition_count = transition_count + 1, \
                          updated = $2 \
-                     WHERE id = $3",
+                     WHERE id = $3 AND owner = $4 AND session_id = $5 \
+                       AND ($6::text IS NULL OR NOT EXISTS ( \
+                         SELECT 1 FROM jsonb_array_elements(transitions::jsonb) AS prior \
+                         WHERE prior->'data'->>'approval_id' = $6))",
                 )
                 .bind(serde_json::to_string(&transition).unwrap())
                 .bind(&now)
                 .bind(&run_id)
+                .bind(&owner)
+                .bind(&session_id)
+                .bind(approval_id)
                 .execute(&pool)
                 .await;
             });
@@ -1468,6 +1570,11 @@ impl Gateway {
 
                             self.session_manager
                                 .set_pending_approval(&self.session_id, pending);
+
+                            if let Err(error) = self.persist_approval_checkpoint().await {
+                                self.session_manager.clear_pending_approval(&self.session_id);
+                                return JsonRpcResponse::error(id, -32600, error);
+                            }
 
                             let response = json!({
                                 "status": "pending_approval",
@@ -3530,6 +3637,103 @@ mod tests {
 
         // Session should have a pending approval
         assert!(session.pending_approval.is_some());
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn pending_approval_survives_gateway_replacement_only_for_exact_owner_and_ticket() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workflow_runs (id, owner, workflow_name, status, session_id, project_id) VALUES ('run-1', 'owner-a', 'approval-test', 'running', 'approval-session', 'project-a')")
+            .execute(&pool).await.unwrap();
+        let mut original = approval_gateway();
+        original.db_pool = Some(pool.clone());
+        original.owner_id = "owner-a".into();
+        original.project_id = Some("project-a".into());
+        original.seed_native_usage_run("run-1", "working");
+        let response = original.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(1)),
+            params: Some(json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}})),
+        }).await.unwrap();
+        assert!(response.error.is_none());
+        let checkpoint: serde_json::Value = sqlx::query_scalar(
+            "SELECT context_snapshot FROM workflow_runs WHERE id = 'run-1'",
+        ).fetch_one(&pool).await.unwrap();
+        let approval_id = checkpoint["session"]["pending_approval"]["approval_id"].as_str().unwrap();
+        assert_eq!(checkpoint["session"]["current_state"], "working");
+
+        let mut replacement = approval_gateway();
+        replacement.active_workflow = None;
+        replacement.owner_id = "owner-a".into();
+        replacement.db_pool = Some(pool.clone());
+        assert!(replacement.recover_pending_approval("run-1", "wrong-ticket").await.is_err());
+        assert!(replacement.current_run_id.is_none());
+        replacement.owner_id = "owner-b".into();
+        assert!(replacement.recover_pending_approval("run-1", approval_id).await.is_err());
+        replacement.owner_id = "owner-a".into();
+        replacement.recover_pending_approval("run-1", approval_id).await.unwrap();
+        assert_eq!(replacement.current_run_id.as_deref(), Some("run-1"));
+        assert_eq!(replacement.active_workflow.as_deref(), Some("approval-test"));
+        assert_eq!(replacement.project_id.as_deref(), Some("project-a"));
+        assert_eq!(replacement.session_manager.get("approval-session").unwrap().checkpoint(), checkpoint);
+        assert!(replacement.recover_pending_approval("run-1", approval_id).await.is_err(),
+            "an already-active gateway must not overwrite its session");
+
+        let mut unsaved = approval_gateway();
+        unsaved.owner_id = "owner-a".into();
+        unsaved.db_pool = Some(pool.clone());
+        unsaved.seed_native_usage_run("missing-run", "working");
+        let response = unsaved.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(2)),
+            params: Some(json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}})),
+        }).await.unwrap();
+        assert!(response.error.is_some(), "an unsaved approval must not reach the TUI");
+        assert!(unsaved.session_manager.get("approval-session").unwrap().pending_approval.is_none());
+        pool.close().await;
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn replayed_approval_audit_is_counted_once_for_its_owned_run() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, session_id text, transitions json, transition_count integer, updated text)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workflow_runs (id, owner, session_id, transitions, transition_count) VALUES ('run-1', 'owner-a', 'approval-session', '[]', 0)")
+            .execute(&pool).await.unwrap();
+        let mut gateway = approval_gateway();
+        gateway.db_pool = Some(pool.clone());
+        gateway.owner_id = "owner-a".into();
+        gateway.seed_native_usage_run("run-1", "working");
+        gateway.record_external_transition("working", "deployed", "DEPLOY",
+            &json!({"approval_id": "apr_replayed"}));
+        for _ in 0..100 {
+            let count: i32 = sqlx::query_scalar("SELECT transition_count FROM workflow_runs WHERE id = 'run-1'")
+                .fetch_one(&pool).await.unwrap();
+            if count > 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        gateway.record_external_transition("working", "deployed", "DEPLOY",
+            &json!({"approval_id": "apr_replayed"}));
+        tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+        let (count, transitions): (i32, serde_json::Value) = sqlx::query_as(
+            "SELECT transition_count, transitions FROM workflow_runs WHERE id = 'run-1'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(transitions.as_array().unwrap().len(), 1);
+        pool.close().await;
     }
 
     #[tokio::test]

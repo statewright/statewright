@@ -541,18 +541,41 @@ async fn handle_runtime_approval(
     if body.run_session_id != root && !under_own_branch {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let Some(session) = state
-        .sessions
-        .read()
-        .await
-        .get(&body.run_session_id)
-        .cloned()
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+    let mut session = state.sessions.read().await.get(&body.run_session_id).cloned();
+    if session.is_none() {
+        // The gateway process may have been replaced while a human decision
+        // was parked. A durable checkpoint is the only authority for reviving
+        // that exact owner/client/run; never fabricate one from the request.
+        if state.db_pool.is_none() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let workflows = match fetch_workflows(&state.pb_url, key).await {
+            Ok(value) if !value.workflows.is_empty() => value,
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
+        let manager = state.get_session_manager(&fingerprint).await;
+        let mut gateway = Gateway::new(
+            manager,
+            UpstreamManager::empty(),
+            body.run_session_id.clone(),
+            workflows.workflows,
+            None,
+            workflows.owner_id,
+            state.db_pool.clone(),
+        );
+        gateway.set_api_key_fingerprint(key);
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        let candidate = Arc::new(Mutex::new(RemoteSession { gateway, tx }));
+        let mut sessions = state.sessions.write().await;
+        session = Some(sessions.entry(body.run_session_id.clone()).or_insert(candidate).clone());
+    }
+    let session = session.expect("approval session was restored or already present");
     let mut session = session.lock().await;
     if !session.gateway.verify_owner_key(key) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if session.gateway.ensure_pending_approval(&body.run_id, &body.approval_id).await.is_err() {
+        return StatusCode::NOT_FOUND.into_response();
     }
     let mut projection = match session
         .gateway
@@ -588,6 +611,9 @@ async fn handle_runtime_approval(
         .is_err()
     {
         return StatusCode::CONFLICT.into_response();
+    }
+    if receipt["status"] != "pending" && session.gateway.persist_approval_checkpoint().await.is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     Json(receipt).into_response()
 }
@@ -1255,6 +1281,91 @@ mod tests {
         assert_eq!(summaries[0]["token_usage"]["total_tokens"], 15);
     }
 
+    #[tokio::test]
+    async fn native_usage_accepts_branch_pane_presenting_its_own_key() {
+        // Executor panes run `br_*` branch sessions whose owner key is the
+        // branch session key, not the client root key. The usage route must
+        // accept the pane's own key (exact fingerprint match) and reject
+        // foreign keys, or every branch pane's usage stream 403s.
+        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"canary-key")
+            .to_string();
+        let root = streamable_session_key(&fingerprint, Some("canary-client"), None);
+        let branch = format!("{root}_br_exec_pane");
+        let branch_key = "sw_test_branch_key";
+        let state = test_state_with_session(&branch, branch_key).await;
+        {
+            let remote_session = state
+                .sessions
+                .read()
+                .await
+                .get(&branch)
+                .cloned()
+                .unwrap();
+            remote_session
+                .lock()
+                .await
+                .gateway
+                .seed_native_usage_run("run-1", "working");
+        }
+
+        let report = json!({
+            "run_id": "run-1",
+            "run_session_id": branch,
+            "usage": {
+                "sequence": 1,
+                "state": "working",
+                "state_epoch": 1,
+                "provider": "openai",
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "precision": "exact",
+                "token_usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 2,
+                    "cache_write_input_tokens": 3,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 1,
+                    "total_tokens": 15
+                }
+            }
+        });
+        let send = |body: serde_json::Value, key: &str| {
+            build_router(state.clone()).oneshot(
+                Request::post("/api/runtime-usage")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {key}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+        };
+
+        // The pane presenting its own branch key is accepted.
+        assert_eq!(
+            send(report.clone(), branch_key)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+
+        // The client root key of the same account must not be usable against
+        // the branch pane's stream, and unknown keys stay forbidden.
+        assert_eq!(
+            send(report.clone(), "sw_test_root_key")
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            send(report.clone(), "sw_test_wrong_key")
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
     // --- Approval callback ---
 
     #[tokio::test]
@@ -1328,6 +1439,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn runtime_approval_recovers_only_exact_parked_session_after_gateway_replacement() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)")
+            .execute(&pool).await.unwrap();
+
+        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"key").to_string();
+        let root = streamable_session_key(&fingerprint, Some("own-client"), None);
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "test", "initial": "working", "context": {},
+            "states": {"working": {"on": {"DEPLOY": {"target": "deployed", "requires_approval": true}}},
+                "deployed": {"type": "final"}}
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create(root.clone(), definition.clone());
+        manager.set_pending_approval(&root, crate::session::PendingApproval {
+            approval_id: "apr_recover".into(), event: "DEPLOY".into(),
+            from_state: "working".into(), to_state: "deployed".into(),
+            new_context: json!({}), message: None,
+        });
+        let checkpoint = manager.get(&root).unwrap().checkpoint();
+        sqlx::query("INSERT INTO workflow_runs (id, owner, workflow_name, status, session_id, project_id, final_state, context_snapshot) VALUES ('run-1', 'owner-a', 'test', 'running', $1, 'project-a', 'working', $2)")
+            .bind(&root).bind(&checkpoint).execute(&pool).await.unwrap();
+
+        let response = json!({"default": "test", "owner_id": "owner-a", "workflows": {"test": definition}});
+        let pb = axum::Router::new().route("/api/gateway/workflows", get(move || {
+            let response = response.clone();
+            async move { Json(response) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pb_url = format!("http://{}", listener.local_addr().unwrap());
+        let pb_server = tokio::spawn(async move { axum::serve(listener, pb).await.unwrap(); });
+        let state = Arc::new(RemoteState {
+            sessions: RwLock::new(HashMap::new()),
+            session_managers: RwLock::new(HashMap::new()),
+            pb_url, db_pool: Some(pool.clone()), approval_secret: String::new(),
+        });
+        let request = |client: &'static str, approval: &'static str| Request::post("/api/runtime-approval")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer key")
+            .header(CLIENT_ID_HEADER, client)
+            .body(Body::from(json!({"run_id": "run-1", "run_session_id": root,
+                "approval_id": approval}).to_string())).unwrap();
+
+        assert_eq!(build_router(state.clone()).oneshot(request("foreign-client", "apr_recover"))
+            .await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert_eq!(build_router(state.clone()).oneshot(request("own-client", "wrong-ticket"))
+            .await.unwrap().status(), StatusCode::NOT_FOUND);
+        // No approval secret was configured for this fixture. Reaching 503
+        // means the gateway recovered and projected the exact owned ticket;
+        // no decision was submitted to PocketBase.
+        assert_eq!(build_router(state.clone()).oneshot(request("own-client", "apr_recover"))
+            .await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        let stored = state.sessions.read().await.get(&root).cloned().unwrap();
+        let stored = stored.lock().await;
+        assert_eq!(stored.gateway.approval_projection("run-1", "apr_recover").unwrap()["pending"]["to_state"], "deployed");
+        drop(stored);
+        pb_server.abort();
+        pool.close().await;
     }
 
     #[tokio::test]

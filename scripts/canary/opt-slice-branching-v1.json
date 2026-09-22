@@ -1,0 +1,42 @@
+{
+  "id": "opt-slice-branching-v1",
+  "initial": "s1",
+  "context": {},
+  "states": {
+    "s1": {
+      "instructions": "Step 1 of the P0 canary. Create a file named canary-start.txt in the current working directory containing exactly the text p0-canary. Then call the statewright transition tool with event GO and no other arguments.",
+      "on": { "GO": { "target": "s2" } }
+    },
+    "s2": {
+      "instructions": "This state forks into two parallel branch sessions (a and b) that run automatically; both must finish before the join. Call the statewright transition tool with event DONE to start the fork. Do not run any shell commands in this state.",
+      "on": {
+        "DONE": {
+          "type": "fork",
+          "fork": {
+            "branches": {
+              "a": { "initial": "a1", "terminal": "a_done" },
+              "b": { "initial": "b1", "terminal": "b_done" }
+            },
+            "join": "all",
+            "on_complete": "s3"
+          }
+        }
+      }
+    },
+    "a1": {
+      "instructions": "Branch A: create a file named canary-branch-a.txt in the current working directory containing exactly the text branch-a. Verify the file exists, then call the statewright transition tool with event DONE.",
+      "on": { "DONE": { "target": "a_done" } }
+    },
+    "a_done": { "type": "final" },
+    "b1": {
+      "instructions": "Branch B: create a file named canary-branch-b.txt in the current working directory containing exactly the text branch-b. Verify the file exists, then call the statewright transition tool with event DONE.",
+      "on": { "DONE": { "target": "b_done" } }
+    },
+    "b_done": { "type": "final" },
+    "s3": {
+      "instructions": "Both branches have completed. Call the statewright transition tool with event DONE to finish the workflow.",
+      "on": { "DONE": { "target": "s4" } }
+    },
+    "s4": { "type": "final" }
+  }
+}

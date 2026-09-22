@@ -32,6 +32,11 @@ tasks:
 
   test:plugin-release:
     desc: "Run the complete local validation gate for every supported plugin release"
+    env:
+      # Statewright-managed Codex sessions export STATEWRIGHT_STOP_CONTINUATION=0
+      # to suppress Stop nudges; pin the default so inherited environment cannot
+      # void plugin Stop-contract tests (docs/research/003; W2-R4 receipt).
+      STATEWRIGHT_STOP_CONTINUATION: "1"
     cmds:
       - node plugins/executor/scripts/sync-error-reporting.mjs --check
       - node plugins/codex/scripts/sync-executor-core.mjs --check
@@ -56,6 +61,24 @@ tasks:
       - bash -n plugins/claude-code/hook.sh plugins/claude-code/client-id.sh plugins/claude-code/mcp-proxy.sh plugins/claude-code/setup.sh
       - bash -n plugins/cursor/hook.sh plugins/cursor/mcp-proxy.sh
       - git diff --check
+
+  test:tool-policy:
+    desc: "Run the focused Codex and Claude provider-neutral tool-policy checks"
+    cmds:
+      - bash plugins/codex/tests/tool-policy.test.sh
+      - bash plugins/claude-code/tests/bash-discernment.test.sh
+      - bash -n plugins/codex/hook.sh plugins/codex/tool-policy.sh
+      - bash -n plugins/claude-code/hook.sh
+      - git diff --check
+
+  test:canary-gateway-pb-p0:
+    desc: "Run the P0 gateway<->PB E2E canary (local reference PB server; claude host by default)"
+    cmds:
+      - bash scripts/canary-gateway-pb-p0.sh
+  test:canary-gateway-pb-approval:
+    desc: "Run the D1 gateway<->PB approval contract canary (external + owner approval, pi host by default)"
+    cmds:
+      - bash scripts/canary-gateway-pb-approval.sh
 
   test:plugin-production-canary:unix:
     desc: "Exercise every Unix plugin transport against the production gateway without mutating workflow state"

@@ -1,0 +1,23 @@
+{
+  "id": "p1-restart-readm-v1",
+  "initial": "s1",
+  "context": {},
+  "states": {
+    "s1": {
+      "instructions": "P1 restart/readmit canary step 1: call the statewright_transition tool with event 'GO_A'. GO_A is approval-gated by an EXTERNAL approver (the out-of-band harness, later with a trusted callback). Do NOT self-approve it; if the workflow is parked, wait for s2.",
+      "on": { "GO_A": { "target": "s2", "requires_approval": true } }
+    },
+    "s2": {
+      "instructions": "P1 restart/readmit canary step 2: call the statewright_transition tool with event 'GO_B'. GO_B is approval-gated and you are the workflow owner: if the first call reports the transition parked, call GO_B again to self-approve it. Verify you reached s3.",
+      "on": { "GO_B": { "target": "s3", "requires_approval": true } }
+    },
+    "s3": {
+      "instructions": "P1 restart/readmit canary step 3: create a file named canary-p1-approved.txt in the current directory containing the single line 'approved'. Then call the statewright_transition tool with event 'DONE'.",
+      "on": { "DONE": { "target": "s4" } }
+    },
+    "s4": {
+      "type": "final",
+      "instructions": "The P1 restart/readmit canary workflow is complete. Do not call any further tools."
+    }
+  }
+}

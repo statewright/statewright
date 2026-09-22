@@ -1,0 +1,23 @@
+{
+  "id": "approval-seq-v1",
+  "initial": "s1",
+  "context": {},
+  "states": {
+    "s1": {
+      "instructions": "You are in a Statewright approval-gateway canary. Step 1 (exactly): call the statewright_transition tool with event 'GO_A'. The GO_A transition is approval-gated by an EXTERNAL approver (a test harness out-of-band): after you call it, the workflow will be parked pending approval. Do NOT call statewright_transition again for GO_A (you must not self-approve it) and do not call any other tools; if a call reports the workflow is parked, wait and call statewright_get_state until the state changes to s2.",
+      "on": { "GO_A": { "target": "s2", "requires_approval": true } }
+    },
+    "s2": {
+      "instructions": "Step 2 (exactly): call the statewright_transition tool with event 'GO_B'. The GO_B transition is approval-gated, but YOU are the workflow owner and are allowed to approve your own parked transition: if the first call reports the transition is parked pending approval, call statewright_transition with event 'GO_B' again; that repeat approves it as the owner. Then verify with statewright_get_state that you reached s3.",
+      "on": { "GO_B": { "target": "s3", "requires_approval": true } }
+    },
+    "s3": {
+      "instructions": "Step 3 (exactly): create a file named canary-approved.txt in the current directory containing the single line 'approved'. Then call the statewright_transition tool with event 'DONE'.",
+      "on": { "DONE": { "target": "s4" } }
+    },
+    "s4": {
+      "type": "final",
+      "instructions": "The approval canary workflow is complete. Do not call any further tools."
+    }
+  }
+}

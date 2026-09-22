@@ -245,6 +245,7 @@ export async function startCodexAppServerRouteProxy({
   threadLabels = {},
   getThreadLabels = async () => threadLabels,
   getThreadCwds = async () => ({}),
+  onThreadStarted = async () => {},
   onThreadResumed = async () => {},
   forwardPayload = forwardWhenOpen,
   idleMs = 500,
@@ -272,6 +273,69 @@ export async function startCodexAppServerRouteProxy({
     routeLease = new Promise((resolveLease) => { release = resolveLease; });
     await previous;
     return release;
+  };
+  const takeApprovedRoute = async (threadId, state, fromState, checkOwner) => {
+    let retired = 0;
+    for (;;) {
+      const reservation = await takePendingRoute(threadId);
+      try {
+        await checkOwner();
+        const route = reservation?.route ?? reservation;
+        if (!route) return { route: { session_id: threadId, run_id: state.run_id,
+          state: state.state, model: state.model, effort: state.thinking_level } };
+        // A route queued before the human decision cannot override the approved
+        // destination. Retire only this exact run's known origin; all other
+        // mismatches still fail closed in the caller's identity check.
+        if (fromState !== state.state && route.session_id === threadId && route.run_id === state.run_id
+            && route.state === fromState) {
+          if (typeof reservation?.ack !== "function") {
+            throw new Error("Approved origin route cannot be retired safely");
+          }
+          if (retired >= 32) throw new Error("Approved origin route queue exceeds bounded retirement");
+          await reservation.ack();
+          await checkOwner();
+          retired++;
+          continue;
+        }
+        return { route, ack: reservation?.ack, release: reservation?.release };
+      } catch (error) {
+        await reservation?.release?.();
+        throw error;
+      }
+    }
+  };
+  const takeCurrentRoute = async (threadId, checkOwner = async () => {}) => {
+    if (!approvalService?.getState) return takePendingRoute(threadId);
+    await checkOwner();
+    const authoritative = await approvalService.getState(threadId);
+    await checkOwner();
+    for (let retired = 0; retired <= 256; retired += 1) {
+      const reservation = await takePendingRoute(threadId);
+      if (!reservation) {
+        if (!authoritative || authoritative.is_final === true) return null;
+        return { route: { session_id: threadId, run_id: authoritative.run_id,
+          state: authoritative.state, model: authoritative.model, effort: authoritative.thinking_level,
+          ...(Array.isArray(authoritative.model_ladder) ? { model_ladder: authoritative.model_ladder } : {}) } };
+      }
+      try {
+        await checkOwner();
+        const route = reservation.route ?? reservation;
+        const current = authoritative && authoritative.is_final !== true
+          && route?.session_id === threadId
+          && route.run_id === authoritative.run_id
+          && route.state === authoritative.state
+          && route.model === authoritative.model
+          && route.effort === authoritative.thinking_level;
+        if (current) return reservation;
+        if (typeof reservation.ack !== "function") throw new Error("Stale Statewright route cannot be retired safely");
+        await reservation.ack();
+        await checkOwner();
+      } catch (error) {
+        await reservation?.release?.();
+        throw error;
+      }
+    }
+    throw new Error("Statewright stale route queue exceeds bounded retirement");
   };
   const activeConnections = new Set();
   const approvalGates = new Set();
@@ -423,6 +487,13 @@ export async function startCodexAppServerRouteProxy({
     const upstream = new WebSocket(upstreamUrl);
     const reportApprovalFailure = error => Promise.resolve(onProtocolError({ side: "approval",
       message: error instanceof Error ? error.message : String(error) })).catch(() => {});
+    const reportParkedApprovalFailure = (threadId, error) => {
+      if (/approval checkpoint|approval recovery|approval service HTTP 404/i.test(String(error?.message))) {
+        void forwardWhenOpen(downstream, JSON.stringify({ method: "warning", params: { threadId,
+          message: "Statewright approval remains parked: its authoritative gateway checkpoint is unavailable. No decision or new turn was submitted." } })).catch(reportApprovalFailure);
+      }
+      void reportApprovalFailure(error);
+    };
     const waitForApprovalIdle = async (threadId, check) => {
       const deadline = Date.now() + 10000;
       for (;;) {
@@ -446,17 +517,15 @@ export async function startCodexAppServerRouteProxy({
       rpc: internalRpc,
       send: value => { void forwardWhenOpen(downstream, JSON.stringify(value)).catch(reportApprovalFailure); },
       record: event => onHandoffStatus({ schema: "statewright/approval-lifecycle/v1", ...event }),
-      continueApproved: async ({ threadId, state, goal, check }) => {
+      continueApproved: async ({ threadId, state, fromState, goal, check }) => {
         const checkOwner = async () => { check(); await gate.assertOwner(threadId); check(); };
         const release = await acquireRouteLease();
         let reservation, forwarded = false;
         try {
           await checkOwner();
           await waitForApprovalIdle(threadId, checkOwner);
-          reservation = await takePendingRoute(threadId);
-          await checkOwner();
-          const route = reservation?.route ?? reservation ?? { session_id: threadId, run_id: state.run_id,
-            state: state.state, model: state.model, effort: state.thinking_level };
+          reservation = await takeApprovedRoute(threadId, state, fromState, checkOwner);
+          const route = reservation.route;
           if (route.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
               || !route.model || route.model !== state.model
               || route.effort !== state.thinking_level) throw new Error("Approval continuation lacks the authoritative destination route");
@@ -569,7 +638,9 @@ export async function startCodexAppServerRouteProxy({
             addActivity(threadId, reason);
             if (requestId !== null) pendingTurnStarts.set(requestId, provisionalTurn);
           }
-          const pendingRoute = await takePendingRoute(threadId);
+          const pendingRoute = approvedRelease
+            ? await takeApprovedRoute(threadId, approvedRelease.state, approvedRelease.fromState, checkReleaseOwner)
+            : await takeCurrentRoute(threadId, checkReleaseOwner);
           releasePendingRoute = pendingRoute?.release ?? null;
           await checkReleaseOwner();
           const state = approvedRelease?.state;
@@ -724,6 +795,18 @@ export async function startCodexAppServerRouteProxy({
             await approvalService.clear(approvalRelease.threadId, approvalRelease.approvalId);
           }
         }
+        if (responseTo === "thread/start" && notification?.result?.thread?.id) {
+          try {
+            // Native thread creation is the authoritative first point at which
+            // an opaque managed client ID can be bound to a durable thread.
+            // Do not report success if that ownership record cannot be saved.
+            await onThreadStarted({ threadId: notification.result.thread.id });
+          } catch (error) {
+            notification = { jsonrpc: "2.0", id: notification.id, error: { code: -32603,
+              message: `Statewright could not bind the new Codex thread: ${error.message}` } };
+            payload = JSON.stringify(notification);
+          }
+        }
         if ((responseTo === "thread/start" || responseTo === "thread/resume") && notification?.result?.thread?.id) {
           attachedThreadId = notification.result.thread.id;
           const provider = String(notification.result.modelProvider ?? notification.result.thread.modelProvider ?? "").trim();
@@ -824,8 +907,10 @@ export async function startCodexAppServerRouteProxy({
         side: "upstream_to_native",
         message: error instanceof Error ? error.message : String(error),
       })).catch(() => {});
-      if (approvalHint) void gate.observe(approvalHint.threadId, approvalHint.snapshot, approvalHint.turnId).catch(reportApprovalFailure);
-      else if (attachedThreadId && gate) void gate.reopen(attachedThreadId).catch(reportApprovalFailure);
+      if (approvalHint) void gate.observe(approvalHint.threadId, approvalHint.snapshot, approvalHint.turnId)
+        .catch(error => reportParkedApprovalFailure(approvalHint.threadId, error));
+      else if (attachedThreadId && gate) void gate.reopen(attachedThreadId)
+        .catch(error => reportParkedApprovalFailure(attachedThreadId, error));
     };
     // Preserve source order while a terminal's display-only route lookup waits.
     upstream.on("message", raw => {

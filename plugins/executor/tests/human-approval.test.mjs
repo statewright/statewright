@@ -154,9 +154,28 @@ test("foreign session receipt stays parked and records only through the callback
   const waiting = f.wait();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(f.controller.tickets.size, 1);
-  assert.deepEqual(f.sent, []);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent[0].method, "warning");
+  assert.match(f.sent[0].params.message, /remains parked/);
   assert.deepEqual(f.resolutions, []);
   assert.deepEqual(f.recorded, [{ type: "approval_read_unavailable", threadId: ticket.threadId, approval_id: ticket.approval_id }]);
+  f.abort.abort(new Error("done"));
+  await assert.rejects(waiting, /done/);
+});
+
+test("resolver outage shows one non-authorizing warning, then presents the recovered dialog", async () => {
+  const f = fixture();
+  let reads = 0;
+  f.controller.read = async () => {
+    if (++reads === 1) throw new Error("Approval service HTTP 404");
+    return {...ticket, status: "pending", can_decide: true};
+  };
+  const waiting = f.wait();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(f.sent[0].method, "warning");
+  assert.match(f.sent[0].params.message, /gateway no longer has this approval session/);
+  assert.equal(f.sent.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
+  assert.deepEqual(f.resolutions, []);
   f.abort.abort(new Error("done"));
   await assert.rejects(waiting, /done/);
 });

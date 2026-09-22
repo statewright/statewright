@@ -32,7 +32,22 @@ export class CodexApprovalGate {
       if (saved || hint) throw new Error("Approval belongs to a different root thread");
       return null;
     }
-    const state = await this.service.getState(threadId);
+    let state = await this.service.getState(threadId);
+    if (saved?.pending_approval?.approval_id && !state) {
+      // A gateway replacement can discard its in-memory session while this
+      // host still owns the parked ticket. Only the exact host-only approval
+      // read may rehydrate a durable checkpoint; a journal entry alone is not
+      // permission to present a decision or start another turn.
+      const ticket = { ...saved.pending_approval, run_id: saved.run_id,
+        run_session_id: saved.run_session_id, threadId };
+      const receipt = await this.service.read(ticket);
+      if (receipt?.approval_id !== ticket.approval_id || receipt.run_id !== ticket.run_id
+          || receipt.from_state !== ticket.from_state || receipt.to_state !== ticket.to_state
+          || receipt.run_session_id !== undefined && receipt.run_session_id !== ticket.run_session_id) {
+        throw new Error("Approval recovery returned a foreign ticket; work remains parked");
+      }
+      state = await this.service.getState(threadId);
+    }
     for (const expected of [saved, hint].filter(Boolean)) {
       if (!state || state.run_id !== expected.run_id || state.run_session_id !== expected.run_session_id) {
         throw new Error("Approval checkpoint has no matching live workflow; work remains parked");
@@ -117,7 +132,8 @@ export class CodexApprovalGate {
       check();
       if (autoContinue && !state.is_final) {
         await this.assertOwner(threadId);
-        await this.continueApproved({ threadId, state, goal: entry.goal, check });
+        await this.continueApproved({ threadId, state, fromState: snapshot.pending_approval.from_state,
+          goal: entry.goal, check });
         check();
       }
       if (!retainCheckpoint) await this.service.clear(threadId, ticket.approval_id);
@@ -135,7 +151,8 @@ export class CodexApprovalGate {
     if (this.closed || (this.epochs.get(threadId) ?? 0) !== epoch) throw new Error("Approval request superseded by newer input");
     if (!snapshot) return;
     const state = await this.park(threadId, snapshot, { turnId, retainCheckpoint: true });
-    return { state, approvalId: snapshot.pending_approval.approval_id };
+    return { state, approvalId: snapshot.pending_approval.approval_id,
+      fromState: snapshot.pending_approval.from_state };
   }
 
   async reopen(threadId) {

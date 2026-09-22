@@ -32,7 +32,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
   const calls = [], timeline = [], errors = [], statuses = [], serviceCalls = [], injected = [], readStatuses = [], idleEvents = [];
   const clients = [], upstreamSockets = [], saved = new Map(), holds = new Set();
   let socket, visible, state = null, decision = "pending", active = false, sequence = 0;
-  let approvalStateRead = null, route = null, routeHold = null, rpcHold = null;
+  let approvalStateRead = null, routes = [], routeHold = null, rpcHold = null;
   let owned = true, goal = structuredClone(nativeGoal), settings = null;
   function makeHold() {
     const hold = { entered: deferred(), release: deferred() };
@@ -135,8 +135,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
     ...(withService ? { approvalService: service } : {}),
     takePendingRoute: async () => {
-      const next = route;
-      route = null;
+      const next = routes.shift() ?? null;
       if (routeHold) {
         const hold = routeHold;
         routeHold = null;
@@ -202,7 +201,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
   function respond(form, action) {
     client.send(JSON.stringify({ id: form.id, result: { action } }));
   }
-  return { calls, timeline, errors, statuses, serviceCalls, saved, injected, readStatuses, idleEvents, upstreamSockets,
+  return { calls, timeline, errors, statuses, serviceCalls, service, saved, injected, readStatuses, idleEvents, upstreamSockets,
     rpc, request, response, send, observePending, respond,
     get visible() { return visible; },
     get client() { return client; },
@@ -211,8 +210,11 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     get goal() { return goal; },
     get settings() { return settings; },
     armPending() { state = structuredClone(pending); },
+    setState(value) { state = structuredClone(value); },
     changeRoot() { owned = false; },
-    setRoute(value) { route = value; },
+    setRoute(value) { routes = [value]; },
+    setRoutes(values) { routes = [...values]; },
+    queueRoute(value) { routes.push(value); },
     setNativeIdle() {
       active = false;
       send({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
@@ -386,6 +388,27 @@ test("beforeTurn releases native turn/start with the authoritative destination w
   assert.equal(f.saved.size, 0);
 });
 
+test("approved user turn retires only the exact origin routes before applying the destination", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  await f.rpc("thread/start");
+  f.armPending();
+  const retired = [];
+  for (let index = 0; index < 2; index++) {
+    f.queueRoute({ route: { session_id: threadId, run_id: destination.run_id, state: pending.state,
+      model: pending.model, effort: "low" }, ack: async () => { retired.push(index); },
+    release: async () => assert.fail("an approved origin route must not be requeued") });
+  }
+  const id = f.request("turn/start", { threadId, input: [{ type: "text", text: "Continue approved work" }] });
+  await until(() => form(f), "approval form with queued origin routes");
+  f.respond(form(f), "accept");
+  await f.response(id);
+  assert.deepEqual(retired, [0, 1]);
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "fixture-destination-model");
+  assert.equal(f.saved.size, 0);
+  assert.deepEqual(f.errors, []);
+});
+
 test("beforeTurn installs destination settings before releasing a paused native goal to active", { timeout: 8000 }, async t => {
   const f = await fixture(t, { nativeGoal: pausedGoal });
   await f.rpc("thread/start");
@@ -517,7 +540,10 @@ test("native approval forwards completed evidence before interrupt and consumes 
   const completionIndex = f.timeline.findIndex(event => event.side === "native" && event.message.method === "item/completed");
   const interruptIndex = f.timeline.findIndex(event => event.side === "upstream" && event.message.method === "turn/interrupt");
   assert.ok(completionIndex >= 0 && interruptIndex > completionIndex);
-  assert.deepEqual(f.visible.find(message => message.method === "item/completed"), completion);
+  const visibleCompletion = f.visible.find(message => message.method === "item/completed");
+  assert.equal(visibleCompletion.params.item.result.content[0].text,
+    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+  assert.deepEqual(completion.params.item.result.structuredContent, pending, "approval parsing retained the upstream payload");
   assert.equal(request.params.mode, "form");
   assert.equal(request.params.threadId, threadId);
   assert.match(request.params.message, /Fixture Reviewer/);
@@ -570,6 +596,19 @@ test("cold native thread resume reopens the saved pending gate without a new too
   assert.equal(f.serviceCalls.filter(call => call.method === "resolve").length, 1);
 });
 
+test("lost gateway checkpoint shows a parked warning instead of silently missing the inline dialog", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  f.saved.set(threadId, structuredClone(pending));
+  f.setState(null);
+  f.service.read = async () => { throw new Error("Approval service HTTP 404"); };
+  await f.rpc("thread/resume", { threadId });
+  await until(() => f.visible.some(message => message.method === "warning"), "missing checkpoint warning");
+  assert.match(f.visible.find(message => message.method === "warning").params.message, /remains parked/);
+  assert.equal(f.visible.some(message => message.method === formMethod), false);
+  assert.equal(starts(f).length, 0);
+  assert.equal(f.saved.get(threadId).pending_approval.approval_id, pending.pending_approval.approval_id);
+});
+
 test("native cancellation consumes the reply but leaves the authoritative approval and checkpoint pending", { timeout: 8000 }, async t => {
   const f = await fixture(t);
   await f.observePending();
@@ -616,6 +655,42 @@ test("approved continuation rejects a pending route that disagrees with the auth
   await f.rpc("initialize");
   assert.equal(starts(f).length, 1);
   assert.equal(f.injected.length, 0);
+  assert.equal(f.saved.size, 1);
+});
+
+test("automatic approved continuation retires queued origin routes and resumes on the destination", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  await f.observePending();
+  let retired = 0;
+  for (let index = 0; index < 2; index++) {
+    f.queueRoute({ route: { session_id: threadId, run_id: destination.run_id, state: pending.state,
+      model: pending.model, effort: "low" }, ack: async () => { retired++; },
+    release: async () => assert.fail("an approved origin route must not be requeued") });
+  }
+  f.respond(form(f), "accept");
+  await until(() => f.saved.size === 0, "automatic approved destination continuation");
+  assert.equal(retired, 2);
+  assert.equal(starts(f).length, 2);
+  assert.equal(starts(f)[1].params.model, "fixture-destination-model");
+  assert.deepEqual(f.errors, []);
+});
+
+test("automatic approved continuation drains exact origin routes but preserves a foreign route", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  await f.observePending();
+  let retired = 0, foreignReleased = 0;
+  f.queueRoute({ route: { session_id: threadId, run_id: destination.run_id, state: pending.state,
+    model: pending.model, effort: "low" }, ack: async () => { retired++; },
+  release: async () => assert.fail("an approved origin route must not be requeued") });
+  f.queueRoute({ route: { session_id: threadId, run_id: "foreign-run", state: destination.state,
+    model: destination.model, effort: destination.thinking_level },
+  ack: async () => assert.fail("a foreign route must never be consumed"),
+  release: async () => { foreignReleased++; } });
+  f.respond(form(f), "accept");
+  await until(() => f.errors.some(error => /authoritative destination route/.test(error.message)), "foreign route rejection");
+  assert.equal(retired, 1);
+  assert.equal(foreignReleased, 1);
+  assert.equal(starts(f).length, 1);
   assert.equal(f.saved.size, 1);
 });
 
@@ -684,6 +759,66 @@ test("late old-turn terminal neither reaches the native transcript nor clears th
   await until(() => f.idleEvents.length === 1, "only the current terminal releases resident activity");
 });
 
+test("ordinary turns drain stale Statewright routes when no workflow is active", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  let retired = 0;
+  f.setRoutes(["old-run-1", "old-run-2"].map(runId => ({
+    route: { session_id: threadId, run_id: runId, state: "baseline",
+      model: "openai-codex/gpt-5.6-sol", effort: "high" },
+    ack: async () => { retired++; },
+    release: async () => assert.fail("a stale route must be retired rather than requeued"),
+  })));
+  await f.rpc("turn/start", { threadId, model: "operator-model", effort: "medium",
+    input: [{ type: "text", text: "Ordinary chat" }] });
+  assert.equal(retired, 2);
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "operator-model");
+  assert.equal(starts(f)[0].params.effort, "medium");
+  assert.equal(f.injected.length, 0);
+  assert.deepEqual(f.errors, []);
+});
+
+test("ordinary turns retire stale routes before applying the exact active Statewright route", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  const current = { run_id: "current-run", state: "implement", model: "openai-codex/gpt-5.6-terra",
+    thinking_level: "medium", is_final: false };
+  f.setState(current);
+  let staleRetired = 0, currentAcknowledged = 0;
+  f.setRoutes([
+    { route: { session_id: threadId, run_id: "stale-run", state: "baseline",
+      model: "openai-codex/gpt-5.6-sol", effort: "high" },
+    ack: async () => { staleRetired++; }, release: async () => assert.fail("stale route requeued") },
+    { route: { session_id: threadId, run_id: current.run_id, state: current.state,
+      model: current.model, effort: current.thinking_level },
+    ack: async () => { currentAcknowledged++; }, release: async () => assert.fail("current route requeued") },
+  ]);
+  await f.rpc("turn/start", { threadId, input: [{ type: "text", text: "Continue current workflow" }] });
+  assert.equal(staleRetired, 1);
+  assert.equal(currentAcknowledged, 1);
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "gpt-5.6-terra");
+  assert.equal(starts(f)[0].params.effort, "medium");
+  assert.equal(f.injected.length, 1);
+  assert.equal(f.injected[0].route.run_id, current.run_id);
+  assert.deepEqual(f.errors, []);
+});
+
+test("an active workflow still applies its authoritative route when the queue is empty", { timeout: 8000 }, async t => {
+  const f = await fixture(t);
+  const current = { run_id: "current-run", state: "implement", model: "openai-codex/gpt-5.6-terra",
+    thinking_level: "medium", model_ladder: [{ model: "openai-codex/gpt-5.6-terra", thinking_level: "medium" }],
+    is_final: false };
+  f.setState(current);
+  await f.rpc("turn/start", { threadId, input: [{ type: "text", text: "Continue without a route file" }] });
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "gpt-5.6-terra");
+  assert.equal(starts(f)[0].params.effort, "medium");
+  assert.equal(f.injected.length, 1);
+  assert.equal(f.injected[0].route.run_id, current.run_id);
+  assert.deepEqual(f.injected[0].route.model_ladder, current.model_ladder);
+  assert.deepEqual(f.errors, []);
+});
+
 test("without an approval service normal traffic and native server-request replies pass through", { timeout: 8000 }, async t => {
   const f = await fixture(t, { withService: false });
   await f.rpc("thread/start");
@@ -698,7 +833,10 @@ test("without an approval service normal traffic and native server-request repli
   await until(() => form(f), "ordinary native form");
   f.respond(nativeRequest, "accept");
   await f.rpc("initialize");
-  assert.deepEqual(f.visible.find(message => message.method === "item/completed"), completion);
+  const visibleCompletion = f.visible.find(message => message.method === "item/completed");
+  assert.equal(visibleCompletion.params.item.result.content[0].text,
+    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+  assert.deepEqual(completion.params.item.result.structuredContent, pending, "upstream completion remains intact");
   assert.deepEqual(f.visible.find(message => message.method === formMethod), nativeRequest);
   assert.deepEqual(f.calls.find(message => message.id === nativeRequest.id), { id: nativeRequest.id, result: { action: "accept" } });
   assert.equal(starts(f).length, 1);

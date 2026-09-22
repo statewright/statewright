@@ -1125,6 +1125,40 @@ test("App Server route proxy binds a bare-picker selection and refreshes labels 
   await new Promise((resolveClose) => upstream.close(resolveClose));
 });
 
+test("App Server thread/start binds ownership before reporting native success and fails closed on conflict", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const started = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    onThreadStarted: async ({ threadId }) => {
+      started.push(threadId);
+      if (threadId === "foreign-root") throw new Error("managed identity conflict");
+    },
+  });
+  const connection = new Promise((resolveConnection) => upstream.once("connection", resolveConnection));
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    const socket = await connection;
+    for (const [id, threadId] of [[1, "new-root"], [2, "foreign-root"]]) {
+      const forwarded = new Promise((resolveMessage) => socket.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+      client.send(JSON.stringify({ id, method: "thread/start", params: {} }));
+      assert.equal((await forwarded).method, "thread/start");
+      const response = new Promise((resolveMessage) => client.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+      socket.send(JSON.stringify({ id, result: { thread: { id: threadId } } }));
+      const received = await response;
+      if (id === 1) assert.equal(received.result.thread.id, threadId);
+      else assert.match(received.error.message, /managed identity conflict/);
+    }
+    assert.deepEqual(started, ["new-root", "foreign-root"]);
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
+});
+
 test("App Server route proxy fails open when optional picker-label callbacks fail", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");

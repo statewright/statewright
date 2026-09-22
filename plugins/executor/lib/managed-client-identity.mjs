@@ -47,14 +47,6 @@ function opaqueId() {
   return `swc_${randomUUID().replaceAll("-", "")}`;
 }
 
-function deterministicResumeId(host, sessionId) {
-  const digest = createHash("sha256")
-    .update(`${host}-thread:${sessionId}`)
-    .digest("hex")
-    .slice(0, 32);
-  return `swc_${digest}`;
-}
-
 function validId(value) {
   return typeof value === "string" && /^swc_[a-f0-9]{32}$/.test(value);
 }
@@ -108,6 +100,25 @@ export async function resetCodexRootSession(controlDir, { sessionId = null, clie
   const registration = { version: 1, session_id: sessionId, client_id: clientId };
   await writeFile(path, `${JSON.stringify(registration)}\n`, { mode: 0o600, flag: "wx" });
   await chmod(path, 0o600);
+  return registration;
+}
+
+// A new native thread must acquire its root registration without replacing a
+// different thread's registration (including one written concurrently by a hook).
+export async function claimCodexRootSession(controlDir, { sessionId, clientId }) {
+  if (!sessionId || !validId(clientId)) throw new Error("Statewright Codex root registration requires a valid thread and client identity.");
+  const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
+  const registration = { version: 1, session_id: sessionId, client_id: clientId };
+  try {
+    const handle = await open(path, "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(registration)}\n`); } finally { await handle.close(); }
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const existing = await readCodexRootSession(controlDir);
+    if (existing?.sessionId !== sessionId || existing.clientId !== clientId) {
+      throw new Error(`Statewright refused to bind Codex thread '${sessionId}' to a different root session.`);
+    }
+  }
   return registration;
 }
 
@@ -210,6 +221,22 @@ async function saveStore(home, store) {
   await chmod(path, 0o600);
 }
 
+async function withStoreLock(home, action) {
+  const lockPath = `${storePath(home)}.lock`;
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  let handle;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try { handle = await open(lockPath, "wx", 0o600); break; }
+    catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 25));
+    }
+  }
+  if (!handle) throw new Error("Statewright managed identity store is locked; identity change refused.");
+  try { return await action(); }
+  finally { await handle.close(); await unlink(lockPath); }
+}
+
 function bindingKey(host, sessionId, cwd) {
   return `${host}:${sessionId}:${resolvePath(cwd || process.cwd())}`;
 }
@@ -229,11 +256,13 @@ export function tmuxWindowLabel(environment = process.env, exec = execFileSync) 
 
 export async function bindManagedSessionLabel({ host, sessionId, label, cwd, home = homedir() }) {
   if (!sessionId || !label) return false;
-  const store = await loadStore(home);
-  store.labels = store.labels && typeof store.labels === "object" ? store.labels : {};
-  store.labels[`${host}:${sessionId}`] = { label, cwd: resolvePath(cwd), recorded_at: new Date().toISOString() };
-  await saveStore(home, store);
-  return true;
+  return withStoreLock(home, async () => {
+    const store = await loadStore(home);
+    store.labels = store.labels && typeof store.labels === "object" ? store.labels : {};
+    store.labels[`${host}:${sessionId}`] = { label, cwd: resolvePath(cwd), recorded_at: new Date().toISOString() };
+    await saveStore(home, store);
+    return true;
+  });
 }
 
 export async function readManagedSessionLabels(home = homedir()) {
@@ -244,31 +273,87 @@ export async function readManagedSessionLabels(home = homedir()) {
 export async function resolveManagedClientIdentity({ host, args, home = homedir(), cwd = process.cwd() }) {
   const sessionId = resumedSessionId(host, args);
   if (!sessionId) return { clientId: opaqueId(), sessionId: null, restored: false };
-  const store = await loadStore(home);
-  const key = bindingKey(host, sessionId, cwd);
-  const restored = store.bindings[key];
-  if (validId(restored)) return { clientId: restored, sessionId, restored: true };
-  const clientId = deterministicResumeId(host, sessionId);
-  // Scope resumed identities by project. A thread may be resumed from a
-  // different checkout; reusing the old client ID could attach it to the
-  // wrong resident app-server and cross project boundaries.
-  const scopedClientId = opaqueId();
-  store.bindings[key] = scopedClientId;
-  await saveStore(home, store);
-  return { clientId: scopedClientId, sessionId, restored: false };
+  return withStoreLock(home, async () => {
+    const store = await loadStore(home);
+    const key = bindingKey(host, sessionId, cwd);
+    const restored = store.bindings[key];
+    if (validId(restored)) return { clientId: restored, sessionId, restored: true };
+    // Scope resumed identities by project. A thread may be resumed from a
+    // different checkout; reusing the old client ID could attach it to the
+    // wrong resident app-server and cross project boundaries.
+    const scopedClientId = opaqueId();
+    store.bindings[key] = scopedClientId;
+    await saveStore(home, store);
+    return { clientId: scopedClientId, sessionId, restored: false };
+  });
 }
 
 export async function bindManagedClientIdentity({ host, sessionId, clientId, home = homedir(), cwd = process.cwd() }) {
   if (!sessionId || !validId(clientId)) return false;
-  const store = await loadStore(home);
-  const key = bindingKey(host, sessionId, cwd);
-  if (store.bindings[key] === clientId) return true;
-  if (store.bindings[key] && store.bindings[key] !== clientId) {
-    throw new Error(`Statewright managed identity conflict for ${host} session '${sessionId}'.`);
+  return withStoreLock(home, async () => {
+    const store = await loadStore(home);
+    const key = bindingKey(host, sessionId, cwd);
+    if (store.bindings[key] === clientId) return true;
+    if (store.bindings[key] && store.bindings[key] !== clientId) {
+      throw new Error(`Statewright managed identity conflict for ${host} session '${sessionId}'.`);
+    }
+    store.bindings[key] = clientId;
+    await saveStore(home, store);
+    return true;
+  });
+}
+
+/** Recover only an operator-verified approved thread whose initial identity
+ * was not persisted. Never overwrite a live writer or a foreign checkpoint. */
+export async function recoverApprovedCodexIdentity({ sessionId, originalClientId, detachedClientId,
+  home = homedir(), cwd = process.cwd(), verifyApproval }) {
+  if (!sessionId || !validId(originalClientId) || !validId(detachedClientId)
+      || originalClientId === detachedClientId || typeof verifyApproval !== "function") {
+    throw new Error("Statewright approved identity recovery requires exact, distinct client IDs and live verification.");
   }
-  store.bindings[key] = clientId;
-  await saveStore(home, store);
-  return true;
+  const root = clientId => join(home, ".statewright", "codex-app-server", clientId);
+  for (const clientId of [originalClientId, detachedClientId]) {
+    const registration = await readCodexRootSession(join(root(clientId), "routes"), clientId);
+    if (registration?.sessionId !== sessionId) throw new Error("Statewright approved identity recovery root mismatch.");
+    try {
+      const manifest = JSON.parse(await readFile(join(root(clientId), "manifest.json"), "utf8"));
+      if (Number.isInteger(manifest?.pid) && processAlive(manifest.pid)) {
+        throw new Error("Statewright approved identity recovery refused a live resident.");
+      }
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+  try {
+    const lease = JSON.parse(await readFile(leasePath(home, "codex", sessionId), "utf8"));
+    if (Number.isInteger(lease?.pid) && processAlive(lease.pid)) {
+      throw new Error("Statewright approved identity recovery refused a live owner.");
+    }
+  } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const journalName = createHash("sha256").update(JSON.stringify([originalClientId, sessionId])).digest("hex") + ".json";
+  const journal = JSON.parse(await readFile(join(root(originalClientId), "approvals", journalName), "utf8"));
+  const checkpoint = journal?.state;
+  const ticket = checkpoint?.pending_approval;
+  if (journal.version !== 1 || journal.threadId !== sessionId || journal.clientId !== originalClientId
+      || !checkpoint?.run_id || !checkpoint.run_session_id || !ticket?.approval_id
+      || ticket.from_state !== checkpoint.state || !ticket.to_state) {
+    throw new Error("Statewright approved identity recovery checkpoint mismatch.");
+  }
+  const { receipt, state } = await verifyApproval({ threadId: sessionId, clientId: originalClientId, checkpoint });
+  if (receipt?.status !== "approved" || receipt.approval_id !== ticket.approval_id
+      || receipt.run_id !== checkpoint.run_id
+      || receipt.run_session_id !== undefined && receipt.run_session_id !== checkpoint.run_session_id
+      || receipt.from_state !== ticket.from_state || receipt.to_state !== ticket.to_state
+      || state?.run_id !== checkpoint.run_id || state.run_session_id !== checkpoint.run_session_id
+      || state.state !== ticket.to_state || state.pending_approval) {
+    throw new Error("Statewright approved identity recovery lacks an authoritative approved destination.");
+  }
+  return withStoreLock(home, async () => {
+    const store = await loadStore(home);
+    const key = bindingKey("codex", sessionId, cwd);
+    if (store.bindings[key] !== detachedClientId) throw new Error("Statewright approved identity recovery binding changed.");
+    store.bindings[key] = originalClientId;
+    await saveStore(home, store);
+    return { clientId: originalClientId, sessionId, runId: checkpoint.run_id };
+  });
 }
 
 export async function writeManagedControlIdentity(controlDir, { host, clientId }) {

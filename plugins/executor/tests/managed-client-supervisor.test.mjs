@@ -7,7 +7,8 @@ import net from "node:net";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSessionOwner, readManagedSessionLabels, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
+import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
+import { approvalJournal } from "../lib/approval-journal.mjs";
 import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
@@ -143,6 +144,58 @@ test("managed identity persists a fresh session for a later Codex resume", async
     const resumed = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "durable-thread"], home });
     assert.equal(resumed.clientId, fresh.clientId);
     assert.equal(resumed.restored, true);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("new native Codex root registration is exclusive and its bound identity survives resume", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-native-root-"));
+  const controlDir = join(home, "routes");
+  const cwd = "/workspace/native";
+  try {
+    await mkdir(controlDir);
+    const original = await resolveManagedClientIdentity({ host: "codex", args: [], home, cwd });
+    await claimCodexRootSession(controlDir, { sessionId: "new-thread", clientId: original.clientId });
+    await bindManagedClientIdentity({ host: "codex", sessionId: "new-thread", clientId: original.clientId, home, cwd });
+    assert.equal((await readCodexRootSession(controlDir)).clientId, original.clientId);
+    const resumed = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "new-thread"], home, cwd });
+    assert.equal(resumed.clientId, original.clientId);
+    assert.equal(resumed.restored, true);
+    await assert.rejects(claimCodexRootSession(controlDir, { sessionId: "foreign-thread", clientId: original.clientId }), /different root session/);
+    await assert.rejects(bindManagedClientIdentity({ host: "codex", sessionId: "new-thread", clientId: "swc_00000000000000000000000000000000", home, cwd }), /identity conflict/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("approved detached Codex identity recovery requires matching live receipts and no active owner", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-approved-identity-"));
+  const cwd = "/workspace/native";
+  const sessionId = "approved-thread";
+  const originalClientId = "swc_11111111111111111111111111111111";
+  const detachedClientId = "swc_22222222222222222222222222222222";
+  const checkpoint = { run_id: "approved-run", run_session_id: "gateway-session", state: "awaiting",
+    pending_approval: { approval_id: "apr-1", from_state: "awaiting", to_state: "verified" } };
+  const receipt = { approval_id: "apr-1", run_id: "approved-run",
+    from_state: "awaiting", to_state: "verified", status: "approved" };
+  const state = { run_id: "approved-run", run_session_id: "gateway-session", state: "verified", pending_approval: null };
+  try {
+    for (const clientId of [originalClientId, detachedClientId]) {
+      const routes = join(home, ".statewright", "codex-app-server", clientId, "routes");
+      await mkdir(routes, { recursive: true });
+      await claimCodexRootSession(routes, { sessionId, clientId });
+    }
+    const approvals = join(home, ".statewright", "codex-app-server", originalClientId, "approvals");
+    await approvalJournal(approvals, originalClientId).save(sessionId, checkpoint);
+    await bindManagedClientIdentity({ host: "codex", sessionId, clientId: detachedClientId, home, cwd });
+    const args = { sessionId, originalClientId, detachedClientId, home, cwd };
+    await assert.rejects(recoverApprovedCodexIdentity({ ...args, verifyApproval: async () => ({ receipt: { ...receipt, status: "pending" }, state }) }), /authoritative approved destination/);
+    await assert.rejects(recoverApprovedCodexIdentity({ ...args, verifyApproval: async () => ({ receipt: { ...receipt, run_session_id: "foreign" }, state }) }), /authoritative approved destination/);
+    assert.equal((await resolveManagedClientIdentity({ host: "codex", args: ["resume", sessionId], home, cwd })).clientId, detachedClientId);
+    const lease = await claimManagedSessionOwner({ host: "codex", sessionId, clientId: detachedClientId, home, cwd, pid: process.pid });
+    await assert.rejects(recoverApprovedCodexIdentity({ ...args, verifyApproval: async () => ({ receipt, state }) }), /live owner/);
+    await releaseManagedSessionOwner({ host: "codex", sessionId, ownerId: lease.owner_id, home });
+    const restored = await recoverApprovedCodexIdentity({ ...args, verifyApproval: async () => ({ receipt, state }) });
+    assert.equal(restored.clientId, originalClientId);
+    assert.equal((await resolveManagedClientIdentity({ host: "codex", args: ["resume", sessionId], home, cwd })).clientId, originalClientId);
+    await assert.rejects(recoverApprovedCodexIdentity({ ...args, verifyApproval: async () => ({ receipt, state }) }), /binding changed/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

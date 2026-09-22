@@ -105,12 +105,45 @@ test("approval checkpoints and pauses before interruption, then releases only af
   assert(f.events.indexOf("continue") < f.events.indexOf("clear"));
 });
 
+test("cold reopen recovers only an exact gateway ticket before presenting an inline dialog", async t => {
+  const f = await fixture(t);
+  await f.journal.save(threadId, snapshot);
+  f.setState(null);
+  let reads = 0;
+  f.service.read = async ticket => {
+    reads += 1;
+    assert.equal(ticket.run_id, snapshot.run_id);
+    assert.equal(ticket.run_session_id, snapshot.run_session_id);
+    f.setState(structuredClone(snapshot));
+    return { ...ticket, status: "pending", can_decide: true };
+  };
+  const waiting = f.gate.reopen(threadId);
+  await until(() => f.dialog());
+  assert.equal(reads, 2, "host read restores the checkpoint, then the dialog checks authorization");
+  assert.equal(f.continuations.length, 0);
+  assert.deepEqual(f.decisions, []);
+  f.gate.close();
+  await assert.rejects(waiting, /connection closed/);
+});
+
+test("cold reopen refuses a foreign recovery receipt without presenting a dialog", async t => {
+  const f = await fixture(t);
+  await f.journal.save(threadId, snapshot);
+  f.setState(null);
+  f.service.read = async () => ({ ...snapshot.pending_approval, run_id: "foreign", status: "pending" });
+  await assert.rejects(f.gate.reopen(threadId), /foreign ticket/);
+  assert.equal(f.dialog(), undefined);
+  assert.deepEqual(await f.journal.load(threadId), snapshot);
+  assert.equal(f.continuations.length, 0);
+});
+
 test("beforeTurn waits for approval without creating a second autonomous continuation", async t => {
   const f = await fixture(t);
   const waiting = f.gate.beforeTurn(threadId);
   await until(() => f.dialog());
   f.gate.handleReply({ id: f.dialog().id, result: { action: "accept" } });
-  assert.deepEqual(await waiting, { state: approved, approvalId: snapshot.pending_approval.approval_id });
+  assert.deepEqual(await waiting, { state: approved, approvalId: snapshot.pending_approval.approval_id,
+    fromState: snapshot.pending_approval.from_state });
   assert.equal(f.continuations.length, 0);
   assert.deepEqual(await f.journal.load(threadId), snapshot);
   assert.equal(f.events.includes("clear"), false);

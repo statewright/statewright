@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
-import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
@@ -259,6 +259,10 @@ async function main() {
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
     getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, metadataCache: knownThreadCwds }),
+    onThreadStarted: async ({ threadId }) => {
+      await claimCodexRootSession(controlDir, { sessionId: threadId, clientId });
+      await bindManagedClientIdentity({ host: "codex", sessionId: threadId, clientId, home, cwd });
+    },
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,

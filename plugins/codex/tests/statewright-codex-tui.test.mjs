@@ -90,6 +90,33 @@ test("workflow load emits an atomic route restart request only for a supervised 
   }
 });
 
+test("new workflow boundaries supersede stale routes and deactivation drains the thread queue", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-hook-"));
+  const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-"));
+  try {
+    await invokeHook({ session_id: "session-1", prompt: "start" }, { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir }, "user-prompt");
+    const registration = JSON.parse(await readFile(resolve(controlDir, "codex-root-session.json"), "utf8"));
+    await writeFile(resolve(controlDir, "legacy.route.json"), JSON.stringify({ session_id: "session-1",
+      root_session_id: "session-1", client_id: registration.client_id,
+      run_id: "old-run", state: "baseline", model: "openai-codex/gpt-5.6-sol", effort: "high" }));
+    const loaded = await invokeHook({ session_id: "session-1", turn_id: "turn-2",
+      tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: {
+        workflow: "routing-test", state: "implement", run_id: "new-run", model: "openai-codex/gpt-5.6-terra",
+        thinking_level: "medium", allowed_tools: ["Read"], transitions: [],
+      } }) }, { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir });
+    assert.equal(loaded.status, 0, loaded.stderr);
+    assert.deepEqual((await readdir(controlDir)).filter(name => name.endsWith(".route.json")), ["current.route.json"]);
+    assert.equal(JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8")).run_id, "new-run");
+    const stopped = await invokeHook({ session_id: "session-1", tool_name: "mcp__statewright__statewright_deactivate",
+      tool_response: JSON.stringify({ deactivated: true }) }, { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir });
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.deepEqual((await readdir(controlDir)).filter(name => name.endsWith(".route.json")), []);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(controlDir, { recursive: true, force: true });
+  }
+});
+
 test("workflow load beneath codex exec does not request a parent TUI restart", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-hook-"));
   const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-"));

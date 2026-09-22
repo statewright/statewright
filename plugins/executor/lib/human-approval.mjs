@@ -140,6 +140,7 @@ export class HumanApprovalController {
       try {
         const result = await this.read(entry.ticket, { signal });
         this.verify(entry.ticket, result);
+        entry.reportedReadError = false;
         entry.lastResult = result;
         if (entry.settled) return;
         if (result.status !== "pending") { finish(null, result); return; }
@@ -150,6 +151,11 @@ export class HumanApprovalController {
         if (!entry.reportedReadError) {
           entry.reportedReadError = true;
           await this.record({ type: "approval_read_unavailable", threadId: ticket.threadId, approval_id: ticket.approval_id });
+          const missingSession = /Approval service HTTP 404/.test(String(error?.message));
+          this.send({ method: "warning", params: { threadId: ticket.threadId,
+            message: `Statewright approval ${ticket.approval_id} remains parked. ${missingSession
+              ? "The gateway no longer has this approval session; restore its authoritative checkpoint before deciding."
+              : "The approval service is unavailable; no decision can be made until it responds."}` } });
         }
       }
       if (!entry.settled) entry.timer = setTimeout(poll, this.pollMs);

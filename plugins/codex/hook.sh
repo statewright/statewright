@@ -304,7 +304,9 @@ request_interactive_route_restart() {
   effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
   model_ladder=$(echo "$state_json" | jq -c 'if (.model_ladder | type) == "array" then .model_ladder else [] end' 2>/dev/null || echo '[]')
   mkdir -p "$control_dir" || return 0
-  request_path="$control_dir/$(date +%s%N)-${HOOK_SESSION:-unknown}.route.json"
+  # A thread has one authoritative next route. State transitions in the same
+  # turn supersede earlier boundaries instead of accumulating replayable work.
+  request_path="$control_dir/current.route.json"
   jq -n \
     --arg session_id "$HOOK_SESSION" \
     --arg turn_id "$(echo "$HOOK_INPUT" | jq -r '.turn_id // empty' 2>/dev/null || true)" \
@@ -316,7 +318,26 @@ request_interactive_route_restart() {
     --arg effort "$effort" \
     --argjson model_ladder "$model_ladder" \
     '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder} + (if $turn_id != "" then {turn_id: $turn_id} else {} end)' \
-    > "$request_path.tmp" && mv "$request_path.tmp" "$request_path"
+    > "$request_path.$$.tmp" && mv "$request_path.$$.tmp" "$request_path"
+}
+
+clear_interactive_route_requests() {
+  local control_dir registration root_session_id path route_owner route_session
+  control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
+  [ -n "$control_dir" ] || return 0
+  registration="$control_dir/codex-root-session.json"
+  [ -r "$registration" ] || return 0
+  root_session_id=$(jq -r --arg client_id "$CLIENT_ID" \
+    'if .version == 1 and .client_id == $client_id and (.session_id | type) == "string" then .session_id else empty end' \
+    "$registration" 2>/dev/null || true)
+  [ -n "$root_session_id" ] || return 0
+  while IFS= read -r path; do
+    route_owner=$(jq -r '.client_id // empty' "$path" 2>/dev/null || true)
+    route_session=$(jq -r '.session_id // empty' "$path" 2>/dev/null || true)
+    if [ "$route_owner" = "$CLIENT_ID" ] && [ "$route_session" = "$root_session_id" ]; then
+      rm -f -- "$path"
+    fi
+  done < <(find "$control_dir" -maxdepth 1 -type f -name '*.route.json' -print 2>/dev/null)
 }
 
 reset_native_telemetry_state() {
@@ -716,6 +737,7 @@ case "$ENDPOINT" in
         [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
         [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
         emit_native_telemetry "workflow_loaded" "$STATE_JSON"
+        clear_interactive_route_requests
         request_interactive_route_restart "$STATE_JSON"
         # Tell the agent to start working immediately
         INIT_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
@@ -726,6 +748,7 @@ case "$ENDPOINT" in
         ;;
       stop)
         # Deactivate enforcement
+        clear_interactive_route_requests
         rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
         ;;
       transition)
@@ -773,6 +796,7 @@ case "$ENDPOINT" in
           fi
           if [ "$IS_FINAL" = "true" ]; then
             emit_native_telemetry "workflow_completed" "$STATE_JSON"
+            clear_interactive_route_requests
           else
             emit_native_telemetry "state_boundary" "$STATE_JSON"
             request_interactive_route_restart "$STATE_JSON"

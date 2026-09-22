@@ -69,3 +69,19 @@ test("managed approval preparation rejects a foreign client before network acces
     fetchImpl: async () => { throw new Error("must not fetch"); },
   }), /mismatched client identity/);
 });
+
+test("unrelated workflow evidence_packet cannot suppress the native approval", async () => {
+  let requests = 0;
+  const receipt = {status: "pending", approval_id: "apr_one", run_id: "run_one", record_id: "record_one",
+    context_snapshot: {evidence_packet: {candidates: [], gaps: [], window: "week"}}};
+  const request = {approval_id: "apr_one", run_id: "run_one", run_session_id: "gateway_one", client_id: "client_one"};
+  const options = {request, apiKey: "secret", gatewayUrl: "https://mcp.example.test",
+    pbUrl: "https://statewright.example.test", cwd: process.cwd(), clientId: "client_one",
+    fetchImpl: async () => {requests++; return new Response(JSON.stringify(receipt), {status: 200});}};
+  const result = await prepareManagedApproval(options);
+  assert.equal(result.reviewUrl, "https://statewright.example.test/approvals/record_one");
+  assert.equal(requests, 1, "unrelated workflow data must not cause an upload");
+  await assert.rejects(prepareManagedApproval({...options, fetchImpl: async () => new Response(JSON.stringify({
+    ...receipt, context_snapshot: {evidence_packet: {schema: "statewright/evidence-packet/v1"}},
+  }), {status: 200})}), /malformed/);
+});

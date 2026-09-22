@@ -420,7 +420,8 @@ describe("handleUserPrompt", () => {
 
     expect(result).not.toBeNull()
     expect(result!.hookSpecificOutput!.additionalContext).toContain("No workflow running")
-    expect(result!.hookSpecificOutput!.additionalContext).toContain("statewright_start")
+    expect(result!.hookSpecificOutput!.additionalContext).toContain("statewright_list_workflows")
+    expect(result!.hookSpecificOutput!.additionalContext).toContain("Never guess a workflow name")
   })
 
   it("returns null when dormant and already hinted", async () => {

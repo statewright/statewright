@@ -33,7 +33,11 @@
         <div class="w-px h-5 bg-gray-200 mx-1"></div>
         <label class="flex items-center gap-2 text-sm text-gray-500 cursor-pointer">
           <input type="checkbox" v-model="active" class="rounded border-gray-300 text-brand-600 focus:ring-brand-500 bg-white" />
-          Active
+          Default
+        </label>
+        <label class="flex items-center gap-2 text-sm text-gray-500 cursor-pointer">
+          <input type="checkbox" v-model="enabled" class="rounded border-gray-300 text-green-600 focus:ring-green-500 bg-white" />
+          Loadable
         </label>
         <label class="flex items-center gap-2 text-sm text-gray-500 cursor-pointer">
           <input type="checkbox" v-model="captureOutput" class="rounded border-gray-300 text-amber-600 focus:ring-amber-500 bg-white" />
@@ -415,6 +419,7 @@ export default {
     const workflowId = ref(route.params.id)
     const name = ref('')
     const active = ref(false)
+    const enabled = ref(true)
     const captureOutput = ref(false)
     const saving = ref(false)
     const saved = ref(false)
@@ -682,7 +687,7 @@ export default {
         const defaultDef = { id: '', initial: 'planning', states: { planning: { allowed_tools: ['Read', 'Grep', 'Glob'], instructions: 'Understand the problem before making changes.', max_iterations: 8, on: { READY: 'implementing', FAIL: 'failed' } }, implementing: { allowed_tools: ['Read', 'Edit', 'Write'], instructions: 'Make the minimal change needed.', max_iterations: 10, max_edit_lines: 20, on: { DONE: 'testing', FAIL: 'failed' } }, testing: { allowed_tools: ['Read', 'Bash'], instructions: 'Run tests to verify the change.', max_iterations: 5, on: { PASS: 'completed', FAIL_TEST: 'implementing', FAIL: 'failed' } }, completed: { type: 'final' }, failed: { type: 'final' } }, guards: {} }
         jsonText.value = JSON.stringify(defaultDef, null, 2); syncJsonToFlow(); nextTick(runLayout); return
       }
-      try { const record = await pocketbase.collection('workflows').getOne(workflowId.value); name.value = record.name; active.value = record.active || false; captureOutput.value = record.definition?.meta?.capture_output || false; jsonText.value = JSON.stringify(record.definition, null, 2); syncJsonToFlow(); const hasPositions = Object.values(record.definition?.states || {}).some(s => s._position && (s._position.x || s._position.y)); if (!hasPositions) nextTick(runLayout) }
+      try { const record = await pocketbase.collection('workflows').getOne(workflowId.value); name.value = record.name; active.value = record.active || false; enabled.value = record.definition?.meta?.enabled !== false; captureOutput.value = record.definition?.meta?.capture_output || false; jsonText.value = JSON.stringify(record.definition, null, 2); syncJsonToFlow(); const hasPositions = Object.values(record.definition?.states || {}).some(s => s._position && (s._position.x || s._position.y)); if (!hasPositions) nextTick(runLayout) }
       catch (e) { console.error('Failed to load workflow:', e); router.push('/workflows') }
     }
 
@@ -690,6 +695,7 @@ export default {
       saving.value = true; saveError.value = null
       try {
         const definition = JSON.parse(jsonText.value); definition.id = name.value || definition.id
+        definition.meta = { ...(definition.meta || {}), enabled: enabled.value }
         if (captureOutput.value) { definition.meta = { ...(definition.meta || {}), capture_output: true } } else if (definition.meta) { delete definition.meta.capture_output }
         const data = { name: name.value, definition, active: active.value }
         if (workflowId.value === 'new') { const record = await pocketbase.collection('workflows').create(data); workflowId.value = record.id; router.replace('/workflows/' + record.id) }
@@ -704,7 +710,7 @@ export default {
     onMounted(() => { load() })
 
     return {
-      workflowId, name, active, captureOutput, saving, saved, saveError, showJson,
+      workflowId, name, active, enabled, captureOutput, saving, saved, saveError, showJson,
       jsonText, parseError, validationErrors,
       nodes, edges, selectedNode, selectedEdge, editLabel,
       connectDialog, toolSearch, customToolName, eventNameInput,

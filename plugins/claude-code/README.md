@@ -113,7 +113,7 @@ For executor-owned isolated delivery, launch Claude Code through the shared exec
 
 ```bash
 node plugins/executor/statewright-exec.mjs \
-  --host claude --workflow bugfix --cwd "$PWD" -- \
+  --host claude --workflow '<explicit-workflow-name>' --cwd "$PWD" -- \
   "Fix the failing tests"
 ```
 

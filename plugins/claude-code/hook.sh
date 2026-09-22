@@ -328,7 +328,7 @@ case "$ENDPOINT" in
         mkdir -p "$STATEWRIGHT_DIR"
         echo "$PASTED_KEY" > "$STATEWRIGHT_DIR/api_key"
         chmod 600 "$STATEWRIGHT_DIR/api_key"
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright API key saved automatically. The user can now activate a workflow with: statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.\"}}"
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright API key saved automatically. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task.\"}}"
         exit 0
       fi
 
@@ -354,7 +354,7 @@ case "$ENDPOINT" in
       if [ ! -f "$HINT_FILE" ] || [ -n "$UPDATE_NOTICE" ]; then
         mkdir -p "$PROJECT_DIR"
         touch "$HINT_FILE"
-        DORMANT_CONTEXT="Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.${UPDATE_NOTICE:+ $UPDATE_NOTICE}"
+        DORMANT_CONTEXT="Statewright plugin active. No workflow running. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task.${UPDATE_NOTICE:+ $UPDATE_NOTICE}"
         jq -n --arg ctx "$DORMANT_CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
       fi
       exit 0

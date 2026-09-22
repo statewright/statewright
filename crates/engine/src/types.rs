@@ -341,6 +341,10 @@ pub struct MachineMeta {
     pub requires_human_approval: Option<bool>,
     #[serde(default)]
     pub capture_output: Option<bool>,
+    /// Whether this workflow may be selected for a new load or resume.
+    /// Missing values preserve compatibility with existing definitions.
+    #[serde(default)]
+    pub enabled: Option<bool>,
     /// Default model for states that don't specify their own.
     /// States with an explicit `model` field override this.
     #[serde(default)]

@@ -696,7 +696,7 @@ export async function handleUserPrompt(
         hookSpecificOutput: {
           hookEventName: "UserPromptSubmit",
           additionalContext:
-            "Statewright API key saved automatically. The user can now activate a workflow with: statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.",
+            "Statewright API key saved automatically. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task.",
         },
       }
     }
@@ -719,7 +719,7 @@ export async function handleUserPrompt(
       hookSpecificOutput: {
         hookEventName: "UserPromptSubmit",
         additionalContext:
-          "Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows.",
+          "Statewright plugin active. No workflow running. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task.",
       },
     }
   }

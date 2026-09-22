@@ -451,13 +451,24 @@ async fn fetch_workflows(pb_url: &str, api_key: &str) -> Result<FetchResult, Str
         plan_limit: Option<u64>,
     }
 
-    let data: GatewayResponse = resp
+    let mut data: GatewayResponse = resp
         .json()
         .await
         .map_err(|e| format!("Parse error: {}", e))?;
 
+    // Treat the upstream response as untrusted catalog input. Older PB hooks
+    // may still return disabled definitions, so filter again at the gateway.
+    data.workflows.retain(|_, definition| {
+        definition
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.enabled)
+            .unwrap_or(true)
+    });
+
     let default = data
         .default
+        .filter(|name| data.workflows.contains_key(name))
         .unwrap_or_else(|| data.workflows.keys().next().cloned().unwrap_or_default());
 
     Ok(FetchResult {
@@ -849,6 +860,43 @@ mod tests {
             db_pool: None,
             approval_secret: secret.into(),
         })
+    }
+
+    #[tokio::test]
+    async fn workflow_fetch_excludes_disabled_definitions_and_disabled_default() {
+        let enabled = json!({
+            "id": "enabled",
+            "initial": "done",
+            "states": {"done": {"type": "final"}}
+        });
+        let disabled = json!({
+            "id": "disabled",
+            "initial": "done",
+            "meta": {"enabled": false},
+            "states": {"done": {"type": "final"}}
+        });
+        let response = json!({
+            "default": "disabled",
+            "owner_id": "owner-a",
+            "workflows": {"enabled": enabled, "disabled": disabled}
+        });
+        let app = axum::Router::new().route(
+            "/api/gateway/workflows",
+            get(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let pb_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let result = fetch_workflows(&pb_url, "test-key").await.unwrap();
+        assert_eq!(result.default, "enabled");
+        assert_eq!(result.workflows.keys().collect::<Vec<_>>(), vec!["enabled"]);
+        server.abort();
     }
 
     async fn test_state_with_session(session_id: &str, api_key: &str) -> Arc<RemoteState> {

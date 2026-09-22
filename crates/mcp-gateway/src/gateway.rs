@@ -45,6 +45,26 @@ pub struct NativeUsageError {
 }
 
 impl Gateway {
+    fn workflow_enabled(definition: &MachineDefinition) -> bool {
+        definition
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.enabled)
+            .unwrap_or(true)
+    }
+
+    fn available_workflow_names(&self) -> Vec<&str> {
+        let mut names = self
+            .workflows
+            .iter()
+            .filter_map(|(name, definition)| {
+                Self::workflow_enabled(definition).then_some(name.as_str())
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names
+    }
+
     async fn paused_run(
         &self,
         workflow: &str,
@@ -2075,7 +2095,7 @@ impl Gateway {
                 response
             }
             "statewright_list_workflows" => {
-                let workflow_names: Vec<&str> = self.workflows.keys().map(|k| k.as_str()).collect();
+                let workflow_names = self.available_workflow_names();
                 let result = json!({
                     "workflows": workflow_names,
                     "active": self.active_workflow,
@@ -2244,21 +2264,80 @@ impl Gateway {
 
                 // Clone definition to release immutable borrow before mutable calls
                 let definition = match self.workflows.get(workflow_name).cloned() {
-                    Some(d) => d,
-                    None => {
-                        let available: Vec<&str> =
-                            self.workflows.keys().map(|k| k.as_str()).collect();
+                    Some(d) if Self::workflow_enabled(&d) => d,
+                    Some(_) => {
                         return JsonRpcResponse::success(
                             id,
                             serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
-                                "Workflow '{}' not found. Available: {}",
-                                workflow_name,
-                                available.join(", ")
+                                "Workflow '{}' is disabled and cannot be loaded or resumed.",
+                                workflow_name
+                            )))
+                            .unwrap(),
+                        );
+                    }
+                    None => {
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                "Workflow '{}' is not available. Call statewright_list_workflows for selectable names.",
+                                workflow_name
                             )))
                             .unwrap(),
                         );
                     }
                 };
+
+                // Remote sessions cache workflow definitions. Recheck the durable
+                // record before mutating session state so a workflow disabled by
+                // another client cannot still be loaded from a stale cache.
+                #[cfg(feature = "metering")]
+                if let Some(pool) = &self.db_pool {
+                    let stored = sqlx::query_scalar::<_, serde_json::Value>(
+                        "SELECT definition FROM workflows WHERE owner = $1 AND name = $2",
+                    )
+                    .bind(&self.owner_id)
+                    .bind(workflow_name)
+                    .fetch_optional(pool)
+                    .await;
+                    match stored {
+                        Ok(Some(value)) => {
+                            let enabled = value
+                                .get("meta")
+                                .and_then(|meta| meta.get("enabled"))
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(true);
+                            if !enabled {
+                                return JsonRpcResponse::success(
+                                    id,
+                                    serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                        format!(
+                                            "Workflow '{}' is disabled and cannot be loaded or resumed.",
+                                            workflow_name
+                                        ),
+                                    ))
+                                    .unwrap(),
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            return JsonRpcResponse::success(
+                                id,
+                                serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                                    "Workflow '{}' is not available. Call statewright_list_workflows for selectable names.",
+                                    workflow_name
+                                )))
+                                .unwrap(),
+                            );
+                        }
+                        Err(error) => {
+                            return JsonRpcResponse::error(
+                                id,
+                                -32603,
+                                format!("Failed to verify workflow availability: {}", error),
+                            );
+                        }
+                    }
+                }
 
                 if let Err(e) = statewright_engine::validate_definition(&definition) {
                     return JsonRpcResponse::success(
@@ -2584,7 +2663,7 @@ impl Gateway {
                     "iteration": active.then(|| session.as_ref().map(|s| s.iteration_count)).flatten(),
                     "transition_count": active.then(|| session.as_ref().map(|s| s.transition_count)).flatten(),
                     "is_final": active.then(|| session.as_ref().map(|s| s.is_final())).flatten(),
-                    "available_workflows": self.workflows.keys().collect::<Vec<_>>(),
+                    "available_workflows": self.available_workflow_names(),
                     "usage": usage,
                 });
                 JsonRpcResponse::success(
@@ -3002,6 +3081,13 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
+    fn tool_result_text(response: JsonRpcResponse) -> String {
+        response.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     #[test]
     fn tools_list_preserves_annotations_across_active_and_inactive_workflows() {
         let mut gateway = test_gateway();
@@ -3271,6 +3357,104 @@ mod tests {
         assert!(gw.session_manager.exists("test-session"));
         assert!(!gw.session_manager.exists("test-session_codex-session"));
         assert_eq!(gw.project_id.as_deref(), Some("codex-session"));
+    }
+
+    #[tokio::test]
+    async fn disabled_workflow_is_hidden_and_load_fails_without_mutation() {
+        let mut gateway = test_gateway();
+        let mut disabled = test_definition();
+        disabled.id = "retired".into();
+        disabled.meta = Some(serde_json::from_value(json!({"enabled": false})).unwrap());
+        gateway.workflows.insert("retired".into(), disabled);
+
+        let list = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_list_workflows",
+                    "arguments": {}
+                })),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tool_result_json(list)["workflows"], json!(["test"]));
+
+        let status = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_get_status",
+                    "arguments": {}
+                })),
+                id: Some(json!(2)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tool_result_json(status)["available_workflows"], json!(["test"]));
+
+        let before = gateway
+            .session_manager
+            .get("test-session")
+            .unwrap()
+            .checkpoint();
+        let identity = (
+            gateway.active_workflow.clone(),
+            gateway.current_run_id.clone(),
+            gateway.project_id.clone(),
+        );
+        let denied = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_load_workflow",
+                    "arguments": {"name": "retired", "resume": false}
+                })),
+                id: Some(json!(3)),
+            })
+            .await
+            .unwrap();
+        assert!(tool_result_text(denied).contains("disabled"));
+        assert_eq!(
+            gateway
+                .session_manager
+                .get("test-session")
+                .unwrap()
+                .checkpoint(),
+            before
+        );
+        assert_eq!(
+            (
+                gateway.active_workflow,
+                gateway.current_run_id,
+                gateway.project_id
+            ),
+            identity
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_workflow_error_does_not_advertise_registry_names() {
+        let mut gateway = test_gateway();
+        let response = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_load_workflow",
+                    "arguments": {"name": "invented-name"}
+                })),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
+        let text = tool_result_text(response);
+        assert!(text.contains("statewright_list_workflows"));
+        assert!(!text.contains("Available:"));
+        assert!(!text.contains("test,"));
     }
 
     #[tokio::test]

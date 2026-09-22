@@ -1784,7 +1784,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
     label: "Load Workflow",
     description: "Load a named workflow. Activates enforcement.",
     parameters: Type.Object({
-      name: Type.String({ description: "Workflow name (e.g., bugfix, tdd-feature)" }),
+      name: Type.String({ description: "Exact workflow name returned by statewright_list_workflows or explicitly supplied by the user" }),
       resume: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params: { name: string; resume?: boolean }) {

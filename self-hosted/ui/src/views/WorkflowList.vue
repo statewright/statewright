@@ -89,6 +89,7 @@
               <div class="flex items-center gap-2">
                 <span class="font-semibold text-gray-900">{{ wf.name }}</span>
                 <span v-if="wf.active" class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded">active</span>
+                <span v-if="wf.definition?.meta?.enabled === false" class="text-xs bg-gray-200 text-gray-600 px-2 py-0.5 rounded">disabled</span>
                 <span v-if="wf.definition?.meta?.capture_output" class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded">logging</span>
                 <span v-if="wf.template_source" class="text-xs text-gray-400">from {{ wf.template_source }}</span>
               </div>

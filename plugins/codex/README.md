@@ -173,8 +173,8 @@ pause/approve/resume road test remain separate release gates.
 Start a workflow via MCP tool:
 
 ```
-statewright_load_workflow(name='bugfix')
 statewright_list_workflows()
+statewright_load_workflow(name='<exact-name-returned-by-list>')
 ```
 
 ### Isolated delivery runs

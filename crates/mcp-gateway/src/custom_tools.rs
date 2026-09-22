@@ -331,7 +331,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_get_workflow".into(),
             description: Some(
-                "Get the complete definition for one named workflow. Use it before create_workflow(overwrite=true) to preserve existing routing and controls.".into(),
+                "Get the complete stored definition for one exact workflow name, including a disabled workflow being managed. Use it before create_workflow(overwrite=true) to preserve existing routing and controls.".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -339,7 +339,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                     "name": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Exact workflow name returned by statewright_list_workflows."
+                        "description": "Exact stored workflow name"
                     }
                 },
                 "required": ["name"],
@@ -357,7 +357,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "The workflow name to load (e.g., bugfix, etl-pipeline)"
+                        "description": "Exact workflow name returned by statewright_list_workflows or explicitly supplied by the user"
                     },
                     "session_id": {
                         "type": "string",
@@ -421,7 +421,7 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             annotations: None,
             name: "statewright_create_workflow".into(),
             description: Some(
-                "Create a new workflow from a JSON definition. Schema at https://statewright.ai/workflow-schema.json".into(),
+                "Create or overwrite a workflow from a JSON definition. Set meta.enabled=false to keep it stored but unavailable to list/load. Schema at https://statewright.ai/workflow-schema.json".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -458,10 +458,6 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
                     "model": {
                         "type": "string",
                         "description": "Ollama model to use (default: gemma4:31b)"
-                    },
-                    "workflow": {
-                        "type": "string",
-                        "description": "State machine workflow name (default: bugfix-v2)"
                     },
                     "workdir": {
                         "type": "string",

@@ -29,7 +29,7 @@ For executor-owned delivery, credentials, telemetry, and startup routing:
 
 ```bash
 node plugins/executor/statewright-exec.mjs \
-  --host omx --workflow bugfix --cwd "$PWD" -- \
+  --host omx --workflow '<explicit-workflow-name>' --cwd "$PWD" -- \
   "Fix the failing tests"
 ```
 
@@ -42,8 +42,8 @@ The executor launches OMX through its native Codex plugin installation. It does 
 The plugin is dormant until you activate a workflow:
 
 ```
-statewright_start(workflow='bugfix')
 statewright_list_workflows()
+statewright_start(workflow='<exact-name-returned-by-list>')
 ```
 
 Once active, the plugin enforces which tools are available in each phase and injects workflow context into every turn.

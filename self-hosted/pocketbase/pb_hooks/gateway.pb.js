@@ -42,6 +42,9 @@ routerAdd('GET', '/api/gateway/workflows', (e) => {
     var r = records[i]
     var name = r.get('name')
     var def = r.get('definition')
+    if (def && def.meta && def.meta.enabled === false) {
+      continue
+    }
     workflows[name] = def
     if (r.get('active') && !defaultName) {
       defaultName = name

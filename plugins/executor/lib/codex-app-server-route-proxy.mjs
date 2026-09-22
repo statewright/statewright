@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.mjs";
+import { summarizeStatewrightToolCompletion } from "./statewright-tool-summary.mjs";
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 function routeModel(model) {
@@ -806,6 +807,8 @@ export async function startCodexAppServerRouteProxy({
           receipts.delete(receipt.threadId);
           await onRouteConfirmed(receipt);
         }
+        const summarized = summarizeStatewrightToolCompletion(notification);
+        if (summarized !== notification) payload = JSON.stringify(summarized);
       } catch (error) {
         // Protocol traffic is still forwarded; receipt telemetry must never
         // interfere with a native Codex session.

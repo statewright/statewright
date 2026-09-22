@@ -29,6 +29,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
+  join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
 ];
 
 function safeName(value) {

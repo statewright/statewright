@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
 process.env.STATEWRIGHT_QWEN_BASE_URL = 'http://127.0.0.1:1/v1';
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   appServerHomePrefixForClient,
@@ -338,6 +338,86 @@ test("resident App Server accepts routes only for the attached root session", as
     await finalAttempt.ack();
     await finalAttempt.ack();
   } finally { await rm(control, { recursive: true, force: true }); }
+});
+
+test("resident App Server keeps retry route filenames bounded across repeated releases", async () => {
+  const control = await mkdtemp(join(tmpdir(), "statewright-resident-bounded-retries-"));
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const sessionId = "bounded-retry-thread";
+  try {
+    await writeFile(join(control, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: sessionId, client_id: clientId }));
+    await writeFile(join(control, "01-root.route.json"), JSON.stringify({ session_id: sessionId, root_session_id: sessionId, client_id: clientId, model: "gpt-5.6-terra" }));
+    const reservationNames = [];
+    const renameImpl = async (source, destination) => {
+      if (destination.endsWith(".inflight")) reservationNames.push(basename(destination));
+      await rename(source, destination);
+    };
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const pending = await nextCodexResidentRouteRequest(control, clientId, sessionId, { renameImpl });
+      assert.ok(pending);
+      await pending.release();
+      const queued = (await readdir(control)).filter((name) => name.endsWith(".route.json"));
+      assert.equal(queued.length, 1);
+      assert.ok(basename(queued[0]).length <= 160, `retry filename exceeded bound: ${queued[0]}`);
+    }
+    assert.equal(reservationNames.length, 20);
+    assert.ok(reservationNames.every((name) => name.length <= 80));
+
+    const pending = await nextCodexResidentRouteRequest(control, clientId, sessionId, { renameImpl });
+    await pending.ack();
+    assert.equal((await readdir(control)).filter((name) => name.endsWith(".route.json")).length, 0);
+  } finally {
+    await rm(control, { recursive: true, force: true });
+  }
+});
+
+test("resident App Server recovers a legacy near-limit route filename", async () => {
+  const control = await mkdtemp(join(tmpdir(), "statewright-resident-legacy-route-"));
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const sessionId = "legacy-route-thread";
+  try {
+    await writeFile(join(control, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: sessionId, client_id: clientId }));
+    const legacyName = `${"x".repeat(220)}.route.json`;
+    await writeFile(join(control, legacyName), JSON.stringify({ session_id: sessionId, root_session_id: sessionId, client_id: clientId, model: "gpt-5.6-terra" }));
+
+    const pending = await nextCodexResidentRouteRequest(control, clientId, sessionId);
+    assert.ok(pending);
+    await pending.release();
+    const queued = (await readdir(control)).filter((name) => name.endsWith(".route.json"));
+    assert.equal(queued.length, 1);
+    assert.ok(basename(queued[0]).length <= 160, `retry filename exceeded bound: ${queued[0]}`);
+
+    const retry = await nextCodexResidentRouteRequest(control, clientId, sessionId);
+    await retry.ack();
+    assert.equal((await readdir(control)).filter((name) => name.endsWith(".route.json")).length, 0);
+  } finally {
+    await rm(control, { recursive: true, force: true });
+  }
+});
+
+test("resident App Server keeps a fresh current route ahead of its released retry", async () => {
+  const control = await mkdtemp(join(tmpdir(), "statewright-resident-retry-order-"));
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const sessionId = "retry-order-thread";
+  const routePath = join(control, "current.route.json");
+  try {
+    await writeFile(join(control, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: sessionId, client_id: clientId }));
+    await writeFile(routePath, JSON.stringify({ session_id: sessionId, root_session_id: sessionId, client_id: clientId, turn_id: "retry" }));
+    const first = await nextCodexResidentRouteRequest(control, clientId, sessionId);
+    await first.release();
+
+    await writeFile(routePath, JSON.stringify({ session_id: sessionId, root_session_id: sessionId, client_id: clientId, turn_id: "fresh" }));
+    const fresh = await nextCodexResidentRouteRequest(control, clientId, sessionId);
+    assert.equal(fresh.route.turn_id, "fresh");
+    await fresh.ack();
+
+    const retry = await nextCodexResidentRouteRequest(control, clientId, sessionId);
+    assert.equal(retry.route.turn_id, "retry");
+    await retry.ack();
+  } finally {
+    await rm(control, { recursive: true, force: true });
+  }
 });
 
 test("resident runtime revision changes reuse only when the loaded transport bundle matches", async () => {

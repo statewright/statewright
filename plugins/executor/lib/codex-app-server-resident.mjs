@@ -36,6 +36,15 @@ function safeName(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 96);
 }
 
+function retryRouteStem(name) {
+  const marker = ".route.json";
+  const markerIndex = name.indexOf(marker);
+  const original = markerIndex >= 0 ? name.slice(0, markerIndex + marker.length) : name;
+  if (original.length <= 96) return original;
+  const digest = createHash("sha256").update(original).digest("hex").slice(0, 16);
+  return `${original.slice(0, 64)}-${digest}${marker}`;
+}
+
 function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -83,14 +92,14 @@ export async function nextCodexResidentRouteRequest(controlDir, clientId, thread
   const entries = (await readdir(controlDir)).filter((name) => name === "route.json" || name.endsWith(".route.json")).sort();
   for (const name of entries) {
     const path = join(controlDir, name);
-    const reservationPath = `${path}.${process.pid}.${randomUUID()}.inflight`;
+    const reservationPath = join(controlDir, `${process.pid}-${randomUUID()}.inflight`);
     try {
       await renameImpl(path, reservationPath);
     } catch (error) {
       if (error?.code === "ENOENT") continue;
       throw error;
     }
-    const retryPath = `${path}.${randomUUID()}.retry.route.json`;
+    const retryPath = join(controlDir, `${retryRouteStem(name)}.${randomUUID()}.retry.route.json`);
     let settled = false;
     const ack = async () => {
       if (settled) return;

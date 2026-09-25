@@ -26,7 +26,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai" } = {}) {
+async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai", rejectObjectiveGoal = false } = {}) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(server, "listening");
   const calls = [], timeline = [], errors = [], statuses = [], serviceCalls = [], injected = [], readStatuses = [], idleEvents = [];
@@ -59,6 +59,10 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
         timeline.push({ side: "ack", connectionId, message: { id: request.id, result } });
         ws.send(JSON.stringify({ id: request.id, result }));
       };
+      const reject = error => {
+        timeline.push({ side: "ack", connectionId, message: { id: request.id, error } });
+        ws.send(JSON.stringify({ id: request.id, error }));
+      };
       const notify = value => ws.send(JSON.stringify(value));
       if (["thread/start", "thread/resume"].includes(request.method)) {
         return reply({ thread: { id: threadId, status: { type: "idle" }, turns: [] },
@@ -66,6 +70,9 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
       }
       if (request.method === "thread/goal/get") return reply({ goal: structuredClone(goal) });
       if (request.method === "thread/goal/set") {
+        if (rejectObjectiveGoal && Object.hasOwn(request.params, "objective")) {
+          return reject({ code: -32603, message: "Native goal persistence failed" });
+        }
         goal = { ...goal, ...request.params };
         timeline.push({ side: "effect", message: request });
         return reply({ goal: structuredClone(goal) });
@@ -428,6 +435,52 @@ test("beforeTurn installs destination settings before releasing a paused native 
   assert.equal(f.goal.objective, pausedGoal.objective);
   assert.equal(f.goal.createdAt, pausedGoal.createdAt);
   assert.equal(starts(f).length, 0);
+});
+
+test("objective-bearing goal creation forwards its goal-set request without an execution gate", async t => {
+  const f = await fixture(t);
+  await f.rpc("thread/start");
+  f.armPending();
+  const objective = "Complete the three serial SaSSY MCP milestones";
+  const id = f.request("thread/goal/set", { threadId, status: "active", objective });
+  const response = await f.response(id);
+  assert.equal(response.result.goal.status, "active");
+  assert.equal(response.result.goal.objective, objective);
+  assert.equal(f.goal.status, "active");
+  assert.equal(f.goal.objective, objective);
+  assert.equal(f.calls.filter(message => message.method === "thread/goal/get").length, 1);
+  assert.equal(f.calls.find(message => message.id === id)?.params.objective, objective);
+  assert.equal(form(f), undefined);
+  assert.equal(f.settings, null);
+  assert.equal(starts(f).length, 0);
+  assert.deepEqual(f.serviceCalls, []);
+});
+
+test("objective-bearing activation of an existing paused goal remains gated", async t => {
+  const f = await fixture(t, { nativeGoal: pausedGoal });
+  await f.rpc("thread/start");
+  f.armPending();
+  const id = f.request("thread/goal/set", { threadId, status: "active", objective: pausedGoal.objective });
+  await until(() => form(f), "objective-bearing goal activation approval form");
+  assert.equal(f.goal.status, "paused");
+  assert.equal(f.calls.some(message => message.id === id), false);
+  f.respond(form(f), "accept");
+  await f.response(id);
+  assert.equal(f.goal.status, "active");
+  assert.equal(f.goal.objective, pausedGoal.objective);
+  assert.equal(f.settings.model, "fixture-destination-model");
+});
+
+test("goal creation surfaces native persistence rejection without claiming a goal", async t => {
+  const f = await fixture(t, { rejectObjectiveGoal: true });
+  await f.rpc("thread/start");
+  const id = f.request("thread/goal/set", { threadId, status: "active", objective: "Rejected fixture goal" });
+  const response = await f.response(id, { allowError: true });
+  assert.deepEqual(response.error, { code: -32603, message: "Native goal persistence failed" });
+  assert.equal(f.goal, null);
+  assert.equal(form(f), undefined);
+  assert.equal(starts(f).length, 0);
+  assert.deepEqual(f.serviceCalls, []);
 });
 
 test("approved steer is refused and its checkpoint survives until a retried new turn receives native positive acceptance", { timeout: 8000 }, async t => {

@@ -132,6 +132,56 @@ and marked shell-path block.
 The explicit `statewright-codex-tui.mjs` launcher remains available for scripts
 that want to name the workflow and bootstrap route up front.
 
+### ChatGPT Desktop routing (experimental, macOS)
+
+The same `statewright` Codex plugin can optionally route Desktop App Server
+turns. It is a single-thread experimental broker: it does not patch or
+redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
+chats, approvals, or generated-answer correctness.
+
+On macOS, open a chat that uses the installed Statewright plugin once. Its MCP
+startup quietly provisions **ChatGPT + Statewright** in your user Applications
+folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
+from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
+shim only for that process tree; normal ChatGPT launches are unchanged.
+
+The installed plugin always binds this standard launcher to the production
+gateway (`https://mcp.statewright.ai`) and reads its credential from
+`~/.statewright/api_key`. The first Desktop turn is held briefly until the
+native App Server reports Statewright's tools as ready, so a fast first prompt
+cannot race MCP registration.
+
+### Developer troubleshooting
+
+The CLI is not part of plugin-user installation. It is only for developers
+diagnosing a local checkout or recovering a failed development setup:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs doctor
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
+```
+
+Statewright developers can provision a completely separate staging launcher:
+
+```bash
+gopass show -o statewright/staging/api-key > ~/.statewright/staging_api_key
+chmod 600 ~/.statewright/staging_api_key
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs provision --profile staging
+```
+
+This creates **ChatGPT + Statewright Staging**, bound to the staging gateway and
+`~/.statewright/staging_api_key`. Its app, state file, shim, and client identity
+are separate from the production launcher. The staging profile is not created
+by ordinary plugin installation.
+
+When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
+value only if the launchd value still points to the recorded Statewright shim;
+otherwise it refuses to overwrite the user's setting. Re-run `enable` after
+updating the plugin so its private shim points at the newly installed runtime.
+A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
+chat remain required before this is release-ready.
+
 ### Native workflow approvals (experimental App Server mode)
 
 The standalone Statewright managed client owns the native approval controller,

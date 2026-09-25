@@ -41,6 +41,12 @@ assert_allowed "Read" Bash "$(shell_input 'cat README.md')"
 assert_allowed "Read" exec_command "$(shell_input "rg -n 'needle' src")"
 assert_allowed "Read" Bash "$(shell_input "find src -name '*.rs'")"
 assert_allowed "Read" exec_command "$(cmd_input "rg -n 'needle' src")"
+for command in 'cat README.md' 'cat README.md && cat LICENSE' "rg -n 'needle' src" "find src -name '*.rs'"; do
+  assert_allowed $'Read\nBash' exec_command "$(shell_input "$command")"
+  test "$STATEWRIGHT_TOOL_MODE" = "readonly_shell"
+done
+assert_allowed $'Read\nBash' exec_command "$(shell_input 'task test:unit')"
+test "$STATEWRIGHT_TOOL_MODE" = "bash"
 for native in Read read_file Grep grep search_files Glob glob find find_files ls list_directory; do
   assert_allowed "Read" "$native" '{}'
 done

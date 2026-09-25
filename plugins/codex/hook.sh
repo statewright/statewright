@@ -528,7 +528,7 @@ case "$ENDPOINT" in
 
     # Always allow system/internal/MCP tools
     case "$TOOL_NAME" in
-      *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
     # Read cached state (written by UserPromptSubmit — ZERO network calls)
@@ -595,9 +595,11 @@ case "$ENDPOINT" in
             jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
-          # Check allowed_commands from cache if present
+          # allowed_commands constrains broad Bash authority. A strict
+          # readonly_shell command is the provider-specific implementation of
+          # canonical Read and was already validated by tool-policy.sh.
           ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
-          if [ -n "$ALLOWED_CMDS" ]; then
+          if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] && [ -n "$ALLOWED_CMDS" ]; then
             CMD_OK=false
             while IFS= read -r pattern; do
               # Preserve the historical literal-prefix form while accepting

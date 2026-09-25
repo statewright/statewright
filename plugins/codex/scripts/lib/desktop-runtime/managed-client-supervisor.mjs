@@ -1,0 +1,1045 @@
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
+import { codexHistoryRepairMode, guardCodexResumeHistory } from "./codex-history-integrity.mjs";
+import { bindManagedClientIdentity, bindManagedSessionLabel, claimManagedSessionOwner, codexRouteOwnsRoot, readCodexRootSession, releaseManagedSessionOwner, resetCodexRootSession, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { resolveApiKey } from "./remote-client.mjs";
+import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
+import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
+import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
+import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
+
+const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
+const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
+const DEFAULT_TELEMETRY_AGENT = resolve(EXECUTOR_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
+const PARENT_MANAGED_IDENTITY_ENV = [
+  "STATEWRIGHT_CLIENT_ID",
+  "STATEWRIGHT_MCP_SESSION_ID",
+  "STATEWRIGHT_ROUTE_CONTROL_DIR",
+  "STATEWRIGHT_MANAGED_CLIENT_HOST",
+  "STATEWRIGHT_MANAGED_CLAUDE_ROOT_SESSION_ID",
+  "STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID",
+  "STATEWRIGHT_MANAGED_MCP_URL",
+  "STATEWRIGHT_MANAGED_MCP_SESSION_ID",
+  "STATEWRIGHT_MANAGED_MCP_TOKEN",
+  "STATEWRIGHT_MANAGED_TELEMETRY_OWNER",
+];
+const WINDOWS_PROCESS_TREE_ENV = new Set([
+  "comspec",
+  "path",
+  "pathext",
+  "systemroot",
+  "temp",
+  "tmp",
+  "windir",
+]);
+
+function statewrightEphemeralCodexHome(value) {
+  return typeof value === "string"
+    && /(?:^|[\\/])statewright-swc_[a-f0-9]{32}-app-server-[^\\/]+$/.test(value);
+}
+
+export function managedClientChildEnvironment({ host, environment = process.env, overrides = {} }) {
+  const childEnvironment = { ...environment };
+  for (const name of PARENT_MANAGED_IDENTITY_ENV) delete childEnvironment[name];
+  if (host === "codex") {
+    // Codex exposes the active TUI identity to tools. A nested `codex exec`
+    // must create its own thread instead of presenting the parent's active
+    // writer identity to another Codex process. Explicit resumes carry their
+    // target thread in argv and do not need either inherited variable.
+    delete childEnvironment.CODEX_SESSION_ID;
+    delete childEnvironment.CODEX_THREAD_ID;
+    // A managed App Server may leave its temporary CODEX_HOME in the parent
+    // environment. Drop only that Statewright-owned path; preserve an
+    // explicitly configured tenant/user home so managed clients remain
+    // isolated rather than silently collapsing onto the OS user's default.
+    if (statewrightEphemeralCodexHome(childEnvironment.CODEX_HOME)) delete childEnvironment.CODEX_HOME;
+  }
+  return { ...childEnvironment, ...overrides };
+}
+
+function telemetryDirectory(environment, home) {
+  return environment.STATEWRIGHT_TELEMETRY_DIR ?? join(home, ".statewright", "telemetry", "native-codex");
+}
+
+function telemetryPort(environment) {
+  const value = Number(environment.STATEWRIGHT_TELEMETRY_PORT ?? 4318);
+  return Number.isInteger(value) && value > 0 && value < 65536 ? value : 4318;
+}
+
+function telemetryAgentPath(environment) {
+  return environment.STATEWRIGHT_TELEMETRY_AGENT ?? DEFAULT_TELEMETRY_AGENT;
+}
+
+function telemetryEnvironment(environment, dataDir) {
+  return {
+    ...environment,
+    STATEWRIGHT_TELEMETRY_DIR: dataDir,
+  };
+}
+
+async function telemetryHealth(port) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForTelemetry(port, expectedIdentity, attempts = 20) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const health = await telemetryHealth(port);
+    if (health?.listener_status === "healthy" && health?.config_identity === expectedIdentity) return health;
+    await delay(100);
+  }
+  return null;
+}
+
+async function removeStaleTelemetryLeases(leasesDir) {
+  let entries = [];
+  try { entries = await readdir(leasesDir); } catch { return; }
+  await Promise.all(entries.map(async (entry) => {
+    const path = join(leasesDir, entry);
+    try {
+      const lease = JSON.parse(await readFile(path, "utf8"));
+      if (!processAlive(Number(lease?.supervisor_pid))) await unlink(path);
+    } catch {
+      await unlink(path).catch(() => {});
+    }
+  }));
+}
+
+async function acquireTelemetryLock(lockDir) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await mkdir(lockDir);
+      return;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await delay(20);
+    }
+  }
+  throw new Error("Timed out acquiring Statewright telemetry service lock.");
+}
+
+async function withTelemetryLock(dataDir, operation) {
+  const lockDir = join(dataDir, "managed-service.lock");
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await acquireTelemetryLock(lockDir);
+  try {
+    return await operation();
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+async function localTelemetryIdentity({ agentPath, environment, dataDir }) {
+  const result = spawnSync(process.execPath, [agentPath, "--identity"], {
+    env: telemetryEnvironment(environment, dataDir),
+    encoding: "utf8",
+  });
+  if (result.status !== 0) throw new Error(`Statewright telemetry identity failed: ${result.stderr || result.error?.message || "unknown error"}`);
+  const identity = JSON.parse(result.stdout);
+  if (!identity?.config_identity) throw new Error("Statewright telemetry identity was empty.");
+  return identity.config_identity;
+}
+
+async function nativeTelemetryEnabled({ environment, home, cwd }) {
+  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "true") return true;
+  if (environment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return false;
+  for (const path of [join(cwd, ".statewright", "config.json"), join(home, ".statewright", "config.json")]) {
+    try {
+      const config = JSON.parse(await readFile(path, "utf8"));
+      if (config?.telemetry?.codex?.native_tokens === true) return true;
+    } catch { /* absent or malformed config is not an opt-in */ }
+  }
+  return false;
+}
+
+// A detached telemetry listener exports an identity that embeds the API key it
+// was spawned with. A managed client started from a shell that does not export
+// STATEWRIGHT_API_KEY must resolve the same key from ~/.statewright/api_key, or
+// a healthy listener is misreported as a stale/conflicting listener.
+async function resolvedTelemetryApiKey(environment, home) {
+  const fromEnvironment = (environment.STATEWRIGHT_API_KEY ?? "").trim();
+  if (fromEnvironment) return fromEnvironment;
+  try {
+    return await resolveApiKey(environment, home);
+  } catch {
+    return "";
+  }
+}
+
+export async function acquireManagedTelemetry({ environment: clientEnvironment = process.env, home = homedir(), cwd = process.cwd(), supervisorId = `${process.pid}-${randomUUID()}`, agentPath = telemetryAgentPath(clientEnvironment) } = {}) {
+  if (!await nativeTelemetryEnabled({ environment: clientEnvironment, home, cwd })) return null;
+  if (clientEnvironment.STATEWRIGHT_NATIVE_TOKEN_TELEMETRY === "false") return null;
+  if (!existsSync(agentPath)) return null;
+  const environment = { ...clientEnvironment };
+  const resolvedKey = await resolvedTelemetryApiKey(environment, home);
+  if (!environment.STATEWRIGHT_API_KEY && resolvedKey) environment.STATEWRIGHT_API_KEY = resolvedKey;
+  const dataDir = telemetryDirectory(environment, home);
+  const port = telemetryPort(environment);
+  const markerPath = join(dataDir, "managed-service.json");
+  const leasesDir = join(dataDir, "managed-service-leases");
+  const expectedIdentity = await localTelemetryIdentity({ agentPath, environment, dataDir });
+  let leasePath = null;
+  await withTelemetryLock(dataDir, async () => {
+    await mkdir(leasesDir, { recursive: true, mode: 0o700 });
+    await removeStaleTelemetryLeases(leasesDir);
+    let health = await telemetryHealth(port);
+    if (health?.listener_status === "healthy" && health?.config_identity !== expectedIdentity) {
+      throw new Error(`Statewright telemetry listener identity conflicts with the managed client configuration. Close the stale managed client and restart it so the listener reloads its configuration; also verify that STATEWRIGHT_API_KEY is current and valid. If this project has a stale resident App Server, run: statewright-managed-client --kill-app-server (cwd: ${cwd})`);
+    }
+    if (!health) {
+      const child = spawn(process.execPath, [agentPath], {
+        env: telemetryEnvironment(environment, dataDir),
+        stdio: "ignore",
+        detached: process.platform !== "win32",
+      });
+      child.unref();
+      health = await waitForTelemetry(port, expectedIdentity);
+      if (!health) {
+        if (processAlive(child.pid)) child.kill("SIGTERM");
+        throw new Error("Statewright managed telemetry listener did not become healthy.");
+      }
+      await writeFile(markerPath, `${JSON.stringify({ pid: child.pid, config_identity: expectedIdentity })}\n`, { mode: 0o600 });
+    }
+    leasePath = join(leasesDir, `${supervisorId}.json`);
+    await writeFile(leasePath, `${JSON.stringify({ supervisor_pid: process.pid, acquired_at: new Date().toISOString() })}\n`, { mode: 0o600 });
+  });
+  return {
+    dataDir,
+    port,
+    leasePath,
+    async release() {
+      await withTelemetryLock(dataDir, async () => {
+        if (leasePath) await unlink(leasePath).catch(() => {});
+        await removeStaleTelemetryLeases(leasesDir);
+        let leases = [];
+        try { leases = await readdir(leasesDir); } catch { /* absent is empty */ }
+        if (leases.length) return;
+        let marker = null;
+        try { marker = JSON.parse(await readFile(markerPath, "utf8")); } catch { /* foreign listener */ }
+        if (marker?.config_identity === expectedIdentity && processAlive(Number(marker.pid))) {
+          process.kill(Number(marker.pid), "SIGTERM");
+        }
+        await unlink(markerPath).catch(() => {});
+      });
+    },
+  };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function waitForExit(child) {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+}
+
+export function windowsProcessTreeEnvironment(environment = process.env) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => WINDOWS_PROCESS_TREE_ENV.has(key.toLowerCase())),
+  );
+}
+
+export async function terminateWindowsProcessTree(child, {
+  environment = process.env,
+  spawnImpl = spawn,
+  timeoutMs = 1_500,
+  closeGraceMs = 500,
+} = {}) {
+  if (!child.pid) return { status: "missing_pid" };
+  let taskkill;
+  try {
+    taskkill = spawnImpl("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      env: windowsProcessTreeEnvironment(environment),
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch (error) {
+    return { status: "spawn_error", errorCode: error?.code ?? "unknown" };
+  }
+  const completion = new Promise((resolveCompletion) => {
+    taskkill.once?.("error", (error) => resolveCompletion({ status: "spawn_error", errorCode: error?.code ?? "unknown" }));
+    taskkill.once?.("close", (code, signal) => resolveCompletion({ status: code === 0 ? "success" : "nonzero", code, signal }));
+  });
+  if (await waitForChildExit(completion, timeoutMs)) return completion;
+  try { taskkill.kill?.(); } catch { /* cleanup process already exited */ }
+  const closedAfterKill = await waitForChildExit(completion, closeGraceMs);
+  if (!closedAfterKill) taskkill.unref?.();
+  return { status: "timeout", closedAfterKill };
+}
+
+async function signalChildGroup(child, signal, { platform = process.platform, spawnImpl = spawn, environment = process.env } = {}) {
+  if (!windowsPlatform(platform) && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return { status: "group_signal_sent" };
+    } catch {
+      // The child exited or the host does not permit process-group signals.
+    }
+  }
+  if (windowsPlatform(platform) && child.pid && signal !== "SIGINT") {
+    // A managed .cmd launcher owns a cmd.exe child. Killing only that wrapper
+    // leaves the real CLI process behind, so escalate through taskkill's tree
+    // semantics after the initial graceful SIGINT attempt.
+    return terminateWindowsProcessTree(child, { environment, spawnImpl });
+  }
+  child.kill(signal);
+  return { status: "child_signal_sent" };
+}
+
+function waitForChildExit(exit, milliseconds) {
+  return new Promise((resolveWait) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveWait(result);
+    };
+    const timer = setTimeout(() => finish(false), milliseconds);
+    exit.then(() => finish(true));
+  });
+}
+
+function processGroupAlive(child, platform) {
+  if (windowsPlatform(platform) || !child.pid) return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+async function waitForManagedChildExit(child, exit, milliseconds, platform) {
+  const deadline = Date.now() + milliseconds;
+  if (!await waitForChildExit(exit, milliseconds)) return false;
+  if (windowsPlatform(platform)) return true;
+  while (processGroupAlive(child, platform)) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(25, remaining)));
+  }
+  return true;
+}
+
+export async function restartManagedChild(child, exit, {
+  command,
+  platform = process.platform,
+  environment = process.env,
+  spawnImpl = spawn,
+  cleanupProcessTree = terminateWindowsProcessTree,
+} = {}) {
+  // SIGINT against cmd.exe can terminate the wrapper while leaving its CLI
+  // child running. Terminate the tree first and await it before the next
+  // routed launch so the old process cannot retain the control directory.
+  if (isWindowsCommand(command, platform)) {
+    const cleanup = await cleanupProcessTree(child, { environment, spawnImpl });
+    if (cleanup.status !== "success") {
+      throw new Error(`Windows managed-client process-tree cleanup failed (${cleanup.status}).`);
+    }
+    if (!await waitForManagedChildExit(child, exit, 1_500, platform)) {
+      throw new Error("Windows managed client remained active after successful process-tree cleanup.");
+    }
+    return;
+  }
+  await signalChildGroup(child, "SIGINT", { platform, environment });
+  if (await waitForManagedChildExit(child, exit, 1_500, platform)) return;
+  await signalChildGroup(child, "SIGTERM", { platform, environment });
+  if (await waitForManagedChildExit(child, exit, 1_500, platform)) return;
+  await signalChildGroup(child, "SIGKILL", { platform, environment });
+  if (!await waitForManagedChildExit(child, exit, 1_500, platform)) {
+    throw new Error("POSIX managed client remained active after SIGKILL process-group cleanup.");
+  }
+}
+
+function routeModel(model) {
+  return String(model ?? "").replace(/^[^/]+\//, "");
+}
+
+const CODEX_OPTIONS_WITH_VALUE = new Set([
+  "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config",
+  "--disable", "--enable", "--local-provider", "-m", "--model", "-p", "--profile", "--remote",
+  "--remote-auth-token-env", "-s", "--sandbox", "--add-dir",
+]);
+const CODEX_TOP_LEVEL_COMMANDS = new Set([
+  "agents", "app", "app-server", "apply", "archive", "cloud", "completion", "debug", "delete",
+  "doctor", "e", "exec", "exec-server", "features", "fork", "help", "login", "logout", "mcp",
+  "mcp-server", "migrate-rollouts", "plugin", "queue", "remote-control", "resume", "review", "sandbox",
+  "unarchive", "update",
+]);
+
+export function codexOneShotInvocation(host, args) {
+  if (host !== "codex") return false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    // `--` ends option/subcommand parsing; any following `exec` is prompt text.
+    if (argument === "--") return false;
+    if (argument.startsWith("-") && argument.includes("=")) continue;
+    if (argument === "-i" || argument === "--image") {
+      // Clap accepts one or more image paths. Stop only when the next token is
+      // another option or a real top-level Codex command.
+      while (index + 1 < args.length) {
+        const candidate = args[index + 1];
+        if (candidate === "--" || candidate.startsWith("-") || CODEX_TOP_LEVEL_COMMANDS.has(candidate)) break;
+        index += 1;
+      }
+      continue;
+    }
+    if (CODEX_OPTIONS_WITH_VALUE.has(argument)) {
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) continue;
+    // Codex advertises `e` as the exec alias and `review` as a separate
+    // non-interactive top-level command. Any other first positional token is
+    // either an interactive command (including resume) or its prompt.
+    return argument === "exec" || argument === "e" || argument === "review";
+  }
+  return false;
+}
+
+function forwardManagedTermination(child, exit, { command, platform = process.platform, environment = process.env } = {}) {
+  let termination = null;
+  const forward = (signal) => {
+    termination ??= (async () => {
+      if (isWindowsCommand(command, platform)) {
+        await signalChildGroup(child, "SIGTERM", { platform, environment });
+      } else {
+        await signalChildGroup(child, signal, { platform, environment });
+      }
+      if (await waitForManagedChildExit(child, exit, 1_500, platform)) return;
+      await signalChildGroup(child, "SIGTERM", { platform, environment });
+      if (await waitForManagedChildExit(child, exit, 1_500, platform)) return;
+      if (isWindowsCommand(command, platform)) {
+        throw new Error("Windows managed client remained active after process-tree termination.");
+      }
+      await signalChildGroup(child, "SIGKILL", { platform, environment });
+      if (!await waitForManagedChildExit(child, exit, 1_500, platform)) {
+        throw new Error("POSIX managed client remained active after terminal-loss SIGKILL cleanup.");
+      }
+    })();
+  };
+  const onSigint = () => forward("SIGINT");
+  const onSigterm = () => forward("SIGTERM");
+  const onSighup = () => forward("SIGHUP");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  if (!windowsPlatform(platform)) process.once("SIGHUP", onSighup);
+  return async () => {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+    if (!windowsPlatform(platform)) process.off("SIGHUP", onSighup);
+    await termination;
+  };
+}
+
+export function codexAllSessionsRequested(args = []) {
+  const boundary = args.indexOf("--");
+  return args.slice(0, boundary < 0 ? args.length : boundary).includes("--all");
+}
+
+export function routeClaudeModel(model) {
+  const value = String(model ?? "").trim();
+  if (!value) throw new Error("Statewright Claude routing request is missing model.");
+  if (/^anthropic\//i.test(value)) return routeModel(value);
+  const semantic = value.toLowerCase().match(/(?:^|[-_/])(sol|terra|luna)$/)?.[1];
+  if (semantic) return { sol: "opus", terra: "sonnet", luna: "haiku" }[semantic];
+  if (/^(?:openai|openai-codex)\//i.test(value)) {
+    throw new Error(`Statewright cannot translate OpenAI model '${value}' to Claude; use a sol, terra, or luna route.`);
+  }
+  return value;
+}
+
+export async function createManagedMcpBridge({ environment, clientId, bridgeFactory = (options) => new ManagedMcpBridge(options) }) {
+  const apiKey = await resolveApiKey(environment);
+  const bridge = await bridgeFactory({
+    gatewayUrl: environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
+    apiKey,
+    clientId,
+  });
+  await bridge.start();
+  return bridge;
+}
+
+function stripRouteArgs(args, host) {
+  const isRouteConfigOverride = (value) => {
+    const key = String(value ?? "").split("=", 1)[0].trim();
+    return /(?:^|\.)\s*(?:["'](?:model|model_reasoning_effort|model_provider)["']|model|model_reasoning_effort|model_provider)\s*$/.test(key);
+  };
+  const result = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    // A routed restart always creates its own `resume <session> <prompt>`
+    // invocation. Keeping a prior resume subcommand would leave Codex with
+    // two positional session identifiers.
+    if (host === "codex" && arg === "resume") break;
+    if (arg === "-m" || arg === "--model") {
+      index += 1;
+      continue;
+    }
+    if (/^(?:-m|--model)=/.test(arg)) continue;
+    if (host === "codex" && (arg === "-c" || arg === "--config") && isRouteConfigOverride(args[index + 1])) {
+      index += 1;
+      continue;
+    }
+    if (host === "codex" && /^(?:-c|--config)=/.test(arg) && isRouteConfigOverride(arg.slice(arg.indexOf("=") + 1))) continue;
+    if (host === "codex" && arg === "--oss") continue;
+    if (host === "codex" && arg === "--local-provider") {
+      index += 1;
+      continue;
+    }
+    if (host === "codex" && arg.startsWith("--local-provider=")) continue;
+    if (host === "claude" && (arg === "--resume" || arg === "-r" || arg === "--continue" || arg === "-c" || arg === "--session-id" || arg === "--fork-session")) {
+      if (arg !== "--continue" && arg !== "-c" && arg !== "--fork-session") index += 1;
+      continue;
+    }
+    result.push(arg);
+  }
+  return result;
+}
+
+export function buildRoutedArgs({ host, originalArgs, request }) {
+  const base = stripRouteArgs(originalArgs, host);
+  const parsed = providerModel(request.model);
+  const model = host === "claude" ? routeClaudeModel(request.model) : parsed.model;
+  if (!request.session_id) throw new Error("Statewright routing request is missing session_id.");
+  if (!model) throw new Error("Statewright routing request is missing model.");
+  if (host === "codex") {
+    const effort = request.effort || "medium";
+    const providerArgs = parsed.provider ? ["-c", `model_provider=${JSON.stringify(parsed.provider)}`] : [];
+    return ["-m", model, ...providerArgs, "-c", `model_reasoning_effort=${JSON.stringify(effort)}`, ...base,
+      "resume", request.session_id, CONTINUATION_PROMPT];
+  }
+  if (host === "claude") {
+    // Claude supports an explicit model override while resuming. Preserve the
+    // session so its plugin/MCP registration survives a routed model change.
+    return [...base, "--resume", request.session_id, "--model", model, CONTINUATION_PROMPT];
+  }
+  throw new Error(`Unsupported managed client host '${host}'.`);
+}
+
+async function nextRouteRequest(controlDir, consumed) {
+  const entries = (await readdir(controlDir))
+    .filter((name) => name === "route.json" || name.endsWith(".route.json"))
+    .sort();
+  for (const name of entries) {
+    if (consumed.has(name)) continue;
+    const request = JSON.parse(await readFile(join(controlDir, name), "utf8"));
+    consumed.add(name);
+    return request;
+  }
+  return null;
+}
+
+async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.now()) {
+  const entries = (await readdir(controlDir))
+    .filter((name) => name.endsWith(".approval.json"))
+    .sort();
+  for (const name of entries) {
+    if (consumed.has(name) || (retryAfter.get(name) ?? 0) > now) continue;
+    return { name, request: JSON.parse(await readFile(join(controlDir, name), "utf8")) };
+  }
+  return null;
+}
+
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
+  if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
+  const launch = await resolveWindowsLaunch(command);
+  const launchCommand = launch.command;
+  const launchPrefixArgs = launch.prefixArgs;
+  const oneShotCodexExec = codexOneShotInvocation(host, args);
+  const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
+  const consumed = new Set();
+  const consumedApprovals = new Set();
+  const preparedApprovals = new Set();
+  const approvalRetryAfter = new Map();
+  const reportedApprovalErrors = new Set();
+  let nextArgs = args;
+  // Managed clients can spawn native children. Those children inherit the
+  // bridge identity, but are not safe restart targets: a process-group signal
+  // would tear down the parent/child handoff. Lock routing to the durable root
+  // session rather than trusting the shared client ID alone.
+  let claudeRootSessionId = null;
+  let codexRootSessionId = null;
+  let bridge = null;
+  let telemetry = null;
+  let managedSessionOwner = null;
+  try {
+    const identity = await resolveManagedClientIdentity({ host, args, home, cwd });
+    const routedClientId = identity.clientId;
+    const approvalApiKey = host === "claude" ? await resolveApiKey(environment) : null;
+    const approvalGatewayUrl = environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
+    const approvalPbUrl = environment.STATEWRIGHT_PB_URL ?? "https://statewright.ai";
+    const terminalLabel = host === "codex" ? tmuxWindowLabel(environment) : null;
+    if (host === "codex") codexRootSessionId = identity.sessionId;
+    if (host === "codex" && identity.sessionId) {
+      await bindManagedSessionLabel({ host, sessionId: identity.sessionId, label: terminalLabel, cwd, home });
+    }
+    if (host === "codex" && identity.sessionId && !oneShotCodexExec) {
+      managedSessionOwner = await claimManagedSessionOwner({
+        host,
+        sessionId: identity.sessionId,
+        clientId: routedClientId,
+        home,
+        cwd,
+      });
+    }
+    const config = host === "codex" ? await managedClientConfig(home) : {};
+    const preflightCodexHistory = async (launchArgs) => {
+      const sessionId = host === "codex" ? resumedSessionId("codex", launchArgs) : null;
+      if (!sessionId) return { status: "not_applicable" };
+      const historyResult = await historyGuard({
+        home,
+        cwd,
+        args: launchArgs,
+        environment,
+        sessionId,
+        mode: codexHistoryRepairMode({ environment, config }),
+      });
+      if (historyResult?.status === "repaired") {
+        if (historyResult.repairKind === "stale_rollout_pointer") process.stderr.write(`[statewright] backed up the Codex state database and restored this thread's canonical rollout pointer.\n`);
+        else process.stderr.write(`[statewright] backed up and repaired ${historyResult.droppedRecords} duplicate Codex restart metadata record(s); rebuilding this thread's derived history projection.\n`);
+      }
+      return historyResult;
+    };
+    const isolatedEnvironment = managedClientChildEnvironment({ host, environment });
+    await writeManagedControlIdentity(controlDir, { host, clientId: routedClientId });
+    if (host === "codex") {
+      await resetCodexRootSession(controlDir, { sessionId: codexRootSessionId, clientId: routedClientId });
+    }
+    telemetry = host === "codex"
+      ? await acquireManagedTelemetry({ environment, home, cwd, supervisorId: `${host}-${process.pid}-${randomUUID()}` })
+      : null;
+    if (host === "codex" && !oneShotCodexExec) {
+      // Claude receives a compact copy of this shared supervisor. Keep the
+      // optional Codex-only transport out of its module-load graph.
+      const { codexAppServerTransportEnabled } = await import("./codex-app-server-transport.mjs");
+      if (codexAppServerTransportEnabled({
+        environment,
+        config,
+      })) {
+        const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
+        if (identity.sessionId) {
+          await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home, cwd });
+        }
+        await preflightCodexHistory(args);
+        const resident = await ensureCodexAppServerResident({
+          command,
+          cwd,
+          environment: isolatedEnvironment,
+          home,
+          clientId: routedClientId,
+          // The native resume picker is a cross-project session chooser. Its
+          // rows are decorated from each rollout's session_meta cwd, so do
+          // not filter discovery to the checkout that launched the picker.
+          threadListCwd: null,
+          terminalLabel,
+        });
+        const residentRoutes = residentControlDir(home, routedClientId);
+        await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
+        const residentArgs = [...args, "--remote", resident.proxyUrl];
+        const tuiEnvironment = {
+          ...isolatedEnvironment,
+          STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
+          STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+          STATEWRIGHT_CLIENT_ID: routedClientId,
+          ...(codexRootSessionId ? { STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: codexRootSessionId } : {}),
+          STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+        };
+        const tui = spawn(command, residentArgs, {
+          cwd,
+          env: tuiEnvironment,
+          stdio: "inherit",
+        });
+        const tuiExit = waitForExit(tui);
+        const stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
+        try {
+          const result = await tuiExit;
+          if (!isExpectedExit(result)) await reporter.report(new Error("Native Codex connected to its resident App Server exited unexpectedly."), {
+            mechanism: "child_exit", host, operation: "resident_tui", exit_code: result.code ?? 1, signal: result.signal,
+          });
+          return result.code ?? 1;
+        } finally {
+          await stopForwarding();
+        }
+      }
+    }
+    bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
+    while (true) {
+      await preflightCodexHistory(nextArgs);
+      const childEnvironment = {
+        ...isolatedEnvironment,
+        STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
+        STATEWRIGHT_MANAGED_CLIENT_HOST: host,
+        STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
+      };
+      if (routedClientId) childEnvironment.STATEWRIGHT_CLIENT_ID = routedClientId;
+      if (host === "claude" && claudeRootSessionId) {
+        childEnvironment.STATEWRIGHT_MANAGED_CLAUDE_ROOT_SESSION_ID = claudeRootSessionId;
+      }
+      if (host === "codex" && codexRootSessionId) {
+        childEnvironment.STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID = codexRootSessionId;
+      }
+      if (bridge) {
+        childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
+        childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
+      }
+      const child = spawn(launchCommand, [...launchPrefixArgs, ...nextArgs], {
+        cwd,
+        env: childEnvironment,
+        stdio: "inherit",
+        // POSIX process-group ownership lets cancellation terminate every
+        // descendant the CLI starts. Scoped forwarding above prevents that
+        // detached group from outliving its managed supervisor.
+        detached: process.platform !== "win32",
+        // Non-npm .cmd/.bat launchers still need cmd.exe. npm-generated shims
+        // are resolved to their Node entrypoint above, preserving argv exactly.
+        shell: launch.shell,
+      });
+      let exited = false;
+      let restart = false;
+      child.once("exit", () => { exited = true; });
+      const exit = waitForExit(child);
+      const stopForwarding = forwardManagedTermination(child, exit, { command: launchCommand, environment: childEnvironment });
+      try {
+        if (oneShotCodexExec) {
+          const result = await exit;
+          if (!isExpectedExit(result)) await reporter.report(new Error("Managed codex exec exited unexpectedly."), {
+            mechanism: "child_exit", host, operation: "managed_exec", exit_code: result.code ?? 1, signal: result.signal,
+          });
+          return result.code ?? 1;
+        }
+        while (!exited) {
+          if (host === "claude") {
+            const approval = await nextApprovalRequest(controlDir, consumedApprovals, approvalRetryAfter).catch(() => null);
+            if (approval) {
+              const { name, request: approvalRequest } = approval;
+              if (approvalRequest.client_id !== routedClientId) {
+                consumedApprovals.add(name);
+              } else if (preparedApprovals.has(approvalRequest.approval_id)) {
+                consumedApprovals.add(name);
+              } else {
+                try {
+                  const prepared = await approvalPreparer({
+                    request: approvalRequest,
+                    apiKey: approvalApiKey,
+                    gatewayUrl: approvalGatewayUrl,
+                    pbUrl: approvalPbUrl,
+                    cwd,
+                    clientId: routedClientId,
+                  });
+                  approvalOpener(prepared.reviewUrl);
+                  preparedApprovals.add(approvalRequest.approval_id);
+                  consumedApprovals.add(name);
+                  approvalRetryAfter.delete(name);
+                  reportedApprovalErrors.delete(name);
+                  const resultPath = join(controlDir, `${approvalRequest.approval_id}.approval-result.json`);
+                  await writeFile(`${resultPath}.tmp`, `${JSON.stringify({
+                    approval_id: approvalRequest.approval_id,
+                    review_url: prepared.reviewUrl,
+                  })}\n`, { mode: 0o600 });
+                  await rename(`${resultPath}.tmp`, resultPath);
+                } catch (error) {
+                  approvalRetryAfter.set(name, Date.now() + 2000);
+                  if (!reportedApprovalErrors.has(name)) {
+                    reportedApprovalErrors.add(name);
+                    await reporter.report(error, {
+                      mechanism: "approval_evidence",
+                      host,
+                      operation: "prepare_review",
+                      approval_id: approvalRequest.approval_id ?? null,
+                    });
+                  }
+                }
+              }
+            }
+          }
+          const request = await nextRouteRequest(controlDir, consumed).catch(() => null);
+          if (request) {
+            if (request.client_id !== routedClientId) {
+              process.stderr.write("[statewright] rejected route request with a mismatched managed client identity.\n");
+              continue;
+            }
+            if (host === "claude") {
+              const declaredRoot = String(request.root_session_id ?? "").trim();
+              const requestSessionId = String(request.session_id ?? "").trim();
+              if (!claudeRootSessionId) claudeRootSessionId = declaredRoot || requestSessionId || null;
+              if (!requestSessionId || requestSessionId !== claudeRootSessionId) {
+                process.stderr.write("[statewright] deferred Claude model route from a native fork; the parent session remains authoritative.\n");
+                continue;
+              }
+            }
+            if (host === "codex") {
+              const registration = await readCodexRootSession(controlDir, routedClientId);
+              if (!codexRouteOwnsRoot(request, registration)) {
+                process.stderr.write("[statewright] deferred Codex model route from a nested process; the parent thread remains authoritative.\n");
+                continue;
+              }
+              codexRootSessionId = registration.sessionId;
+            }
+            await bindManagedClientIdentity({
+              host,
+              sessionId: request.session_id,
+              clientId: routedClientId,
+              home,
+            });
+            // An omitted model is an inherited route. The initial unmanaged TUI
+            // model is authoritative, so there is no safe or useful restart.
+            if (!request.model) continue;
+            let selectedRequest = request;
+            if (host === "codex") {
+              try {
+                selectedRequest = await selectAvailableRoute(request);
+              } catch (error) {
+                // Availability failure is fail-closed: stop the detached child
+                // before the supervisor relinquishes its control directory.
+                await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+                throw error;
+              }
+              if (selectedRequest.session_id !== request.session_id
+                  || selectedRequest.client_id !== request.client_id
+                  || selectedRequest.root_session_id !== request.root_session_id) {
+                await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+                throw new Error("Statewright model_ladder attempted to alter managed session identity.");
+              }
+            }
+            nextArgs = buildRoutedArgs({ host, originalArgs: args, request: selectedRequest });
+            restart = true;
+            await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+            break;
+          }
+          await delay(pollMs);
+        }
+        const result = await exit;
+        if (!restart) {
+          if (!isExpectedExit(result)) await reporter.report(new Error(`Managed ${host} client exited unexpectedly.`), {
+            mechanism: "child_exit", host, operation: "managed_client", exit_code: result.code ?? 1, signal: result.signal,
+          });
+          return result.code ?? 1;
+        }
+      } finally {
+        await stopForwarding();
+      }
+    }
+  } finally {
+    if (managedSessionOwner) {
+      await releaseManagedSessionOwner({
+        host: managedSessionOwner.host,
+        sessionId: managedSessionOwner.session_id,
+        ownerId: managedSessionOwner.owner_id,
+        home,
+      });
+    }
+    await telemetry?.release();
+    await bridge?.close();
+    await rm(controlDir, { recursive: true, force: true });
+  }
+}
+
+function configPath(home = homedir()) {
+  return join(home, ".statewright", "config.json");
+}
+
+async function managedClientConfig(home = homedir()) {
+  try {
+    return JSON.parse(await readFile(configPath(home), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+export async function managedClientEnabled(host, home = homedir()) {
+  const config = await managedClientConfig(home);
+  const managed = config?.routing?.managed_clients;
+  if (managed?.enabled !== true) return false;
+  // An omitted hosts object enables every supported managed client. Once a
+  // host-specific choice exists, only explicit true values are enabled.
+  return !managed.hosts || managed.hosts[host] === true;
+}
+
+export async function setManagedClientEnabled(host, enabled, home = homedir()) {
+  if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
+  const path = configPath(home);
+  let config = {};
+  try { config = JSON.parse(await readFile(path, "utf8")); } catch { /* start with an empty user config */ }
+  const routing = config.routing && typeof config.routing === "object" ? config.routing : {};
+  const managed = routing.managed_clients && typeof routing.managed_clients === "object"
+    ? routing.managed_clients : {};
+  config.routing = {
+    ...routing,
+    managed_clients: {
+      ...managed,
+      // Individual toggles create an explicit host map. Keep the feature
+      // globally enabled so disabling Claude cannot silently disable Codex.
+      enabled: true,
+      hosts: { ...(managed.hosts ?? {}), [host]: Boolean(enabled) },
+    },
+  };
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  return path;
+}
+
+function windowsPlatform(platform) {
+  return platform === "win32";
+}
+
+function samePath(left, right, platform) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return windowsPlatform(platform)
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function commandCandidates(command, platform) {
+  if (!windowsPlatform(platform) || extname(command)) return [command];
+  // Windows command resolution uses executable extensions. Prefer them over an
+  // extensionless sibling left by a POSIX-oriented package installation.
+  return [`${command}.cmd`, `${command}.exe`, `${command}.bat`, command];
+}
+
+export function resolveRealBinary(command, {
+  path = process.env.PATH ?? "",
+  shimDirectory,
+  platform = process.platform,
+  pathSeparator = windowsPlatform(platform) ? ";" : delimiter,
+} = {}) {
+  if (command.includes("/") || command.includes("\\")) return resolve(command);
+  for (const directory of path.split(pathSeparator).filter(Boolean)) {
+    if (shimDirectory && samePath(directory, shimDirectory, platform)) continue;
+    for (const candidateName of commandCandidates(command, platform)) {
+      const candidate = join(directory, candidateName);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  throw new Error(`Unable to resolve the real '${command}' executable outside the Statewright shim directory.`);
+}
+
+export async function installManagedClientShim({ host, launcherPath, home = homedir(), realBinary, platform = process.platform }) {
+  if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
+  const shimDirectory = join(home, ".statewright", "bin");
+  const binary = realBinary ?? resolveRealBinary(host, { shimDirectory, platform });
+  await mkdir(shimDirectory, { recursive: true });
+  const shimPath = join(shimDirectory, windowsPlatform(platform) ? `${host}.cmd` : host);
+  const contents = windowsPlatform(platform)
+    ? `@echo off\r\nif /I \"%~1\"==\"--kill-app-server\" (\r\n  \"${process.execPath}\" \"${launcherPath}\" %*\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\"${process.execPath}\" \"${launcherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
+    : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(launcherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
+  await writeFile(shimPath, contents, { mode: windowsPlatform(platform) ? undefined : 0o755 });
+  if (!windowsPlatform(platform)) await chmod(shimPath, 0o755);
+  return { shimDirectory, shimPath, realBinary: binary };
+}
+
+function shellProfile(shell, home, platform = process.platform) {
+  if (windowsPlatform(platform)) {
+    return {
+      path: join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1"),
+      line: '$env:Path = "$HOME\\.statewright\\bin;$env:Path"',
+    };
+  }
+  const name = String(shell ?? "").split("/").at(-1);
+  if (name === "zsh") return { path: join(home, ".zshrc"), line: 'export PATH="$HOME/.statewright/bin:$PATH"' };
+  if (name === "bash") return { path: join(home, ".bashrc"), line: 'export PATH="$HOME/.statewright/bin:$PATH"' };
+  if (name === "fish") return { path: join(home, ".config", "fish", "config.fish"), line: "fish_add_path -m $HOME/.statewright/bin" };
+  return null;
+}
+
+const SHELL_BLOCK_START = "# >>> statewright managed clients >>>";
+const SHELL_BLOCK_END = "# <<< statewright managed clients <<<";
+
+async function installShellPath(shell, home, platform) {
+  const profile = shellProfile(shell, home, platform);
+  if (!profile) return null;
+  let content = "";
+  try { content = await readFile(profile.path, "utf8"); } catch { /* create it below */ }
+  const block = `${SHELL_BLOCK_START}\n${profile.line}\n${SHELL_BLOCK_END}`;
+  const start = SHELL_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const end = SHELL_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const expression = new RegExp(`${start}[\\s\\S]*?${end}`, "g");
+  const next = expression.test(content)
+    ? content.replace(expression, block)
+    : `${content}${content && !content.endsWith("\n") ? "\n" : ""}${block}\n`;
+  if (next === content) return null;
+  await mkdir(dirname(profile.path), { recursive: true });
+  await writeFile(profile.path, next, { mode: 0o600 });
+  return profile.path;
+}
+
+export async function bootstrapManagedClients({
+  launcherPath,
+  home = homedir(),
+  path = process.env.PATH,
+  shell = process.env.SHELL,
+  platform = process.platform,
+  pathSeparator = windowsPlatform(platform) ? ";" : delimiter,
+} = {}) {
+  const installed = [];
+  const shimDirectory = join(home, ".statewright", "bin");
+  for (const host of ["codex", "claude"]) {
+    let realBinary;
+    try { realBinary = resolveRealBinary(host, { path, shimDirectory, platform, pathSeparator }); } catch { continue; }
+    installed.push(await installManagedClientShim({ host, launcherPath, home, realBinary, platform }));
+    await setManagedClientEnabled(host, true, home);
+  }
+  const profile = installed.length > 0 ? await installShellPath(shell, home, platform) : null;
+  return { installed, profile, restart_required: Boolean(profile) };
+}
+
+export async function uninstallManagedClients({ home = homedir(), shell = process.env.SHELL, platform = process.platform } = {}) {
+  const config = configPath(home);
+  let value = {};
+  try { value = JSON.parse(await readFile(config, "utf8")); } catch { /* no Statewright config */ }
+  const routing = value.routing && typeof value.routing === "object" ? value.routing : {};
+  const managed = routing.managed_clients && typeof routing.managed_clients === "object"
+    ? routing.managed_clients : {};
+  value.routing = {
+    ...routing,
+    managed_clients: { ...managed, enabled: false, hosts: { ...(managed.hosts ?? {}), codex: false, claude: false } },
+  };
+  await mkdir(dirname(config), { recursive: true });
+  await writeFile(config, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const removed = [];
+  for (const host of ["codex", "claude"]) {
+    const path = join(home, ".statewright", "bin", windowsPlatform(platform) ? `${host}.cmd` : host);
+    try { await unlink(path); removed.push(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+  const profile = shellProfile(shell, home, platform);
+  let profileRemoved = false;
+  if (profile) {
+    try {
+      const content = await readFile(profile.path, "utf8");
+      const start = SHELL_BLOCK_START.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const end = SHELL_BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const next = content.replace(new RegExp(`${start}[\\s\\S]*?${end}\\n?`, "g"), "");
+      if (next !== content) {
+        await writeFile(profile.path, next, { mode: 0o600 });
+        profileRemoved = true;
+      }
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+  return { removed, profile: profileRemoved ? profile?.path : null };
+}

@@ -271,12 +271,16 @@ statewright_tool_allowed() {
     statewright_uses_unsupported_shell "$tool_name" "$hook_input" && return 1
     command=$(statewright_input_command "$hook_input")
     [ -n "$command" ] || return 1
-    if statewright_has_capability "Bash" || statewright_has_capability "exec_command"; then
-      STATEWRIGHT_TOOL_MODE="bash"
+    # Provider shell adapters are also the concrete transport for canonical
+    # Read operations. Classify strict reads before broad Bash authority so a
+    # phase that grants both capabilities does not turn `cat`/`rg`/`find` into
+    # Bash commands subject to an unrelated allowed_commands list.
+    if statewright_readonly_shell_allowed "$command"; then
+      STATEWRIGHT_TOOL_MODE="readonly_shell"
       return 0
     fi
-    if [ -n "$command" ] && statewright_readonly_shell_allowed "$command"; then
-      STATEWRIGHT_TOOL_MODE="readonly_shell"
+    if statewright_has_capability "Bash" || statewright_has_capability "exec_command"; then
+      STATEWRIGHT_TOOL_MODE="bash"
       return 0
     fi
     return 1

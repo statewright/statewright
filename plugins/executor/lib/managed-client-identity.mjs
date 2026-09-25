@@ -362,3 +362,25 @@ export async function writeManagedControlIdentity(controlDir, { host, clientId }
   await chmod(path, 0o600);
   return path;
 }
+
+// A broker must never replace an identity owned by another managed client.
+// `writeManagedControlIdentity` remains for established resident migration
+// paths; new isolated launchers use this compare-or-create boundary.
+export async function claimManagedControlIdentity(controlDir, { host, clientId }) {
+  const path = join(controlDir, "identity.json");
+  const desired = { version: 1, host, client_id: clientId };
+  try {
+    const handle = await open(path, "wx", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(desired)}\n`); } finally { await handle.close(); }
+    await chmod(path, 0o600);
+    return path;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    let existing = null;
+    try { existing = JSON.parse(await readFile(path, "utf8")); } catch { /* treated as a conflict */ }
+    if (existing?.version !== desired.version || existing?.host !== host || existing?.client_id !== clientId) {
+      throw new Error("Statewright Desktop broker refused to replace an existing managed control identity.");
+    }
+    return path;
+  }
+}

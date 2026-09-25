@@ -137,6 +137,56 @@ test("native Codex hook leaves malformed workflow-load results inactive", async 
   }
 });
 
+test("native Codex hook treats safe shell reads as Read when Bash is also allowed", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const environment = {
+    HOME: home,
+    STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+    STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+  };
+  const session_id = "native-read-alias";
+  const state = {state_snapshot: {...loadedState.state_snapshot,
+    allowed_tools: ["Read", "Bash"], allowed_commands: ["task test:unit"]}};
+
+  try {
+    const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id,
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: state,
+    }, environment);
+    assert.equal(post.status, 0, post.stderr);
+
+    for (const command of ["cat README.md", "cat README.md && cat package.json",
+      "rg -n needle src", "find src -name '*.mjs'"]) {
+      const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id,
+        tool_name: "exec_command",
+        tool_input: {cmd: command},
+      }, environment);
+      assert.equal(pre.status, 0, pre.stderr);
+      assert.equal(pre.stdout, "", command);
+    }
+
+    const allowedBash = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "exec_command",
+      tool_input: {cmd: "task test:unit"},
+    }, environment);
+    assert.equal(allowedBash.status, 0, allowedBash.stderr);
+    assert.equal(allowedBash.stdout, "");
+
+    const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "exec_command",
+      tool_input: {cmd: "npm test"},
+    }, environment);
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.match(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason, /not in allowed commands/);
+  } finally {
+    await rm(home, {recursive: true, force: true});
+  }
+});
+
 test("Codex hooks and MCP join the executor-owned bridge", async () => {
   const bridge = await startBridge();
   const environment = {

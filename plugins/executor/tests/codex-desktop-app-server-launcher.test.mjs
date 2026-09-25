@@ -56,11 +56,11 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
 test("Desktop bridge owns gateway authentication outside the App Server sandbox", async () => {
   let started = 0;
   const bridge = await startDesktopMcpBridge({
-    environment: { STATEWRIGHT_API_KEY: "desktop-api-key", STATEWRIGHT_GATEWAY_URL: "https://example.test/mcp" },
+    environment: { STATEWRIGHT_API_KEY: "desktop-api-key", STATEWRIGHT_GATEWAY_URL: "https://example.test/custom" },
     clientId: "swc_0123456789abcdef0123456789abcdef",
     bridgeFactory: options => {
       assert.deepEqual(options, {
-        gatewayUrl: "https://example.test/mcp",
+        gatewayUrl: "https://example.test/custom/mcp",
         apiKey: "desktop-api-key",
         clientId: "swc_0123456789abcdef0123456789abcdef",
       });

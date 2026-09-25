@@ -131,7 +131,10 @@ try {
   await access(state.shim_path, constants.X_OK);
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
   const { startDesktopMcpBridge } = await import(runtimeUrl);
-  const bridge = await startDesktopMcpBridge({ environment: process.env, clientId: state.client_id });
+  const bridgeEnvironment = state.gateway_url
+    ? { ...process.env, STATEWRIGHT_GATEWAY_URL: state.gateway_url }
+    : process.env;
+  const bridge = await startDesktopMcpBridge({ environment: bridgeEnvironment, clientId: state.client_id });
   const child = spawn(state.desktop_executable, [], {
     detached: false,
     stdio: "ignore",
@@ -229,7 +232,7 @@ export function parseDesktopArgs(argv) {
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
+async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, environment = process.env, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
   const vendor = resolve(original ?? DEFAULT_VENDOR_CODEX);
@@ -239,13 +242,22 @@ async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SC
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
   const launcherAppPath = join(desktopApplicationsDirectory, DESKTOP_APP_NAME);
   const shim = join(dirname(resolvedState), "bin", "statewright-desktop-codex");
+  const gatewayUrl = String(environment.STATEWRIGHT_GATEWAY_URL ?? existing?.gateway_url ?? "").trim() || null;
+  if (gatewayUrl) {
+    const parsedGateway = new URL(gatewayUrl);
+    if (!["http:", "https:"].includes(parsedGateway.protocol) || parsedGateway.username || parsedGateway.password || parsedGateway.search || parsedGateway.hash) {
+      throw new Error("Statewright Desktop gateway must be an HTTP URL without credentials, query, or fragment.");
+    }
+  }
   if (!await executable(vendor)) throw new Error(`Desktop vendor executable is not executable: ${vendor}`);
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);
   if (!await executable(nodeExecutable)) throw new Error(`Node executable is not executable: ${nodeExecutable}`);
   if (!await readable(runtime)) throw new Error(`Desktop broker module is not readable: ${runtime}`);
   if (existing && existing.version !== 2 && (existing.version !== 3 || existing.shim_path !== shim || existing.original_codex !== vendor || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
   const legacyPath = await legacyLaunchdPath(existing, { launchctlExecFile, launchctlPath });
-  const state = existing?.version === 3 ? { ...existing, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath } : { version: 3, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+  const state = existing?.version === 3
+    ? { ...existing, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
+    : { version: 3, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
   await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
   await writeAtomicFn(shim, `#!/bin/sh\nSTATEWRIGHT_DESKTOP_STATE_PATH=${shellQuote(resolvedState)} exec ${shellQuote(nodeExecutable)} ${shellQuote(runtime)} "$@"\n`, 0o700);
   if (legacyPath) {
@@ -337,7 +349,7 @@ export async function desktopDoctor({ statePath } = {}) {
   if (!state) return { ok: false, reason: "not_configured", state_path: resolvedState };
   if (state.version !== 3) return { ok: false, reason: "legacy_setup_requires_enable", state_path: resolvedState };
   const launcherPath = state.launcher_app_path && join(state.launcher_app_path, "Contents", "MacOS", DESKTOP_APP_EXECUTABLE);
-  return { ok: await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath), state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, client_id: state.client_id, launch_mode: "explicit_process_environment" };
+  return { ok: await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath), state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, client_id: state.client_id, launch_mode: "explicit_process_environment" };
 }
 
 export async function readDesktopState(path = defaultDesktopStatePath()) {

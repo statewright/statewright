@@ -6,7 +6,7 @@ import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
-import { resolveApiKey } from "./remote-client.mjs";
+import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
 
 // A Desktop broker is a separate managed client. These names carry process
 // handles owned by a parent TUI/session and must not escape into Desktop.
@@ -33,7 +33,7 @@ export function desktopBrokerEnvironment(environment, { controlDir, clientId }) 
 
 export async function startDesktopMcpBridge({ environment, clientId, bridgeFactory = options => new ManagedMcpBridge(options) }) {
   const bridge = bridgeFactory({
-    gatewayUrl: environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
+    gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"),
     apiKey: await resolveApiKey(environment),
     clientId,
   });

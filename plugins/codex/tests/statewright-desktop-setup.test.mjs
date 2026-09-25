@@ -31,7 +31,7 @@ async function fixture(prefix) {
     executable(vendor),
     executable(app),
     moduleFile(wrapper),
-    writeFile(desktopRuntime, `export async function startDesktopMcpBridge() { return { url: "http://127.0.0.1:43123", token: "launcher-token", close: async () => {} }; }\n`),
+    writeFile(desktopRuntime, `export async function startDesktopMcpBridge({ environment }) { return { url: "http://127.0.0.1:43123", token: environment.STATEWRIGHT_GATEWAY_URL ?? "missing-gateway", close: async () => {} }; }\n`),
   ]);
   return { root, state, vendor, app, applications, wrapper };
 }
@@ -54,9 +54,10 @@ test("Desktop setup creates an explicit-launch shim without mutating launchd", a
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-setup-");
   const launchctl = launchctlHarness("/prior/codex");
   try {
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, launchctlExecFile: launchctl.exec });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" }, launchctlExecFile: launchctl.exec });
     assert.equal(record.version, 3);
     assert.equal(record.desktop_executable, app);
+    assert.equal(record.gateway_url, "https://staging.example.test");
     assert.match(record.client_id, /^swc_[a-f0-9]{32}$/);
     assert.equal(launchctl.value, "/prior/codex");
     assert.equal(launchctl.calls.length, 0);
@@ -212,7 +213,7 @@ test("Desktop setup preserves an unverified similarly named application", async 
 test("Desktop launch starts the app directly with the private shim injected", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-launch-");
   try {
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" } });
     const calls = [];
     const result = await launchDesktop({ statePath: state, environment: { HOME: "/test/home", KEEP: "yes", CODEX_CLI_PATH: "/wrong/codex" }, spawn(command, args, options) { calls.push({ command, args, options }); const child = new EventEmitter(); child.pid = 4242; child.unref = () => { calls[0].unref = true; }; queueMicrotask(() => child.emit("spawn")); return child; } });
     assert.deepEqual(calls[0], { command: app, args: [], unref: true, options: { detached: true, stdio: "ignore", env: { HOME: "/test/home", KEEP: "yes", CODEX_CLI_PATH: record.shim_path } } });
@@ -227,10 +228,10 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   try {
     await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" } });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
     await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", RECORD_PATH: recordPath } });
-    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|launcher-token`);
+    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://staging.example.test`);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

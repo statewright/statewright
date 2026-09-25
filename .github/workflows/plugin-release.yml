@@ -96,6 +96,7 @@ jobs:
           node --test plugins/executor/tests/license-metadata.test.mjs
           node --test plugins/executor/tests/plugin-release-workflow.test.mjs
           if [ "$DIRECTORY" = "plugins/codex" ]; then
+            node plugins/codex/scripts/sync-desktop-runtime.mjs --check
             node --test plugins/codex/tests/*.test.mjs
             bash -n plugins/codex/hook.sh plugins/codex/client-id.sh plugins/codex/mcp-proxy.sh
           else

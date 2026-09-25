@@ -18,6 +18,12 @@ tasks:
       - node plugins/codex/scripts/sync-executor-core.mjs
       - node plugins/codex/scripts/sync-executor-core.mjs --check
 
+  plugins:sync-desktop-runtime:
+    desc: "Refresh the Codex marketplace bundle for the opt-in Desktop routing broker"
+    cmds:
+      - node plugins/codex/scripts/sync-desktop-runtime.mjs
+      - node plugins/codex/scripts/sync-desktop-runtime.mjs --check
+
   plugins:sync-claude-managed-client:
     desc: "Refresh the Claude marketplace bundle for transparent managed routing"
     cmds:
@@ -40,6 +46,7 @@ tasks:
     cmds:
       - node plugins/executor/scripts/sync-error-reporting.mjs --check
       - node plugins/codex/scripts/sync-executor-core.mjs --check
+      - node plugins/codex/scripts/sync-desktop-runtime.mjs --check
       - node plugins/claude-code/scripts/sync-managed-client.mjs --check
       - node --check plugins/executor/tests/unix-plugin-live-gateway-canary.mjs
       - node --check plugins/executor/tests/windows-managed-client-canary.mjs

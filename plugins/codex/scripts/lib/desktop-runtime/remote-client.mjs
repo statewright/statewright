@@ -1,0 +1,134 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const MAX_GATEWAY_ERROR_BYTES = 4 * 1024;
+
+function sanitizeGatewayError(value) {
+  return String(value)
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/\bsw_(?:live|test)_[A-Za-z0-9_-]+\b/g, "sw_[redacted]")
+    .slice(0, MAX_GATEWAY_ERROR_BYTES);
+}
+
+async function gatewayErrorDetail(response) {
+  const raw = await response.text().catch(() => "");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.error === "string") return sanitizeGatewayError(parsed.error);
+    if (typeof parsed?.error?.message === "string") {
+      return sanitizeGatewayError(parsed.error.message);
+    }
+  } catch {}
+  return sanitizeGatewayError(raw);
+}
+
+export function gatewayEndpoint(value) {
+  const url = new URL(value);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Gateway identity must be an HTTP URL without credentials, query or fragment");
+  }
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path.endsWith("/mcp") ? path : `${path}/mcp`;
+  return url.href;
+}
+
+export async function resolveApiKey(environment = process.env, home = homedir()) {
+  if (environment.STATEWRIGHT_API_KEY?.trim()) {
+    return environment.STATEWRIGHT_API_KEY.trim();
+  }
+  return (await readFile(join(home, ".statewright", "api_key"), "utf8")).trim();
+}
+
+export class RemoteStatewrightClient {
+  constructor(options) {
+    this.endpoint = gatewayEndpoint(options.gatewayUrl);
+    this.gatewayOrigin = new URL(this.endpoint).origin;
+    this.apiKey = options.apiKey;
+    this.clientId = options.clientId;
+    this.sessionId = options.sessionId;
+    this.expectedSessionId = options.expectedSessionId;
+    this.requireNegotiatedSessionId = options.requireNegotiatedSessionId ?? false;
+    this.fetch = options.fetch ?? globalThis.fetch;
+    this.requestId = 1;
+  }
+
+  headers() {
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+      "X-Statewright-Client-Id": this.clientId,
+      "Mcp-Session-Id": this.sessionId,
+    };
+  }
+
+  async initialize() {
+    await this.request("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "statewright-executor", version: "0.1.0" },
+    });
+  }
+
+  async call(name, args = {}) {
+    const result = await this.request("tools/call", {
+      name,
+      arguments: args,
+    });
+    if (result?.isError) {
+      const detail = result.content?.[0]?.text ?? `Statewright tool '${name}' failed.`;
+      throw new Error(detail);
+    }
+    const text = result?.content?.[0]?.text;
+    if (!text) return result ?? null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { _raw: text };
+    }
+  }
+
+  async supportsExactRunResume() {
+    const result = await this.request("tools/list", {});
+    const tool = result?.tools?.find(tool => tool.name === "statewright_load_workflow");
+    return tool?.inputSchema?.properties?.run_id?.type === "string"
+      && tool.inputSchema.properties.run_id.minLength === 1;
+  }
+
+  async request(method, params) {
+    const response = await this.fetch(this.endpoint, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: this.requestId++,
+        method,
+        params,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      const detail = await gatewayErrorDetail(response);
+      throw new Error(
+        `Statewright gateway ${method} failed with HTTP ${response.status}`
+        + `${detail ? `: ${detail}` : "."}`,
+      );
+    }
+    const payload = await response.json();
+    const negotiated = response.headers?.get("mcp-session-id");
+    if (method === "initialize") {
+      if (this.requireNegotiatedSessionId && !negotiated) throw new Error("Gateway did not return its authoritative MCP session identity");
+      if (this.expectedSessionId && negotiated !== this.expectedSessionId) {
+        throw new Error("Gateway MCP session ownership identity changed; resume denied");
+      }
+      if (negotiated) this.sessionId = negotiated;
+    } else if (this.requireNegotiatedSessionId && negotiated !== this.sessionId) {
+      throw new Error("Gateway MCP session ownership identity changed; continuation denied");
+    }
+    if (payload.error) {
+      throw new Error(payload.error.message ?? JSON.stringify(payload.error));
+    }
+    return payload.result;
+  }
+}

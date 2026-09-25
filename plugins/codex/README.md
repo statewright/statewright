@@ -132,6 +132,34 @@ and marked shell-path block.
 The explicit `statewright-codex-tui.mjs` launcher remains available for scripts
 that want to name the workflow and bootstrap route up front.
 
+### ChatGPT Desktop routing (experimental, macOS)
+
+The same `statewright` Codex plugin can optionally route Desktop App Server
+turns. It is a single-thread experimental broker: it does not patch or
+redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
+chats, approvals, or generated-answer correctness.
+
+After installing or updating the plugin, enable it explicitly:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs doctor
+```
+
+Setup records the current vendor `CODEX_CLI_PATH`, creates a private
+Statewright shim, generates one Desktop managed-client identity, and replaces
+only that config value. Quit and reopen ChatGPT.app after enabling or disabling
+the broker. To roll back, run:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
+```
+
+`disable` refuses to overwrite a `CODEX_CLI_PATH` changed by the user after
+setup. Re-run `enable` after updating the plugin so its private shim points at
+the newly installed runtime. A signed-in vendor route canary remains an
+operator-only check; it is not run during installation.
+
 ### Native workflow approvals (experimental App Server mode)
 
 The standalone Statewright managed client owns the native approval controller,

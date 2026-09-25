@@ -100,6 +100,7 @@ TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/../executor/statewright-managed-client.mjs"
+DESKTOP_SETUP="${SCRIPT_DIR}/scripts/statewright-desktop-setup.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
@@ -197,6 +198,13 @@ bootstrap_native_token_telemetry
 # idempotent, and only touches a shell profile when a supported client exists.
 if command -v node >/dev/null 2>&1 && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
   node "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
+fi
+
+# Desktop routing is an opt-in application surface.  Provision its stable
+# user-local launcher from the installed plugin path; opening that app remains
+# the user's explicit routing action.
+if [ "$(uname -s)" = "Darwin" ] && [ -x "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" ] && [ -f "$DESKTOP_SETUP" ] && command -v node >/dev/null 2>&1; then
+  node "$DESKTOP_SETUP" provision >/dev/null 2>&1 || true
 fi
 
 CLIENT_ID=$(statewright_client_id codex)

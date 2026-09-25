@@ -139,27 +139,29 @@ turns. It is a single-thread experimental broker: it does not patch or
 redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
 chats, approvals, or generated-answer correctness.
 
-After installing or updating the plugin, enable it explicitly:
+On macOS, open a chat that uses the installed Statewright plugin once. Its MCP
+startup quietly provisions **ChatGPT + Statewright** in your user Applications
+folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
+from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
+shim only for that process tree; normal ChatGPT launches are unchanged.
+
+### Developer troubleshooting
+
+The CLI is not part of plugin-user installation. It is only for developers
+diagnosing a local checkout or recovering a failed development setup:
 
 ```bash
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs doctor
-```
-
-Setup records the current launchd `CODEX_CLI_PATH` value, creates a private
-Statewright shim, generates one Desktop managed-client identity, and sets that
-environment variable for future macOS GUI processes. Quit and reopen ChatGPT.app
-after enabling or disabling the broker. To roll back, run:
-
-```bash
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
 
-`disable` refuses to overwrite a launchd `CODEX_CLI_PATH` changed by the user
-after setup, and restores the exact prior launchd value (or unsets it when it
-was absent). Re-run `enable` after updating the plugin so its private shim
-points at the newly installed runtime. A signed-in vendor route canary remains
-an operator-only check; it is not run during installation.
+When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
+value only if the launchd value still points to the recorded Statewright shim;
+otherwise it refuses to overwrite the user's setting. Re-run `enable` after
+updating the plugin so its private shim points at the newly installed runtime.
+A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
+chat remain required before this is release-ready.
 
 ### Native workflow approvals (experimental App Server mode)
 

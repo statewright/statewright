@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback, spawn as spawnCallback } from "node:child_process";
-import { access, chmod, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -326,7 +326,13 @@ export async function readDesktopState(path = defaultDesktopStatePath()) {
   return state;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function invokedAsEntryPoint(argument = process.argv[1]) {
+  if (!argument) return false;
+  try { return await realpath(argument) === await realpath(fileURLToPath(import.meta.url)); }
+  catch { return resolve(argument) === fileURLToPath(import.meta.url); }
+}
+
+if (await invokedAsEntryPoint()) {
   const options = parseDesktopArgs(process.argv.slice(2));
   let result;
   if (options.command === "enable") result = await enableDesktop({ statePath: options.state, original: options.original, wrapper: options.wrapper, app: options.app });

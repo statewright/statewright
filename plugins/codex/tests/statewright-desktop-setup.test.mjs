@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { desktopDoctor, disableDesktop, enableDesktop, launchDesktop, provisionDesktop, withDesktopLock } from "../scripts/statewright-desktop-setup.mjs";
 
@@ -27,6 +28,20 @@ async function fixture(prefix) {
   await Promise.all([executable(vendor), executable(app), moduleFile(wrapper)]);
   return { root, state, vendor, app, applications, wrapper };
 }
+
+test("Desktop setup CLI executes through an installed-plugin symlink", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-desktop-symlink-entrypoint-"));
+  const link = join(root, "statewright-desktop-setup.mjs");
+  const state = join(root, "missing-state.json");
+  try {
+    await symlink(fileURLToPath(new URL("../scripts/statewright-desktop-setup.mjs", import.meta.url)), link);
+    let failure;
+    try { await execFile(process.execPath, [link, "doctor", "--state", state]); }
+    catch (error) { failure = error; }
+    assert.ok(failure, "doctor should execute and report an unconfigured state");
+    assert.deepEqual(JSON.parse(failure.stdout), { ok: false, reason: "not_configured", state_path: state });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("Desktop setup creates an explicit-launch shim without mutating launchd", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-setup-");

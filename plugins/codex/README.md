@@ -162,19 +162,6 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs do
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
 
-Statewright developers can provision a completely separate staging launcher:
-
-```bash
-gopass show -o statewright/staging/api-key > ~/.statewright/staging_api_key
-chmod 600 ~/.statewright/staging_api_key
-node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs provision --profile staging
-```
-
-This creates **ChatGPT + Statewright Staging**, bound to the staging gateway and
-`~/.statewright/staging_api_key`. Its app, state file, shim, and client identity
-are separate from the production launcher. The staging profile is not created
-by ordinary plugin installation.
-
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;
 otherwise it refuses to overwrite the user's setting. Re-run `enable` after
@@ -217,7 +204,7 @@ CODEX_BIN=/path/to/codex task test:codex-native-approvals:vendor
 
 It exercises the installed vendor protocol with
 no inference or real approval decision. These are not desktop/Windows GUI or
-live staging journey certificates. Marketplace release packaging and the live
+pre-release journey certificates. Marketplace release packaging and the live
 pause/approve/resume road test remain separate release gates.
 
 Start a workflow via MCP tool:

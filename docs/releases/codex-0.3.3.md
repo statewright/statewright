@@ -23,9 +23,7 @@ correctness improvements. It does not patch or redistribute ChatGPT.app.
   process tree whose first turn waits for native Statewright-tool registration,
   preventing a fast prompt from racing MCP startup.
 - The standard launcher is bound to the production gateway and the user's
-  `~/.statewright/api_key`; ordinary ChatGPT launches remain unchanged. A
-  separate staging launcher is developer-only and is not created by normal
-  plugin installation.
+  `~/.statewright/api_key`; ordinary ChatGPT launches remain unchanged.
 
 ## Safety boundary
 

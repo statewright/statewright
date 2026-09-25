@@ -5,7 +5,6 @@
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "dependencies": {
-    "@iarna/toml": "^3.0.0",
     "@sentry/node": "^10.69.0",
     "ws": "^8.21.3"
   }

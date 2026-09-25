@@ -4,7 +4,9 @@ import { mkdir } from "node:fs/promises";
 import { WebSocket } from "ws";
 import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
+import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
+import { resolveApiKey } from "./remote-client.mjs";
 
 // A Desktop broker is a separate managed client. These names carry process
 // handles owned by a parent TUI/session and must not escape into Desktop.
@@ -26,6 +28,16 @@ export function desktopBrokerEnvironment(environment, { controlDir, clientId }) 
     STATEWRIGHT_MANAGED_CLIENT_HOST: "codex",
     STATEWRIGHT_CLIENT_ID: clientId,
   };
+}
+
+export async function startDesktopMcpBridge({ environment, clientId, bridgeFactory = options => new ManagedMcpBridge(options) }) {
+  const bridge = bridgeFactory({
+    gatewayUrl: environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
+    apiKey: await resolveApiKey(environment),
+    clientId,
+  });
+  await bridge.start();
+  return bridge;
 }
 
 function nonEmpty(value) {
@@ -56,7 +68,8 @@ export function desktopAppServerLaunchPlan(argv, environment = process.env, home
 
 export async function runDesktopAppServerBroker({
   argv = process.argv.slice(2), environment = process.env, stdin = process.stdin, stdout = process.stdout, stderr = process.stderr,
-  startRuntime = startCodexAppServerRuntime, WebSocketImpl = WebSocket, home = homedir(), setExitCode = code => { process.exitCode = code; },
+  startRuntime = startCodexAppServerRuntime, startMcpBridge = startDesktopMcpBridge,
+  WebSocketImpl = WebSocket, home = homedir(), setExitCode = code => { process.exitCode = code; },
 } = {}) {
   const plan = desktopAppServerLaunchPlan(argv, environment, home);
   // A Desktop install may be the first Statewright client on this machine.
@@ -86,16 +99,27 @@ export async function runDesktopAppServerBroker({
       reject("Statewright Desktop broker only permits its registered Desktop thread; this request was not forwarded.");
     }
   };
-  const managedEnvironment = desktopBrokerEnvironment(environment, plan);
-  const runtime = await startRuntime({
-    command: plan.command,
-    environment: managedEnvironment,
-    clientId: plan.clientId,
-    nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
-    onThreadStarted: claimThread,
-    authorizeThread,
-    stderr,
-  });
+  const isolatedEnvironment = desktopBrokerEnvironment(environment, plan);
+  const bridge = await startMcpBridge({ environment: isolatedEnvironment, clientId: plan.clientId });
+  let runtime;
+  try {
+    runtime = await startRuntime({
+      command: plan.command,
+      environment: {
+        ...isolatedEnvironment,
+        STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
+        STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+      },
+      clientId: plan.clientId,
+      nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
+      onThreadStarted: claimThread,
+      authorizeThread,
+      stderr,
+    });
+  } catch (error) {
+    await bridge.close().catch(() => {});
+    throw error;
+  }
   const socket = new WebSocketImpl(runtime.proxyUrl);
   let closing = null;
   let buffer = "";
@@ -120,7 +144,11 @@ export async function runDesktopAppServerBroker({
     stdin.pause?.();
     for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
     if (socket.readyState === WebSocketImpl.OPEN || socket.readyState === WebSocketImpl.CONNECTING) socket.close();
+    try {
       await runtime.close();
+    } finally {
+      await bridge.close();
+    }
     })().catch(error => {
       setExitCode(1);
       throw error;

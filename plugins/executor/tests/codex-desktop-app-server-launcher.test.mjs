@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { WebSocketServer } from "ws";
-import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, runDesktopAppServerBroker } from "../lib/codex-desktop-app-server-launcher.mjs";
+import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, runDesktopAppServerBroker, startDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
+
+function fakeMcpBridge(onClose = () => {}) {
+  return async () => ({
+    url: "http://127.0.0.1:43123",
+    token: "desktop-bridge-token",
+    close: async () => onClose(),
+  });
+}
 
 test("Desktop broker is explicit, app-server-only, isolated, and client scoped", () => {
   const environment = {
@@ -45,6 +53,24 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
   ]) assert.equal(child[name], undefined, `${name} must not escape the parent session`);
 });
 
+test("Desktop bridge owns gateway authentication outside the App Server sandbox", async () => {
+  let started = 0;
+  const bridge = await startDesktopMcpBridge({
+    environment: { STATEWRIGHT_API_KEY: "desktop-api-key", STATEWRIGHT_GATEWAY_URL: "https://example.test/mcp" },
+    clientId: "swc_0123456789abcdef0123456789abcdef",
+    bridgeFactory: options => {
+      assert.deepEqual(options, {
+        gatewayUrl: "https://example.test/mcp",
+        apiKey: "desktop-api-key",
+        clientId: "swc_0123456789abcdef0123456789abcdef",
+      });
+      return { start: async () => { started += 1; } };
+    },
+  });
+  assert.equal(started, 1);
+  assert.ok(bridge);
+});
+
 test("Desktop broker buffers an immediate stdio request and initializes its private route boundary", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-desktop-control-"));
   const controlDir = join(home, ".statewright", "codex-desktop-app-server", "swc_0123456789abcdef0123456789abcdef", "routes");
@@ -60,6 +86,7 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
     socket.once("message", raw => resolve(String(raw)));
   }));
   let closed = 0;
+  let bridgeClosed = 0;
   let launch;
   try {
     launch = await runDesktopAppServerBroker({
@@ -73,12 +100,15 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
       stdin,
       stdout,
       stderr,
+      startMcpBridge: fakeMcpBridge(() => { bridgeClosed += 1; }),
       startRuntime: async options => {
         assert.equal(typeof options.onThreadStarted, "function");
         assert.equal(typeof options.authorizeThread, "function");
         assert.equal(options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR, controlDir);
         assert.equal(options.environment.STATEWRIGHT_MANAGED_CLIENT_HOST, "codex");
         assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
+        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43123");
+        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "desktop-bridge-token");
         await options.onThreadStarted({ threadId: "desktop-thread" });
         return { proxyUrl: `ws://127.0.0.1:${address.port}`, close: async () => { closed += 1; } };
       },
@@ -94,6 +124,7 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
   } finally {
     await launch?.close();
     assert.equal(closed, 1);
+    assert.equal(bridgeClosed, 1);
     upstreamSocket?.terminate();
     await new Promise(resolve => upstream.close(resolve));
     await rm(home, { recursive: true, force: true });
@@ -120,9 +151,27 @@ test("Desktop broker ignores an inherited parent route directory and refuses a c
         STATEWRIGHT_ROUTE_CONTROL_DIR: foreign,
       },
       startRuntime: async () => { started = true; throw new Error("must not start"); },
+      startMcpBridge: fakeMcpBridge(),
     }), /refused to replace/);
     assert.equal(started, false);
     assert.equal(await readFile(join(foreign, "identity.json"), "utf8"), "parent-bytes\n");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker closes its MCP bridge when App Server startup fails", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-start-failure-"));
+  let bridgeClosed = 0;
+  try {
+    await assert.rejects(() => runDesktopAppServerBroker({
+      argv: ["app-server"], home, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      environment: {
+        STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
+        STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
+      },
+      startMcpBridge: fakeMcpBridge(() => { bridgeClosed += 1; }),
+      startRuntime: async () => { throw new Error("app server startup failed"); },
+    }), /app server startup failed/);
+    assert.equal(bridgeClosed, 1);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -141,6 +190,7 @@ test("Desktop broker reserves its only new-thread slot before vendor forwarding"
         STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
         STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
       },
+      startMcpBridge: fakeMcpBridge(),
       startRuntime: async options => {
         authorize = options.authorizeThread;
         return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, close: async () => {} };
@@ -173,6 +223,7 @@ test("Desktop broker detaches open stdin when its backend closes", async () => {
         STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
         STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
       },
+      startMcpBridge: fakeMcpBridge(),
       startRuntime: async () => ({
         proxyUrl: `ws://127.0.0.1:${upstream.address().port}`,
         close: async () => { closed += 1; },

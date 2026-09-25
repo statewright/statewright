@@ -12,16 +12,45 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_VENDOR_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex";
 const DEFAULT_DESKTOP_EXECUTABLE = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT";
-const DESKTOP_APP_NAME = "ChatGPT + Statewright.app";
-const DESKTOP_APP_EXECUTABLE = "ChatGPT + Statewright";
 const LEGACY_DESKTOP_APP_NAME = "Statewright ChatGPT.app";
 const LEGACY_DESKTOP_APP_EXECUTABLE = "Statewright ChatGPT";
 const DEFAULT_LAUNCHCTL = "/bin/launchctl";
 const DESKTOP_ENVIRONMENT_KEY = "CODEX_CLI_PATH";
 const DESKTOP_LOCK_TIMEOUT_MS = 5_000;
+const DESKTOP_PROFILES = Object.freeze({
+  production: Object.freeze({
+    name: "production",
+    appName: "ChatGPT + Statewright.app",
+    displayName: "ChatGPT + Statewright",
+    executableName: "ChatGPT + Statewright",
+    bundleId: "ai.statewright.chatgpt",
+    stateFile: "codex-desktop.json",
+    shimName: "statewright-desktop-codex",
+    launcherName: "statewright-desktop-launch.mjs",
+    gatewayUrl: "https://mcp.statewright.ai",
+    apiKeyFile: "api_key",
+  }),
+  staging: Object.freeze({
+    name: "staging",
+    appName: "ChatGPT + Statewright Staging.app",
+    displayName: "ChatGPT + Statewright Staging",
+    executableName: "ChatGPT + Statewright Staging",
+    bundleId: "ai.statewright.chatgpt.staging",
+    stateFile: "codex-desktop-staging.json",
+    shimName: "statewright-desktop-codex-staging",
+    launcherName: "statewright-desktop-staging-launch.mjs",
+    gatewayUrl: "https://statewright-mcp.casa.enhasa.cloud",
+    apiKeyFile: "staging_api_key",
+  }),
+});
 const execFile = promisify(execFileCallback);
 
-export function defaultDesktopStatePath(home = homedir()) { return join(home, ".statewright", "codex-desktop.json"); }
+function desktopProfile(name = "production") {
+  const profile = DESKTOP_PROFILES[name];
+  if (!profile) throw new Error(`Unknown Desktop profile: ${name}. Expected production or staging.`);
+  return profile;
+}
+export function defaultDesktopStatePath(home = homedir(), profile = "production") { return join(home, ".statewright", desktopProfile(profile).stateFile); }
 export function defaultDesktopApplicationsDirectory(home = homedir()) { return join(home, "Applications"); }
 function desktopDisabledPath(statePath) { return `${statePath}.disabled`; }
 function desktopLockPath(statePath) { return `${statePath}.lock`; }
@@ -129,11 +158,11 @@ try {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   await access(state.desktop_executable, constants.X_OK);
   await access(state.shim_path, constants.X_OK);
+  const apiKey = (await readFile(state.api_key_path, "utf8")).trim();
+  if (!apiKey) throw new Error(\`Statewright API key is empty: \${state.api_key_path}\`);
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
   const { startDesktopMcpBridge } = await import(runtimeUrl);
-  const bridgeEnvironment = state.gateway_url
-    ? { ...process.env, STATEWRIGHT_GATEWAY_URL: state.gateway_url }
-    : process.env;
+  const bridgeEnvironment = { ...process.env, STATEWRIGHT_GATEWAY_URL: state.gateway_url, STATEWRIGHT_API_KEY: apiKey };
   const bridge = await startDesktopMcpBridge({ environment: bridgeEnvironment, clientId: state.client_id });
   const child = spawn(state.desktop_executable, [], {
     detached: false,
@@ -163,15 +192,15 @@ try {
 }
 `;
 }
-function desktopAppContents(launcherPath, nodeExecutable) {
-  return `#!/bin/sh\nif ! ${shellQuote(nodeExecutable)} ${shellQuote(launcherPath)}; then\n  /usr/bin/osascript -e 'display alert "ChatGPT + Statewright could not start" message "Quit ChatGPT completely, then open ChatGPT + Statewright again."' >/dev/null 2>&1 || true\n  exit 1\nfi\n`;
+function desktopAppContents(launcherPath, nodeExecutable, displayName) {
+  return `#!/bin/sh\nif ! ${shellQuote(nodeExecutable)} ${shellQuote(launcherPath)}; then\n  /usr/bin/osascript -e 'display alert "${displayName} could not start" message "Quit ChatGPT completely, then open ${displayName} again."' >/dev/null 2>&1 || true\n  exit 1\nfi\n`;
 }
-async function installDesktopApp({ statePath, applicationsDirectory, nodeExecutable, writeAtomicFn }) {
-  const launcherPath = join(dirname(statePath), "bin", "statewright-desktop-launch.mjs");
-  const appPath = join(applicationsDirectory, DESKTOP_APP_NAME);
+async function installDesktopApp({ statePath, applicationsDirectory, nodeExecutable, profile, writeAtomicFn }) {
+  const launcherPath = join(dirname(statePath), "bin", profile.launcherName);
+  const appPath = join(applicationsDirectory, profile.appName);
   await writeAtomicFn(launcherPath, desktopLauncherContents(statePath), 0o700);
-  await writeAtomicFn(join(appPath, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleDisplayName</key><string>ChatGPT + Statewright</string><key>CFBundleExecutable</key><string>${DESKTOP_APP_EXECUTABLE}</string><key>CFBundleIdentifier</key><string>ai.statewright.chatgpt</string><key>CFBundleName</key><string>ChatGPT + Statewright</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`, 0o600);
-  await writeAtomicFn(join(appPath, "Contents", "MacOS", DESKTOP_APP_EXECUTABLE), desktopAppContents(launcherPath, nodeExecutable), 0o700);
+  await writeAtomicFn(join(appPath, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleDisplayName</key><string>${profile.displayName}</string><key>CFBundleExecutable</key><string>${profile.executableName}</string><key>CFBundleIdentifier</key><string>${profile.bundleId}</string><key>CFBundleName</key><string>${profile.displayName}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`, 0o600);
+  await writeAtomicFn(join(appPath, "Contents", "MacOS", profile.executableName), desktopAppContents(launcherPath, nodeExecutable, profile.displayName), 0o700);
   return { appPath, launcherPath };
 }
 async function removeVerifiedLegacyDesktopApp(applicationsDirectory) {
@@ -184,18 +213,18 @@ async function removeVerifiedLegacyDesktopApp(applicationsDirectory) {
   await rm(appPath, { recursive: true, force: true });
   return true;
 }
-async function removeVerifiedDesktopApp(appPath) {
+async function removeVerifiedDesktopApp(appPath, profile) {
   if (!appPath) return false;
   const infoPath = join(appPath, "Contents", "Info.plist");
-  const executablePath = join(appPath, "Contents", "MacOS", DESKTOP_APP_EXECUTABLE);
+  const executablePath = join(appPath, "Contents", "MacOS", profile.executableName);
   let info;
   try { info = await readFile(infoPath, "utf8"); } catch (error) { if (error?.code === "ENOENT") return false; throw error; }
-  if (!info.includes("<string>ai.statewright.chatgpt</string>") || !await executable(executablePath)) return false;
+  if (!info.includes(`<string>${profile.bundleId}</string>`) || !await executable(executablePath)) return false;
   await rm(appPath, { recursive: true, force: true });
   return true;
 }
-async function removeVerifiedDesktopLauncher(statePath) {
-  const launcherPath = join(dirname(statePath), "bin", "statewright-desktop-launch.mjs");
+async function removeVerifiedDesktopLauncher(statePath, profile, recordedPath) {
+  const launcherPath = recordedPath ?? join(dirname(statePath), "bin", profile.launcherName);
   let contents;
   try { contents = await readFile(launcherPath, "utf8"); } catch (error) { if (error?.code === "ENOENT") return false; throw error; }
   if (!contents.includes(`const statePath = ${JSON.stringify(statePath)};`)) return false;
@@ -225,14 +254,16 @@ export function parseDesktopArgs(argv) {
     const value = rest[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const key = value.slice(2);
-    if (!["state", "original", "wrapper", "app"].includes(key)) throw new Error(`Unknown option: ${value}`);
+    if (!["state", "original", "wrapper", "app", "profile"].includes(key)) throw new Error(`Unknown option: ${value}`);
     options[key] = rest[++index];
     if (!options[key]) throw new Error(`${value} requires a value.`);
   }
+  if (options.profile) desktopProfile(options.profile);
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, environment = process.env, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
+  const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
   const vendor = resolve(original ?? DEFAULT_VENDOR_CODEX);
@@ -240,24 +271,19 @@ async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SC
   const nodeExecutable = resolve(node);
   const desktopExecutable = resolve(app);
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
-  const launcherAppPath = join(desktopApplicationsDirectory, DESKTOP_APP_NAME);
-  const shim = join(dirname(resolvedState), "bin", "statewright-desktop-codex");
-  const gatewayUrl = String(environment.STATEWRIGHT_GATEWAY_URL ?? existing?.gateway_url ?? "").trim() || null;
-  if (gatewayUrl) {
-    const parsedGateway = new URL(gatewayUrl);
-    if (!["http:", "https:"].includes(parsedGateway.protocol) || parsedGateway.username || parsedGateway.password || parsedGateway.search || parsedGateway.hash) {
-      throw new Error("Statewright Desktop gateway must be an HTTP URL without credentials, query, or fragment.");
-    }
-  }
+  const launcherAppPath = join(desktopApplicationsDirectory, profile.appName);
+  const shim = join(dirname(resolvedState), "bin", profile.shimName);
+  const gatewayUrl = profile.gatewayUrl;
+  const apiKeyPath = join(dirname(resolvedState), profile.apiKeyFile);
   if (!await executable(vendor)) throw new Error(`Desktop vendor executable is not executable: ${vendor}`);
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);
   if (!await executable(nodeExecutable)) throw new Error(`Node executable is not executable: ${nodeExecutable}`);
   if (!await readable(runtime)) throw new Error(`Desktop broker module is not readable: ${runtime}`);
-  if (existing && existing.version !== 2 && (existing.version !== 3 || existing.shim_path !== shim || existing.original_codex !== vendor || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
+  if (existing && existing.version !== 2 && (existing.version !== 3 || (existing.profile ?? "production") !== profile.name || existing.shim_path !== shim || existing.original_codex !== vendor || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
   const legacyPath = await legacyLaunchdPath(existing, { launchctlExecFile, launchctlPath });
   const state = existing?.version === 3
-    ? { ...existing, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
-    : { version: 3, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+    ? { ...existing, profile: profile.name, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, api_key_path: apiKeyPath }
+    : { version: 3, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, api_key_path: apiKeyPath, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
   await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
   await writeAtomicFn(shim, `#!/bin/sh\nSTATEWRIGHT_DESKTOP_STATE_PATH=${shellQuote(resolvedState)} exec ${shellQuote(nodeExecutable)} ${shellQuote(runtime)} "$@"\n`, 0o700);
   if (legacyPath) {
@@ -270,13 +296,14 @@ async function enableDesktopUnlocked({ statePath, original, wrapper = resolve(SC
       throw error;
     }
   } else await writeAtomicFn(resolvedState, `${JSON.stringify(state, null, 2)}\n`, 0o600);
-  const desktopApp = await installDesktopApp({ statePath: resolvedState, applicationsDirectory: desktopApplicationsDirectory, nodeExecutable, writeAtomicFn });
-  await removeVerifiedLegacyDesktopApp(desktopApplicationsDirectory);
+  const desktopApp = await installDesktopApp({ statePath: resolvedState, applicationsDirectory: desktopApplicationsDirectory, nodeExecutable, profile, writeAtomicFn });
+  if (profile.name === "production") await removeVerifiedLegacyDesktopApp(desktopApplicationsDirectory);
   return { ...state, launcher_app_path: desktopApp.appPath, launcher_path: desktopApp.launcherPath };
 }
 
 export async function enableDesktop(options = {}) {
-  const resolvedState = resolve(options.statePath ?? defaultDesktopStatePath(homedir()));
+  const profile = options.profile ?? "production";
+  const resolvedState = resolve(options.statePath ?? defaultDesktopStatePath(homedir(), profile));
   return withDesktopLock(resolvedState, async () => {
     await rm(desktopDisabledPath(resolvedState), { force: true });
     return enableDesktopUnlocked({ ...options, statePath: resolvedState });
@@ -284,7 +311,8 @@ export async function enableDesktop(options = {}) {
 }
 
 export async function provisionDesktop(options = {}) {
-  const resolvedState = resolve(options.statePath ?? defaultDesktopStatePath(homedir()));
+  const profile = options.profile ?? "production";
+  const resolvedState = resolve(options.statePath ?? defaultDesktopStatePath(homedir(), profile));
   if (await readable(desktopDisabledPath(resolvedState))) return { skipped: "disabled", state_path: resolvedState };
   return withDesktopLock(resolvedState, async () => {
     if (await readable(desktopDisabledPath(resolvedState))) return { skipped: "disabled", state_path: resolvedState };
@@ -292,15 +320,16 @@ export async function provisionDesktop(options = {}) {
   });
 }
 
-export async function launchDesktop({ statePath, spawn = spawnCallback, environment = process.env } = {}) {
-  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir()));
+export async function launchDesktop({ statePath, profile: profileName = "production", spawn = spawnCallback, environment = process.env } = {}) {
+  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir(), profileName));
   const state = await readDesktopState(resolvedState);
-  if (!state.desktop_executable || !await executable(state.desktop_executable)) throw new Error("ChatGPT Desktop executable is unavailable; rerun enable with --app after installing ChatGPT.app.");
-  if (!await executable(state.shim_path)) throw new Error("Statewright Desktop shim is unavailable; rerun enable first.");
-  const child = spawn(state.desktop_executable, [], { detached: true, stdio: "ignore", env: { ...environment, [DESKTOP_ENVIRONMENT_KEY]: state.shim_path } });
+  const profile = desktopProfile(state.profile ?? profileName);
+  const launcherExecutable = state.launcher_app_path && join(state.launcher_app_path, "Contents", "MacOS", profile.executableName);
+  if (!launcherExecutable || !await executable(launcherExecutable)) throw new Error(`${profile.displayName} is unavailable; rerun enable first.`);
+  const child = spawn(launcherExecutable, [], { detached: true, stdio: "ignore", env: environment });
   await waitForDesktopStartup(child);
   child.unref?.();
-  return { started: true, desktop_executable: state.desktop_executable, shim_path: state.shim_path, client_id: state.client_id, pid: child.pid ?? null, note: "Process startup is confirmed only; verify direct MCP tools and route receipt in a fresh Desktop code chat." };
+  return { started: true, desktop_executable: launcherExecutable, shim_path: state.shim_path, client_id: state.client_id, pid: child.pid ?? null, note: "Process startup is confirmed only; verify direct MCP tools and route receipt in a fresh Desktop code chat." };
 }
 
 function waitForDesktopStartup(child, graceMs = 250) {
@@ -327,29 +356,32 @@ function waitForDesktopStartup(child, graceMs = 250) {
   });
 }
 
-export async function disableDesktop({ statePath, launchctlExecFile = execFile, launchctlPath } = {}) {
-  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir()));
+export async function disableDesktop({ statePath, profile: profileName = "production", launchctlExecFile = execFile, launchctlPath } = {}) {
+  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir(), profileName));
   return withDesktopLock(resolvedState, async () => {
     await writeAtomic(desktopDisabledPath(resolvedState), "disabled\n", 0o600);
     const state = await readOptionalJson(resolvedState);
     if (!state) return { disabled: true, state_path: resolvedState, app_removed: false, launcher_removed: false };
+    const profile = desktopProfile(state.profile ?? profileName);
     await removeLegacyLaunchdOverride(state, { launchctlExecFile, launchctlPath });
-    const appRemoved = await removeVerifiedDesktopApp(state.launcher_app_path);
-    const launcherRemoved = await removeVerifiedDesktopLauncher(resolvedState);
+    const appRemoved = await removeVerifiedDesktopApp(state.launcher_app_path, profile);
+    const launcherRemoved = await removeVerifiedDesktopLauncher(resolvedState, profile, state.launcher_path);
     await rm(state.shim_path, { force: true });
     await rm(resolvedState, { force: true });
     return { ...state, disabled: true, app_removed: appRemoved, launcher_removed: launcherRemoved };
   });
 }
 
-export async function desktopDoctor({ statePath } = {}) {
-  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir()));
+export async function desktopDoctor({ statePath, profile: profileName = "production" } = {}) {
+  const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir(), profileName));
   if (await readable(desktopDisabledPath(resolvedState))) return { ok: false, reason: "disabled", state_path: resolvedState };
   const state = await readOptionalJson(resolvedState);
   if (!state) return { ok: false, reason: "not_configured", state_path: resolvedState };
   if (state.version !== 3) return { ok: false, reason: "legacy_setup_requires_enable", state_path: resolvedState };
-  const launcherPath = state.launcher_app_path && join(state.launcher_app_path, "Contents", "MacOS", DESKTOP_APP_EXECUTABLE);
-  return { ok: await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath), state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, client_id: state.client_id, launch_mode: "explicit_process_environment" };
+  const profile = desktopProfile(state.profile ?? profileName);
+  const launcherPath = state.launcher_app_path && join(state.launcher_app_path, "Contents", "MacOS", profile.executableName);
+  const credentialPresent = Boolean(state.api_key_path) && await readable(state.api_key_path);
+  return { ok: await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath) && credentialPresent, profile: profile.name, state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, api_key_path: state.api_key_path ?? null, credential_present: credentialPresent, client_id: state.client_id, launch_mode: "explicit_process_environment" };
 }
 
 export async function readDesktopState(path = defaultDesktopStatePath()) {
@@ -367,11 +399,11 @@ async function invokedAsEntryPoint(argument = process.argv[1]) {
 if (await invokedAsEntryPoint()) {
   const options = parseDesktopArgs(process.argv.slice(2));
   let result;
-  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, original: options.original, wrapper: options.wrapper, app: options.app });
-  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, original: options.original, wrapper: options.wrapper, app: options.app });
-  else if (options.command === "launch") result = await launchDesktop({ statePath: options.state });
-  else if (options.command === "disable") result = await disableDesktop({ statePath: options.state });
-  else if (options.command === "doctor") result = await desktopDoctor({ statePath: options.state });
+  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, original: options.original, wrapper: options.wrapper, app: options.app });
+  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, original: options.original, wrapper: options.wrapper, app: options.app });
+  else if (options.command === "launch") result = await launchDesktop({ statePath: options.state, profile: options.profile });
+  else if (options.command === "disable") result = await disableDesktop({ statePath: options.state, profile: options.profile });
+  else if (options.command === "doctor") result = await desktopDoctor({ statePath: options.state, profile: options.profile });
   else throw new Error(`Unknown Desktop command: ${options.command}`);
   console.log(JSON.stringify(result));
   if (options.command === "doctor" && !result.ok) process.exitCode = 1;

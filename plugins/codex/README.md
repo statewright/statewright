@@ -145,6 +145,12 @@ folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
 from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
 shim only for that process tree; normal ChatGPT launches are unchanged.
 
+The installed plugin always binds this standard launcher to the production
+gateway (`https://mcp.statewright.ai`) and reads its credential from
+`~/.statewright/api_key`. The first Desktop turn is held briefly until the
+native App Server reports Statewright's tools as ready, so a fast first prompt
+cannot race MCP registration.
+
 ### Developer troubleshooting
 
 The CLI is not part of plugin-user installation. It is only for developers
@@ -155,6 +161,19 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs en
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs doctor
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
+
+Statewright developers can provision a completely separate staging launcher:
+
+```bash
+gopass show -o statewright/staging/api-key > ~/.statewright/staging_api_key
+chmod 600 ~/.statewright/staging_api_key
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs provision --profile staging
+```
+
+This creates **ChatGPT + Statewright Staging**, bound to the staging gateway and
+`~/.statewright/staging_api_key`. Its app, state file, shim, and client identity
+are separate from the production launcher. The staging profile is not created
+by ordinary plugin installation.
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;

@@ -27,11 +27,14 @@ async function fixture(prefix) {
   const wrapper = join(root, "plugin-wrapper.mjs");
   const desktopRuntime = join(root, "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs");
   await mkdir(dirname(desktopRuntime), { recursive: true });
+  await mkdir(dirname(state), { recursive: true });
   await Promise.all([
     executable(vendor),
     executable(app),
     moduleFile(wrapper),
-    writeFile(desktopRuntime, `export async function startDesktopMcpBridge({ environment }) { return { url: "http://127.0.0.1:43123", token: environment.STATEWRIGHT_GATEWAY_URL ?? "missing-gateway", close: async () => {} }; }\n`),
+    writeFile(join(dirname(state), "api_key"), "test-production-key\n", { mode: 0o600 }),
+    writeFile(join(dirname(state), "staging_api_key"), "test-staging-key\n", { mode: 0o600 }),
+    writeFile(desktopRuntime, `export async function startDesktopMcpBridge({ environment }) { return { url: "http://127.0.0.1:43123", token: \`${"${environment.STATEWRIGHT_GATEWAY_URL}"}|${"${environment.STATEWRIGHT_API_KEY}"}\`, close: async () => {} }; }\n`),
   ]);
   return { root, state, vendor, app, applications, wrapper };
 }
@@ -54,10 +57,12 @@ test("Desktop setup creates an explicit-launch shim without mutating launchd", a
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-setup-");
   const launchctl = launchctlHarness("/prior/codex");
   try {
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" }, launchctlExecFile: launchctl.exec });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, launchctlExecFile: launchctl.exec });
     assert.equal(record.version, 3);
     assert.equal(record.desktop_executable, app);
-    assert.equal(record.gateway_url, "https://staging.example.test");
+    assert.equal(record.profile, "production");
+    assert.equal(record.gateway_url, "https://mcp.statewright.ai");
+    assert.equal(record.api_key_path, join(dirname(state), "api_key"));
     assert.match(record.client_id, /^swc_[a-f0-9]{32}$/);
     assert.equal(launchctl.value, "/prior/codex");
     assert.equal(launchctl.calls.length, 0);
@@ -210,13 +215,13 @@ test("Desktop setup preserves an unverified similarly named application", async 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Desktop launch starts the app directly with the private shim injected", async () => {
+test("Desktop launch starts the generated profile app", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-launch-");
   try {
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" } });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const calls = [];
     const result = await launchDesktop({ statePath: state, environment: { HOME: "/test/home", KEEP: "yes", CODEX_CLI_PATH: "/wrong/codex" }, spawn(command, args, options) { calls.push({ command, args, options }); const child = new EventEmitter(); child.pid = 4242; child.unref = () => { calls[0].unref = true; }; queueMicrotask(() => child.emit("spawn")); return child; } });
-    assert.deepEqual(calls[0], { command: app, args: [], unref: true, options: { detached: true, stdio: "ignore", env: { HOME: "/test/home", KEEP: "yes", CODEX_CLI_PATH: record.shim_path } } });
+    assert.deepEqual(calls[0], { command: join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright"), args: [], unref: true, options: { detached: true, stdio: "ignore", env: { HOME: "/test/home", KEEP: "yes", CODEX_CLI_PATH: "/wrong/codex" } } });
     assert.equal(result.pid, 4242);
     assert.equal(result.started, true);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -228,10 +233,30 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   try {
     await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
-    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, environment: { STATEWRIGHT_GATEWAY_URL: "https://staging.example.test" } });
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
     await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", RECORD_PATH: recordPath } });
-    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://staging.example.test`);
+    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|test-production-key`);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Production and staging Desktop profiles install independently", async () => {
+  const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-profiles-");
+  const stagingState = join(dirname(state), "codex-desktop-staging.json");
+  try {
+    const production = await enableDesktop({ statePath: state, profile: "production", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    const staging = await enableDesktop({ statePath: stagingState, profile: "staging", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    assert.equal(production.gateway_url, "https://mcp.statewright.ai");
+    assert.equal(staging.gateway_url, "https://statewright-mcp.casa.enhasa.cloud");
+    assert.notEqual(production.client_id, staging.client_id);
+    assert.equal(production.launcher_app_path, join(applications, "ChatGPT + Statewright.app"));
+    assert.equal(staging.launcher_app_path, join(applications, "ChatGPT + Statewright Staging.app"));
+    assert.equal(staging.api_key_path, join(dirname(state), "staging_api_key"));
+    assert.equal((await desktopDoctor({ statePath: state, profile: "production" })).ok, true);
+    assert.equal((await desktopDoctor({ statePath: stagingState, profile: "staging" })).ok, true);
+    const disabled = await disableDesktop({ statePath: stagingState, profile: "staging" });
+    assert.equal(disabled.app_removed, true);
+    assert.equal((await desktopDoctor({ statePath: state, profile: "production" })).ok, true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

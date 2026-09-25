@@ -1315,6 +1315,44 @@ test("Desktop ownership authorization refuses a second thread before upstream RP
   }
 });
 
+test("Desktop MCP readiness gate holds turn/start until Statewright tools are visible", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const forwarded = [];
+  let statusCalls = 0;
+  upstream.on("connection", socket => socket.on("message", raw => {
+    const message = JSON.parse(String(raw));
+    forwarded.push(message);
+    if (message.method !== "mcpServerStatus/list") return;
+    statusCalls += 1;
+    socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
+      data: [{ name: "statewright", tools: statusCalls >= 2 ? { statewright_get_state: {} } : {} }],
+      nextCursor: null,
+    } }));
+  }));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    requiredMcpToolSuffix: "statewright_get_state",
+    requiredMcpReadyTimeoutMs: 2_000,
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    client.send(JSON.stringify({ id: 41, method: "turn/start", params: { threadId: "desktop-thread", input: [] } }));
+    const deadline = Date.now() + 2_000;
+    while (!forwarded.some(message => message.method === "turn/start")) {
+      if (Date.now() >= deadline) throw new Error("turn/start was not released after MCP readiness");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(statusCalls, 2);
+    assert.deepEqual(forwarded.map(message => message.method), ["mcpServerStatus/list", "mcpServerStatus/list", "turn/start"]);
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test("App Server route proxy fails open when optional picker-label callbacks fail", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");

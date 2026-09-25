@@ -280,6 +280,8 @@ export async function startCodexAppServerRouteProxy({
   // RPC is forwarded, so a broker can reject an unsupported second thread
   // without creating or resuming it in the vendor App Server.
   authorizeThread = async () => {},
+  requiredMcpToolSuffix = null,
+  requiredMcpReadyTimeoutMs = 0,
   forwardPayload = forwardWhenOpen,
   idleMs = 500,
   onIdle = async () => {},
@@ -418,6 +420,7 @@ export async function startCodexAppServerRouteProxy({
     const internalRequests = new Map();
     const switchingThreads = new Set();
     const stateNames = new Map();
+    const mcpReadyThreads = new Set();
     const presentation = new HandoffPresentation({onStatus: event => {
       if (event.phase === "running") stateNames.set(event.thread_id, event.state);
       return onHandoffStatus(event);
@@ -437,6 +440,37 @@ export async function startCodexAppServerRouteProxy({
       });
       await forwardPayload(upstream, JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       return response;
+    };
+    const waitForRequiredMcpTool = async (threadId, checkCurrentRequest) => {
+      if (!requiredMcpToolSuffix || requiredMcpReadyTimeoutMs <= 0 || mcpReadyThreads.has(threadId)) return;
+      const deadline = Date.now() + requiredMcpReadyTimeoutMs;
+      let lastError = null;
+      for (;;) {
+        checkCurrentRequest();
+        try {
+          let cursor = null;
+          do {
+            const result = await internalRpc("mcpServerStatus/list", {
+              threadId, cursor, limit: 100, detail: "full",
+            });
+            checkCurrentRequest();
+            if ((result?.data ?? []).some(server => Object.keys(server?.tools ?? {})
+              .some(tool => tool.endsWith(requiredMcpToolSuffix)))) {
+              mcpReadyThreads.add(threadId);
+              return;
+            }
+            cursor = result?.nextCursor ?? null;
+          } while (cursor);
+        } catch (error) {
+          lastError = error;
+        }
+        if (Date.now() >= deadline) {
+          const error = new Error(`Statewright MCP tools did not become ready before the Desktop turn deadline${lastError ? `: ${lastError.message}` : "."}`);
+          error.code = "STATEWRIGHT_MCP_NOT_READY";
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
     };
     const switchProvider = async (threadId, receipt) => {
       const desiredProvider = receipt.effectiveProvider;
@@ -636,6 +670,9 @@ export async function startCodexAppServerRouteProxy({
           if (message.method === "turn/interrupt" && message.params.turnId) explainedTurns.set(message.params.threadId, message.params.turnId);
           await sendPresentation(presentation.userActivity(message.params.threadId));
         }
+        if (message.method === "turn/start" && message.params?.threadId) {
+          await waitForRequiredMcpTool(message.params.threadId, checkCurrentRequest);
+        }
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
         if (message.id !== undefined && message.method) requestMethods.set(String(message.id), message.method);
         message = applyThreadListCwd(message, threadListCwd);
@@ -756,7 +793,7 @@ export async function startCodexAppServerRouteProxy({
         // Closing the WebSocket here makes native Codex lose its session and
         // defeats retry/recovery after a provider configuration mistake.
         if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED"
-            || error.code === "STATEWRIGHT_THREAD_OWNERSHIP")
+            || error.code === "STATEWRIGHT_THREAD_OWNERSHIP" || error.code === "STATEWRIGHT_MCP_NOT_READY")
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
           void forwardWhenOpen(downstream, JSON.stringify({
             jsonrpc: "2.0",

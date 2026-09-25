@@ -104,6 +104,8 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
       startRuntime: async options => {
         assert.equal(typeof options.onThreadStarted, "function");
         assert.equal(typeof options.authorizeThread, "function");
+        assert.equal(options.requiredMcpToolSuffix, "statewright_get_state");
+        assert.equal(options.requiredMcpReadyTimeoutMs, 30_000);
         assert.equal(options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR, controlDir);
         assert.equal(options.environment.STATEWRIGHT_MANAGED_CLIENT_HOST, "codex");
         assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");

@@ -127,6 +127,8 @@ export async function runDesktopAppServerBroker({
       nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
       onThreadStarted: claimThread,
       authorizeThread,
+      requiredMcpToolSuffix: "statewright_get_state",
+      requiredMcpReadyTimeoutMs: 30_000,
       stderr,
     });
   } catch (error) {

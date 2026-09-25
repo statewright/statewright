@@ -39,7 +39,7 @@ const DESKTOP_PROFILES = Object.freeze({
     stateFile: "codex-desktop-staging.json",
     shimName: "statewright-desktop-codex-staging",
     launcherName: "statewright-desktop-staging-launch.mjs",
-    gatewayUrl: "https://statewright-mcp.casa.enhasa.cloud",
+    gatewayUrl: null,
     apiKeyFile: "staging_api_key",
   }),
 });
@@ -262,7 +262,7 @@ export function parseDesktopArgs(argv) {
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, stagingGatewayUrl = process.env.STATEWRIGHT_DESKTOP_STAGING_GATEWAY_URL } = {}) {
   const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
@@ -273,7 +273,8 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
   const launcherAppPath = join(desktopApplicationsDirectory, profile.appName);
   const shim = join(dirname(resolvedState), "bin", profile.shimName);
-  const gatewayUrl = profile.gatewayUrl;
+  const gatewayUrl = profile.name === "staging" ? stagingGatewayUrl : profile.gatewayUrl;
+  if (!gatewayUrl) throw new Error("Staging Desktop gateway URL is required.");
   const apiKeyPath = join(dirname(resolvedState), profile.apiKeyFile);
   if (!await executable(vendor)) throw new Error(`Desktop vendor executable is not executable: ${vendor}`);
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);

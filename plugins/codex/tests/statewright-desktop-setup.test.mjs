@@ -245,9 +245,9 @@ test("Production and staging Desktop profiles install independently", async () =
   const stagingState = join(dirname(state), "codex-desktop-staging.json");
   try {
     const production = await enableDesktop({ statePath: state, profile: "production", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
-    const staging = await enableDesktop({ statePath: stagingState, profile: "staging", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    const staging = await enableDesktop({ statePath: stagingState, profile: "staging", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, stagingGatewayUrl: "https://staging.example.test" });
     assert.equal(production.gateway_url, "https://mcp.statewright.ai");
-    assert.equal(staging.gateway_url, "https://statewright-mcp.casa.enhasa.cloud");
+    assert.equal(staging.gateway_url, "https://staging.example.test");
     assert.notEqual(production.client_id, staging.client_id);
     assert.equal(production.launcher_app_path, join(applications, "ChatGPT + Statewright.app"));
     assert.equal(staging.launcher_app_path, join(applications, "ChatGPT + Statewright Staging.app"));

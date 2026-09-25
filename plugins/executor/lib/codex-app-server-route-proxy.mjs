@@ -61,6 +61,22 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
   const identity = routeIdentity(selectedRoute.model, environment);
   const params = { ...(message.params ?? {}), model: identity.model };
   if (selectedRoute.effort) params.effort = selectedRoute.effort;
+  // Desktop's collaborationMode.settings takes precedence over the top-level
+  // turn fields. Keep its unrelated mode/instructions intact, but make the
+  // model selection atomic across both representations.
+  const collaborationMode = params.collaborationMode;
+  const collaborationSettings = collaborationMode?.settings;
+  const collaborationModeApplied = Boolean(collaborationSettings && typeof collaborationSettings === "object" && !Array.isArray(collaborationSettings));
+  if (collaborationModeApplied) {
+    params.collaborationMode = {
+      ...collaborationMode,
+      settings: {
+        ...collaborationSettings,
+        model: identity.model,
+        ...(selectedRoute.effort ? { reasoning_effort: selectedRoute.effort } : {}),
+      },
+    };
+  }
   const routed = { ...message, params };
   return {
     message: routed,
@@ -71,6 +87,7 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
       effectiveProvider: identity.provider,
       effectiveModel: identity.model,
       effectiveEffort: selectedRoute.effort ?? null,
+      collaborationModeApplied,
       providerConfig: identity.config,
     },
   };
@@ -84,14 +101,26 @@ export function settingsConfirmRoute(receipt, notification) {
   const actualModel = routeModel(settings.model);
   const actualProvider = String(settings.modelProvider ?? "").trim() || null;
   const actualEffort = settings.effort ?? null;
+  const collaborationSettings = settings.collaborationMode?.settings ?? null;
+  const actualCollaborationModel = collaborationSettings ? routeModel(collaborationSettings.model) : null;
+  const actualCollaborationEffort = collaborationSettings?.reasoning_effort ?? null;
+  const collaborationReceipt = receipt.collaborationModeApplied ? {
+    actualCollaborationModel,
+    actualCollaborationEffort,
+  } : {};
   return {
     ...receipt,
     actualModel,
     actualProvider,
     actualEffort,
+    ...collaborationReceipt,
     confirmed: sameRouteValue(actualModel, receipt.effectiveModel)
       && (!receipt.effectiveProvider || sameRouteValue(actualProvider, receipt.effectiveProvider))
-      && (!receipt.effectiveEffort || sameRouteValue(actualEffort, receipt.effectiveEffort)),
+      && (!receipt.effectiveEffort || sameRouteValue(actualEffort, receipt.effectiveEffort))
+      && (!receipt.collaborationModeApplied || (
+        sameRouteValue(actualCollaborationModel, receipt.effectiveModel)
+        && (!receipt.effectiveEffort || sameRouteValue(actualCollaborationEffort, receipt.effectiveEffort))
+      )),
   };
 }
 
@@ -247,6 +276,10 @@ export async function startCodexAppServerRouteProxy({
   getThreadCwds = async () => ({}),
   onThreadStarted = async () => {},
   onThreadResumed = async () => {},
+  // Optional host-specific ownership guard.  This runs before any upstream
+  // RPC is forwarded, so a broker can reject an unsupported second thread
+  // without creating or resuming it in the vendor App Server.
+  authorizeThread = async () => {},
   forwardPayload = forwardWhenOpen,
   idleMs = 500,
   onIdle = async () => {},
@@ -589,6 +622,12 @@ export async function startCodexAppServerRouteProxy({
       try {
         message = JSON.parse(payload);
         if (gate?.handleReply(message)) return;
+        if (message.method === "thread/start" || message.params?.threadId) {
+          await authorizeThread({
+            method: message.method,
+            threadId: message.params?.threadId ?? null,
+          });
+        }
         if ((["turn/start", "turn/interrupt", "turn/steer", "thread/goal/clear"].includes(message.method)
             || message.method === "thread/goal/set" && message.params?.status === "active") && message.params?.threadId) {
           gate?.userActivity(message.params.threadId);
@@ -716,7 +755,8 @@ export async function startCodexAppServerRouteProxy({
         // A rejected route is a turn-level failure, not a corrupted transport.
         // Closing the WebSocket here makes native Codex lose its session and
         // defeats retry/recovery after a provider configuration mistake.
-        if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED")
+        if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED"
+            || error.code === "STATEWRIGHT_THREAD_OWNERSHIP")
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
           void forwardWhenOpen(downstream, JSON.stringify({
             jsonrpc: "2.0",

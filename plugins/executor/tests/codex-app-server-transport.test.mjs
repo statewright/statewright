@@ -500,6 +500,42 @@ test("App Server routing overrides the native next turn and requires a settings 
   });
 });
 
+test("App Server routing synchronizes Desktop collaboration mode without crossing threads", () => {
+  const request = {
+    id: 13,
+    method: "turn/start",
+    params: {
+      threadId: "desktop-thread",
+      input: [],
+      model: "gpt-5.6-terra",
+      effort: "medium",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-5.6-terra", reasoning_effort: "medium", developer_instructions: "keep this" },
+      },
+    },
+  };
+  const route = { session_id: "desktop-thread", model: "openai-codex/gpt-6-astra", effort: "xhigh" };
+  const { message, receipt } = applyRouteToTurnStart(request, route);
+  assert.equal(message.params.model, "gpt-6-astra");
+  assert.equal(message.params.effort, "xhigh");
+  assert.deepEqual(message.params.collaborationMode, {
+    mode: "default",
+    settings: { model: "gpt-6-astra", reasoning_effort: "xhigh", developer_instructions: "keep this" },
+  });
+  assert.equal(receipt.collaborationModeApplied, true);
+  assert.equal(settingsConfirmRoute(receipt, {
+    method: "thread/settings/updated",
+    params: { threadId: "desktop-thread", threadSettings: {
+      model: "gpt-6-astra", modelProvider: "openai", effort: "xhigh",
+      collaborationMode: { settings: { model: "gpt-6-astra", reasoning_effort: "xhigh" } },
+    } },
+  }).confirmed, true);
+  const untouched = applyRouteToTurnStart({ ...request, params: { ...request.params, threadId: "other-thread" } }, route);
+  assert.equal(untouched.receipt, null);
+  assert.equal(untouched.message.params.collaborationMode.settings.model, "gpt-5.6-terra");
+});
+
 test("App Server routing preserves the Statewright-selected provider route", () => {
   const route = {
     session_id: "thread-1",
@@ -1236,6 +1272,46 @@ test("App Server thread/start binds ownership before reporting native success an
     client.close();
     await proxy.close();
     await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
+});
+
+test("Desktop ownership authorization refuses a second thread before upstream RPC effects", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const forwarded = [];
+  upstream.on("connection", socket => socket.on("message", raw => forwarded.push(JSON.parse(String(raw)))));
+  const root = "desktop-root";
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    authorizeThread: async ({ method, threadId }) => {
+      if (method === "thread/start" || threadId !== root) {
+        const error = new Error("single-thread Desktop broker");
+        error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+        throw error;
+      }
+    },
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    const rejected = once(client, "message");
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "other-thread" } }));
+    const reply = JSON.parse(String(await rejected));
+    assert.match(reply.error.message, /single-thread Desktop broker/);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(forwarded.length, 0, "rejected thread never reached vendor App Server");
+    const rejectedTurn = once(client, "message");
+    client.send(JSON.stringify({ id: 3, method: "turn/start", params: { threadId: "other-thread", input: [] } }));
+    assert.match(JSON.parse(String(await rejectedTurn)).error.message, /single-thread Desktop broker/);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(forwarded.length, 0, "foreign turn did not reach vendor App Server");
+    client.send(JSON.stringify({ id: 2, method: "thread/resume", params: { threadId: root } }));
+    while (forwarded.length === 0) await new Promise(resolve => setTimeout(resolve, 1));
+    assert.equal(forwarded[0].params.threadId, root);
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
   }
 });
 

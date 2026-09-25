@@ -85,7 +85,13 @@ async function readDesktopTicketOwner(ticketPath) {
 }
 async function activeDesktopTickets(queuePath) {
   const tickets = [];
-  for (const entry of await readdir(queuePath, { withFileTypes: true })) {
+  let entries;
+  try { entries = await readdir(queuePath, { withFileTypes: true }); }
+  catch (error) {
+    if (error?.code === "ENOENT") return tickets;
+    throw error;
+  }
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const ticketPath = join(queuePath, entry.name);
     if (await staleDesktopTicket(ticketPath)) { await rm(ticketPath, { recursive: true, force: true }); continue; }

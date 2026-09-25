@@ -17,6 +17,11 @@ const mediaTypes = new Map([
 function packetArtifacts(receipt) {
   const packet = receipt?.context_snapshot?.evidence_packet;
   if (!packet) return [];
+  // Workflow context also uses `evidence_packet` for unrelated decision data.
+  // Only an explicitly declared approval-upload packet may request files.
+  if (packet.schema !== "statewright/evidence-packet/v1"
+      && !Object.hasOwn(Object(packet), "artifacts")
+      && !(typeof packet.schema === "string" && packet.schema.startsWith("statewright/evidence-packet/"))) return [];
   if (packet.schema !== "statewright/evidence-packet/v1" || !Array.isArray(packet.artifacts)) {
     throw new Error("Approval evidence packet is malformed.");
   }

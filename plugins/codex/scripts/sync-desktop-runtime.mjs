@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,16 @@ const CODEX_ROOT = resolve(SCRIPT_ROOT, "..");
 const EXECUTOR_LIB = resolve(CODEX_ROOT, "..", "executor", "lib");
 export const DESKTOP_RUNTIME_ROOT = resolve(CODEX_ROOT, "scripts", "lib", "desktop-runtime");
 const ENTRY = resolve(EXECUTOR_LIB, "codex-desktop-app-server-launcher.mjs");
+const PACKAGED_IMPORT_REWRITES = new Map([
+  ["ws", "../../../vendor/ws/wrapper.mjs"],
+]);
+
+function packagedRuntimeSource(source) {
+  return source.replace(/(from\s+|import\s*\()(["'])([^"']+)\2/g, (match, prefix, quote, specifier) => {
+    const packaged = PACKAGED_IMPORT_REWRITES.get(specifier);
+    return packaged ? `${prefix}${quote}${packaged}${quote}` : match;
+  });
+}
 
 function relativeImports(source) {
   return [...source.matchAll(/(?:from\s+|import\s*\()\s*["'](\.[^"']+)["']/g)].map(match => match[1]);
@@ -39,7 +49,7 @@ export async function desktopRuntimeDrift() {
     const target = resolve(DESKTOP_RUNTIME_ROOT, relative(EXECUTOR_LIB, source));
     let targetText = null;
     try { targetText = await readFile(target, "utf8"); } catch { /* missing is drift */ }
-    if (targetText !== await readFile(source, "utf8")) drift.push(relative(EXECUTOR_LIB, source));
+    if (targetText !== packagedRuntimeSource(await readFile(source, "utf8"))) drift.push(relative(EXECUTOR_LIB, source));
   }
   const expected = new Set((await runtimeSources()).map(source => relative(EXECUTOR_LIB, source)));
   async function checkExtras(directory, prefix = "") {
@@ -62,7 +72,7 @@ export async function syncDesktopRuntime() {
   for (const source of sources) {
     const target = resolve(DESKTOP_RUNTIME_ROOT, relative(EXECUTOR_LIB, source));
     await mkdir(dirname(target), { recursive: true });
-    await cp(source, target);
+    await writeFile(target, packagedRuntimeSource(await readFile(source, "utf8")));
   }
   return sources.map(source => relative(EXECUTOR_LIB, source));
 }

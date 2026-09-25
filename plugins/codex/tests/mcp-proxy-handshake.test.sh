@@ -14,6 +14,10 @@ printf '%s\n' "test-key" > "$TMP/home/.statewright/api_key"
 mkdir -p "$TMP/bin"
 printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "$TMP/bin/codex"
 chmod +x "$TMP/bin/codex"
+printf '%s\n' '#!/usr/bin/env sh' 'printf "%s\\n" "$*" >> "$STATEWRIGHT_DESKTOP_NODE_CAPTURE"' 'exit 0' > "$TMP/bin/desktop-node"
+chmod +x "$TMP/bin/desktop-node"
+printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "$TMP/bin/ChatGPT"
+chmod +x "$TMP/bin/ChatGPT"
 
 RESPONSE=$(
   printf '%s\n' \
@@ -27,6 +31,10 @@ RESPONSE=$(
     STATEWRIGHT_MANAGED_MCP_URL="" \
     STATEWRIGHT_MANAGED_MCP_TOKEN="" \
     STATEWRIGHT_TELEMETRY_DIR="$TMP/telemetry" \
+    STATEWRIGHT_DESKTOP_PLATFORM="Darwin" \
+    STATEWRIGHT_DESKTOP_APP_EXECUTABLE="$TMP/bin/ChatGPT" \
+    STATEWRIGHT_DESKTOP_BUNDLED_NODE="$TMP/bin/desktop-node" \
+    STATEWRIGHT_DESKTOP_NODE_CAPTURE="$TMP/desktop-node.log" \
     bash "$SCRIPT_DIR/mcp-proxy.sh"
 )
 
@@ -41,5 +49,6 @@ echo "$RESPONSE" | jq -e '
 [ -x "$TMP/home/.statewright/bin/codex" ]
 grep -q 'statewright managed clients' "$TMP/home/.zshrc"
 node -e 'const fs = require("fs"); const config = JSON.parse(fs.readFileSync(process.argv[1])); if (config.routing?.managed_clients?.hosts?.codex !== true) process.exit(1)' "$TMP/home/.statewright/config.json"
+grep -q 'statewright-desktop-setup.mjs provision --app' "$TMP/desktop-node.log"
 
 echo "MCP proxy handshake tests passed"

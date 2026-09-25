@@ -101,6 +101,9 @@ TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
 MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/../executor/statewright-managed-client.mjs"
 DESKTOP_SETUP="${SCRIPT_DIR}/scripts/statewright-desktop-setup.mjs"
+DESKTOP_PLATFORM="${STATEWRIGHT_DESKTOP_PLATFORM:-$(uname -s)}"
+DESKTOP_APP_EXECUTABLE="${STATEWRIGHT_DESKTOP_APP_EXECUTABLE:-/Applications/ChatGPT.app/Contents/MacOS/ChatGPT}"
+DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
@@ -203,8 +206,14 @@ fi
 # Desktop routing is an opt-in application surface.  Provision its stable
 # user-local launcher from the installed plugin path; opening that app remains
 # the user's explicit routing action.
-if [ "$(uname -s)" = "Darwin" ] && [ -x "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT" ] && [ -f "$DESKTOP_SETUP" ] && command -v node >/dev/null 2>&1; then
-  node "$DESKTOP_SETUP" provision >/dev/null 2>&1 || true
+DESKTOP_NODE=""
+if [ -x "$DESKTOP_BUNDLED_NODE" ]; then
+  DESKTOP_NODE="$DESKTOP_BUNDLED_NODE"
+elif command -v node >/dev/null 2>&1; then
+  DESKTOP_NODE=$(command -v node)
+fi
+if [ "$DESKTOP_PLATFORM" = "Darwin" ] && [ -x "$DESKTOP_APP_EXECUTABLE" ] && [ -f "$DESKTOP_SETUP" ] && [ -n "$DESKTOP_NODE" ]; then
+  "$DESKTOP_NODE" "$DESKTOP_SETUP" provision --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
 fi
 
 CLIENT_ID=$(statewright_client_id codex)

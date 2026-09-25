@@ -16,6 +16,7 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_URL",
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
+  "STATEWRIGHT_DESKTOP_MCP_URL", "STATEWRIGHT_DESKTOP_MCP_TOKEN",
   "CODEX_SESSION_ID", "CODEX_THREAD_ID",
 ];
 
@@ -38,6 +39,14 @@ export async function startDesktopMcpBridge({ environment, clientId, bridgeFacto
   });
   await bridge.start();
   return bridge;
+}
+
+function inheritedDesktopMcpBridge(environment) {
+  const url = nonEmpty(environment.STATEWRIGHT_DESKTOP_MCP_URL);
+  const token = nonEmpty(environment.STATEWRIGHT_DESKTOP_MCP_TOKEN);
+  if (!url && !token) return null;
+  if (!url || !token) throw new Error("Statewright Desktop MCP bridge identity is incomplete.");
+  return { url, token, close: async () => {} };
 }
 
 function nonEmpty(value) {
@@ -99,8 +108,12 @@ export async function runDesktopAppServerBroker({
       reject("Statewright Desktop broker only permits its registered Desktop thread; this request was not forwarded.");
     }
   };
+  const inheritedBridge = inheritedDesktopMcpBridge(environment);
   const isolatedEnvironment = desktopBrokerEnvironment(environment, plan);
-  const bridge = await startMcpBridge({ environment: isolatedEnvironment, clientId: plan.clientId });
+  // The generated launcher starts this bridge before the network-restricted
+  // ChatGPT process. Direct CLI callers retain the in-process fallback.
+  const bridge = inheritedBridge
+    ?? await startMcpBridge({ environment: isolatedEnvironment, clientId: plan.clientId });
   let runtime;
   try {
     runtime = await startRuntime({

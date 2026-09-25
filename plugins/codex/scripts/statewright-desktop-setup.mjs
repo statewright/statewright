@@ -101,6 +101,8 @@ function desktopLauncherContents(statePath) {
 import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const statePath = ${JSON.stringify(statePath)};
 const waitForStartup = child => new Promise((resolve, reject) => {
@@ -127,13 +129,31 @@ try {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   await access(state.desktop_executable, constants.X_OK);
   await access(state.shim_path, constants.X_OK);
+  const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
+  const { startDesktopMcpBridge } = await import(runtimeUrl);
+  const bridge = await startDesktopMcpBridge({ environment: process.env, clientId: state.client_id });
   const child = spawn(state.desktop_executable, [], {
-    detached: true,
+    detached: false,
     stdio: "ignore",
-    env: { ...process.env, CODEX_CLI_PATH: state.shim_path },
+    env: {
+      ...process.env,
+      CODEX_CLI_PATH: state.shim_path,
+      STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,
+      STATEWRIGHT_DESKTOP_MCP_TOKEN: bridge.token,
+    },
   });
-  await waitForStartup(child);
-  child.unref();
+  const childOutcome = new Promise(resolve => {
+    child.once("error", error => resolve({ error }));
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  try {
+    await waitForStartup(child);
+    const outcome = await childOutcome;
+    if (outcome.error) throw outcome.error;
+    if (outcome.code && outcome.code !== 0) throw new Error(\`ChatGPT exited with code \${outcome.code} (signal \${outcome.signal ?? "none"}).\`);
+  } finally {
+    await bridge.close();
+  }
 } catch (error) {
   process.stderr.write(\`ChatGPT + Statewright could not start: \${error.message}\\n\`);
   process.exitCode = 1;

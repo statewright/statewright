@@ -3,7 +3,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -25,7 +25,14 @@ async function fixture(prefix) {
   const app = join(root, "ChatGPT");
   const applications = join(root, "Applications");
   const wrapper = join(root, "plugin-wrapper.mjs");
-  await Promise.all([executable(vendor), executable(app), moduleFile(wrapper)]);
+  const desktopRuntime = join(root, "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs");
+  await mkdir(dirname(desktopRuntime), { recursive: true });
+  await Promise.all([
+    executable(vendor),
+    executable(app),
+    moduleFile(wrapper),
+    writeFile(desktopRuntime, `export async function startDesktopMcpBridge() { return { url: "http://127.0.0.1:43123", token: "launcher-token", close: async () => {} }; }\n`),
+  ]);
   return { root, state, vendor, app, applications, wrapper };
 }
 
@@ -218,12 +225,12 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-generated-app-");
   const recordPath = join(root, "recorded-codex-cli-path");
   try {
-    await writeFile(app, `#!/bin/sh\nprintf '%s' "$CODEX_CLI_PATH" > "$RECORD_PATH"\nsleep 1\n`);
+    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
     await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", RECORD_PATH: recordPath } });
-    assert.equal(await readFile(recordPath, "utf8"), record.shim_path);
+    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|launcher-token`);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

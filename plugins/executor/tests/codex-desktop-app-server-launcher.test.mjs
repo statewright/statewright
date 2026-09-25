@@ -175,6 +175,53 @@ test("Desktop broker closes its MCP bridge when App Server startup fails", async
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test("Desktop broker reuses the launcher's unsandboxed MCP bridge without leaking its launcher identity", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-external-bridge-"));
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let innerBridgeStarted = 0;
+  let socket = null;
+  upstream.once("connection", value => { socket = value; });
+  let launch;
+  try {
+    launch = await runDesktopAppServerBroker({
+      argv: ["app-server"], home, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      environment: {
+        STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
+        STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
+        STATEWRIGHT_DESKTOP_MCP_URL: "http://127.0.0.1:43124",
+        STATEWRIGHT_DESKTOP_MCP_TOKEN: "launcher-owned-token",
+      },
+      startMcpBridge: async () => { innerBridgeStarted += 1; throw new Error("inner bridge must not start"); },
+      startRuntime: async options => {
+        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43124");
+        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "launcher-owned-token");
+        assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_URL, undefined);
+        assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_TOKEN, undefined);
+        return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, close: async () => {} };
+      },
+    });
+    assert.equal(innerBridgeStarted, 0);
+  } finally {
+    await launch?.close();
+    socket?.terminate();
+    await new Promise(resolve => upstream.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Desktop broker rejects an incomplete launcher MCP bridge identity", async () => {
+  const environment = {
+    STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
+    STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
+    STATEWRIGHT_DESKTOP_MCP_URL: "http://127.0.0.1:43124",
+  };
+  await assert.rejects(() => runDesktopAppServerBroker({
+    argv: ["app-server"], environment,
+    stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+  }), /bridge identity is incomplete/);
+});
+
 test("Desktop broker reserves its only new-thread slot before vendor forwarding", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-desktop-reserve-"));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });

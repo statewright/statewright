@@ -11,7 +11,14 @@ function runProxy(proxy, environment) {
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } },
     { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
-  ].map(JSON.stringify).join("\n") + "\n";
+    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "statewright_list_workflows", arguments: {} } },
+    { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "statewright_search_docs", arguments: {} } },
+  ];
+  return runProxyRequests(proxy, environment, requests);
+}
+
+function runProxyRequests(proxy, environment, requests) {
+  const input = requests.map(JSON.stringify).join("\n") + "\n";
   return new Promise((resolveResult, rejectResult) => {
     const child = spawn("bash", [proxy], { env: environment, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -20,7 +27,7 @@ function runProxy(proxy, environment) {
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
     child.once("error", rejectResult);
     child.once("close", (code) => resolveResult({ code, stdout, stderr }));
-    child.stdin.end(requests);
+    child.stdin.end(input);
   });
 }
 
@@ -77,13 +84,26 @@ test("codex opens account setup automatically and again on explicit reconnect, w
       const result = await runProxy(proxy, environment);
       assert.equal(result.code, 0, result.stderr);
       const setupCatalog = responseById(result.stdout, 2);
-      assert.deepEqual(setupCatalog.result.tools.map((tool) => tool.name), ["statewright_connect"]);
+      assert.deepEqual(setupCatalog.result.tools.map((tool) => tool.name), [
+        "statewright_search_docs",
+        "statewright_list_workflows",
+        "statewright_connect",
+      ]);
       const ordinaryCall = responseById(result.stdout, 3);
       assert.equal(ordinaryCall.error.code, -32001);
       assert.match(ordinaryCall.error.message, /Statewright is not connected/);
       const connect = responseById(result.stdout, 4);
       assert.match(connect.result.content[0].text, /Opened Statewright account setup in your browser/);
       assert.match(connect.result.content[0].text, /Do not paste a credential into chat/);
+      const workflowStatus = JSON.parse(responseById(result.stdout, 5).result.content[0].text);
+      assert.deepEqual(workflowStatus, {
+        connected: false,
+        credential: "missing",
+        workflows: [],
+        active: null,
+        reason: "No local Statewright credential is configured. Use statewright_connect for account setup.",
+      });
+      assert.match(responseById(result.stdout, 6).result.content[0].text, /Missing required parameter: query/);
       assert.deepEqual((await readFile(capture, "utf8")).trim().split(/\r?\n/), [
         "powershell.exe",
         "-NoProfile",
@@ -100,6 +120,46 @@ test("codex opens account setup automatically and again on explicit reconnect, w
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+});
+
+test("codex searches public docs without a local credential or gateway request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-public-docs-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const curlCapture = join(root, "curl-command.txt");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  try {
+    await mkdir(bin, { recursive: true });
+    const fakeCurl = join(bin, "curl");
+    await writeFile(
+      fakeCurl,
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s' '[{\"url\":\"/docs/workflows\",\"title\":\"Workflow Guide\",\"section\":\"Intro\",\"content\":\"Build workflows safely.\"}]'\n",
+    );
+    await chmod(fakeCurl, 0o755);
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_NO_BROWSER: "true",
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: "workflow" } } },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: 'not "found' } } },
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(responseById(result.stdout, 2).result.content[0].text, /Workflow Guide/);
+    assert.equal(responseById(result.stdout, 3).result.content[0].text, 'No results found for: not "found');
+    const curlArguments = await readFile(curlCapture, "utf8");
+    assert.match(curlArguments, /https:\/\/docs\.statewright\.ai\/search-index\.json/);
+    assert.doesNotMatch(curlArguments, /Authorization:|mcp\.statewright\.ai/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 for (const [name, proxy] of legacyProxies) {
@@ -180,7 +240,11 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     await waitForOutput(() => stdout, /\"id\":1/);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
     await waitForOutput(() => stdout, /\"id\":2/);
-    assert.deepEqual(responseById(stdout, 2).result.tools.map((tool) => tool.name), ["statewright_connect"]);
+    assert.deepEqual(responseById(stdout, 2).result.tools.map((tool) => tool.name), [
+      "statewright_search_docs",
+      "statewright_list_workflows",
+      "statewright_connect",
+    ]);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
     await waitForOutput(() => stdout, /\"id\":3/);
     assert.equal(responseById(stdout, 3).error.code, -32001);

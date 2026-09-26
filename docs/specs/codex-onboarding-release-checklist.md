@@ -8,15 +8,19 @@ path.
 
 1. Install the published Codex plugin into a disposable Desktop or CLI profile.
 2. Confirm the unauthenticated proxy opens `https://statewright.ai/keys`, never
-   `/signup`, and exposes only `statewright_connect`.
-3. Confirm an ordinary tool call returns the structured not-connected response
+   `/signup`, and exposes only `statewright_search_docs`,
+   `statewright_list_workflows`, and `statewright_connect`.
+3. Confirm `statewright_list_workflows` reports `connected: false`, an empty
+   workflow list, and no active workflow until a local credential exists.
+4. Confirm documentation search remains available without a credential.
+5. Confirm an ordinary tool call returns the structured not-connected response
    and does not claim workflow availability.
-4. Complete account setup in the browser without putting a credential in a
+6. Complete account setup in the browser without putting a credential in a
    model prompt. Browser sign-in does not yet provision the MCP credential, so
    record the connection as blocked and do not claim authenticated tools are
    available. The OAuth handoff described below is required before this step
    can end in an authenticated catalog.
-5. Record the installer version, plugin digest, client version, gateway host,
+7. Record the installer version, plugin digest, client version, gateway host,
    UTC timestamp, and redacted result. Do not record credentials, browser
    cookies, authorization codes, or raw prompts.
 

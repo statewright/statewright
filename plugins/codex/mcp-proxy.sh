@@ -482,44 +482,6 @@ while IFS= read -r line; do
   API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 
-  if [ -n "$API_KEY" ] && ! invalid_key_matches "$API_KEY"; then
-    rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
-  fi
-
-  if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
-    if [ "$METHOD" != "notifications/initialized" ]; then
-      echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key is invalid or revoked. Visit https://statewright.ai/keys to generate a new key, then restart this client."},"id":'"$ID"'}'
-    fi
-    continue
-  fi
-
-  if [ -z "$API_KEY" ]; then
-    [ "$METHOD" = "notifications/initialized" ] || prompt_missing_key
-    if [ "$METHOD" = "tools/list" ]; then
-      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_connect","description":"Open Statewright account setup in your browser. Statewright tools remain unavailable until this client has a local credential; never paste a credential into chat.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
-    elif [ "$METHOD" = "tools/call" ] && [ "$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)" = "statewright_connect" ]; then
-      if open_keys_page 'https://statewright.ai/keys'; then
-        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Opened Statewright account setup in your browser. Sign in or create an account there; this client will become available after its local credential is configured. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
-      else
-        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Open https://statewright.ai/keys in your browser to finish account setup. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
-      fi
-    elif [ "$METHOD" = "notifications/initialized" ]; then
-      : # notification, no response
-    else
-      echo '{"jsonrpc":"2.0","error":{"code":-32001,"message":"Statewright is not connected. Use statewright_connect to open account setup in your browser; do not paste credentials into chat."},"id":'"$ID"'}'
-    fi
-    continue
-  fi
-
-  # Notifications: no response needed, trigger side effects
-  if [ "$METHOD" = "notifications/initialized" ]; then
-    if [ -n "$API_KEY" ]; then
-      start_local_telemetry_agent >/dev/null 2>&1 &
-      (upload_client_tools "$API_KEY" &)
-    fi
-    continue
-  fi
-
   # Handle statewright_search_docs locally (no gateway round-trip)
   TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
   if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
@@ -537,8 +499,8 @@ while IFS= read -r line; do
             ($chunk.title | ascii_downcase) as $t |
             ($chunk.section | ascii_downcase) as $s |
             ($chunk.content | ascii_downcase) as $c |
-            ([$terms[] | select(($t | contains(.)) or ($s | contains(.)))] | length) as $title_hits |
-            ([$terms[] | select($c | contains(.))] | length) as $content_hits |
+            ([$terms[] as $term | select(($t | contains($term)) or ($s | contains($term)))] | length) as $title_hits |
+            ([$terms[] as $term | select($c | contains($term))] | length) as $content_hits |
             select(($title_hits + $content_hits) > 0) |
             {url, title, section, content: $chunk.content, score: (($title_hits * 3) + $content_hits)}
           ] | sort_by(-.score) | unique_by(.url + .section) | .[0:5] |
@@ -557,12 +519,50 @@ while IFS= read -r line; do
           RESULT_JSON=$(jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')
           echo "$RESULT_JSON"
         else
-          echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"No results found for: '"$QUERY"'"}]},"id":'"$ID"'}'
+          jq -cn --arg text "No results found for: $QUERY" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}'
         fi
       else
         echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Search index unavailable"}]},"id":'"$ID"'}'
       fi
     fi
+    continue
+  fi
+
+  if [ -n "$API_KEY" ] && ! invalid_key_matches "$API_KEY"; then
+    rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
+  fi
+
+  if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
+    if [ "$METHOD" != "notifications/initialized" ]; then
+      echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key is invalid or revoked. Visit https://statewright.ai/keys to generate a new key, then restart this client."},"id":'"$ID"'}'
+    fi
+    continue
+  fi
+
+  if [ -z "$API_KEY" ]; then
+    [ "$METHOD" = "notifications/initialized" ] || prompt_missing_key
+    if [ "$METHOD" = "tools/list" ]; then
+      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_search_docs","description":"Search Statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Available without a local credential.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}},{"name":"statewright_list_workflows","description":"Report local Statewright connectivity and available workflows. Without a local credential it reports connected:false and an empty workflow list.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_connect","description":"Open Statewright account setup in your browser. Statewright tools remain unavailable until this client has a local credential; never paste a credential into chat.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
+    elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_list_workflows" ]; then
+      echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"connected\":false,\"credential\":\"missing\",\"workflows\":[],\"active\":null,\"reason\":\"No local Statewright credential is configured. Use statewright_connect for account setup.\"}"}]},"id":'"$ID"'}'
+    elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_connect" ]; then
+      if open_keys_page 'https://statewright.ai/keys'; then
+        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Opened Statewright account setup in your browser. Sign in or create an account there; this client will become available after its local credential is configured. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+      else
+        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Open https://statewright.ai/keys in your browser to finish account setup. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+      fi
+    elif [ "$METHOD" = "notifications/initialized" ]; then
+      : # notification, no response
+    else
+      echo '{"jsonrpc":"2.0","error":{"code":-32001,"message":"Statewright is not connected. Use statewright_connect to open account setup in your browser; do not paste credentials into chat."},"id":'"$ID"'}'
+    fi
+    continue
+  fi
+
+  # Notifications: no response needed, trigger side effects
+  if [ "$METHOD" = "notifications/initialized" ]; then
+    start_local_telemetry_agent >/dev/null 2>&1 &
+    (upload_client_tools "$API_KEY" &)
     continue
   fi
 

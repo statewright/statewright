@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
@@ -42,7 +42,7 @@ const legacyProxies = [
 
 async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   const started = Date.now();
-  while (!pattern.test(readOutput())) {
+  while (!pattern.test(await readOutput())) {
     if (Date.now() - started > timeoutMs) {
       throw new Error(`Timed out waiting for proxy output matching ${pattern}`);
     }
@@ -50,7 +50,7 @@ async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   }
 }
 
-test("codex opens account setup automatically and again on explicit reconnect, with only connection setup available when no API key is configured", async () => {
+test("codex exposes only safe setup tools and opens device approval on explicit connect", async () => {
   const name = "codex";
   const proxy = resolve("plugins/codex/mcp-proxy.sh");
     const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));
@@ -62,6 +62,32 @@ test("codex opens account setup automatically and again on explicit reconnect, w
       const fakePowerShell = join(bin, "powershell.exe");
       await writeFile(fakePowerShell, "#!/usr/bin/env bash\nexit 99\n");
       await chmod(fakePowerShell, 0o755);
+      const fakeSleep = join(bin, "sleep");
+      await writeFile(fakeSleep, "#!/usr/bin/env bash\nexit 0\n");
+      await chmod(fakeSleep, 0o755);
+      const fakeCurl = join(bin, "curl");
+      await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+url=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  case "$argument" in http://*|https://*) url="$argument" ;; esac
+  previous="$argument"
+done
+case "$url" in
+  */api/oauth/device/code)
+    printf '%s' '{"device_code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_code":"BCDF-GHJK-MNPQ","verification_uri":"https://statewright.ai/device","verification_uri_complete":"https://statewright.ai/device?user_code=BCDF-GHJK-MNPQ","expires_in":600,"interval":5}' > "$output"
+    printf '200'
+    ;;
+  */api/oauth/device/token)
+    printf '%s' '{"error":"access_denied"}' > "$output"
+    printf '400'
+    ;;
+  *) exit 1 ;;
+esac
+`);
+      await chmod(fakeCurl, 0o755);
       const environment = Object.fromEntries(
         Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
       );
@@ -77,8 +103,8 @@ test("codex opens account setup automatically and again on explicit reconnect, w
       const disabled = await runProxy(proxy, { ...environment, STATEWRIGHT_NO_BROWSER: "true" });
       assert.equal(disabled.code, 0, disabled.stderr);
       const disabledConnect = responseById(disabled.stdout, 4);
-      assert.match(disabledConnect.result.content[0].text, /Open https:\/\/statewright\.ai\/keys/);
-      assert.doesNotMatch(disabledConnect.result.content[0].text, /Opened Statewright/);
+      assert.match(disabledConnect.result.content[0].text, /Open https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/);
+      assert.match(disabledConnect.result.content[0].text, /device code BCDF-GHJK-MNPQ/);
       await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
 
       const result = await runProxy(proxy, environment);
@@ -93,8 +119,9 @@ test("codex opens account setup automatically and again on explicit reconnect, w
       assert.equal(ordinaryCall.error.code, -32001);
       assert.match(ordinaryCall.error.message, /Statewright is not connected/);
       const connect = responseById(result.stdout, 4);
-      assert.match(connect.result.content[0].text, /Opened Statewright account setup in your browser/);
-      assert.match(connect.result.content[0].text, /Do not paste a credential into chat/);
+      assert.match(connect.result.content[0].text, /Opened secure Statewright approval in your browser/);
+      assert.match(connect.result.content[0].text, /device code BCDF-GHJK-MNPQ/);
+      assert.match(connect.result.content[0].text, /do not paste an API key into chat/i);
       const workflowStatus = JSON.parse(responseById(result.stdout, 5).result.content[0].text);
       assert.deepEqual(workflowStatus, {
         connected: false,
@@ -109,17 +136,85 @@ test("codex opens account setup automatically and again on explicit reconnect, w
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "Start-Process -FilePath 'https://statewright.ai/keys'",
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Start-Process -FilePath 'https://statewright.ai/keys'",
+        "Start-Process -FilePath 'https://statewright.ai/device?user_code=BCDF-GHJK-MNPQ'",
       ]);
-      assert.equal(await readFile(join(home, ".statewright", "missing_api_key_prompted"), "utf8"), "");
+      await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+});
+
+test("codex device approval verifies and atomically stores the returned Statewright key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-device-login-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const capture = join(root, "curl-command.txt");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  const rawKey = `sw_live_${"a".repeat(32)}`;
+  try {
+    await mkdir(bin, { recursive: true });
+    const fakeSleep = join(bin, "sleep");
+    await writeFile(fakeSleep, "#!/usr/bin/env bash\nexit 0\n");
+    await chmod(fakeSleep, 0o755);
+    const fakeCurl = join(bin, "curl");
+    await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+url=''
+previous=''
+printf '%s\\n' "$@" >> "$STATEWRIGHT_CURL_CAPTURE"
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  case "$argument" in http://*|https://*) url="$argument" ;; esac
+  previous="$argument"
+done
+case "$url" in
+  */api/oauth/device/code)
+    printf '%s' '{"device_code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_code":"BCDF-GHJK-MNPQ","verification_uri":"https://statewright.ai/device","verification_uri_complete":"https://statewright.ai/device?user_code=BCDF-GHJK-MNPQ","expires_in":600,"interval":5}' > "$output"
+    printf '200'
+    ;;
+  */api/oauth/device/token)
+    printf '%s' '{"access_token":"${rawKey}","token_type":"Bearer","scope":"mcp"}' > "$output"
+    printf '200'
+    ;;
+  */api/gateway/workflows)
+    printf '%s' '{"default":"bugfix","workflows":{}}' > "$output"
+    printf '200'
+    ;;
+  *) exit 1 ;;
+esac
+`);
+    await chmod(fakeCurl, 0o755);
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_CURL_CAPTURE: capture,
+      STATEWRIGHT_NO_BROWSER: "true",
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+
+    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(responseById(result.stdout, 2).result.content[0].text, /device code BCDF-GHJK-MNPQ/);
+
+    const keyPath = join(home, ".statewright", "api_key");
+    await waitForOutput(async () => {
+      try { return await readFile(keyPath, "utf8"); } catch { return ""; }
+    }, /sw_live_/);
+    assert.equal(await readFile(keyPath, "utf8"), `${rawKey}\n`);
+    assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+    const curlArguments = await readFile(capture, "utf8");
+    assert.match(curlArguments, /\/api\/oauth\/device\/code/);
+    assert.match(curlArguments, /\/api\/oauth\/device\/token/);
+    assert.match(curlArguments, /\/api\/gateway\/workflows/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("codex searches public docs without a local credential or gateway request", async () => {

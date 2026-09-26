@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stdio MCP proxy — forwards JSON-RPC to statewright gateway with auth from disk
 # Used as `type: "command"` MCP server in plugin .mcp.json
-# No OAuth, no static auth headers — reads key dynamically from ~/.statewright/api_key
+# Browser device authorization provisions the local key; authenticated calls
+# continue to read it dynamically from ~/.statewright/api_key.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -146,14 +147,87 @@ open_keys_page() {
   fi
 }
 
-prompt_missing_key() {
-  mkdir -p "$STATEWRIGHT_DIR" 2>/dev/null || return 0
-  if [ ! -f "$MISSING_KEY_SENTINEL" ]; then
-    if open_keys_page 'https://statewright.ai/keys'; then
-      : > "$MISSING_KEY_SENTINEL"
-      chmod 600 "$MISSING_KEY_SENTINEL"
-    fi
+request_device_authorization() {
+  local body status response
+  command -v curl >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-code.XXXXXX") || return 1
+  status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
+    -X POST "${PB_URL%/}/api/oauth/device/code" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    --data-urlencode 'client_id=statewright-codex' \
+    --data-urlencode 'scope=mcp' 2>/dev/null || true)
+  response=$(cat "$body" 2>/dev/null || true)
+  rm -f "$body"
+  [ "$status" = "200" ] || return 1
+  printf '%s' "$response" | jq -e -c '
+    select(
+      (.device_code | type == "string" and test("^[0-9a-f]{32}$")) and
+      (.user_code | type == "string" and test("^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$")) and
+      (.verification_uri_complete | type == "string") and
+      (.expires_in | type == "number" and floor == . and . >= 60 and . <= 900) and
+      (.interval | type == "number" and floor == . and . >= 5 and . <= 60)
+    )
+  ' 2>/dev/null
+}
+
+persist_verified_device_key() {
+  local key="$1" body status temp_key
+  [[ "$key" =~ ^sw_live_[0-9a-f]{32}$ ]] || return 1
+
+  body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
+  status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
+    "${PB_URL%/}/api/gateway/workflows" \
+    -H "Authorization: Bearer $key" \
+    -H 'Accept: application/json' 2>/dev/null || true)
+  rm -f "$body"
+  [ "$status" = "200" ] || return 1
+
+  umask 077
+  mkdir -p "$STATEWRIGHT_DIR" || return 1
+  chmod 700 "$STATEWRIGHT_DIR" || return 1
+  temp_key=$(mktemp "$STATEWRIGHT_DIR/api_key.device.XXXXXX") || return 1
+  if ! printf '%s\n' "$key" > "$temp_key"; then
+    rm -f "$temp_key"
+    return 1
   fi
+  chmod 600 "$temp_key" || { rm -f "$temp_key"; return 1; }
+  mv -f "$temp_key" "$KEY_FILE"
+  rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
+}
+
+poll_device_authorization() {
+  local device_code="$1" expires_in="$2" interval="$3"
+  local started now body status response oauth_error key
+  started=$(date +%s)
+  while :; do
+    sleep "$interval"
+    now=$(date +%s)
+    [ $((now - started)) -lt "$expires_in" ] || return 1
+    body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-token.XXXXXX") || return 1
+    status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
+      -X POST "${PB_URL%/}/api/oauth/device/token" \
+      -H 'Accept: application/json' \
+      -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data-urlencode 'grant_type=urn:ietf:params:oauth:grant-type:device_code' \
+      --data-urlencode "device_code=$device_code" \
+      --data-urlencode 'client_id=statewright-codex' 2>/dev/null || true)
+    response=$(cat "$body" 2>/dev/null || true)
+    rm -f "$body"
+    if [ "$status" = "200" ]; then
+      key=$(printf '%s' "$response" | jq -r 'select(.token_type == "Bearer") | .access_token // empty' 2>/dev/null)
+      persist_verified_device_key "$key"
+      return $?
+    fi
+    oauth_error=$(printf '%s' "$response" | jq -r '.error // empty' 2>/dev/null)
+    case "$oauth_error" in
+      authorization_pending) ;;
+      slow_down) interval=$((interval + 5)); [ "$interval" -le 60 ] || interval=60 ;;
+      access_denied|expired_token|invalid_grant) return 1 ;;
+      *) return 1 ;;
+    esac
+  done
 }
 
 mark_invalid_key() {
@@ -540,16 +614,31 @@ while IFS= read -r line; do
   fi
 
   if [ -z "$API_KEY" ]; then
-    [ "$METHOD" = "notifications/initialized" ] || prompt_missing_key
     if [ "$METHOD" = "tools/list" ]; then
-      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_search_docs","description":"Search Statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Available without a local credential.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}},{"name":"statewright_list_workflows","description":"Report local Statewright connectivity and available workflows. Without a local credential it reports connected:false and an empty workflow list.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_connect","description":"Open Statewright account setup in your browser. Statewright tools remain unavailable until this client has a local credential; never paste a credential into chat.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
+      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_search_docs","description":"Search Statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Available without a local credential.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}},{"name":"statewright_list_workflows","description":"Report local Statewright connectivity and available workflows. Without a local credential it reports connected:false and an empty workflow list.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_connect","description":"Connect this client through secure browser approval. The plugin verifies and stores the resulting credential without asking you to copy an API key.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_list_workflows" ]; then
       echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"connected\":false,\"credential\":\"missing\",\"workflows\":[],\"active\":null,\"reason\":\"No local Statewright credential is configured. Use statewright_connect for account setup.\"}"}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_connect" ]; then
-      if open_keys_page 'https://statewright.ai/keys'; then
-        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Opened Statewright account setup in your browser. Sign in or create an account there; this client will become available after its local credential is configured. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+      DEVICE_AUTHORIZATION=$(request_device_authorization || true)
+      DEVICE_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.device_code // empty' 2>/dev/null)
+      USER_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.user_code // empty' 2>/dev/null)
+      VERIFY_URL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.verification_uri_complete // empty' 2>/dev/null)
+      EXPIRES_IN=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.expires_in // empty' 2>/dev/null)
+      POLL_INTERVAL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.interval // empty' 2>/dev/null)
+      case "$VERIFY_URL" in
+        "${PB_URL%/}/device?user_code="*) ;;
+        *) VERIFY_URL="" ;;
+      esac
+      if [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ] || [ -z "$VERIFY_URL" ]; then
+        jq -cn --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:"Statewright account connection could not be started. Try again, or use https://statewright.ai/keys as the manual recovery path."},id:$id}'
       else
-        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Open https://statewright.ai/keys in your browser to finish account setup. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+        (poll_device_authorization "$DEVICE_CODE" "$EXPIRES_IN" "$POLL_INTERVAL") >/dev/null 2>&1 &
+        if open_keys_page "$VERIFY_URL"; then
+          CONNECT_TEXT="Opened secure Statewright approval in your browser. Confirm that it shows device code $USER_CODE, then approve it. This plugin will verify and store the credential automatically; do not paste an API key into chat."
+        else
+          CONNECT_TEXT="Open $VERIFY_URL and confirm device code $USER_CODE. After approval, this plugin will verify and store the credential automatically; do not paste an API key into chat."
+        fi
+        jq -cn --arg text "$CONNECT_TEXT" --argjson id "$ID" '{jsonrpc:"2.0",result:{content:[{type:"text",text:$text}]},id:$id}'
       fi
     elif [ "$METHOD" = "notifications/initialized" ]; then
       : # notification, no response

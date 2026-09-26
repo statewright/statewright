@@ -23,16 +23,19 @@ codex plugin marketplace add statewright/statewright
 codex plugin add statewright@statewright
 ```
 
-After installation, Statewright opens [account setup](https://statewright.ai/keys)
-in your browser. Sign in there to manage the account; never paste a Statewright
-credential into a Codex or ChatGPT conversation. The plugin reads an already
-provisioned local credential directly, outside model context.
+After installation, call `statewright_connect`. Statewright creates a short-lived
+device request and opens an authenticated approval page in your browser. Confirm
+that the browser shows the same device code as the tool response, then approve.
+The plugin polls in the background, verifies the returned Statewright gateway
+key against a read-only endpoint, and writes it atomically to
+`~/.statewright/api_key` with mode `0600`. It never asks you to paste the key into
+a Codex or ChatGPT conversation.
 
-Automatic browser-to-MCP account linking is not available yet. Until the generic
-Statewright OAuth provider ships, browser sign-in does not provision a local
-credential. A fresh public install therefore remains unconnected after browser
-sign-in; do not transfer a credential through model chat. The future OAuth
-handoff will provision a short-lived local token and refresh the tool catalog.
+If browser launch is disabled, `statewright_connect` returns the complete
+approval URL and device code. `https://statewright.ai/keys` remains the manual
+recovery path when device enrollment cannot be started. The tool catalog reads
+the credential file for every request, so authenticated tools become available
+in the same MCP process after approval.
 
 ### Exact native token telemetry
 

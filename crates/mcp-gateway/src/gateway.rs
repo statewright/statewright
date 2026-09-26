@@ -806,13 +806,12 @@ impl Gateway {
                             .get(&session.current_state)
                             .and_then(|state| state.intent.clone())
                     });
-                let shadow = risk_assessment::assess_invocation(
+                let _pipeline = risk_assessment::assess_pipeline(
                     None,
                     &params.name,
                     &params.arguments,
                     intent.as_deref(),
                 );
-                risk_assessment::emit_shadow(&params.name, &shadow);
             }
             return self
                 .handle_custom_tool_call(id, &params.name, params.arguments)
@@ -834,13 +833,12 @@ impl Gateway {
                     .get(&session.current_state)
                     .and_then(|state| state.intent.clone())
             });
-        let shadow = risk_assessment::assess_invocation(
+        let _pipeline = risk_assessment::assess_pipeline(
             upstream_tool,
             &params.name,
             &params.arguments,
             intent.as_deref(),
         );
-        risk_assessment::emit_shadow(&params.name, &shadow);
 
         // When deactivated, pass all tool calls through without enforcement
         if self.active_workflow.is_none() {
@@ -1138,8 +1136,7 @@ impl Gateway {
             .states
             .get(&session.current_state)
             .and_then(|state| state.intent.as_deref());
-        let shadow = risk_assessment::assess_invocation(None, tool_name, tool_input, intent);
-        risk_assessment::emit_shadow(tool_name, &shadow);
+        let pipeline = risk_assessment::assess_pipeline(None, tool_name, tool_input, intent);
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
         // including tools the state whitelist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
@@ -1150,6 +1147,7 @@ impl Gateway {
                 "approval_pending": true,
                 "approval_id": pending.approval_id,
                 "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
                 "reason": format!(
                     "APPROVAL PENDING (id: {}): the workflow is parked at state '{}' awaiting a human decision on event '{}' ({}). All tool calls are blocked until an authorized reviewer approves or rejects the pending approval; do not attempt further tool calls or transitions.",
                     pending.approval_id,
@@ -1165,6 +1163,7 @@ impl Gateway {
                 "reason": reason,
                 "available_tools": statewright_agent::tool_enforcer::get_allowed_tools(&session.definition, &session.current_state).unwrap_or_default(),
                 "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
             });
         }
         let policy_tool_name =
@@ -1183,6 +1182,7 @@ impl Gateway {
                     "reason": reason,
                     "available_tools": available_tools,
                     "state": session.current_state,
+                    "risk_assessment": pipeline.visible_json(),
                 });
             }
             EnforcementDecision::ImplicitTransition { event, new_state } => {
@@ -1211,6 +1211,7 @@ impl Gateway {
                         return json!({
                             "decision": "deny",
                             "reason": "workflow session disappeared during implicit transition",
+                            "risk_assessment": pipeline.visible_json(),
                         });
                     }
                 }
@@ -1230,6 +1231,7 @@ impl Gateway {
                 "decision": "deny",
                 "reason": reason,
                 "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
             }),
             PreCallDecision::Warn(warning) => json!({
                 "decision": "allow",
@@ -1237,12 +1239,14 @@ impl Gateway {
                 "policy_tool_name": policy_tool_name,
                 "additional_context": checkpoint_context,
                 "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
             }),
             PreCallDecision::Allow => json!({
                 "decision": "allow",
                 "policy_tool_name": policy_tool_name,
                 "additional_context": checkpoint_context,
                 "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
             }),
         }
     }
@@ -3625,6 +3629,8 @@ mod tests {
         let allowed = tool_result_json(allowed);
         assert_eq!(allowed["decision"], "allow");
         assert_eq!(allowed["policy_tool_name"], "read_file");
+        assert_eq!(allowed["risk_assessment"]["deterministic_risk"], "Low");
+        assert!(!allowed["risk_assessment"].to_string().contains("src/lib.rs"));
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].tool, "Read");

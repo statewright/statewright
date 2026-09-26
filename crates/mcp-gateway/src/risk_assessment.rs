@@ -53,6 +53,7 @@ pub struct SemanticRiskVector {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticAssessorStatus {
     Disabled,
+    Queued,
     Unavailable,
     Timeout,
     Malformed,
@@ -115,6 +116,44 @@ pub struct SemanticAssessmentReceipt {
     pub status: SemanticAssessorStatus,
     pub vector: Option<SemanticRiskVector>,
     pub state_intent: Option<String>,
+}
+
+/// The assessment that travels with a pre-tool pipeline response.  It is
+/// deliberately separate from authorization: callers can observe the
+/// deterministic heuristic, the semantic failsafe's state, and the resulting
+/// conservative risk floor without giving semantic inference permission to
+/// admit an invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RiskPipelineAssessment {
+    pub deterministic: ShadowAssessment,
+    pub semantic: SemanticAssessmentReceipt,
+    pub effective_risk: RiskBand,
+    pub semantic_failsafe_escalated: bool,
+}
+
+impl RiskPipelineAssessment {
+    /// Redacted, stable response shape for adapters and hooks.  It contains
+    /// labels and bounded probabilities only--never arguments, command text,
+    /// paths, or payload values.
+    pub fn visible_json(&self) -> serde_json::Value {
+        let vector = self.semantic.vector.as_ref().map(|value| serde_json::json!({
+            "read_only": value.read_only.get(),
+            "may_write": value.may_write.get(),
+            "reversible": value.reversible.get(),
+            "destructive": value.destructive.get(),
+            "irreversible": value.irreversible.get(),
+            "external_or_account_effect": value.external_or_account_effect.get(),
+        }));
+        serde_json::json!({
+            "deterministic_risk": format!("{:?}", self.deterministic.risk),
+            "deterministic_exposure": format!("{:?}", self.deterministic.exposure),
+            "deterministic_source": self.deterministic.source,
+            "effective_risk": format!("{:?}", self.effective_risk),
+            "semantic_status": format!("{:?}", self.semantic.status),
+            "semantic_vector": vector,
+            "semantic_failsafe_escalated": self.semantic_failsafe_escalated,
+        })
+    }
 }
 
 pub struct SemanticAssessmentJob {
@@ -283,9 +322,6 @@ fn emit_shadow_when(enabled: bool, tool: &str, assessment: &ShadowAssessment) ->
             source: assessment.source,
             state_intent: assessment.state_intent.clone(),
         }));
-        if let Some(request) = &assessment.semantic_request {
-            emit_semantic_shadow(tool, request);
-        }
         tracing::info!(
             tool,
             risk = ?assessment.risk,
@@ -370,19 +406,29 @@ fn dispatch_semantic_shadow(
         .map(|status| semantic_receipt(request, status))
 }
 
-/// Submit the redacted operation shape to the staging-only worker. The
-/// pre-tool path never awaits this work: disabled, missing-runtime, full, and
-/// unavailable outcomes are recorded as shadow telemetry and then discarded.
-fn emit_semantic_shadow(_tool: &str, request: &SemanticAssessmentRequest) {
+/// Submit the redacted operation shape through the same staging worker used by
+/// the visible pre-tool pipeline response. The returned status is the exact
+/// immediate outcome of that submission; successful enqueue is `Queued` and
+/// its later provider result is recorded separately by the worker.
+fn submit_semantic_pipeline(request: &SemanticAssessmentRequest) -> SemanticAssessmentReceipt {
     let config = SemanticShadowConfig::from_env();
     let runtime = if config.enabled && tokio::runtime::Handle::try_current().is_ok() {
         Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| start_shared_semantic_shadow_runtime(&config)))
     } else {
         None
     };
-    if let Some(receipt) = dispatch_semantic_shadow(&config, runtime, request) {
-        record_semantic_receipt(receipt);
-    }
+    submit_semantic_pipeline_with(&config, runtime, request)
+}
+
+fn submit_semantic_pipeline_with(
+    config: &SemanticShadowConfig,
+    runtime: Option<&SemanticShadowRuntime>,
+    request: &SemanticAssessmentRequest,
+) -> SemanticAssessmentReceipt {
+    let receipt = dispatch_semantic_shadow(config, runtime, request)
+        .unwrap_or_else(|| semantic_receipt(request, SemanticAssessorStatus::Queued));
+    record_semantic_receipt(receipt.clone());
+    receipt
 }
 
 pub fn assess_shell(command: &str) -> ShadowAssessment {
@@ -428,6 +474,113 @@ pub fn assess_invocation(
     result.state_intent = state_intent.map(str::to_owned);
     result.semantic_request = Some(semantic_request(tool, tool_name, arguments, state_intent, is_shell));
     result
+}
+
+/// Run the pre-tool assessment pipeline with the production staging posture.
+/// Until a calibrated provider is installed, an opted-in semantic branch is
+/// explicitly `Unavailable`; this is visible to the caller and cannot make a
+/// deterministic decision less restrictive.
+pub fn assess_pipeline(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+) -> RiskPipelineAssessment {
+    let deterministic = assess_invocation(tool, tool_name, arguments, state_intent);
+    emit_shadow(tool_name, &deterministic);
+    let semantic = deterministic
+        .semantic_request
+        .as_ref()
+        .map(submit_semantic_pipeline)
+        .unwrap_or(SemanticAssessmentReceipt {
+            tool: "unknown".to_owned(),
+            status: SemanticAssessorStatus::Malformed,
+            vector: None,
+            state_intent: None,
+        });
+    pipeline_from_parts(deterministic, semantic)
+}
+
+/// Provider-injected form used by a future calibrated worker and focused
+/// tests.  The combination policy is monotonic: semantic inference may only
+/// raise the deterministic risk floor.
+pub fn assess_pipeline_with<A: SemanticAssessor>(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    assessor: Option<&A>,
+) -> RiskPipelineAssessment {
+    assess_pipeline_with_config(
+        tool,
+        tool_name,
+        arguments,
+        state_intent,
+        assessor,
+        &SemanticShadowConfig::from_env(),
+    )
+}
+
+fn assess_pipeline_with_config<A: SemanticAssessor>(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    assessor: Option<&A>,
+    config: &SemanticShadowConfig,
+) -> RiskPipelineAssessment {
+    let deterministic = assess_invocation(tool, tool_name, arguments, state_intent);
+    let semantic = match deterministic.semantic_request.as_ref() {
+        None => SemanticAssessmentReceipt {
+            tool: "unknown".to_owned(),
+            status: SemanticAssessorStatus::Malformed,
+            vector: None,
+            state_intent: None,
+        },
+        Some(request) if !config.enabled => semantic_receipt(request, SemanticAssessorStatus::Disabled),
+        Some(request) => match assessor {
+            Some(assessor) => evaluate_semantic(tool_name, request, Some(assessor)),
+            None => semantic_receipt(request, SemanticAssessorStatus::Unavailable),
+        },
+    };
+    pipeline_from_parts(deterministic, semantic)
+}
+
+fn pipeline_from_parts(
+    deterministic: ShadowAssessment,
+    semantic: SemanticAssessmentReceipt,
+) -> RiskPipelineAssessment {
+    let effective_risk = semantic_failsafe_floor(deterministic.risk, &semantic);
+    let semantic_failsafe_escalated = effective_risk != deterministic.risk;
+    RiskPipelineAssessment {
+        deterministic,
+        semantic,
+        effective_risk,
+        semantic_failsafe_escalated,
+    }
+}
+
+fn semantic_failsafe_floor(deterministic: RiskBand, semantic: &SemanticAssessmentReceipt) -> RiskBand {
+    let Some(vector) = semantic.vector.as_ref() else { return deterministic; };
+    let semantic_floor = if vector.destructive.get() >= 0.85 || vector.irreversible.get() >= 0.85 {
+        RiskBand::Critical
+    } else if vector.external_or_account_effect.get() >= 0.85 {
+        RiskBand::High
+    } else if vector.may_write.get() >= 0.85 {
+        RiskBand::Moderate
+    } else {
+        RiskBand::Low
+    };
+    if risk_rank(semantic_floor) > risk_rank(deterministic) { semantic_floor } else { deterministic }
+}
+
+fn risk_rank(risk: RiskBand) -> u8 {
+    match risk {
+        RiskBand::Low => 0,
+        RiskBand::Moderate => 1,
+        RiskBand::High => 2,
+        RiskBand::Critical => 3,
+    }
 }
 
 pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment {
@@ -888,5 +1041,112 @@ mod tests {
         ));
         assert_eq!(receipt_receiver.try_recv().unwrap().status, SemanticAssessorStatus::Disabled);
         assert!(receipt_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn visible_pipeline_keeps_heuristic_as_floor_and_escalates_only_for_high_confidence_failsafes() {
+        struct Failsafe;
+        impl SemanticAssessor for Failsafe {
+            fn assess(&self, _: &SemanticAssessmentRequest) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+                Ok(SemanticRiskVector {
+                    read_only: Probability::new(0.99).unwrap(),
+                    may_write: Probability::new(0.01).unwrap(),
+                    reversible: Probability::new(0.1).unwrap(),
+                    destructive: Probability::new(0.91).unwrap(),
+                    irreversible: Probability::new(0.9).unwrap(),
+                    external_or_account_effect: Probability::new(0.0).unwrap(),
+                })
+            }
+        }
+        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None);
+        let pipeline = assess_pipeline_with_config(
+            None,
+            "read_file",
+            &json!({"path":"/private/secret.txt"}),
+            Some("inspect"),
+            Some(&Failsafe),
+            &enabled,
+        );
+        assert_eq!(pipeline.deterministic.risk, RiskBand::Low);
+        assert_eq!(pipeline.effective_risk, RiskBand::Critical);
+        assert!(pipeline.semantic_failsafe_escalated);
+        let visible = pipeline.visible_json();
+        assert_eq!(visible["semantic_status"], "Assessed");
+        assert_eq!(visible["effective_risk"], "Critical");
+        assert!(!visible.to_string().contains("/private/secret.txt"));
+
+        let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None);
+        let unavailable = assess_pipeline_with_config::<Failsafe>(
+            None,
+            "read_file",
+            &json!({"path":"/private/secret.txt"}),
+            Some("inspect"),
+            None,
+            &disabled,
+        );
+        assert_eq!(unavailable.semantic.status, SemanticAssessorStatus::Disabled);
+        assert_eq!(unavailable.effective_risk, unavailable.deterministic.risk);
+        assert!(!unavailable.semantic_failsafe_escalated);
+    }
+
+    #[test]
+    fn semantic_failsafe_is_monotonic_across_all_risk_floors_and_fallbacks() {
+        let vector = |may_write, destructive, irreversible, external_or_account_effect| SemanticRiskVector {
+            read_only: Probability::new(0.99).unwrap(),
+            may_write: Probability::new(may_write).unwrap(),
+            reversible: Probability::new(0.99).unwrap(),
+            destructive: Probability::new(destructive).unwrap(),
+            irreversible: Probability::new(irreversible).unwrap(),
+            external_or_account_effect: Probability::new(external_or_account_effect).unwrap(),
+        };
+        let assessed = |vector| SemanticAssessmentReceipt {
+            tool: "read_file".to_owned(),
+            status: SemanticAssessorStatus::Assessed,
+            vector: Some(vector),
+            state_intent: Some("inspect".to_owned()),
+        };
+        let cases = [
+            (RiskBand::Low, assessed(vector(0.91, 0.01, 0.01, 0.01)), RiskBand::Moderate, true),
+            (RiskBand::Low, assessed(vector(0.01, 0.01, 0.01, 0.91)), RiskBand::High, true),
+            (RiskBand::Low, assessed(vector(0.01, 0.91, 0.01, 0.01)), RiskBand::Critical, true),
+            (RiskBand::Low, assessed(vector(0.01, 0.01, 0.91, 0.01)), RiskBand::Critical, true),
+            (RiskBand::Critical, assessed(vector(0.01, 0.01, 0.01, 0.01)), RiskBand::Critical, false),
+        ];
+        for (baseline, semantic, expected, escalated) in cases {
+            let pipeline = pipeline_from_parts(assessment(baseline, ExposureBand::Local, "test"), semantic);
+            assert_eq!(pipeline.effective_risk, expected);
+            assert_eq!(pipeline.semantic_failsafe_escalated, escalated);
+        }
+
+        let request = semantic_request(None, "read_file", &json!({"path":"/private/secret.txt"}), Some("inspect"), false);
+        for status in [
+            SemanticAssessorStatus::Disabled,
+            SemanticAssessorStatus::Queued,
+            SemanticAssessorStatus::Unavailable,
+            SemanticAssessorStatus::Timeout,
+            SemanticAssessorStatus::Malformed,
+            SemanticAssessorStatus::QueueFull,
+        ] {
+            let pipeline = pipeline_from_parts(
+                assessment(RiskBand::Critical, ExposureBand::Account, "test"),
+                semantic_receipt(&request, status),
+            );
+            assert_eq!(pipeline.effective_risk, RiskBand::Critical, "{status:?}");
+            assert!(!pipeline.semantic_failsafe_escalated, "{status:?}");
+            assert_eq!(pipeline.visible_json()["semantic_status"], format!("{status:?}"));
+        }
+    }
+
+    #[test]
+    fn visible_pipeline_submission_reports_the_actual_queue_full_outcome() {
+        let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), None, false);
+        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
+        let (queue, _receiver) = SemanticAssessmentQueue::new(1);
+        assert!(queue.try_submit(request.clone()).is_ok());
+        let runtime = SemanticShadowRuntime { queue };
+        let receipt = submit_semantic_pipeline_with(&enabled, Some(&runtime), &request);
+        assert_eq!(receipt.status, SemanticAssessorStatus::QueueFull);
+        assert!(receipt.vector.is_none());
+        assert!(!format!("{:?}", receipt).contains("/private/secret"));
     }
 }

@@ -32,6 +32,8 @@ pub struct PreToolRequest {
 pub struct PreToolResponse {
     pub decision: String, // "allow" | "deny"
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_assessment: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_message: Option<String>,
@@ -126,6 +128,7 @@ async fn handle_pre_tool(
         None => {
             return Json(PreToolResponse {
                 decision: "allow".into(),
+                risk_assessment: None,
                 additional_context: None,
                 status_message: None,
             });
@@ -143,21 +146,22 @@ async fn handle_pre_tool(
         .states
         .get(&session.current_state)
         .and_then(|state| state.intent.as_deref());
-    let shadow = risk_assessment::assess_invocation(None, &req.tool_name, &req.tool_input, intent);
-    risk_assessment::emit_shadow(&req.tool_name, &shadow);
+    let pipeline = risk_assessment::assess_pipeline(None, &req.tool_name, &req.tool_input, intent);
 
     if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
         return Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         });
     }
     let policy_tool_name = enforcement::resolve_adapter_tool_name(&session, &req.tool_name, &req.tool_input);
     match enforcement::enforce_tool_call(&session, &policy_tool_name) {
-        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None),
+        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None, &pipeline),
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         }),
@@ -179,9 +183,11 @@ async fn handle_pre_tool(
                     &req,
                     format!("{} -> {}", old_state, new_state),
                     context,
+                    &pipeline,
                 ),
                 None => Json(PreToolResponse {
                     decision: "deny".into(),
+                    risk_assessment: Some(pipeline.visible_json()),
                     additional_context: Some(
                         "BLOCKED: workflow session disappeared during implicit transition".into(),
                     ),
@@ -199,6 +205,7 @@ async fn handle_pre_tool(
                  using statewright_transition.",
                 iteration, max, session.current_state
             )),
+            &pipeline,
         ),
     }
 }
@@ -208,15 +215,18 @@ fn pre_tool_policy_response(
     req: &PreToolRequest,
     status: String,
     context: Option<String>,
+    pipeline: &risk_assessment::RiskPipelineAssessment,
 ) -> Json<PreToolResponse> {
     match interceptors::pre_call_check(session, &req.tool_name, &req.tool_input) {
         PreCallDecision::Allow => Json(PreToolResponse {
             decision: "allow".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: context,
             status_message: Some(status),
         }),
         PreCallDecision::Warn(warning) => Json(PreToolResponse {
             decision: "allow".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(match context {
                 Some(context) => format!("{} {}", context, warning),
                 None => warning,
@@ -225,6 +235,7 @@ fn pre_tool_policy_response(
         }),
         PreCallDecision::Block(reason) => Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(match context {
                 Some(context) => format!("{} BLOCKED: {}", context, reason),
                 None => format!("BLOCKED: {}", reason),
@@ -490,6 +501,8 @@ mod tests {
             Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
         ).await.0;
         assert_eq!(allowed.decision, "allow");
+        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"], "Moderate");
+        assert!(!allowed.risk_assessment.as_ref().unwrap().to_string().contains("policy"));
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].tool, "grep");

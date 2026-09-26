@@ -122,8 +122,11 @@ async fn handle_pre_tool(
     State(state): State<Arc<RwLock<HookState>>>,
     Json(req): Json<PreToolRequest>,
 ) -> Json<PreToolResponse> {
-    let state = state.read().await;
-    let session = match state.session_manager.get(&state.session_id) {
+    let (session_manager, session_id) = {
+        let state = state.read().await;
+        (state.session_manager.clone(), state.session_id.clone())
+    };
+    let initial_session = match session_manager.get(&session_id) {
         Some(s) => s,
         None => {
             return Json(PreToolResponse {
@@ -135,18 +138,38 @@ async fn handle_pre_tool(
         }
     };
 
+    let intent = initial_session
+        .definition
+        .states
+        .get(&initial_session.current_state)
+        .and_then(|state| state.intent.as_deref());
+    let pipeline = risk_assessment::assess_pipeline_visible(None, &req.tool_name, &req.tool_input, intent).await;
+    let session = match session_manager.get(&session_id) {
+        Some(session) => session,
+        None => return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some("BLOCKED: workflow session disappeared while semantic risk was assessed".into()),
+            status_message: None,
+        }),
+    };
     let status = format!(
         "{} ({}/{})",
         session.current_state,
         session.iteration_count,
         session.max_iterations().unwrap_or(0)
     );
-    let intent = session
-        .definition
-        .states
-        .get(&session.current_state)
-        .and_then(|state| state.intent.as_deref());
-    let pipeline = risk_assessment::assess_pipeline(None, &req.tool_name, &req.tool_input, intent);
+    if let Some(pending) = &session.pending_approval {
+        return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some(format!(
+                "BLOCKED: approval '{}' is pending for event '{}'",
+                pending.approval_id, pending.event,
+            )),
+            status_message: Some(status),
+        });
+    }
 
     if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
         return Json(PreToolResponse {
@@ -168,8 +191,8 @@ async fn handle_pre_tool(
         EnforcementDecision::ImplicitTransition { event, new_state } => {
             // Apply the transition in the session manager
             let old_state = session.current_state.clone();
-            state.session_manager.update_state(
-                &state.session_id,
+            session_manager.update_state(
+                &session_id,
                 new_state.clone(),
                 session.context.clone(),
             );
@@ -177,7 +200,7 @@ async fn handle_pre_tool(
                 "State transitioned: {} -> {} (via {}). You are now in the {} phase.",
                 old_state, new_state, event, new_state
             ));
-            match state.session_manager.get(&state.session_id) {
+            match session_manager.get(&session_id) {
                 Some(updated) => pre_tool_policy_response(
                     &updated,
                     &req,
@@ -424,6 +447,29 @@ mod tests {
             session_manager: manager,
             session_id: "test-session".into(),
         }))
+    }
+
+    #[tokio::test]
+    async fn refreshed_hook_session_blocks_pending_approval() {
+        let state = hook_state();
+        let manager = state.read().await.session_manager.clone();
+        manager.set_pending_approval(
+            "test-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_hook".into(),
+                event: "DONE".into(),
+                from_state: "active".into(),
+                to_state: "completed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
+        let response = handle_pre_tool(
+            State(state),
+            Json(PreToolRequest { tool_name: "bash".into(), tool_input: json!({"command":"gh"}) }),
+        ).await.0;
+        assert_eq!(response.decision, "deny");
+        assert!(response.additional_context.unwrap_or_default().contains("apr_hook"));
     }
 
     fn exploratory_hook_state() -> Arc<RwLock<HookState>> {

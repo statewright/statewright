@@ -5,6 +5,7 @@
 //! it is safe to log as a bounded staging receipt.
 
 use crate::{bash_classifier::{self, OpClass}, protocol::ToolInfo};
+use serde::Deserialize;
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
@@ -158,6 +159,32 @@ impl RiskPipelineAssessment {
 
 pub struct SemanticAssessmentJob {
     request: SemanticAssessmentRequest,
+    response: Option<tokio::sync::oneshot::Sender<SemanticAssessmentReceipt>>,
+}
+
+#[derive(Clone)]
+struct SemanticProviderConfig {
+    endpoint: String,
+    model: String,
+    bearer_token: Option<String>,
+    timeout: std::time::Duration,
+}
+
+impl SemanticProviderConfig {
+    fn from_env() -> Option<Self> {
+        let endpoint = std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_URL").ok()?;
+        let model = std::env::var("STATEWRIGHT_SEMANTIC_RISK_MODEL").ok()?;
+        if endpoint.trim().is_empty() || model.trim().is_empty() { return None; }
+        let timeout_ms = std::env::var("STATEWRIGHT_SEMANTIC_RISK_TIMEOUT_MS")
+            .ok().and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (50..=5_000).contains(value)).unwrap_or(1_500);
+        Some(Self {
+            endpoint: endpoint.trim_end_matches('/').to_owned(),
+            model,
+            bearer_token: std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_TOKEN").ok().filter(|value| !value.is_empty()),
+            timeout: std::time::Duration::from_millis(timeout_ms),
+        })
+    }
 }
 
 /// Bounded, non-blocking queue used by a future local/open-weight worker.  A
@@ -175,8 +202,18 @@ impl SemanticAssessmentQueue {
     }
 
     pub fn try_submit(&self, request: SemanticAssessmentRequest) -> Result<(), SemanticAssessorStatus> {
+        self.try_submit_job(SemanticAssessmentJob { request, response: None })
+    }
+
+    fn try_submit_with_response(&self, request: SemanticAssessmentRequest) -> Result<tokio::sync::oneshot::Receiver<SemanticAssessmentReceipt>, SemanticAssessorStatus> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.try_submit_job(SemanticAssessmentJob { request, response: Some(sender) })?;
+        Ok(receiver)
+    }
+
+    fn try_submit_job(&self, job: SemanticAssessmentJob) -> Result<(), SemanticAssessorStatus> {
         self.sender
-            .try_send(SemanticAssessmentJob { request })
+            .try_send(job)
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => SemanticAssessorStatus::QueueFull,
                 mpsc::error::TrySendError::Closed(_) => SemanticAssessorStatus::Unavailable,
@@ -184,16 +221,79 @@ impl SemanticAssessmentQueue {
     }
 }
 
-/// Start the staging worker before any calibrated provider is installed. It
-/// produces only `Unavailable` receipts, so no synchronous or unbounded
-/// provider work can run on the gateway executor.
-fn spawn_unavailable_semantic_worker(
+/// OpenAI-compatible response envelope. The provider receives only the
+/// redacted operation shape and must return JSON containing the six fields.
+#[derive(Deserialize)]
+struct SemanticProviderResponse { choices: Vec<SemanticProviderChoice> }
+#[derive(Deserialize)]
+struct SemanticProviderChoice { message: SemanticProviderMessage }
+#[derive(Deserialize)]
+struct SemanticProviderMessage { content: Option<String> }
+#[derive(Deserialize)]
+struct SemanticVectorWire {
+    read_only: f32, may_write: f32, reversible: f32, destructive: f32,
+    irreversible: f32, external_or_account_effect: f32,
+}
+
+async fn assess_with_provider(
+    client: &reqwest::Client,
+    provider: &SemanticProviderConfig,
+    request: &SemanticAssessmentRequest,
+) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+    let request_shape = serde_json::json!({
+        "tool_family": request.tool_family, "tool_name": request.tool_name,
+        "state_intent": request.state_intent, "argument_keys": request.argument_keys,
+        "shell_executable": request.shell_executable, "shell_flags": request.shell_flags,
+        "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
+        "open_world_hint": request.open_world_hint,
+    });
+    let body = serde_json::json!({
+        "model": provider.model,
+        "temperature": 0.0,
+        "max_tokens": 160,
+        "messages": [
+            {"role":"system","content":"Return JSON only with independent numbers 0..1: read_only, may_write, reversible, destructive, irreversible, external_or_account_effect. Assess only the supplied redacted operation shape."},
+            {"role":"user","content": request_shape.to_string()}
+        ]
+    });
+    let mut call = client.post(format!("{}/chat/completions", provider.endpoint)).json(&body);
+    if let Some(token) = &provider.bearer_token { call = call.bearer_auth(token); }
+    let response = call.send().await.map_err(|error| {
+        if error.is_timeout() { SemanticAssessorStatus::Timeout } else { SemanticAssessorStatus::Unavailable }
+    })?.error_for_status().map_err(|_| SemanticAssessorStatus::Unavailable)?;
+    let body = response.bytes().await.map_err(|error| {
+        if error.is_timeout() { SemanticAssessorStatus::Timeout } else { SemanticAssessorStatus::Unavailable }
+    })?;
+    let envelope: SemanticProviderResponse = serde_json::from_slice(&body)
+        .map_err(|_| SemanticAssessorStatus::Malformed)?;
+    let content = envelope.choices.into_iter().next().and_then(|choice| choice.message.content)
+        .ok_or(SemanticAssessorStatus::Malformed)?;
+    let wire: SemanticVectorWire = serde_json::from_str(content.trim().trim_matches('`').trim_start_matches("json"))
+        .map_err(|_| SemanticAssessorStatus::Malformed)?;
+    Ok(SemanticRiskVector {
+        read_only: Probability::new(wire.read_only).map_err(|_| SemanticAssessorStatus::Malformed)?,
+        may_write: Probability::new(wire.may_write).map_err(|_| SemanticAssessorStatus::Malformed)?,
+        reversible: Probability::new(wire.reversible).map_err(|_| SemanticAssessorStatus::Malformed)?,
+        destructive: Probability::new(wire.destructive).map_err(|_| SemanticAssessorStatus::Malformed)?,
+        irreversible: Probability::new(wire.irreversible).map_err(|_| SemanticAssessorStatus::Malformed)?,
+        external_or_account_effect: Probability::new(wire.external_or_account_effect).map_err(|_| SemanticAssessorStatus::Malformed)?,
+    })
+}
+
+fn spawn_semantic_worker(
     mut receiver: mpsc::Receiver<SemanticAssessmentJob>,
     receipts: mpsc::Sender<SemanticAssessmentReceipt>,
+    provider: SemanticProviderConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let client = reqwest::Client::builder().timeout(provider.timeout).build()
+            .expect("semantic provider HTTP client must build");
         while let Some(job) = receiver.recv().await {
-            let receipt = semantic_receipt(&job.request, SemanticAssessorStatus::Unavailable);
+            let receipt = match assess_with_provider(&client, &provider, &job.request).await {
+                Ok(vector) => SemanticAssessmentReceipt { tool: job.request.tool_name.clone(), status: SemanticAssessorStatus::Assessed, vector: Some(vector), state_intent: job.request.state_intent.clone() },
+                Err(status) => semantic_receipt(&job.request, status),
+            };
+            if let Some(response) = job.response { let _ = response.send(receipt.clone()); }
             let _ = try_emit_semantic_receipt(&receipts, receipt);
         }
     })
@@ -336,9 +436,8 @@ fn emit_shadow_when(enabled: bool, tool: &str, assessment: &ShadowAssessment) ->
     }
 }
 
-/// Process-wide staging runtime. Its only configured assessor is deliberately
-/// unavailable until a provider clears the calibration gate; the queue and
-/// receipt path are nevertheless live so staging observability is real.
+/// Process-wide staging runtime. It exists only for an explicitly configured
+/// staging provider; requests are bounded by the queue and provider timeout.
 struct SemanticShadowRuntime {
     queue: SemanticAssessmentQueue,
 }
@@ -369,15 +468,16 @@ fn record_semantic_receipt(receipt: SemanticAssessmentReceipt) {
 fn start_semantic_shadow_runtime(
     config: &SemanticShadowConfig,
     receipts: mpsc::Sender<SemanticAssessmentReceipt>,
+    provider: SemanticProviderConfig,
 ) -> SemanticShadowRuntime {
     let (queue, receiver) = SemanticAssessmentQueue::new(config.queue_capacity);
-    spawn_unavailable_semantic_worker(receiver, receipts);
+    spawn_semantic_worker(receiver, receipts, provider);
     SemanticShadowRuntime { queue }
 }
 
-fn start_shared_semantic_shadow_runtime(config: &SemanticShadowConfig) -> SemanticShadowRuntime {
+fn start_shared_semantic_shadow_runtime(config: &SemanticShadowConfig, provider: SemanticProviderConfig) -> SemanticShadowRuntime {
     let (receipt_sender, mut receipt_receiver) = mpsc::channel(config.queue_capacity);
-    let runtime = start_semantic_shadow_runtime(config, receipt_sender);
+    let runtime = start_semantic_shadow_runtime(config, receipt_sender, provider);
     tokio::spawn(async move {
         while let Some(receipt) = receipt_receiver.recv().await {
             record_semantic_receipt(receipt);
@@ -406,18 +506,38 @@ fn dispatch_semantic_shadow(
         .map(|status| semantic_receipt(request, status))
 }
 
-/// Submit the redacted operation shape through the same staging worker used by
-/// the visible pre-tool pipeline response. The returned status is the exact
-/// immediate outcome of that submission; successful enqueue is `Queued` and
-/// its later provider result is recorded separately by the worker.
+/// Submit the redacted operation shape through the staging provider worker.
+/// The returned status is the exact immediate outcome: successful enqueue is
+/// `Queued`; the later assessed, timeout, malformed, or unavailable receipt is
+/// recorded by the worker without delaying authorization.
 fn submit_semantic_pipeline(request: &SemanticAssessmentRequest) -> SemanticAssessmentReceipt {
     let config = SemanticShadowConfig::from_env();
-    let runtime = if config.enabled && tokio::runtime::Handle::try_current().is_ok() {
-        Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| start_shared_semantic_shadow_runtime(&config)))
+    let provider = SemanticProviderConfig::from_env();
+    let runtime = if config.enabled && provider.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+        Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| start_shared_semantic_shadow_runtime(&config, provider.expect("provider checked"))))
     } else {
         None
     };
     submit_semantic_pipeline_with(&config, runtime, request)
+}
+
+async fn submit_semantic_pipeline_visible_with(
+    config: &SemanticShadowConfig,
+    runtime: Option<&SemanticShadowRuntime>,
+    timeout: std::time::Duration,
+    request: &SemanticAssessmentRequest,
+) -> SemanticAssessmentReceipt {
+    if !config.enabled { return semantic_receipt(request, SemanticAssessorStatus::Disabled); }
+    let Some(runtime) = runtime else { return semantic_receipt(request, SemanticAssessorStatus::Unavailable); };
+    let receiver = match runtime.queue.try_submit_with_response(request.clone()) {
+        Ok(receiver) => receiver,
+        Err(status) => return semantic_receipt(request, status),
+    };
+    match tokio::time::timeout(timeout, receiver).await {
+        Ok(Ok(receipt)) => receipt,
+        Ok(Err(_)) => semantic_receipt(request, SemanticAssessorStatus::Unavailable),
+        Err(_) => semantic_receipt(request, SemanticAssessorStatus::Timeout),
+    }
 }
 
 fn submit_semantic_pipeline_with(
@@ -476,9 +596,9 @@ pub fn assess_invocation(
     result
 }
 
-/// Run the pre-tool assessment pipeline with the production staging posture.
-/// Until a calibrated provider is installed, an opted-in semantic branch is
-/// explicitly `Unavailable`; this is visible to the caller and cannot make a
+/// Run the pre-tool assessment pipeline with the staging provider posture.
+/// A provider must be explicitly configured in an opted-in staging deployment;
+/// otherwise the semantic branch is visibly `Unavailable` and cannot make a
 /// deterministic decision less restrictive.
 pub fn assess_pipeline(
     tool: Option<&ToolInfo>,
@@ -498,6 +618,45 @@ pub fn assess_pipeline(
             vector: None,
             state_intent: None,
         });
+    pipeline_from_parts(deterministic, semantic)
+}
+
+/// Async visible form for hook and adapter responses. It waits only for the
+/// configured bounded provider window and never changes authorization.
+pub async fn assess_pipeline_visible(
+    tool: Option<&ToolInfo>, tool_name: &str, arguments: &serde_json::Value, state_intent: Option<&str>,
+) -> RiskPipelineAssessment {
+    let config = SemanticShadowConfig::from_env();
+    let provider = SemanticProviderConfig::from_env();
+    let runtime = if config.enabled && provider.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+        Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| start_shared_semantic_shadow_runtime(&config, provider.clone().expect("provider checked"))))
+    } else { None };
+    assess_pipeline_visible_with_runtime(
+        tool,
+        tool_name,
+        arguments,
+        state_intent,
+        &config,
+        runtime,
+        provider.map(|provider| provider.timeout).unwrap_or_default(),
+    ).await
+}
+
+async fn assess_pipeline_visible_with_runtime(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    config: &SemanticShadowConfig,
+    runtime: Option<&SemanticShadowRuntime>,
+    timeout: std::time::Duration,
+) -> RiskPipelineAssessment {
+    let deterministic = assess_invocation(tool, tool_name, arguments, state_intent);
+    emit_shadow(tool_name, &deterministic);
+    let semantic = match deterministic.semantic_request.as_ref() {
+        Some(request) => submit_semantic_pipeline_visible_with(config, runtime, timeout, request).await,
+        None => SemanticAssessmentReceipt { tool: "unknown".to_owned(), status: SemanticAssessorStatus::Malformed, vector: None, state_intent: None },
+    };
     pipeline_from_parts(deterministic, semantic)
 }
 
@@ -980,7 +1139,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn staging_worker_is_unavailable_and_reports_queue_full() {
+    async fn provider_returns_redacted_assessed_vector() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
+        let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));
+        let app = Router::new().route("/chat/completions", post({
+            let seen_sender = seen_sender.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let seen_sender = seen_sender.clone();
+                async move {
+                    if let Some(sender) = seen_sender.lock().unwrap().take() { let _ = sender.send(body); }
+                    Json(json!({"choices":[{"message":{"content":r#"{"read_only":0.1,"may_write":0.9,"reversible":0.7,"destructive":0.1,"irreversible":0.1,"external_or_account_effect":0.95}"#}}]}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let config = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
+        let provider = SemanticProviderConfig { endpoint, model: "test".into(), bearer_token: None, timeout: std::time::Duration::from_secs(1) };
+        let (receipt_sender, _receipt_receiver) = mpsc::channel(1);
+        let runtime = start_semantic_shadow_runtime(&config, receipt_sender, provider.clone());
+        let pipeline = assess_pipeline_visible_with_runtime(
+            None,
+            "read_file",
+            &json!({"path":"/private/secret"}),
+            Some("inspect"),
+            &config,
+            Some(&runtime),
+            provider.timeout,
+        ).await;
+        assert_eq!(pipeline.semantic.status, SemanticAssessorStatus::Assessed);
+        assert_eq!(pipeline.semantic.vector.unwrap().external_or_account_effect.get(), 0.95);
+        assert_eq!(pipeline.deterministic.risk, RiskBand::Low);
+        assert_eq!(pipeline.effective_risk, RiskBand::High);
+        assert!(pipeline.semantic_failsafe_escalated);
+        let seen = seen_receiver.await.unwrap().to_string();
+        assert!(!seen.contains("/private/secret"));
+        assert!(seen.contains("shell_executable") && seen.contains("shell_flags"));
+    }
+
+    #[tokio::test]
+    async fn provider_body_timeout_is_not_reported_as_malformed() {
+        use axum::{body::{Body, Bytes}, response::Response, routing::post, Router};
+        use std::convert::Infallible;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let app = Router::new().route("/chat/completions", post(|| async {
+            let (sender, receiver) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = sender.send(Ok::<Bytes, Infallible>(Bytes::from_static(b"{\"choices\":"))).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            });
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(Body::from_stream(ReceiverStream::new(receiver)))
+                .unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let provider = SemanticProviderConfig {
+            endpoint,
+            model: "test".into(),
+            bearer_token: None,
+            timeout: std::time::Duration::from_millis(20),
+        };
+        let client = reqwest::Client::builder().timeout(provider.timeout).build().unwrap();
+        let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), Some("inspect"), false);
+        assert_eq!(assess_with_provider(&client, &provider, &request).await, Err(SemanticAssessorStatus::Timeout));
+    }
+
+    #[tokio::test]
+    async fn semantic_queue_reports_full_and_closed() {
         let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), Some("inspect"), false);
         let (full_queue, _full_receiver) = SemanticAssessmentQueue::new(1);
         assert!(full_queue.try_submit(request.clone()).is_ok());
@@ -990,14 +1222,6 @@ mod tests {
         drop(closed_receiver);
         assert_eq!(closed_queue.try_submit(request.clone()), Err(SemanticAssessorStatus::Unavailable));
 
-        let (queue, receiver) = SemanticAssessmentQueue::new(1);
-        let (receipt_sender, mut receipt_receiver) = tokio::sync::mpsc::channel(1);
-        let worker = spawn_unavailable_semantic_worker(receiver, receipt_sender);
-        assert!(queue.try_submit(request).is_ok());
-        let receipt = receipt_receiver.recv().await.unwrap();
-        assert_eq!(receipt.status, SemanticAssessorStatus::Unavailable);
-        assert!(receipt.vector.is_none());
-        worker.abort();
     }
 
     #[tokio::test]
@@ -1015,10 +1239,17 @@ mod tests {
 
         let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(1);
-        let runtime = start_semantic_shadow_runtime(&enabled, receipt_sender);
+        let provider = SemanticProviderConfig {
+            endpoint: "http://127.0.0.1:1".into(), model: "test".into(), bearer_token: None,
+            timeout: std::time::Duration::from_millis(50),
+        };
+        let runtime = start_semantic_shadow_runtime(&enabled, receipt_sender, provider);
         assert!(dispatch_semantic_shadow(&enabled, Some(&runtime), &request).is_none());
         let receipt = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
+            // The provider deadline remains 50ms; leave scheduler slack so
+            // this test verifies bounded completion without assuming an idle
+            // shared test runtime.
+            std::time::Duration::from_millis(500),
             receipt_receiver.recv(),
         )
         .await

@@ -1119,7 +1119,7 @@ impl Gateway {
         }
     }
 
-    fn adapter_pre_tool(
+    async fn adapter_pre_tool(
         &mut self,
         tool_name: &str,
         tool_input: &serde_json::Value,
@@ -1127,16 +1127,24 @@ impl Gateway {
         if self.active_workflow.is_none() {
             return json!({"decision": "allow", "active": false});
         }
-        let session = match self.session_manager.get(&self.session_id) {
+        let initial_session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
-        let intent = session
+        let intent = initial_session
             .definition
             .states
-            .get(&session.current_state)
+            .get(&initial_session.current_state)
             .and_then(|state| state.intent.as_deref());
-        let pipeline = risk_assessment::assess_pipeline(None, tool_name, tool_input, intent);
+        let pipeline = risk_assessment::assess_pipeline_visible(None, tool_name, tool_input, intent).await;
+        let session = match self.session_manager.get(&self.session_id) {
+            Some(session) => session,
+            None => return json!({
+                "decision": "deny",
+                "reason": "workflow session disappeared while semantic risk was assessed",
+                "risk_assessment": pipeline.visible_json(),
+            }),
+        };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
         // including tools the state whitelist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
@@ -1385,7 +1393,7 @@ impl Gateway {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 let tool_input = arguments.get("tool_input").cloned().unwrap_or(json!({}));
-                let response = self.adapter_pre_tool(tool_name, &tool_input);
+                let response = self.adapter_pre_tool(tool_name, &tool_input).await;
                 JsonRpcResponse::success(
                     id,
                     serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -4855,8 +4863,8 @@ mod tests {
         pool.close().await;
     }
 
-    #[test]
-    fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
+    #[tokio::test]
+    async fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
         let mut gw = approval_gateway();
         gw.session_manager.set_pending_approval(
             "approval-session",
@@ -4872,7 +4880,7 @@ mod tests {
 
         // A tool the state whitelist admits is still denied while the gate
         // is parked: the approval gate outranks the state whitelist.
-        let result = gw.adapter_pre_tool("read_file", &json!({ "path": "x" }));
+        let result = gw.adapter_pre_tool("read_file", &json!({ "path": "x" })).await;
         assert_eq!(result["decision"], "deny");
         assert_eq!(result["approval_pending"], true);
         assert_eq!(result["approval_id"], "apr_gate");
@@ -4891,7 +4899,7 @@ mod tests {
         let cleared = gw.session_manager.clear_pending_approval("approval-session");
         assert!(cleared.is_some());
         assert_eq!(cleared.unwrap().approval_id, "apr_gate");
-        let admitted = gw.adapter_pre_tool("read_file", &json!({ "path": "x" }));
+        let admitted = gw.adapter_pre_tool("read_file", &json!({ "path": "x" })).await;
         assert_eq!(admitted["decision"], "allow");
         assert!(admitted.get("approval_pending").is_none());
     }
@@ -5472,13 +5480,13 @@ mod tests {
         assert_eq!(state["state"], "implementing");
     }
 
-    #[test]
-    fn adapter_implicit_transition_advances_usage_epoch() {
+    #[tokio::test]
+    async fn adapter_implicit_transition_advances_usage_epoch() {
         let mut gw = implicit_transition_gateway();
         let result = gw.adapter_pre_tool(
             "Edit",
             &json!({"file_path": "src/main.rs", "old_string": "a", "new_string": "b"}),
-        );
+        ).await;
 
         assert_eq!(result["decision"], "allow");
         let state = gw.current_state_snapshot(false).unwrap();

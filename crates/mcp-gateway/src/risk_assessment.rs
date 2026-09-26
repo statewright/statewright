@@ -1138,6 +1138,49 @@ mod tests {
     }
 
     #[test]
+    fn historical_risky_commands_are_assessed_without_execution() {
+        // These commands occurred in the earlier workflow. They are inputs to
+        // the assessor only: this test never invokes a shell or a provider.
+        // `npm install` occurred in both plugins/executor and plugins/pi; this
+        // classifier deliberately receives command text, not a working directory.
+        struct NeverCalled;
+        impl SemanticAssessor for NeverCalled {
+            fn assess(&self, _: &SemanticAssessmentRequest) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+                unreachable!("the unavailable replay path must not invoke an assessor")
+            }
+        }
+        let staging = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None);
+        for (command, expected_risk, expected_exposure) in [
+            (
+                "git add plugins/executor/lib/workflow-preamble.mjs plugins/executor/lib/host-adapters.mjs plugins/executor/lib/managed-client-supervisor.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/managed-client-supervisor.test.mjs",
+                RiskBand::Moderate,
+                ExposureBand::Unknown,
+            ),
+            (
+                "git commit -m \"fix(executor): reinforce workflow continuation\"",
+                RiskBand::High,
+                ExposureBand::External,
+            ),
+            ("npm install", RiskBand::Moderate, ExposureBand::Unknown),
+        ] {
+            let pipeline = assess_pipeline_with_config::<NeverCalled>(
+                None,
+                "Bash",
+                &json!({"command": command}),
+                Some("implement"),
+                None,
+                &staging,
+            );
+            assert_eq!(pipeline.deterministic.risk, expected_risk, "{command}");
+            assert_eq!(pipeline.deterministic.exposure, expected_exposure, "{command}");
+            assert_eq!(pipeline.semantic.status, SemanticAssessorStatus::Unavailable, "{command}");
+            assert!(pipeline.semantic.vector.is_none(), "{command}");
+            assert_eq!(pipeline.effective_risk, expected_risk, "{command}");
+            assert!(!pipeline.semantic_failsafe_escalated, "{command}");
+        }
+    }
+
+    #[test]
     fn visible_pipeline_submission_reports_the_actual_queue_full_outcome() {
         let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), None, false);
         let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));

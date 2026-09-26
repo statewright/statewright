@@ -155,6 +155,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
     let max_iterations = state_def.and_then(|s| s.max_iterations);
     let allowed_commands = state_def.and_then(|s| s.allowed_commands.as_ref()).cloned();
     let disallowed_tools = state_def.and_then(|s| s.disallowed_tools.as_ref()).cloned();
+    let intent = state_def.and_then(|s| s.intent.as_ref()).cloned();
     let blocked_env = state_def.and_then(|s| s.blocked_env.as_ref()).cloned();
     let env_overrides = state_def.and_then(|s| s.env_overrides.as_ref()).cloned();
     let thinking_level = state_def.and_then(|s| s.thinking_level.as_ref()).cloned();
@@ -222,6 +223,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "meta": session.definition.meta,
         "allowed_commands": allowed_commands,
         "disallowed_tools": disallowed_tools,
+        "intent": intent,
         "direct_execution": direct_execution,
         "model_ladder": model_ladder,
     });

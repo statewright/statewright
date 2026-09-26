@@ -3,6 +3,8 @@ use statewright_engine::resolve_transition;
 
 use crate::{bash_classifier, session::GatewaySession};
 
+const UNTRUSTED_EXPLORATORY_ADAPTER: &str = "__statewright_untrusted_exploratory_adapter__";
+
 /// Decision from the enforcement pipeline.
 #[derive(Debug, Clone)]
 pub enum EnforcementDecision {
@@ -26,7 +28,7 @@ fn adapter_tool_family(name: &str) -> Option<&'static str> {
         | "find_files" | "ls" | "list_directory" => Some("read"),
         "edit" | "edit_file" | "apply_patch" | "patch_file" | "multiedit"
         | "write" | "write_file" | "create_file" | "create_or_update_file" => Some("write"),
-        "bash" | "exec_command" | "run_command" | "shell" => Some("command"),
+        "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some("command"),
         "run_test" => Some("test"),
         "webfetch" | "fetch" | "http_request" => Some("fetch"),
         "websearch" | "web_search" => Some("search"),
@@ -44,7 +46,7 @@ pub fn unsupported_shell_dialect_reason(
 ) -> Option<&'static str> {
     let native_shell = matches!(
         requested_tool.to_ascii_lowercase().as_str(),
-        "bash" | "zsh" | "exec_command" | "run_command" | "shell"
+        "bash" | "zsh" | "exec_command" | "run_command" | "shell" | "terminal"
     );
     if !native_shell {
         return None;
@@ -94,6 +96,32 @@ pub fn resolve_adapter_tool_name(
     requested: &str,
     tool_input: &serde_json::Value,
 ) -> String {
+    // Preserve the original identity before adapter aliases collapse it to a
+    // provider-neutral family. This makes an explicit `grep` denial effective
+    // even when `grep` would otherwise normalize to `Read`.
+    if tool_enforcer::tool_is_explicitly_disallowed(
+        &session.definition,
+        &session.current_state,
+        requested,
+    ) {
+        return requested.to_string();
+    }
+    let exploratory = session
+        .definition
+        .states
+        .get(&session.current_state)
+        .and_then(|state| state.intent.as_deref())
+        == Some("exploratory_read_only");
+    if exploratory {
+        // Adapter-native read aliases have no MCP metadata.  Normalize only
+        // the small built-in family; unknown adapters remain unknown.  Shell
+        // admission is still decided from its arguments by interceptors.
+        return match adapter_tool_family(requested) {
+            Some("read") => "Read".to_string(),
+            Some("command") => "Bash".to_string(),
+            _ => format!("{UNTRUSTED_EXPLORATORY_ADAPTER}:{requested}"),
+        };
+    }
     let allowed = tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
         .unwrap_or_default();
     if allowed.iter().any(|name| name == requested) {
@@ -115,6 +143,13 @@ pub fn resolve_adapter_tool_name(
 
 /// Evaluate whether a tool call should be permitted, blocked, or trigger an implicit transition.
 pub fn enforce_tool_call(session: &GatewaySession, tool_name: &str) -> EnforcementDecision {
+    if tool_name.starts_with(UNTRUSTED_EXPLORATORY_ADAPTER) {
+        return EnforcementDecision::Block {
+            reason: "Unregistered adapter tool has no authoritative read-only capability evidence in an exploratory state.".into(),
+            available_tools: tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
+                .unwrap_or_default(),
+        };
+    }
     if tool_name.eq_ignore_ascii_case("zsh") {
         return EnforcementDecision::Block {
             reason: "Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy.".into(),
@@ -232,6 +267,22 @@ mod tests {
             mgr.update_state("test", state.into(), json!({}));
         }
         mgr.get("test").unwrap()
+    }
+
+    #[test]
+    fn exploratory_adapters_normalize_only_builtin_read_and_shell_families() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "explore", "initial": "inspect", "states": {
+                "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let session = GatewaySession::new("explore".into(), definition);
+        assert_eq!(resolve_adapter_tool_name(&session, "grep", &json!({})), "Read");
+        assert_eq!(resolve_adapter_tool_name(&session, "terminal", &json!({"cmd":"touch x"})), "Bash");
+        let opaque = resolve_adapter_tool_name(&session, "mcp__db__query", &json!({}));
+        assert!(opaque.starts_with(UNTRUSTED_EXPLORATORY_ADAPTER));
+        assert!(matches!(enforce_tool_call(&session, &opaque), EnforcementDecision::Block { .. }));
     }
 
     #[test]

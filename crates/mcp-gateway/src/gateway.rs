@@ -7,9 +7,45 @@ use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
 use crate::interceptors::{self, PreCallDecision};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolInfo};
+use crate::risk_assessment;
 use crate::session::SessionManager;
 use crate::upstream::UpstreamManager;
 use crate::usage::{RuntimeToolReport, RuntimeUsageReport, UsageDisposition, UsageLedger};
+
+/// Exploratory states expose provider-neutral filesystem discovery adapters
+/// and upstream tools whose registered metadata explicitly declares them
+/// read-only. Unknown upstream tools fail closed.
+fn exploratory_policy_tool(tool: &ToolInfo) -> Option<&'static str> {
+    if tool.annotations.as_ref().is_some_and(|annotations| {
+        annotations.read_only_hint == Some(false) || annotations.destructive_hint == Some(true)
+    }) {
+        return None;
+    }
+    match tool.name.to_ascii_lowercase().as_str() {
+        "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some("Bash"),
+        "read" | "read_file" | "grep" | "search_files" | "glob" | "find"
+        | "find_files" | "ls" | "list_directory" => Some("Read"),
+        _ if tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+            == Some(true) => Some("Read"),
+        _ => None,
+    }
+}
+
+fn is_exploratory_read_only_tool(tool: &ToolInfo) -> bool {
+    exploratory_policy_tool(tool).is_some()
+}
+
+fn is_exploratory_read_only_state(session: &crate::session::GatewaySession) -> bool {
+    session
+        .definition
+        .states
+        .get(&session.current_state)
+        .and_then(|state| state.intent.as_deref())
+        == Some("exploratory_read_only")
+}
 
 /// Core MCP gateway that dispatches messages.
 pub struct Gateway {
@@ -665,22 +701,57 @@ impl Gateway {
             return JsonRpcResponse::success(id, json!({ "tools": tools }));
         }
 
-        // Filter upstream tools by current state's allowed_tools
+        // Filter upstream tools by current state's declared policy.  An
+        // exploratory read-only state has a dynamic safe set derived from
+        // registered MCP readOnlyHint metadata, rather than treating the
+        // absence of an enumerated list as unrestricted access.
         let allowed = statewright_agent::tool_enforcer::get_allowed_tools(
             &session.definition,
             &session.current_state,
         );
+        let exploratory_read_only = is_exploratory_read_only_state(&session);
 
         for upstream_tool in self.upstream.all_tools() {
-            match &allowed {
+            if exploratory_read_only {
+                let policy_tool = exploratory_policy_tool(upstream_tool);
+                let denied = statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                    &session.definition,
+                    &session.current_state,
+                    &upstream_tool.name,
+                ) || policy_tool.is_some_and(|policy| {
+                    statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                        &session.definition,
+                        &session.current_state,
+                        policy,
+                    )
+                });
+                if !denied && is_exploratory_read_only_tool(upstream_tool) {
+                    tools.push(upstream_tool.clone());
+                }
+            } else {
+                match &allowed {
                 Some(allowed_list) => {
-                    if allowed_list.contains(&upstream_tool.name) {
+                    if allowed_list.contains(&upstream_tool.name)
+                        && !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                            &session.definition,
+                            &session.current_state,
+                            &upstream_tool.name,
+                        )
+                    {
                         tools.push(upstream_tool.clone());
                     }
                 }
                 None => {
-                    // No restrictions — pass all upstream tools through
-                    tools.push(upstream_tool.clone());
+                    // No allow-list is unrestricted only after the explicit
+                    // deny list has been applied.
+                    if !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                        &session.definition,
+                        &session.current_state,
+                        &upstream_tool.name,
+                    ) {
+                        tools.push(upstream_tool.clone());
+                    }
+                }
                 }
             }
         }
@@ -720,12 +791,56 @@ impl Gateway {
             }
         };
 
-        // Handle custom tools locally (always available, even when deactivated)
+        // Handle custom tools locally (always available, even when deactivated).
+        // Adapter pre-tool is assessed inside adapter_pre_tool using the actual
+        // native invocation, rather than this wrapper name.
         if custom_tools::is_custom_tool(&params.name) {
+            if params.name != "statewright_adapter_pre_tool" {
+                let intent = self
+                    .session_manager
+                    .get(&self.session_id)
+                    .and_then(|session| {
+                        session
+                            .definition
+                            .states
+                            .get(&session.current_state)
+                            .and_then(|state| state.intent.clone())
+                    });
+                let shadow = risk_assessment::assess_invocation(
+                    None,
+                    &params.name,
+                    &params.arguments,
+                    intent.as_deref(),
+                );
+                risk_assessment::emit_shadow(&params.name, &shadow);
+            }
             return self
                 .handle_custom_tool_call(id, &params.name, params.arguments)
                 .await;
         }
+
+        let upstream_tool = self
+            .upstream
+            .all_tools()
+            .into_iter()
+            .find(|tool| tool.name == params.name);
+        let intent = self
+            .session_manager
+            .get(&self.session_id)
+            .and_then(|session| {
+                session
+                    .definition
+                    .states
+                    .get(&session.current_state)
+                    .and_then(|state| state.intent.clone())
+            });
+        let shadow = risk_assessment::assess_invocation(
+            upstream_tool,
+            &params.name,
+            &params.arguments,
+            intent.as_deref(),
+        );
+        risk_assessment::emit_shadow(&params.name, &shadow);
 
         // When deactivated, pass all tool calls through without enforcement
         if self.active_workflow.is_none() {
@@ -749,7 +864,59 @@ impl Gateway {
             }
         };
 
-        match enforcement::enforce_tool_call(&session, &params.name) {
+        // Tool calls can arrive without a preceding tools/list response, so
+        // enforce the same registered-read-only boundary at invocation time.
+        // Native shell adapters remain subject to the command classifier below.
+        let exploratory_read_only = is_exploratory_read_only_state(&session);
+        let exploratory_policy = upstream_tool.and_then(exploratory_policy_tool);
+        if exploratory_read_only
+            && (statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                &session.definition,
+                &session.current_state,
+                &params.name,
+            ) || exploratory_policy.is_some_and(|policy| {
+                statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                    &session.definition,
+                    &session.current_state,
+                    policy,
+                )
+            }))
+        {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                    "Tool '{}' is explicitly denied in state '{}'.",
+                    params.name, session.current_state
+                )))
+                .unwrap(),
+            );
+        }
+        if exploratory_read_only
+            && !upstream_tool.is_some_and(is_exploratory_read_only_tool)
+        {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::to_value(crate::protocol::ToolCallResult::error(format!(
+                    "Tool '{}' is not registered as read-only in exploratory state '{}'.",
+                    params.name, session.current_state
+                )))
+                .unwrap(),
+            );
+        }
+
+        // The agent-layer enforcer does not receive ToolInfo.  Map a
+        // registered readOnlyHint tool to the provider-neutral Read policy
+        // family after the gateway has verified that metadata.  Native tools
+        // retain their own names so Bash still receives argument inspection.
+        let policy_tool_name = if exploratory_read_only {
+            exploratory_policy
+                .unwrap_or_else(|| unreachable!("exploratory call was checked above"))
+                .to_string()
+        } else {
+            params.name.clone()
+        };
+
+        match enforcement::enforce_tool_call(&session, &policy_tool_name) {
             EnforcementDecision::Allow => {
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
                 let pre_warning =
@@ -966,6 +1133,13 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
+        let intent = session
+            .definition
+            .states
+            .get(&session.current_state)
+            .and_then(|state| state.intent.as_deref());
+        let shadow = risk_assessment::assess_invocation(None, tool_name, tool_input, intent);
+        risk_assessment::emit_shadow(tool_name, &shadow);
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
         // including tools the state whitelist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
@@ -2984,6 +3158,49 @@ mod tests {
     use super::*;
     use statewright_engine::MachineDefinition;
 
+    #[test]
+    fn exploratory_read_only_tool_requires_adapter_or_read_only_hint() {
+        let hinted = ToolInfo {
+            name: "opaque_registered_reader".into(),
+            annotations: Some(crate::protocol::ToolAnnotations::read_only()),
+            description: None,
+            input_schema: json!({}),
+        };
+        let opaque = ToolInfo {
+            name: "opaque_operation".into(),
+            annotations: None,
+            description: None,
+            input_schema: json!({}),
+        };
+        let mutating_hint = ToolInfo {
+            name: "claimed_reader".into(),
+            annotations: Some(crate::protocol::ToolAnnotations {
+                read_only_hint: Some(false),
+                ..Default::default()
+            }),
+            description: None,
+            input_schema: json!({}),
+        };
+        let bash = ToolInfo {
+            name: "Bash".into(),
+            annotations: None,
+            description: None,
+            input_schema: json!({}),
+        };
+
+        assert_eq!(exploratory_policy_tool(&hinted), Some("Read"));
+        assert!(!is_exploratory_read_only_tool(&opaque));
+        assert!(!is_exploratory_read_only_tool(&mutating_hint));
+        assert_eq!(exploratory_policy_tool(&bash), Some("Bash"));
+
+        let falsely_named_reader = ToolInfo {
+            name: "grep".into(), annotations: Some(crate::protocol::ToolAnnotations {
+                read_only_hint: Some(false), ..Default::default()
+            }), description: None, input_schema: json!({}),
+        };
+        assert_eq!(exploratory_policy_tool(&falsely_named_reader), None);
+    }
+
     fn test_definition() -> MachineDefinition {
         serde_json::from_value(json!({
             "id": "test",
@@ -3022,6 +3239,95 @@ mod tests {
             "test-session".into(),
             test_workflows(),
             Some("test".into()),
+            String::new(),
+            None,
+        )
+    }
+
+    fn exploratory_gateway() -> Gateway {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "explore",
+            "initial": "inspect",
+            "states": {
+                "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let mgr = SessionManager::new();
+        mgr.create("explore-session".into(), definition.clone());
+        let upstream = UpstreamManager::mock(vec![
+            (
+                ToolInfo {
+                    name: "registered_reader".into(),
+                    annotations: Some(crate::protocol::ToolAnnotations::read_only()),
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("read result"),
+            ),
+            (
+                ToolInfo {
+                    name: "opaque_mutator".into(),
+                    annotations: None,
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("should never run"),
+            ),
+            (
+                ToolInfo {
+                    name: "grep".into(),
+                    annotations: None,
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("search result"),
+            ),
+            (
+                ToolInfo {
+                    name: "Bash".into(),
+                    annotations: None,
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("shell result"),
+            ),
+        ]);
+        let mut workflows = HashMap::new();
+        workflows.insert("explore".into(), definition);
+        Gateway::new(
+            mgr,
+            upstream,
+            "explore-session".into(),
+            workflows,
+            Some("explore".into()),
+            String::new(),
+            None,
+        )
+    }
+
+    fn alias_deny_gateway(denied: &str) -> Gateway {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "alias-deny", "initial": "inspect", "states": {
+                "inspect": {
+                    "allowed_tools": ["Read"],
+                    "disallowed_tools": [denied],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("alias-deny-session".into(), definition.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("alias-deny".into(), definition);
+        Gateway::new(
+            manager,
+            UpstreamManager::mock(vec![]),
+            "alias-deny-session".into(),
+            workflows,
+            Some("alias-deny".into()),
             String::new(),
             None,
         )
@@ -3073,6 +3379,169 @@ mod tests {
         assert!(!names.contains(&"statewright_adapter_pre_tool".to_string()));
         assert!(!names.contains(&"statewright_adapter_post_tool".to_string()));
         assert!(!names.contains(&"statewright_adapter_stop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn blocklisted_tools_are_not_advertised_without_an_allow_list() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "blocklist-discovery", "initial": "inspect", "states": {
+                "inspect": {"disallowed_tools": ["blocked_tool"], "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("blocklist-session".into(), definition.clone());
+        let upstream = UpstreamManager::mock(vec![
+            (ToolInfo { name: "blocked_tool".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("no")),
+            (ToolInfo { name: "visible_tool".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("yes")),
+        ]);
+        let mut workflows = HashMap::new();
+        workflows.insert("blocklist-discovery".into(), definition);
+        let mut gateway = Gateway::new(manager, upstream, "blocklist-session".into(), workflows, Some("blocklist-discovery".into()), String::new(), None);
+        let response = gateway.handle_message(JsonRpcRequest {
+            jsonrpc: "2.0".into(), method: "tools/list".into(), params: Some(json!({})), id: Some(json!(1)),
+        }).await.unwrap();
+        let result = response.result.unwrap();
+        let names = result["tools"].as_array().unwrap().iter()
+            .filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
+        assert!(names.contains(&"visible_tool"));
+        assert!(!names.contains(&"blocked_tool"));
+    }
+
+    #[tokio::test]
+    async fn discovery_preserves_allowlist_with_mixed_or_empty_denylists() {
+        for (name, disallowed, expected) in [
+            ("mixed", json!(["Write"]), vec!["Read"]),
+            ("empty", json!([]), vec!["Read", "Write"]),
+        ] {
+            let definition: MachineDefinition = serde_json::from_value(json!({
+                "id": name, "initial": "inspect", "states": {
+                    "inspect": {"allowed_tools": ["Read", "Write"], "disallowed_tools": disallowed, "on": {"DONE": "done"}},
+                    "done": {"type": "final"}
+                }
+            })).unwrap();
+            let manager = SessionManager::new();
+            manager.create(format!("{name}-session"), definition.clone());
+            let upstream = UpstreamManager::mock(vec![
+                (ToolInfo { name: "Read".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("read")),
+                (ToolInfo { name: "Write".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("write")),
+                (ToolInfo { name: "other".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("other")),
+            ]);
+            let mut workflows = HashMap::new();
+            workflows.insert(name.into(), definition);
+            let gateway = Gateway::new(manager, upstream, format!("{name}-session"), workflows, Some(name.into()), String::new(), None);
+            let result = gateway.handle_tools_list(Some(json!(1))).result.unwrap();
+            let mut names = result["tools"].as_array().unwrap().iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .filter(|tool| matches!(*tool, "Read" | "Write" | "other"))
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            let mut expected = expected;
+            expected.sort_unstable();
+            assert_eq!(names, expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn exploratory_read_only_filters_list_and_direct_calls_by_registered_metadata() {
+        let mut gw = exploratory_gateway();
+
+        let listed = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/list".into(),
+                params: Some(json!({})),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
+        let listed_result = listed.result.unwrap();
+        let names: Vec<&str> = listed_result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(names.contains(&"registered_reader"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"Bash"));
+        assert!(!names.contains(&"opaque_mutator"));
+
+        crate::risk_assessment::set_test_shadow_enabled(Some(true));
+        let _ = crate::risk_assessment::take_test_shadow_receipts();
+        let allowed = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "registered_reader", "arguments": {}})),
+                id: Some(json!(2)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(allowed.result.unwrap()["isError"], false);
+        let receipts = crate::risk_assessment::take_test_shadow_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].tool, "registered_reader");
+        assert_eq!(receipts[0].state_intent.as_deref(), Some("exploratory_read_only"));
+
+        crate::risk_assessment::set_test_shadow_enabled(Some(false));
+
+        let grep = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "grep", "arguments": {"query": "policy"}})),
+                id: Some(json!(3)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(grep.result.unwrap()["isError"], false);
+        assert!(crate::risk_assessment::take_test_shadow_receipts().is_empty());
+        crate::risk_assessment::set_test_shadow_enabled(None);
+
+        let shell = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "Bash", "arguments": {"command": "rg policy crates"}})),
+                id: Some(json!(4)),
+        })
+        .await
+        .unwrap();
+        assert_eq!(shell.result.unwrap()["isError"], false);
+
+        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+            let denied = gw
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    params: Some(json!({"name": "Bash", "arguments": {"command": command}})),
+                    id: Some(json!(6)),
+                })
+                .await
+                .unwrap();
+            assert_eq!(denied.result.unwrap()["isError"], true, "must reject {command}");
+            assert_eq!(
+                gw.session_manager.get("explore-session").unwrap().current_state,
+                "inspect",
+                "denial must not transition for {command}"
+            );
+        }
+
+        let blocked = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "opaque_mutator", "arguments": {}})),
+                id: Some(json!(5)),
+            })
+            .await
+            .unwrap();
+        let blocked_result = blocked.result.unwrap();
+        let blocked_text = blocked_result["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(blocked_text.contains("not registered as read-only"));
     }
 
     fn tool_result_json(response: JsonRpcResponse) -> serde_json::Value {
@@ -3135,6 +3604,8 @@ mod tests {
     #[tokio::test]
     async fn adapter_rpcs_share_gateway_enforcement_and_accounting() {
         let mut gateway = test_gateway();
+        crate::risk_assessment::set_test_shadow_enabled(Some(true));
+        let _ = crate::risk_assessment::take_test_shadow_receipts();
 
         let allowed = gateway
             .handle_message(JsonRpcRequest {
@@ -3154,6 +3625,10 @@ mod tests {
         let allowed = tool_result_json(allowed);
         assert_eq!(allowed["decision"], "allow");
         assert_eq!(allowed["policy_tool_name"], "read_file");
+        let receipts = crate::risk_assessment::take_test_shadow_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].tool, "Read");
+        crate::risk_assessment::set_test_shadow_enabled(None);
 
         let readonly_shell = gateway
             .handle_message(JsonRpcRequest {
@@ -3244,6 +3719,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tool_result_json(stopped)["decision"], "block");
+    }
+
+    #[tokio::test]
+    async fn adapter_rpc_preserves_original_and_family_denials() {
+        for (denied, native, expected) in [
+            ("grep", "grep", "deny"),
+            ("grep", "read_file", "allow"),
+            ("Read", "grep", "deny"),
+        ] {
+            let mut gateway = alias_deny_gateway(denied);
+            let response = gateway.handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {"tool_name": native, "tool_input": {"path": "README.md"}}
+                })),
+                id: Some(json!(1)),
+            }).await.unwrap();
+            assert_eq!(tool_result_json(response)["decision"], expected, "{denied}/{native}");
+            assert_eq!(gateway.session_manager.get("alias-deny-session").unwrap().current_state, "inspect");
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_rpc_rejects_exploratory_git_ref_creation_without_transition() {
+        let mut gateway = exploratory_gateway();
+        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+            let response = gateway.handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {"cmd": command}
+                    }
+                })),
+                id: Some(json!(7)),
+            }).await.unwrap();
+            assert_eq!(tool_result_json(response)["decision"], "deny", "must reject {command}");
+            assert_eq!(
+                gateway.session_manager.get("explore-session").unwrap().current_state,
+                "inspect",
+                "denial must not transition for {command}"
+            );
+        }
     }
 
     #[tokio::test]

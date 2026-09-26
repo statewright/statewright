@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::enforcement::{self, EnforcementDecision};
 use crate::interceptors::{self, PreCallDecision};
+use crate::risk_assessment;
 use crate::session::SessionManager;
 
 /// Shared state for the hook HTTP server.
@@ -137,6 +138,13 @@ async fn handle_pre_tool(
         session.iteration_count,
         session.max_iterations().unwrap_or(0)
     );
+    let intent = session
+        .definition
+        .states
+        .get(&session.current_state)
+        .and_then(|state| state.intent.as_deref());
+    let shadow = risk_assessment::assess_invocation(None, &req.tool_name, &req.tool_input, intent);
+    risk_assessment::emit_shadow(&req.tool_name, &shadow);
 
     if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
         return Json(PreToolResponse {
@@ -407,6 +415,40 @@ mod tests {
         }))
     }
 
+    fn exploratory_hook_state() -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-exploration", "initial": "inspect", "states": {
+                "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("explore-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "explore-session".into(),
+        }))
+    }
+
+    fn alias_deny_hook_state(denied: &str) -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-alias-deny", "initial": "inspect", "states": {
+                "inspect": {
+                    "allowed_tools": ["Read"],
+                    "disallowed_tools": [denied],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("alias-deny-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "alias-deny-session".into(),
+        }))
+    }
+
     #[tokio::test]
     async fn pre_tool_applies_allowed_command_policy_to_tool_input() {
         let blocked = handle_pre_tool(
@@ -437,6 +479,85 @@ mod tests {
         .await
         .0;
         assert_eq!(allowed.decision, "allow");
+    }
+
+    #[tokio::test]
+    async fn exploratory_hook_normalizes_reads_and_blocks_mutating_shell() {
+        crate::risk_assessment::set_test_shadow_enabled(Some(true));
+        let _ = crate::risk_assessment::take_test_shadow_receipts();
+        let allowed = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(allowed.decision, "allow");
+        let receipts = crate::risk_assessment::take_test_shadow_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].tool, "grep");
+        assert_eq!(receipts[0].state_intent.as_deref(), Some("exploratory_read_only"));
+        assert!(!format!("{:?}", receipts[0]).contains("policy"));
+
+        crate::risk_assessment::set_test_shadow_enabled(Some(false));
+        let _ = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"sensitive-token"}) }),
+        ).await;
+        assert!(crate::risk_assessment::take_test_shadow_receipts().is_empty());
+        crate::risk_assessment::set_test_shadow_enabled(None);
+
+        let denied = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd":"touch marker"}) }),
+        ).await.0;
+        assert_eq!(denied.decision, "deny");
+        assert!(denied.additional_context.unwrap_or_default().contains("proven read-only"));
+
+        let terminal = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "terminal".into(), tool_input: json!({"cmd":"touch marker"}) }),
+        ).await.0;
+        assert_eq!(terminal.decision, "deny");
+
+        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+            let state = exploratory_hook_state();
+            let denied = handle_pre_tool(
+                State(state.clone()),
+                Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd": command}) }),
+            ).await.0;
+            assert_eq!(denied.decision, "deny", "must reject {command}");
+            assert_eq!(
+                state.read().await.session_manager.get("explore-session").unwrap().current_state,
+                "inspect",
+                "denial must not transition for {command}"
+            );
+        }
+
+        let opaque = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "mcp__db__query".into(), tool_input: json!({"sql":"update users"}) }),
+        ).await.0;
+        assert_eq!(opaque.decision, "deny");
+        assert!(opaque.additional_context.unwrap_or_default().contains("Unregistered adapter tool"));
+    }
+
+    #[tokio::test]
+    async fn hook_preserves_original_and_family_denials_across_adapter_normalization() {
+        let original_denied = handle_pre_tool(
+            State(alias_deny_hook_state("grep")),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(original_denied.decision, "deny");
+
+        let allowed = handle_pre_tool(
+            State(alias_deny_hook_state("grep")),
+            Json(PreToolRequest { tool_name: "read_file".into(), tool_input: json!({"path":"README.md"}) }),
+        ).await.0;
+        assert_eq!(allowed.decision, "allow");
+
+        let family_denied = handle_pre_tool(
+            State(alias_deny_hook_state("Read")),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(family_denied.decision, "deny");
     }
 
     #[tokio::test]

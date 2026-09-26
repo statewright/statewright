@@ -149,7 +149,7 @@ open_keys_page() {
 prompt_missing_key() {
   mkdir -p "$STATEWRIGHT_DIR" 2>/dev/null || return 0
   if [ ! -f "$MISSING_KEY_SENTINEL" ]; then
-    if open_keys_page 'https://statewright.ai/signup?redirect=%2Fkeys'; then
+    if open_keys_page 'https://statewright.ai/keys'; then
       : > "$MISSING_KEY_SENTINEL"
       chmod 600 "$MISSING_KEY_SENTINEL"
     fi
@@ -496,11 +496,17 @@ while IFS= read -r line; do
   if [ -z "$API_KEY" ]; then
     [ "$METHOD" = "notifications/initialized" ] || prompt_missing_key
     if [ "$METHOD" = "tools/list" ]; then
-      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_start","description":"Activate a statewright workflow for this session. Tools will be restricted per state.","inputSchema":{"type":"object","properties":{"workflow":{"type":"string","description":"Exact enabled workflow name returned by statewright_list_workflows"}},"required":["workflow"]}},{"name":"statewright_stop","description":"Deactivate the current workflow. All tools become available again.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_state","description":"Get the current workflow state, allowed tools, and available transitions.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_transition","description":"Transition to the next state in the workflow.","inputSchema":{"type":"object","properties":{"event":{"type":"string","description":"Transition event name (e.g. READY, DONE, PASS, FAIL)"}},"required":["event"]}},{"name":"statewright_list_workflows","description":"List all available workflows for this user.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}},{"name":"statewright_pause","description":"Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_get_status","description":"Get gateway status: active workflow, current state, available workflows.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true in the workflow.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}]},"id":'"$ID"'}'
+      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_connect","description":"Open Statewright account setup in your browser. Statewright tools remain unavailable until this client has a local credential; never paste a credential into chat.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
+    elif [ "$METHOD" = "tools/call" ] && [ "$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)" = "statewright_connect" ]; then
+      if open_keys_page 'https://statewright.ai/keys'; then
+        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Opened Statewright account setup in your browser. Sign in or create an account there; this client will become available after its local credential is configured. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+      else
+        echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Open https://statewright.ai/keys in your browser to finish account setup. Do not paste a credential into chat. Automatic browser account linking is not available yet."}]},"id":'"$ID"'}'
+      fi
     elif [ "$METHOD" = "notifications/initialized" ]; then
       : # notification, no response
     else
-      echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key not configured. Visit https://statewright.ai/keys to generate one."},"id":'"$ID"'}'
+      echo '{"jsonrpc":"2.0","error":{"code":-32001,"message":"Statewright is not connected. Use statewright_connect to open account setup in your browser; do not paste credentials into chat."},"id":'"$ID"'}'
     fi
     continue
   fi

@@ -23,38 +23,16 @@ codex plugin marketplace add statewright/statewright
 codex plugin add statewright@statewright
 ```
 
-Or manual setup:
+After installation, Statewright opens [account setup](https://statewright.ai/keys)
+in your browser. Sign in there to manage the account; never paste a Statewright
+credential into a Codex or ChatGPT conversation. The plugin reads an already
+provisioned local credential directly, outside model context.
 
-1. Get an API key at [statewright.ai/keys](https://statewright.ai/keys)
-2. Save it: `echo 'sw_live_...' > ~/.statewright/api_key`
-3. Add the MCP server:
-   ```bash
-   codex mcp add statewright -- bash /path/to/plugins/codex/mcp-proxy.sh
-   ```
-4. Enable hooks in `~/.codex/config.toml`:
-   ```toml
-   [features]
-   hooks = true
-   ```
-5. Merge `hooks.json` into `~/.codex/hooks.json`
-
-**Important**: Add `env_vars` to propagate API keys to the MCP server:
-
-```toml
-[mcp_servers.statewright]
-command = "bash"
-args = ["/path/to/mcp-proxy.sh"]
-env_vars = [
-  "STATEWRIGHT_API_KEY",
-  "STATEWRIGHT_GATEWAY_URL",
-  "STATEWRIGHT_PB_URL",
-  "STATEWRIGHT_TELEMETRY_DIR",
-  "STATEWRIGHT_TELEMETRY_PORT",
-  "STATEWRIGHT_TELEMETRY_BUILD_ID",
-]
-```
-
-Codex does not propagate parent environment variables to MCP child processes by default. The `env_vars` field explicitly forwards them.
+Automatic browser-to-MCP account linking is not available yet. Until the generic
+Statewright OAuth provider ships, browser sign-in does not provision a local
+credential. A fresh public install therefore remains unconnected after browser
+sign-in; do not transfer a credential through model chat. The future OAuth
+handoff will provision a short-lived local token and refresh the tool catalog.
 
 ### Exact native token telemetry
 
@@ -146,10 +124,10 @@ from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
 shim only for that process tree; normal ChatGPT launches are unchanged.
 
 The installed plugin always binds this standard launcher to the production
-gateway (`https://mcp.statewright.ai`) and reads its credential from
-`~/.statewright/api_key`. The first Desktop turn is held briefly until the
-native App Server reports Statewright's tools as ready, so a fast first prompt
-cannot race MCP registration.
+gateway (`https://mcp.statewright.ai`). A pre-provisioned credential stays in
+local Statewright storage and is never requested in chat. The first Desktop turn is held briefly
+until the native App Server reports Statewright's tools as ready, so a fast
+first prompt cannot race MCP registration.
 
 ### Developer troubleshooting
 
@@ -161,19 +139,6 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs en
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs doctor
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
-
-Statewright developers can provision a completely separate staging launcher:
-
-```bash
-gopass show -o statewright/staging/api-key > ~/.statewright/staging_api_key
-chmod 600 ~/.statewright/staging_api_key
-node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs provision --profile staging
-```
-
-This creates **ChatGPT + Statewright Staging**, bound to the staging gateway and
-`~/.statewright/staging_api_key`. Its app, state file, shim, and client identity
-are separate from the production launcher. The staging profile is not created
-by ordinary plugin installation.
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;

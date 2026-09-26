@@ -5,17 +5,12 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
 
-const proxies = [
-  ["codex", resolve("plugins/codex/mcp-proxy.sh")],
-  ["claude", resolve("plugins/claude-code/mcp-proxy.sh")],
-  ["cursor", resolve("plugins/cursor/mcp-proxy.sh")],
-];
-
 function runProxy(proxy, environment) {
   const requests = [
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
     { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
   ].map(JSON.stringify).join("\n") + "\n";
   return new Promise((resolveResult, rejectResult) => {
     const child = spawn("bash", [proxy], { env: environment, stdio: ["pipe", "pipe", "pipe"] });
@@ -29,6 +24,15 @@ function runProxy(proxy, environment) {
   });
 }
 
+function responseById(stdout, id) {
+  return stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line)).find((response) => response.id === id);
+}
+
+const legacyProxies = [
+  ["claude", resolve("plugins/claude-code/mcp-proxy.sh")],
+  ["cursor", resolve("plugins/cursor/mcp-proxy.sh")],
+];
+
 async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   const started = Date.now();
   while (!pattern.test(readOutput())) {
@@ -39,8 +43,9 @@ async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   }
 }
 
-for (const [name, proxy] of proxies) {
-  test(`${name} opens Windows signup once when no API key is configured`, async () => {
+test("codex opens account setup automatically and again on explicit reconnect, with only connection setup available when no API key is configured", async () => {
+  const name = "codex";
+  const proxy = resolve("plugins/codex/mcp-proxy.sh");
     const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));
     const home = join(root, "home");
     const bin = join(root, "bin");
@@ -64,7 +69,61 @@ for (const [name, proxy] of proxies) {
 
       const disabled = await runProxy(proxy, { ...environment, STATEWRIGHT_NO_BROWSER: "true" });
       assert.equal(disabled.code, 0, disabled.stderr);
+      const disabledConnect = responseById(disabled.stdout, 4);
+      assert.match(disabledConnect.result.content[0].text, /Open https:\/\/statewright\.ai\/keys/);
+      assert.doesNotMatch(disabledConnect.result.content[0].text, /Opened Statewright/);
       await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
+
+      const result = await runProxy(proxy, environment);
+      assert.equal(result.code, 0, result.stderr);
+      const setupCatalog = responseById(result.stdout, 2);
+      assert.deepEqual(setupCatalog.result.tools.map((tool) => tool.name), ["statewright_connect"]);
+      const ordinaryCall = responseById(result.stdout, 3);
+      assert.equal(ordinaryCall.error.code, -32001);
+      assert.match(ordinaryCall.error.message, /Statewright is not connected/);
+      const connect = responseById(result.stdout, 4);
+      assert.match(connect.result.content[0].text, /Opened Statewright account setup in your browser/);
+      assert.match(connect.result.content[0].text, /Do not paste a credential into chat/);
+      assert.deepEqual((await readFile(capture, "utf8")).trim().split(/\r?\n/), [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Start-Process -FilePath 'https://statewright.ai/keys'",
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Start-Process -FilePath 'https://statewright.ai/keys'",
+      ]);
+      assert.equal(await readFile(join(home, ".statewright", "missing_api_key_prompted"), "utf8"), "");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+});
+
+for (const [name, proxy] of legacyProxies) {
+  test(`${name} preserves its existing Windows signup onboarding`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));
+    const home = join(root, "home");
+    const bin = join(root, "bin");
+    const capture = join(root, "browser-command.txt");
+    try {
+      await mkdir(bin, { recursive: true });
+      const fakePowerShell = join(bin, "powershell.exe");
+      await writeFile(fakePowerShell, "#!/usr/bin/env bash\nexit 99\n");
+      await chmod(fakePowerShell, 0o755);
+      const environment = Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+      );
+      Object.assign(environment, {
+        HOME: home,
+        OS: "Windows_NT",
+        PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+        STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: capture,
+        STATEWRIGHT_NO_UPDATE_CHECK: "1",
+        STATEWRIGHT_SENTRY_DISABLED: "true",
+      });
 
       const result = await runProxy(proxy, environment);
       assert.equal(result.code, 0, result.stderr);
@@ -76,12 +135,71 @@ for (const [name, proxy] of proxies) {
         "-Command",
         "Start-Process -FilePath 'https://statewright.ai/signup?redirect=%2Fkeys'",
       ]);
-      assert.equal(await readFile(join(home, ".statewright", "missing_api_key_prompted"), "utf8"), "");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 }
+
+test("codex refreshes its catalog after a local credential is provisioned without restarting", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-key-adoption-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const browserCapture = join(root, "browser-command.txt");
+  const curlCapture = join(root, "curl-command.txt");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  try {
+    await mkdir(bin, { recursive: true });
+    const fakeCurl = join(bin, "curl");
+    await writeFile(
+      fakeCurl,
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"statewright_get_state\"}]},\"id\":4}'\n",
+    );
+    await chmod(fakeCurl, 0o755);
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: browserCapture,
+      STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+
+    const child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+    await waitForOutput(() => stdout, /\"id\":1/);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+    await waitForOutput(() => stdout, /\"id\":2/);
+    assert.deepEqual(responseById(stdout, 2).result.tools.map((tool) => tool.name), ["statewright_connect"]);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
+    await waitForOutput(() => stdout, /\"id\":3/);
+    assert.equal(responseById(stdout, 3).error.code, -32001);
+    await writeFile(join(home, ".statewright", "api_key"), "sw_live_new_key\n", { mode: 0o600 });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} })}\n`);
+    child.stdin.end();
+    const code = await new Promise((resolveClose, rejectClose) => {
+      child.once("error", rejectClose);
+      child.once("close", resolveClose);
+    });
+
+    assert.equal(code, 0, stderr);
+    assert.ok(responseById(stdout, 4).result.tools.some((tool) => tool.name === "statewright_get_state"));
+    assert.match(await readFile(curlCapture, "utf8"), /Authorization: Bearer sw_live_new_key/);
+    await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("cursor adopts a newly saved API key without restarting its MCP process", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-cursor-key-adoption-"));

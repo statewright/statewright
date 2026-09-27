@@ -70,6 +70,13 @@ fn allowed_name_for_family(session: &GatewaySession, family: &str) -> Option<Str
         .find(|candidate| adapter_tool_family(candidate) == Some(family))
 }
 
+fn allowed_general_read_name(session: &GatewaySession) -> Option<String> {
+    tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|candidate| matches!(candidate.to_ascii_lowercase().as_str(), "read" | "read_file"))
+}
+
 fn readonly_shell_policy_name(
     session: &GatewaySession,
     tool_input: &serde_json::Value,
@@ -95,6 +102,19 @@ pub fn resolve_adapter_tool_name(
     session: &GatewaySession,
     requested: &str,
     tool_input: &serde_json::Value,
+) -> String {
+    resolve_adapter_tool_name_with_pipeline(session, requested, tool_input, None)
+}
+
+/// Resolve a native adapter tool after the risk pipeline has classified its
+/// effect. A structurally proven read-only shell call can use the workflow's
+/// provider-neutral read capability even when the legacy token classifier
+/// cannot reduce compound Bash syntax to individual read commands.
+pub fn resolve_adapter_tool_name_with_pipeline(
+    session: &GatewaySession,
+    requested: &str,
+    tool_input: &serde_json::Value,
+    pipeline: Option<&RiskPipelineAssessment>,
 ) -> String {
     // Preserve the original identity before adapter aliases collapse it to a
     // provider-neutral family. This makes an explicit `grep` denial effective
@@ -131,6 +151,13 @@ pub fn resolve_adapter_tool_name(
         return requested.to_string();
     };
     if family == "command" {
+        if pipeline.is_some_and(|assessment| {
+            assessment.resolve_effect() == ResolvedEffect::ReadOnly
+        }) {
+            if let Some(policy_name) = allowed_general_read_name(session) {
+                return policy_name;
+            }
+        }
         if let Some(policy_name) = readonly_shell_policy_name(session, tool_input) {
             return policy_name;
         }
@@ -597,6 +624,51 @@ mod tests {
         assert_eq!(
             resolve_adapter_tool_name(&testing, "run_test", &json!({})),
             "run_test"
+        );
+    }
+
+    #[test]
+    fn authoritative_read_pipeline_maps_compound_shell_to_read_capability() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "pipeline-map",
+            "initial": "planning",
+            "context": {"tool_policy_mode": "blacklist_heuristic_v1"},
+            "states": {
+                "planning": {
+                    "allowed_tools": ["Read", "Grep", "Glob"],
+                    "disallowed_tools": ["Write"],
+                    "on": {"DONE": "completed"}
+                },
+                "completed": {"type": "final"}
+            }
+        })).unwrap();
+        let session = GatewaySession::new("pipeline-map".into(), definition);
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let read = semantic_pipeline(
+            "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi",
+            None,
+        );
+        let write = semantic_pipeline("git rev-parse HEAD || git push origin HEAD", None);
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
+
+        assert_eq!(read.resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(
+            resolve_adapter_tool_name_with_pipeline(
+                &session,
+                "exec_command",
+                &json!({"cmd":"if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"}),
+                Some(&read),
+            ),
+            "Read",
+        );
+        assert_eq!(
+            resolve_adapter_tool_name_with_pipeline(
+                &session,
+                "exec_command",
+                &json!({"cmd":"git rev-parse HEAD || git push origin HEAD"}),
+                Some(&write),
+            ),
+            "exec_command",
         );
     }
 

@@ -1,5 +1,6 @@
 use crate::bash_classifier;
 use crate::protocol::ToolCallResult;
+use crate::risk_assessment::{ResolvedEffect, RiskPipelineAssessment};
 use crate::session::GatewaySession;
 
 /// Pre-call interception result.
@@ -12,12 +13,38 @@ pub enum PreCallDecision {
     Warn(String),
 }
 
+fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[String]) -> bool {
+    let has = |names: &[&str]| {
+        allowed_tools.iter().any(|allowed| {
+            names.iter().any(|candidate| allowed.eq_ignore_ascii_case(candidate))
+        })
+    };
+    match effect {
+        ResolvedEffect::ReadOnly => has(&["Read", "read_file"]),
+        ResolvedEffect::LocalWrite => has(&["Write", "write_file"]),
+        ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => false,
+    }
+}
+
 /// Run all pre-call interceptors. Returns Block if any interceptor rejects.
 /// Returns Warn with concatenated warnings if any fire.
 pub fn pre_call_check(
     session: &GatewaySession,
     tool_name: &str,
     arguments: &serde_json::Value,
+) -> PreCallDecision {
+    pre_call_check_with_pipeline(session, tool_name, arguments, None)
+}
+
+/// Run pre-call interceptors with the already-resolved risk pipeline. The
+/// pipeline is authoritative for effect classification; command allowlists,
+/// blocked environment variables, edit bounds, and state capabilities remain
+/// independently enforced around it.
+pub fn pre_call_check_with_pipeline(
+    session: &GatewaySession,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    pipeline: Option<&RiskPipelineAssessment>,
 ) -> PreCallDecision {
     if let Some(reason) = crate::enforcement::unsupported_shell_dialect_reason(tool_name, arguments) {
         return PreCallDecision::Block(reason.into());
@@ -110,13 +137,18 @@ pub fn pre_call_check(
                     session.current_state
                 ));
             };
-            if exploratory_read_only && bash_classifier::readonly_capabilities(&command).is_none() {
+            let resolved_effect = pipeline.map(RiskPipelineAssessment::resolve_effect);
+            let pipeline_admitted = resolved_effect
+                .is_some_and(|effect| pipeline_effect_has_capability(effect, &allowed_tools));
+            if exploratory_read_only && !pipeline_admitted
+                && bash_classifier::readonly_capabilities(&command).is_none()
+            {
                 return PreCallDecision::Block(format!(
                     "Bash command blocked in exploratory state '{}': only proven read-only commands are permitted.",
                     session.current_state
                 ));
             }
-            if !exploratory_read_only {
+            if !exploratory_read_only && !pipeline_admitted {
                 if let Err(reason) = bash_classifier::check_against_allowed(&command, &allowed_tools) {
                     return PreCallDecision::Block(format!(
                         "Bash command blocked in state '{}': {}",

@@ -1276,7 +1276,12 @@ impl Gateway {
                 }),
             }
         } else {
-            enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input)
+            enforcement::resolve_adapter_tool_name_with_pipeline(
+                &session,
+                tool_name,
+                tool_input,
+                Some(&pipeline),
+            )
         };
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
             &session,
@@ -1357,7 +1362,12 @@ impl Gateway {
             });
         }
 
-        let interceptor = interceptors::pre_call_check(&session, tool_name, tool_input);
+        let interceptor = interceptors::pre_call_check_with_pipeline(
+            &session,
+            tool_name,
+            tool_input,
+            Some(&pipeline),
+        );
         match interceptor {
             PreCallDecision::Block(reason) => json!({
                 "decision": "deny",
@@ -3841,6 +3851,49 @@ mod tests {
         let readonly_shell = tool_result_json(readonly_shell);
         assert_eq!(readonly_shell["decision"], "allow");
         assert_eq!(readonly_shell["policy_tool_name"], "read_file");
+
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let compound_read = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {
+                            "cmd": "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"
+                        }
+                    }
+                })),
+                id: Some(json!(22)),
+            })
+            .await
+            .unwrap();
+        let compound_read = tool_result_json(compound_read);
+        assert_eq!(compound_read["decision"], "allow", "{compound_read}");
+        assert_eq!(compound_read["policy_tool_name"], "read_file");
+        assert_eq!(compound_read["risk_assessment"]["deterministic_source"], "shell_ast");
+
+        let hidden_write = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {"cmd": "git rev-parse HEAD || git push origin HEAD"}
+                    }
+                })),
+                id: Some(json!(23)),
+            })
+            .await
+            .unwrap();
+        let hidden_write = tool_result_json(hidden_write);
+        assert_eq!(hidden_write["decision"], "deny");
+        assert_eq!(hidden_write["risk_assessment"]["deterministic_source"], "shell_ast");
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
 
         let zsh = gateway
             .handle_message(JsonRpcRequest {

@@ -187,7 +187,12 @@ async fn handle_pre_tool(
             status_message: Some(status),
         });
     }
-    let policy_tool_name = enforcement::resolve_adapter_tool_name(&session, &req.tool_name, &req.tool_input);
+    let policy_tool_name = enforcement::resolve_adapter_tool_name_with_pipeline(
+        &session,
+        &req.tool_name,
+        &req.tool_input,
+        Some(&pipeline),
+    );
     match enforcement::enforce_tool_call(&session, &policy_tool_name) {
         EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None, &pipeline),
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
@@ -272,7 +277,12 @@ fn pre_tool_policy_response(
             status_message: Some(status),
         });
     }
-    match interceptors::pre_call_check(session, &req.tool_name, &req.tool_input) {
+    match interceptors::pre_call_check_with_pipeline(
+        session,
+        &req.tool_name,
+        &req.tool_input,
+        Some(pipeline),
+    ) {
         PreCallDecision::Allow => Json(PreToolResponse {
             decision: "allow".into(),
             risk_assessment: Some(pipeline.visible_json()),

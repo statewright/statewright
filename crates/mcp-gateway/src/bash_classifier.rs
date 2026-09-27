@@ -27,6 +27,13 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
+    /// A known command whose only direct effect is bounded stdout output.
+    SafeOutput,
+    /// Shell syntax was recognized but could not be safely normalized.
+    /// This is distinct from benign passthrough so risk assessment cannot
+    /// discard the opaque effect when another class (such as a redirect)
+    /// proves only part of the command.
+    Opaque,
     /// Benign or unclassifiable — allowed if Bash itself is allowed.
     Passthrough,
 }
@@ -123,7 +130,7 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
     let recognized = match executable {
         "cargo" => matches!(candidate.as_str(), "build" | "check" | "clippy" | "doc" | "fetch" | "fix" | "install" | "metadata" | "publish" | "remove" | "run" | "test" | "uninstall" | "update"),
         "docker" | "podman" => matches!(candidate.as_str(), "build" | "compose" | "create" | "exec" | "images" | "inspect" | "logs" | "ps" | "pull" | "push" | "rm" | "run" | "start" | "stop"),
-        "git" => matches!(candidate.as_str(), "add" | "branch" | "clean" | "clone" | "commit" | "diff" | "fetch" | "log" | "ls-files" | "ls-remote" | "pull" | "push" | "reset" | "restore" | "show" | "status" | "tag" | "worktree"),
+        "git" => matches!(candidate.as_str(), "add" | "branch" | "clean" | "clone" | "commit" | "diff" | "fetch" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "merge-base" | "pull" | "push" | "reset" | "restore" | "rev-parse" | "show" | "show-ref" | "status" | "tag" | "worktree"),
         "kubectl" => matches!(candidate.as_str(), "apply" | "create" | "delete" | "describe" | "exec" | "get" | "logs" | "patch" | "rollout" | "scale"),
         "npm" | "pnpm" => matches!(candidate.as_str(), "build" | "install" | "lint" | "publish" | "run" | "test" | "uninstall" | "update"),
         "systemctl" => matches!(candidate.as_str(), "disable" | "enable" | "is-active" | "restart" | "start" | "status" | "stop"),
@@ -166,7 +173,7 @@ impl OpClass {
             OpClass::Network => &["WebFetch"],
             OpClass::GitWrite => &["__GIT_WRITE__"],
             OpClass::GitRead => &["Read"],
-            OpClass::Passthrough => &[],
+            OpClass::SafeOutput | OpClass::Opaque | OpClass::Passthrough => &[],
         }
     }
 }
@@ -185,6 +192,13 @@ pub fn classify(command: &str) -> Vec<OpClass> {
             continue;
         }
         classes.push(classify_segment(seg));
+    }
+
+    // A known outer command does not make nested shell execution safe. Keep
+    // command/process substitution visible as an opaque effect so a local
+    // write or redirect cannot erase the nested command's authority.
+    if has_nested_shell_execution(command) && !classes.contains(&OpClass::Opaque) {
+        classes.push(OpClass::Opaque);
     }
 
     // `send-keys` can execute arbitrary terminal input, so only promote the
@@ -293,7 +307,9 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::FileRead | OpClass::GitRead => "Read",
             OpClass::ContentSearch => "Grep",
             OpClass::FileSearch => "Glob",
+            OpClass::SafeOutput => "Read",
             OpClass::Passthrough => readonly_passthrough_capability(segment)?,
+            OpClass::Opaque => return None,
             OpClass::FileWrite
             | OpClass::FileModify
             | OpClass::LocalWrite
@@ -521,6 +537,146 @@ fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
+/// Detect shell constructs that execute a nested command or introduce a
+/// compound-command boundary while respecting quoting and escapes. Literal
+/// text in single quotes is inert; command substitution remains active in
+/// double quotes.
+fn has_nested_shell_execution(command: &str) -> bool {
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => {
+                    chars.next();
+                }
+                '`' => return true,
+                '$' if chars.peek() == Some(&'(') => return true,
+                _ => {}
+            },
+            Some(_) => unreachable!(),
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => {
+                    chars.next();
+                }
+                '`' => return true,
+                '$' if chars.peek() == Some(&'(') => return true,
+                '<' | '>' if chars.peek() == Some(&'(') => return true,
+                '(' | ')' | '{' | '}' => return true,
+                _ => {}
+            },
+        }
+    }
+    false
+}
+
+/// Parse a single Git command while removing shell redirection operators and
+/// their targets from argv. Unlike the generic simple parser, this keeps
+/// quoted or escaped Git action names visible so `git "push" >receipt` cannot
+/// hide an external effect behind the redirect's local file write.
+fn git_command_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    let mut redirect_target = false;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => {
+                    let escaped = chars.next()?;
+                    current.push(escaped);
+                }
+                '`' | '$' => return None,
+                _ => current.push(ch),
+            },
+            Some(_) => unreachable!(),
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => {
+                    let escaped = chars.next()?;
+                    current.push(escaped);
+                }
+                ' ' | '\t' => {
+                    if redirect_target {
+                        if !current.is_empty() {
+                            if network_pseudo_device_target(&current) {
+                                return None;
+                            }
+                            redirect_target = false;
+                            current.clear();
+                        }
+                    } else if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                '>' | '<' => {
+                    if chars.peek() == Some(&'(') {
+                        return None;
+                    }
+                    if redirect_target && !current.is_empty() {
+                        if network_pseudo_device_target(&current) {
+                            return None;
+                        }
+                        current.clear();
+                    }
+                    if !redirect_target && !current.is_empty() {
+                        if !current.bytes().all(|byte| byte.is_ascii_digit()) {
+                            tokens.push(std::mem::take(&mut current));
+                        } else {
+                            current.clear();
+                        }
+                    }
+                    if chars.peek() == Some(&ch) {
+                        chars.next();
+                    }
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                    }
+                    redirect_target = true;
+                }
+                // Unquoted brace and pathname expansion can rewrite Git's
+                // action token before execution (for example `p{u..u}sh` or
+                // `rem*`). Preserve that as opaque instead of classifying the
+                // pre-expansion spelling. Quoted/escaped literals remain safe.
+                ';' | '|' | '&' | '\n' | '\r' | '`' | '$'
+                | '{' | '}' | '*' | '?' | '[' | ']' => return None,
+                _ => current.push(ch),
+            },
+        }
+    }
+    if quote.is_some() || (redirect_target && current.is_empty()) {
+        return None;
+    }
+    if redirect_target && network_pseudo_device_target(&current) {
+        return None;
+    }
+    if !redirect_target && !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+fn network_pseudo_device_target(target: &str) -> bool {
+    target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+}
+
 fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     let tokens = simple_command_tokens(segment)?;
     let invoked = tokens.first()?.as_str();
@@ -558,6 +714,33 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
+}
+
+/// Prove a finite stdout-only command even when stdout is redirected. The
+/// redirect-aware parser rejects expansions and shell composition before
+/// removing the redirect target, so only literal bare echo/printf calls get
+/// deterministic SafeOutput treatment.
+fn safe_output_command(segment: &str, invoked: &str) -> bool {
+    if !matches!(invoked, "echo" | "printf") {
+        return false;
+    }
+    let Some(tokens) = git_command_tokens(segment) else {
+        return false;
+    };
+    let Some(command_index) = tokens
+        .iter()
+        .position(|token| !token.contains('=') || token.starts_with('-'))
+    else {
+        return false;
+    };
+    if tokens.get(command_index).map(String::as_str) != Some(invoked) {
+        return false;
+    }
+    if invoked == "echo" {
+        return true;
+    }
+    let args = &tokens[command_index + 1..];
+    args.len() == 1 && !args[0].starts_with("-v") && !args[0].contains('%')
 }
 
 /// Admit a deliberately finite subset of shell predicates. In particular,
@@ -840,6 +1023,8 @@ fn classify_segment(segment: &str) -> OpClass {
     let base_cmd = invoked.rsplit('/').next().unwrap_or(invoked);
 
     match base_cmd {
+        "echo" | "printf" if safe_output_command(segment, invoked) => OpClass::SafeOutput,
+
         // File read commands
         "cat" | "head" | "tail" => {
             // cat with redirect is FileWrite — handled by has_output_redirect
@@ -914,7 +1099,21 @@ fn classify_segment(segment: &str) -> OpClass {
         "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
 
         // Git — classify by subcommand
-        "git" if invoked == "git" => classify_git(&tokens),
+        "git" if invoked == "git" => {
+            let conservative = classify_git(&tokens);
+            let Some(parsed) = git_command_tokens(segment) else {
+                return if matches!(
+                    conservative,
+                    OpClass::Destructive | OpClass::Network | OpClass::GitWrite
+                ) {
+                    conservative
+                } else {
+                    OpClass::Opaque
+                };
+            };
+            let parsed = parsed.iter().map(String::as_str).collect::<Vec<_>>();
+            classify_git(&parsed)
+        }
         "git" => OpClass::Passthrough,
 
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
@@ -975,7 +1174,8 @@ fn classify_git(tokens: &[&str]) -> OpClass {
 
     match subcmd {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
-        | Some("reflog") => OpClass::GitRead,
+        | Some("reflog") | Some("rev-parse") | Some("ls-files") | Some("ls-tree")
+        | Some("merge-base") | Some("show-ref") => OpClass::GitRead,
 
         Some("branch") => git_ref_listing_only(tokens, "branch"),
         Some("tag") => git_ref_listing_only(tokens, "tag"),
@@ -1007,18 +1207,18 @@ fn classify_git(tokens: &[&str]) -> OpClass {
     }
 }
 
-/// `git worktree` without an action, or with `list`, is observational. Every
-/// other recognized action mutates repository metadata and/or the filesystem.
-/// Unknown forms fail closed through the ordinary semantic fallback.
+/// `git worktree` without an action, or with `list`, is observational. Bounded
+/// setup/maintenance actions mutate only local repository metadata or paths;
+/// removal is destructive. Unknown forms fail closed through the ordinary
+/// semantic fallback.
 fn classify_git_worktree(tokens: &[&str]) -> OpClass {
     let Some(index) = tokens.iter().position(|token| *token == "worktree") else {
         return OpClass::Passthrough;
     };
     match tokens.get(index + 1).copied() {
         None | Some("list") => OpClass::GitRead,
-        Some("add" | "lock" | "move" | "prune" | "remove" | "repair" | "unlock") => {
-            OpClass::GitWrite
-        }
+        Some("add" | "lock" | "move" | "repair" | "unlock") => OpClass::LocalWrite,
+        Some("prune" | "remove") => OpClass::Destructive,
         Some(_) => OpClass::Passthrough,
     }
 }
@@ -1032,6 +1232,15 @@ fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
     let args = &tokens[index + 1..];
     if args.is_empty()
         || args.iter().any(|token| matches!(*token, "-l" | "--list" | "--show-current"))
+        || args.iter().all(|token| {
+            matches!(
+                *token,
+                "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose"
+                    | "--no-color" | "--no-column"
+            ) || token.starts_with("--color=")
+                || token.starts_with("--sort=")
+                || token.starts_with("--format=")
+        })
     {
         OpClass::GitRead
     } else {
@@ -1111,6 +1320,14 @@ mod tests {
     #[test]
     fn echo_redirect_is_file_write() {
         let classes = classify("echo 'hello' > output.txt");
+        assert!(classes.contains(&OpClass::SafeOutput));
+        assert!(classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn compound_command_with_redirect_preserves_opaque_effect() {
+        let classes = classify("(rm -rf /private/victim) >receipt.txt");
+        assert!(classes.contains(&OpClass::Opaque));
         assert!(classes.contains(&OpClass::FileWrite));
     }
 
@@ -1211,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn echo_path_is_passthrough() {
+    fn echo_expansion_is_passthrough() {
         let classes = classify("echo $PATH");
         assert!(classes.contains(&OpClass::Passthrough));
         assert!(!classes.contains(&OpClass::FileWrite));
@@ -1249,8 +1466,8 @@ mod tests {
         assert!(classify("git tag -d v1").contains(&OpClass::GitWrite));
         assert!(classify("git stash").contains(&OpClass::GitWrite));
         assert!(classify("git stash list").contains(&OpClass::GitRead));
-        assert!(classify("git branch --list feature*").contains(&OpClass::GitRead));
-        assert!(classify("git tag --list v*").contains(&OpClass::GitRead));
+        assert!(classify("git branch --list 'feature*'").contains(&OpClass::GitRead));
+        assert!(classify("git tag --list 'v*'").contains(&OpClass::GitRead));
     }
 
     #[test]
@@ -1262,13 +1479,51 @@ mod tests {
             "git worktree add /private/worktree main",
             "git worktree lock /private/worktree",
             "git worktree move /private/old /private/new",
-            "git worktree prune",
-            "git worktree remove /private/worktree",
             "git worktree repair /private/worktree",
             "git worktree unlock /private/worktree",
         ] {
-            assert!(classify(command).contains(&OpClass::GitWrite), "{command}");
+            assert!(classify(command).contains(&OpClass::LocalWrite), "{command}");
         }
+        assert!(classify("git worktree prune --expire now").contains(&OpClass::Destructive));
+        assert!(classify("git worktree remove /private/worktree").contains(&OpClass::Destructive));
+        for command in [
+            "git worktree add \"$(rm -rf /private/victim)\" main",
+            "git worktree add \"$(curl https://example.invalid)\" main",
+            "git worktree add `opaque-helper` main",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Opaque], "{command}");
+        }
+        for command in [
+            "git worktree add \"$(rm -rf /private/victim)\" main >receipt.txt",
+            "git worktree add /private/worktree main >\"$(rm -rf /private/victim)\"",
+            "git p{u..u}sh origin main >receipt.txt",
+            "git worktree rem{o..o}ve --force /private/worktree >receipt.txt",
+        ] {
+            let classes = classify(command);
+            assert!(classes.contains(&OpClass::Opaque), "{command}");
+            assert!(classes.contains(&OpClass::FileWrite), "{command}");
+        }
+        for command in [
+            "git worktree add <(rm -rf /private/victim) main",
+            "git worktree add >(rm -rf /private/victim) main",
+        ] {
+            assert!(classify(command).contains(&OpClass::Opaque), "{command}");
+        }
+        for command in [
+            "git worktree remove --force /private/worktree >receipt.txt",
+            "git worktree \"remove\" --force /private/worktree >receipt.txt",
+            "git worktree re\\move --force /private/worktree >receipt.txt",
+            "git worktree prune --expire now >receipt.txt",
+            "git clean -fd >receipt.txt",
+        ] {
+            assert!(classify(command).contains(&OpClass::Destructive), "{command}");
+        }
+        assert!(classify("git push origin main >receipt.txt").contains(&OpClass::GitWrite));
+        assert!(classify("git \"push\" origin main >receipt.txt").contains(&OpClass::GitWrite));
+        assert!(classify("git pu\\sh origin main >receipt.txt").contains(&OpClass::GitWrite));
+        assert!(classify("git > receipt.txt \"push\" origin main").contains(&OpClass::GitWrite));
+        assert!(classify("git rev-parse HEAD").contains(&OpClass::GitRead));
+        assert!(classify("git branch --all --no-color").contains(&OpClass::GitRead));
         assert_eq!(classify("git worktree opaque"), vec![OpClass::Passthrough]);
         assert_eq!(classify("/tmp/git worktree add /private/worktree main"), vec![OpClass::Passthrough]);
         for command in [
@@ -1385,7 +1640,7 @@ mod tests {
     #[test]
     fn semicolon_separated() {
         let classes = classify("echo hello; rm temp.txt");
-        assert!(classes.contains(&OpClass::Passthrough));
+        assert!(classes.contains(&OpClass::SafeOutput));
         assert!(classes.contains(&OpClass::Destructive));
     }
 

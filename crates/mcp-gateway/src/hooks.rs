@@ -143,7 +143,7 @@ async fn handle_pre_tool(
         .states
         .get(&initial_session.current_state)
         .and_then(|state| state.intent.as_deref());
-    let pipeline = risk_assessment::assess_pipeline_visible(None, &req.tool_name, &req.tool_input, intent).await;
+    let pipeline = risk_assessment::assess_native_pipeline_visible(None, &req.tool_name, &req.tool_input, intent).await;
     let session = match session_manager.get(&session_id) {
         Some(session) => session,
         None => return Json(PreToolResponse {

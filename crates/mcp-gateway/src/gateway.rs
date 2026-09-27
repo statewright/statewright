@@ -1212,7 +1212,7 @@ impl Gateway {
             Ok(info) => info,
             Err(reason) => return json!({"decision":"deny", "reason":reason}),
         };
-        let pipeline = risk_assessment::assess_pipeline_visible(registered_tool, tool_name, tool_input, intent).await;
+        let pipeline = risk_assessment::assess_native_pipeline_visible(registered_tool, tool_name, tool_input, intent).await;
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => return json!({
@@ -5610,7 +5610,6 @@ mod tests {
         let def: MachineDefinition = serde_json::from_value(json!({
             "id": "implicit-test",
             "initial": "planning",
-            "context": {"tool_policy_mode":"blacklist_heuristic_v1"},
             "states": {
                 "planning": {
                     "allowed_tools": ["Read", "Grep"],
@@ -5820,17 +5819,14 @@ mod tests {
             String::new(),
             None,
         );
-        let response = gateway.handle_message(JsonRpcRequest {
-            jsonrpc:"2.0".into(), method:"tools/call".into(),
-            params:Some(json!({
-                "name":"Edit",
-                "arguments":{"file_path":"src/main.rs","old_string":"a","new_string":"b"}
-            })),
-            id:Some(json!(1)),
-        }).await.unwrap();
-        let result = response.result.unwrap();
-        assert_eq!(result["isError"], true);
-        assert!(result.to_string().contains("Local write effect is explicitly blocked"));
+        let result = gateway.adapter_pre_tool(
+            "Edit",
+            &json!({"file_path":"src/main.rs","old_string":"a","new_string":"b"}),
+        ).await;
+        assert_eq!(result["decision"], "deny");
+        assert!(result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked")));
         let session = gateway.session_manager.get("checkpoint-policy-session").unwrap();
         assert_eq!(session.current_state, "inspect");
         assert_eq!(session.iteration_count, 1);

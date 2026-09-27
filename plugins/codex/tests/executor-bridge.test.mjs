@@ -230,6 +230,11 @@ test("native Codex hook delegates blacklist policy to the authoritative gateway"
       tool_response: state,
     }, environment);
     assert.equal(post.status, 0, post.stderr);
+    assert.match(
+      JSON.parse(post.stdout).hookSpecificOutput.additionalContext,
+      /Tools: unrestricted except explicit blocks: Write/,
+      post.stdout,
+    );
 
     const allowed = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,

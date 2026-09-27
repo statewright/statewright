@@ -457,6 +457,117 @@ describe("statewright Pi extension", () => {
       expect(results[0]).toBeUndefined()
     })
 
+    it("uses explicit blacklist precedence and shared shell risk admission in deny mode", async () => {
+      const blacklistState = {
+        ...MOCK_STATE,
+        allowed_tools: [],
+        disallowed_tools: ["Write"],
+        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+      }
+      setupFetch([{ match: "/mcp", body: blacklistState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      for (const toolName of ["Write", "apply_patch"]) {
+        const result = await pi._fire("tool_call", { toolName }, ctx)
+        expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+      for (const toolName of ["delete_target", "update_read_status"]) {
+        const result = await pi._fire("tool_call", { toolName }, ctx)
+        expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+      for (const command of [" git push origin HEAD", "command /bin/rm -rf target", "git reset --hard", "git branch -D topic", "git remote set-url origin https://example.test/repo", "git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt", "echo x > marker.txt", "opaque-wrapper > marker.txt", "env git push origin HEAD", "git status; arbitrary-wrapper", "git status\narbitrary-wrapper", "find . -exec opaque-wrapper {} +", "rg --pre opaque-wrapper needle .", "fd -x opaque-wrapper", 'find . -e""xec opaque-wrapper {} +', 'rg --p""re opaque-wrapper needle .', "fd -H''Ix opaque-wrapper", "task deploy", "unknown-wrapper do-a-thing"]) {
+        const result = await pi._fire("tool_call", { toolName: "exec_command", input: { cmd: command } }, ctx)
+        expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+      const safe = await pi._fire("tool_call", { toolName: "exec_command", input: { cmd: "git worktree list" } }, ctx)
+      expect(safe[0]).toBeUndefined()
+      const quotedGlobalRead = await pi._fire("tool_call", { toolName: "exec_command", input: { cmd: 'git -C "path with spaces" status' } }, ctx)
+      expect(quotedGlobalRead[0]).toBeUndefined()
+      for (const toolName of ["search", "fetch", "WebSearch", "WebFetch"]) {
+        const result = await pi._fire("tool_call", { toolName }, ctx)
+        expect(result[0]).toBeUndefined()
+      }
+
+      const webBlockedState = {
+        ...blacklistState,
+        disallowed_tools: ["Write", "WebSearch", "WebFetch"],
+      }
+      setupFetch([{ match: "/mcp", body: webBlockedState }])
+      const blockedPi = createMockPi()
+      const blockedCtx = createCtx()
+      await statewrightExtension(asPi(blockedPi))
+      await blockedPi._fire("before_agent_start", {}, blockedCtx)
+      for (const toolName of ["search", "fetch", "WebSearch", "WebFetch"]) {
+        const result = await blockedPi._fire("tool_call", { toolName }, blockedCtx)
+        expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+
+      const writableState = { ...blacklistState, disallowed_tools: [] }
+      setupFetch([{ match: "/mcp", body: writableState }])
+      const writablePi = createMockPi()
+      const writableCtx = createCtx()
+      await statewrightExtension(asPi(writablePi))
+      await writablePi._fire("before_agent_start", {}, writableCtx)
+      for (const command of ["git add README.md", 'git commit -m "policy repair"', "git worktree add ../policy-check HEAD", "git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt"]) {
+        const result = await writablePi._fire("tool_call", { toolName: "exec_command", input: { cmd: command } }, writableCtx)
+        expect(result[0]).toBeUndefined()
+      }
+      const opaqueRedirect = await writablePi._fire("tool_call", { toolName: "exec_command", input: { cmd: "opaque-wrapper > marker.txt" } }, writableCtx)
+      expect(opaqueRedirect[0]).toEqual(expect.objectContaining({ block: true }))
+      for (const command of ["git -C . push origin HEAD", 'git "push" origin HEAD', "git -C . reset --hard", "git unknown-alias", "git unknown-alias --output=marker.txt", "git push origin HEAD --output=marker.txt", "git reset --hard --output=marker.txt", "git -c core.fsmonitor=./opaque-wrapper status", "opaque-wrapper touch marker.txt", "git -C . push origin touch"]) {
+        const result = await writablePi._fire("tool_call", { toolName: "exec_command", input: { cmd: command } }, writableCtx)
+        expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+    })
+
+    it("preserves legacy blacklist and shell enforcement in native and recovery paths", async () => {
+      const legacyState = {
+        ...MOCK_STATE,
+        allowed_tools: ["Read", "Write", "Bash"],
+        disallowed_tools: ["Write"],
+      }
+      setupFetch([{ match: "/mcp", body: legacyState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      expect((await pi._fire("tool_call", { toolName: "apply_patch" }, ctx))[0]).toEqual(expect.objectContaining({ block: true }))
+      expect((await pi._fire("tool_call", { toolName: "exec_command", input: { cmd: "git status" } }, ctx))[0]).toBeUndefined()
+      for (const command of ["echo x > marker.txt", "git status > marker.txt", "git diff --output=marker.txt", "rm -rf target", "git branch -D topic"]) {
+        expect((await pi._fire("tool_call", { toolName: "exec_command", input: { cmd: command } }, ctx))[0]).toEqual(expect.objectContaining({ block: true }))
+      }
+
+      await pi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: '<call:bash{command: "echo x > marker.txt"}<tool_call|>' }] },
+      }, ctx)
+      expect(pi.exec).not.toHaveBeenCalledWith("bash", ["-c", "echo x > marker.txt"])
+      await pi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: '<call:bash{command: "git status > marker.txt"}<tool_call|>' }] },
+      }, ctx)
+      expect(pi.exec).not.toHaveBeenCalledWith("bash", ["-c", "git status > marker.txt"])
+
+      const legacyReadOnlyState = { ...legacyState, allowed_tools: ["Read"] }
+      setupFetch([{ match: "/mcp", body: legacyReadOnlyState }])
+      const readOnlyPi = createMockPi()
+      const readOnlyCtx = createCtx()
+      await statewrightExtension(asPi(readOnlyPi))
+      await readOnlyPi._fire("before_agent_start", {}, readOnlyCtx)
+      await readOnlyPi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: '<call:bash{command: "git status"}<tool_call|>' }] },
+      }, readOnlyCtx)
+      expect(readOnlyPi.exec).toHaveBeenCalledWith("bash", ["-c", "git status"])
+      await readOnlyPi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: '<call:bash{command: "git branch -D topic"}<tool_call|>' }] },
+      }, readOnlyCtx)
+      expect(readOnlyPi.exec).not.toHaveBeenCalledWith("bash", ["-c", "git branch -D topic"])
+    })
+
     it("blocks tool calls with undefined or empty name", async () => {
       setupFetch([{ match: "/mcp", body: MOCK_STATE }])
       vi.spyOn(console, "log").mockImplementation(() => {})
@@ -1264,6 +1375,25 @@ describe("statewright Pi extension", () => {
         expect.stringContaining("Continue"),
         expect.objectContaining({ deliverAs: expect.stringMatching(/steer|followUp/) }),
       )
+    })
+
+    it("uses the same deny-mode classifier for recovered shell calls", async () => {
+      const blacklistState = {
+        ...RECON_STATE,
+        allowed_tools: [],
+        disallowed_tools: ["Write"],
+        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+      }
+      setupFetch([{ match: "/mcp", body: blacklistState }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+      await pi._fire("message_end", {
+        message: { role: "assistant", content: [{ type: "text", text: '<call:bash{command: "find . -e\\\"\\\"xec opaque-wrapper {} +"}<tool_call|>' }] },
+      }, ctx)
+      expect(pi.exec).not.toHaveBeenCalledWith("bash", ["-c", 'find . -e""xec opaque-wrapper {} +'])
     })
 
     it("extracts tool calls from <call:read{path: \"file.py\"}<tool_call|> format", async () => {

@@ -607,6 +607,29 @@ mod tests {
         assert!(crate::risk_assessment::take_test_shadow_receipts().is_empty());
         crate::risk_assessment::set_test_shadow_enabled(None);
 
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let compound = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest {
+                tool_name: "exec_command".into(),
+                tool_input: json!({
+                    "cmd": "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"
+                }),
+            }),
+        ).await.0;
+        assert_eq!(compound.decision, "allow");
+        assert_eq!(compound.risk_assessment.as_ref().unwrap()["deterministic_source"], "shell_ast");
+
+        let hidden_write = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest {
+                tool_name: "exec_command".into(),
+                tool_input: json!({"cmd":"git rev-parse HEAD || git push origin HEAD"}),
+            }),
+        ).await.0;
+        assert_eq!(hidden_write.decision, "deny");
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
+
         let denied = handle_pre_tool(
             State(exploratory_hook_state()),
             Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd":"touch marker"}) }),

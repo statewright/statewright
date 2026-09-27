@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { statewrightToolSummary, summarizeStatewrightToolCompletion } from "../lib/statewright-tool-summary.mjs";
+import {
+  statewrightToolSummary,
+  summarizeStatewrightMcpResponse,
+  summarizeStatewrightToolCompletion,
+} from "../lib/statewright-tool-summary.mjs";
 
 const completion = (tool, value, extra = {}) => ({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1",
   item: { id: "tool-1", type: "mcpToolCall", server: "statewright", tool, status: "completed",
@@ -21,11 +25,32 @@ test("get_state presentation is one bounded supervisor line without raw workflow
 
 test("transition and approval summaries state the actual movement", () => {
   assert.equal(statewrightToolSummary(completion("statewright_transition", {
-    transitioned: true, from: "validate", to: "record",
-  }).params.item), "validate → record · transitioned");
+    transitioned: true, from: "validate", to: "record", transition_count: 7,
+    usage: { transitions: 7, limit: 2500, remaining: 2493 },
+  }).params.item), "validate → record · transitioned · 7/2500 transitions · 2493 remaining");
   assert.equal(statewrightToolSummary(completion("statewright_transition", {
     status: "pending_approval", from: "human_decision", to: "sync_tasks",
   }).params.item), "human_decision → sync_tasks · approval pending");
+});
+
+test("native MCP transition response becomes a concise line without losing machine-readable state", () => {
+  const value = { transitioned: true, from: "baseline", to: "implement", transition_count: 2,
+    usage: { transitions: 2, limit: 2500, remaining: 2498 } };
+  const raw = { jsonrpc: "2.0", id: 17, result: { content: [{ type: "text", text: JSON.stringify(value) }] } };
+  const summarized = summarizeStatewrightMcpResponse("statewright_transition", raw);
+  assert.equal(summarized.result.content[0].text,
+    "Statewright supervisor: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
+  assert.deepEqual(summarized.result.structuredContent, value);
+  assert.equal(raw.result.structuredContent, undefined, "upstream response is untouched");
+});
+
+test("native MCP formatter leaves failures, malformed payloads, and other tools untouched", () => {
+  const failed = { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "details" }] } };
+  const malformed = { jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: "not json" }] } };
+  const state = { jsonrpc: "2.0", id: 3, result: { content: [{ type: "text", text: "{\"state\":\"baseline\"}" }] } };
+  assert.equal(summarizeStatewrightMcpResponse("statewright_transition", failed), failed);
+  assert.equal(summarizeStatewrightMcpResponse("statewright_transition", malformed), malformed);
+  assert.equal(summarizeStatewrightMcpResponse("statewright_get_state", state), state);
 });
 
 test("inactive and failed state calls remain concise while search results remain visible", () => {
@@ -40,4 +65,10 @@ test("foreign MCP results are never rewritten", () => {
   const raw = completion("statewright_get_state", { state: "baseline" });
   raw.params.item.server = "foreign";
   assert.equal(summarizeStatewrightToolCompletion(raw), raw);
+});
+
+test("capitalized native MCP event names are summarized", () => {
+  const raw = completion("statewright_transition", { transitioned: true, from: "intake", to: "localize" });
+  raw.params.item.type = "McpToolCall";
+  assert.equal(statewrightToolSummary(raw.params.item), "intake → localize · transitioned");
 });

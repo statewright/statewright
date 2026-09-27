@@ -142,10 +142,14 @@ extract_mcp_result_text() {
   printf '%s' "$response" | jq -r '
     def first_text:
       [ .[]? | select(.type? == "text") | .text? | strings ][0] // empty;
+    def result_value:
+      if type == "string" then . else tojson end;
     if type == "string" then .
     elif type == "array" then first_text
     elif type == "object" then
-      if (.content? | type) == "array" then (.content | first_text)
+      if .structuredContent? != null then (.structuredContent | result_value)
+      elif .result?.structuredContent? != null then (.result.structuredContent | result_value)
+      elif (.content? | type) == "array" then (.content | first_text)
       elif (.result?.content? | type) == "array" then (.result.content | first_text)
       elif (.text? | type) == "string" then .text
       else tojson

@@ -34,7 +34,14 @@ async function startBridge() {
     } else if (request.url === "/hooks/stop") {
       response.end(JSON.stringify({ decision: "block", reason: "Workflow is still active." }));
     } else if (request.url === "/mcp") {
-      response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [] } }));
+      if (body.params?.name === "statewright_transition") {
+        const transition = { transitioned: true, from: "baseline", to: "implement", transition_count: 2,
+          usage: { transitions: 2, limit: 2500, remaining: 2498 } };
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify(transition) }] } }));
+      } else {
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { tools: [] } }));
+      }
     } else {
       response.writeHead(404).end();
     }
@@ -149,6 +156,8 @@ test("native Codex hook unwraps structured MCP workflow-load results", async () 
     [{ type: "text", text: JSON.stringify(loadedState) }],
     { content: [{ type: "text", text: JSON.stringify(loadedState) }] },
     { result: { content: [{ type: "text", text: JSON.stringify(loadedState) }] } },
+    { structuredContent: loadedState, content: [{ type: "text", text: "Statewright supervisor: loaded" }] },
+    { result: { structuredContent: loadedState, content: [{ type: "text", text: "Statewright supervisor: loaded" }] } },
   ];
 
   for (const [index, tool_response] of responses.entries()) {
@@ -491,11 +500,24 @@ test("Codex hooks and MCP join the executor-owned bridge", async () => {
     assert.equal(mcp.status, 0, mcp.stderr);
     assert.equal(JSON.parse(mcp.stdout).id, 17);
 
+    const transition = await invoke("bash", [resolve(codexRoot, "mcp-proxy.sh")], {
+      jsonrpc: "2.0",
+      id: 18,
+      method: "tools/call",
+      params: { name: "statewright_transition", arguments: { event: "READY", data: { rationale: "test" } } },
+    }, environment);
+    assert.equal(transition.status, 0, transition.stderr);
+    const transitionResponse = JSON.parse(transition.stdout);
+    assert.equal(transitionResponse.result.content[0].text,
+      "Statewright supervisor: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
+    assert.equal(transitionResponse.result.structuredContent.transitioned, true);
+
     assert.deepEqual(bridge.requests.map((item) => item.url), [
       "/hooks/state",
       "/hooks/pre-tool",
       "/hooks/post-tool",
       "/hooks/stop",
+      "/mcp",
       "/mcp",
     ]);
     assert.deepEqual(bridge.requests[1].body, {

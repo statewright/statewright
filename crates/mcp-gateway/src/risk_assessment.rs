@@ -1910,6 +1910,32 @@ mod tests {
         );
         assert_eq!(read.risk, RiskBand::Low);
         assert_eq!(read.exposure, ExposureBand::Local);
+
+        let labeled_read = assess_invocation(
+            None,
+            "exec_command",
+            &json!({
+                "cmd": "sed -n '1,300p' /private/agentic-sdlc/SKILL.md && printf '\\n--- optimize usage ---\\n' && sed -n '1,300p' /private/optimize-statewright-usage/SKILL.md"
+            }),
+            Some("implement"),
+        );
+        assert_eq!(labeled_read.risk, RiskBand::Low);
+        assert_eq!(labeled_read.exposure, ExposureBand::Local);
+
+        for command in [
+            "printf -v PATH /attacker",
+            "printf '%n' PATH",
+            "/tmp/printf label",
+        ] {
+            let unknown = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("implement"),
+            );
+            assert_eq!(unknown.risk, RiskBand::Moderate, "{command}");
+            assert_eq!(unknown.exposure, ExposureBand::Unknown, "{command}");
+        }
     }
 
     #[test]

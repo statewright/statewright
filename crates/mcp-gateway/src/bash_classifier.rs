@@ -458,7 +458,21 @@ fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
 
 fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     let tokens = simple_command_tokens(segment)?;
-    let executable = tokens.first()?.rsplit('/').next()?;
+    let invoked = tokens.first()?.as_str();
+    // Keep label output on a deliberately finite grammar. Bash `printf` can
+    // mutate shell variables via `-v` and `%n`; path-qualified lookalikes are
+    // arbitrary executables rather than the known utility/builtin.
+    if invoked == "echo" {
+        return Some("Read");
+    }
+    if invoked == "printf"
+        && tokens.len() == 2
+        && !tokens[1].starts_with("-v")
+        && !tokens[1].contains('%')
+    {
+        return Some("Read");
+    }
+    let executable = invoked.rsplit('/').next()?;
     match executable {
         "sha256sum" | "shasum" if readonly_checksum_args(executable, &tokens[1..]) => Some("Read"),
         "ls" | "pwd" | "stat" | "file" | "wc" | "du" | "dirname" | "basename" | "realpath"
@@ -1420,6 +1434,26 @@ mod tests {
         assert_eq!(readonly_capabilities("git tag v1"), None);
         assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
         assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
+    }
+
+    #[test]
+    fn stdout_only_labels_compose_with_bounded_reads() {
+        let command = "sed -n '1,300p' /private/agentic-sdlc/SKILL.md && printf '\\n--- optimize usage ---\\n' && sed -n '1,300p' /private/optimize-statewright-usage/SKILL.md";
+        assert_eq!(readonly_capabilities(command), Some(vec!["Read"]));
+
+        for unsafe_command in [
+            "printf '%s' \"$(touch marker)\"",
+            "printf -v PATH /attacker",
+            "printf -vPATH ignored",
+            "printf '%n' PATH",
+            "/tmp/printf label",
+            "/tmp/echo label",
+            "printf label > marker.txt",
+            "echo label >> marker.txt",
+            "echo `touch marker`",
+        ] {
+            assert_eq!(readonly_capabilities(unsafe_command), None, "{unsafe_command}");
+        }
     }
 
     #[test]

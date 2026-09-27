@@ -1,5 +1,5 @@
-//! Non-authoritative Bash AST classifier used to compare a structured shell
-//! view with the production string classifier before changing enforcement.
+//! Bash AST classifier used first for shadow comparison and, behind a separate
+//! development-only authority flag, for bounded shell-effect enforcement.
 //!
 //! The result deliberately contains no source text, paths, arguments, or
 //! heredoc bodies.  Parsing and classification happen locally; only bounded
@@ -171,8 +171,9 @@ fn effect_label(class: &OpClass) -> &'static str {
     }
 }
 
-/// Parse one shell submission into executable AST nodes.  This never makes an
-/// authorization decision; callers compare it with the production classifier.
+/// Parse one shell submission into executable AST nodes. This function never
+/// makes an authorization decision; the caller applies the fail-closed
+/// arbitration policy and workflow capability denials.
 pub fn assess(command: &str) -> AstShadowAssessment {
     assess_at_depth(command, 0)
 }
@@ -255,7 +256,26 @@ fn walk(
         "command" => {
             assessment.executable_nodes += 1;
             if let Ok(text) = node.utf8_text(source) {
-                for class in bash_classifier::classify(text) {
+                let mut classes = bash_classifier::classify(text);
+                // Shell expansion in an operand makes the legacy token parser
+                // opaque, but the Bash AST still proves an exact literal Git
+                // executable and read-only subcommand. Later arguments cannot
+                // turn these particular subcommands into Git writes; nested
+                // substitutions are walked independently below.
+                if classes == [OpClass::Opaque] && ast_proven_git_read(node, source) {
+                    classes = vec![OpClass::GitRead];
+                }
+                // The legacy operation classifier intentionally leaves a
+                // small set of stdout/metadata commands as Passthrough. At an
+                // AST command leaf we can reuse its stricter read-only proof
+                // without confusing surrounding control-flow syntax for an
+                // executable.
+                if classes == [OpClass::Passthrough]
+                    && bash_classifier::readonly_capabilities(text).is_some()
+                {
+                    classes = vec![OpClass::SafeOutput];
+                }
+                for class in classes {
                     assessment.push_class(class);
                 }
                 if let Some(shapes) = bash_classifier::semantic_command_shapes(text) {
@@ -285,6 +305,25 @@ fn walk(
     for child in node.children(&mut cursor) {
         walk(child, source, depth + 1, recursive_shell_depth, assessment);
     }
+}
+
+fn ast_proven_git_read(command: Node<'_>, source: &[u8]) -> bool {
+    let literal_label = |node: Node<'_>| {
+        node.utf8_text(source).ok().filter(|value| {
+            !value.is_empty()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                })
+        })
+    };
+    let Some(name) = command.child_by_field_name("name").and_then(literal_label) else {
+        return false;
+    };
+    let Some(operation) = command.child_by_field_name("argument").and_then(literal_label) else {
+        return false;
+    };
+    name == "git" && matches!(operation,
+        "ls-files" | "ls-tree" | "merge-base" | "rev-parse" | "show-ref" | "status")
 }
 
 fn sanitize_semantic_shape(
@@ -665,5 +704,31 @@ mod tests {
                 result.classes
             );
         }
+    }
+
+    #[test]
+    fn read_only_loop_has_no_opaque_effect() {
+        let result = assess("for reference in HEAD main; do git rev-parse \"$reference\"; done");
+        assert_eq!(result.status, ParseStatus::Parsed);
+        assert!(result.classes.contains(&OpClass::GitRead), "{:?}", result.classes);
+        assert!(!result.classes.contains(&OpClass::Opaque), "{:?}", result.classes);
+        assert!(!result.classes.contains(&OpClass::Passthrough), "{:?}", result.classes);
+    }
+
+    #[test]
+    fn expanded_git_executable_or_operation_stays_unresolved() {
+        for command in [
+            "git \"$operation\" origin HEAD",
+            "\"$executable\" rev-parse HEAD",
+        ] {
+            let result = assess(command);
+            assert!(result.classes.iter().any(|class| {
+                matches!(class, OpClass::Opaque | OpClass::Passthrough)
+            }), "{command}");
+            assert!(!result.classes.contains(&OpClass::GitRead), "{command}");
+        }
+        let nested = assess("git rev-parse \"$(git push origin HEAD)\"");
+        assert!(nested.classes.contains(&OpClass::GitRead));
+        assert!(nested.classes.contains(&OpClass::GitWrite));
     }
 }

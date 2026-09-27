@@ -668,6 +668,7 @@ thread_local! {
     static TEST_SHADOW_RECEIPTS: RefCell<Vec<ShadowReceipt>> = const { RefCell::new(Vec::new()) };
     static TEST_SEMANTIC_RECEIPTS: RefCell<Vec<SemanticAssessmentReceipt>> = const { RefCell::new(Vec::new()) };
     static TEST_SHELL_AST_SHADOW_ENABLED: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_SHELL_AST_AUTHORITY_ENABLED: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_SHELL_AST_RECEIPTS: RefCell<Vec<ShellAstShadowReceipt>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -689,6 +690,11 @@ pub fn take_test_semantic_receipts() -> Vec<SemanticAssessmentReceipt> {
 #[cfg(test)]
 pub fn set_test_shell_ast_shadow_enabled(enabled: Option<bool>) {
     TEST_SHELL_AST_SHADOW_ENABLED.with(|value| value.set(enabled));
+}
+
+#[cfg(test)]
+pub fn set_test_shell_ast_authority_enabled(enabled: Option<bool>) {
+    TEST_SHELL_AST_AUTHORITY_ENABLED.with(|value| value.set(enabled));
 }
 
 #[cfg(test)]
@@ -889,6 +895,23 @@ fn shell_ast_shadow_enabled() -> bool {
     enabled
 }
 
+fn shell_ast_authority_enabled() -> bool {
+    let enabled = shadow_enabled_for(std::env::var("STATEWRIGHT_SHELL_AST_AUTHORITY").ok().as_deref());
+    #[cfg(test)]
+    let enabled = TEST_SHELL_AST_AUTHORITY_ENABLED
+        .with(|override_value| override_value.get().unwrap_or(enabled));
+    enabled
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellAstMode { Disabled, Shadow, Authority }
+
+fn shell_ast_mode() -> ShellAstMode {
+    if shell_ast_authority_enabled() { ShellAstMode::Authority }
+    else if shell_ast_shadow_enabled() { ShellAstMode::Shadow }
+    else { ShellAstMode::Disabled }
+}
+
 fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     let classes = &ast.classes;
     if classes.contains(&OpClass::Destructive) {
@@ -912,6 +935,51 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         return assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast")
+}
+
+fn exposure_rank(exposure: ExposureBand) -> u8 {
+    match exposure {
+        ExposureBand::Local => 0,
+        ExposureBand::Unknown => 1,
+        ExposureBand::External => 2,
+        ExposureBand::Account => 3,
+    }
+}
+
+/// Select the structured assessment only when it is complete and cannot erase
+/// a known effect. The one permitted downgrade is the purpose of this
+/// promotion: a fully parsed local read may replace a legacy Moderate/Unknown
+/// result caused by compound shell syntax.
+fn ast_authority_wins(legacy: &ShadowAssessment, ast: &ShadowAssessment, status: ParseStatus) -> bool {
+    if status != ParseStatus::Parsed { return false; }
+    let legacy_rank = risk_rank(legacy.risk);
+    let ast_rank = risk_rank(ast.risk);
+    if ast_rank > legacy_rank { return true; }
+    if ast_rank == legacy_rank {
+        return exposure_rank(ast.exposure) >= exposure_rank(legacy.exposure);
+    }
+    legacy.risk == RiskBand::Moderate
+        && legacy.exposure == ExposureBand::Unknown
+        && ast.risk == RiskBand::Low
+        && ast.exposure == ExposureBand::Local
+}
+
+fn apply_shell_ast_authority(
+    mut legacy: ShadowAssessment,
+    ast: &AstShadowAssessment,
+    ast_request: SemanticAssessmentRequest,
+) -> ShadowAssessment {
+    let mut structured = assess_shell_ast(ast);
+    structured.state_intent = legacy.state_intent.clone();
+    structured.semantic_request = Some(ast_request.clone());
+    if ast_authority_wins(&legacy, &structured, ast.status) {
+        structured
+    } else {
+        // Preserve comparison telemetry when an incomplete or weaker AST
+        // result correctly falls back to the legacy decision.
+        legacy.ast_semantic_request = Some(ast_request);
+        legacy
+    }
 }
 
 fn emit_shell_ast_comparison(legacy: &ShadowAssessment, ast: &AstShadowAssessment) {
@@ -1004,14 +1072,20 @@ fn assess_invocation_with_origin(
     };
     result.state_intent = state_intent.map(str::to_owned);
     let semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
-    if shell_ast_shadow_enabled() {
+    result.semantic_request = Some(semantic_request.clone());
+    let ast_mode = shell_ast_mode();
+    if ast_mode != ShellAstMode::Disabled {
         if let Some(command) = shell_command {
             let ast = shell_ast_shadow::assess(command);
             emit_shell_ast_comparison(&result, &ast);
-            result.ast_semantic_request = Some(shell_ast_semantic_request(&semantic_request, &ast));
+            let ast_request = shell_ast_semantic_request(&semantic_request, &ast, ast_mode);
+            match ast_mode {
+                ShellAstMode::Authority => result = apply_shell_ast_authority(result, &ast, ast_request),
+                ShellAstMode::Shadow => result.ast_semantic_request = Some(ast_request),
+                ShellAstMode::Disabled => unreachable!(),
+            }
         }
     }
-    result.semantic_request = Some(semantic_request);
     result
 }
 
@@ -1311,9 +1385,15 @@ fn semantic_request(
 fn shell_ast_semantic_request(
     legacy: &SemanticAssessmentRequest,
     ast: &AstShadowAssessment,
+    mode: ShellAstMode,
 ) -> SemanticAssessmentRequest {
     let mut request = legacy.clone();
-    request.tool_name = bounded_metadata_label(&format!("{}_ast_shadow", legacy.tool_name));
+    let suffix = match mode {
+        ShellAstMode::Authority => "ast_authority",
+        ShellAstMode::Shadow => "ast_shadow",
+        ShellAstMode::Disabled => "ast_disabled",
+    };
+    request.tool_name = bounded_metadata_label(&format!("{}_{}", legacy.tool_name, suffix));
     request.shell_shape = ast.semantic_shapes.clone();
     request.shell_ast_shape = Some(ast.semantic_shape());
     request
@@ -2522,6 +2602,7 @@ mod tests {
     #[test]
     fn shell_ast_shadow_is_inert_without_explicit_opt_in() {
         set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(false));
         let _ = take_test_shell_ast_receipts();
         let assessment = assess_invocation(
             None,
@@ -2532,6 +2613,84 @@ mod tests {
         assert!(assessment.ast_semantic_request.is_none());
         assert!(take_test_shell_ast_receipts().is_empty());
         set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_admits_compound_reads_and_preserves_stricter_effects() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+        for command in [
+            "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi",
+            "(pwd; git status --short)",
+            "git rev-parse HEAD && rg needle crates | head -20",
+            "case inspect in inspect) git status --short;; esac",
+            "for reference in HEAD main; do git rev-parse \"$reference\"; done",
+        ] {
+            let assessed = assess_invocation(None, "exec_command", &json!({"cmd":command}), Some("inspect"));
+            assert_eq!(assessed.source, "shell_ast", "{command}");
+            assert_eq!(assessed.risk, RiskBand::Low, "{command}");
+            assert_eq!(assessed.exposure, ExposureBand::Local, "{command}");
+        }
+        for (command, risk) in [
+            ("git status --short && git push origin HEAD", RiskBand::High),
+            ("printf '%s\\n' \"$(git push origin HEAD)\"", RiskBand::High),
+            ("bash -lc 'git rev-parse HEAD && git push origin HEAD'", RiskBand::High),
+            ("bash <<'EOF'\ngit push origin HEAD\nEOF", RiskBand::High),
+            ("cat <(git push origin HEAD)", RiskBand::High),
+            ("git rev-parse HEAD || git push origin HEAD", RiskBand::High),
+            ("if test -d target; then rm -rf target; fi", RiskBand::Critical),
+            ("ssh host <<'EOF'\nrm -rf /srv/app\nEOF", RiskBand::Critical),
+        ] {
+            let assessed = assess_invocation(None, "exec_command", &json!({"cmd":command}), Some("inspect"));
+            assert_eq!(assessed.source, "shell_ast", "{command}");
+            assert_eq!(assessed.risk, risk, "{command}");
+        }
+        let data = assess_invocation(None, "exec_command",
+            &json!({"cmd":"cat > artifact <<'EOF'\ngit push origin HEAD\nEOF"}), Some("implement"));
+        assert_eq!(data.source, "shell_ast");
+        assert_eq!(data.risk, RiskBand::Moderate);
+        assert_eq!(data.exposure, ExposureBand::Local);
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_only_downgrades_the_proven_compound_read_case() {
+        let known_high = assessment(RiskBand::High, ExposureBand::External, "shell");
+        let known_local = assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
+        let uncertain = assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
+        let read = assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
+        let external = assessment(RiskBand::High, ExposureBand::External, "shell_ast");
+        assert!(!ast_authority_wins(&known_high, &read, ParseStatus::Parsed));
+        assert!(!ast_authority_wins(&known_local, &read, ParseStatus::Parsed));
+        assert!(ast_authority_wins(&uncertain, &read, ParseStatus::Parsed));
+        assert!(ast_authority_wins(&known_local, &external, ParseStatus::Parsed));
+        assert!(!ast_authority_wins(&uncertain, &read, ParseStatus::ParsedWithErrors));
+        assert!(!ast_authority_wins(&uncertain, &read, ParseStatus::LimitExceeded));
+    }
+
+    #[test]
+    fn shell_ast_authority_falls_back_on_parse_errors_and_keeps_opaque_semantics_closed() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+        let malformed = assess_invocation(None, "exec_command",
+            &json!({"cmd":"if git status --short; then"}), Some("inspect"));
+        assert_eq!(malformed.source, "shell");
+        assert!(malformed.ast_semantic_request.is_some());
+
+        let opaque = assess_invocation(None, "exec_command",
+            &json!({"cmd":"private-runner --opaque-value"}), Some("inspect"));
+        assert_eq!(opaque.source, "shell_ast");
+        let request = opaque.semantic_request.as_ref().unwrap();
+        assert!(request.tool_name.ends_with("_ast_authority"));
+        assert!(request.shell_ast_shape.is_some());
+        assert!(!serde_json::to_string(request).unwrap().contains("opaque-value"));
+        let semantic = semantic_receipt(request, SemanticAssessorStatus::Unavailable);
+        let pipeline = pipeline_from_parts(opaque, semantic, true);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyUncertain);
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
     }
 
     #[tokio::test]

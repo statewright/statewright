@@ -311,19 +311,25 @@ fn ast_proven_git_read(command: Node<'_>, source: &[u8]) -> bool {
     let literal_label = |node: Node<'_>| {
         node.utf8_text(source).ok().filter(|value| {
             !value.is_empty()
-                && value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-                })
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         })
     };
     let Some(name) = command.child_by_field_name("name").and_then(literal_label) else {
         return false;
     };
-    let Some(operation) = command.child_by_field_name("argument").and_then(literal_label) else {
+    let Some(operation) = command
+        .child_by_field_name("argument")
+        .and_then(literal_label)
+    else {
         return false;
     };
-    name == "git" && matches!(operation,
-        "ls-files" | "ls-tree" | "merge-base" | "rev-parse" | "show-ref" | "status")
+    name == "git"
+        && matches!(
+            operation,
+            "ls-files" | "ls-tree" | "merge-base" | "rev-parse" | "show-ref" | "status"
+        )
 }
 
 fn sanitize_semantic_shape(
@@ -710,9 +716,21 @@ mod tests {
     fn read_only_loop_has_no_opaque_effect() {
         let result = assess("for reference in HEAD main; do git rev-parse \"$reference\"; done");
         assert_eq!(result.status, ParseStatus::Parsed);
-        assert!(result.classes.contains(&OpClass::GitRead), "{:?}", result.classes);
-        assert!(!result.classes.contains(&OpClass::Opaque), "{:?}", result.classes);
-        assert!(!result.classes.contains(&OpClass::Passthrough), "{:?}", result.classes);
+        assert!(
+            result.classes.contains(&OpClass::GitRead),
+            "{:?}",
+            result.classes
+        );
+        assert!(
+            !result.classes.contains(&OpClass::Opaque),
+            "{:?}",
+            result.classes
+        );
+        assert!(
+            !result.classes.contains(&OpClass::Passthrough),
+            "{:?}",
+            result.classes
+        );
     }
 
     #[test]
@@ -722,9 +740,13 @@ mod tests {
             "\"$executable\" rev-parse HEAD",
         ] {
             let result = assess(command);
-            assert!(result.classes.iter().any(|class| {
-                matches!(class, OpClass::Opaque | OpClass::Passthrough)
-            }), "{command}");
+            assert!(
+                result
+                    .classes
+                    .iter()
+                    .any(|class| { matches!(class, OpClass::Opaque | OpClass::Passthrough) }),
+                "{command}"
+            );
             assert!(!result.classes.contains(&OpClass::GitRead), "{command}");
         }
         let nested = assess("git rev-parse \"$(git push origin HEAD)\"");

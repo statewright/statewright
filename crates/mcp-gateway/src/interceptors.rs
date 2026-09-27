@@ -16,7 +16,9 @@ pub enum PreCallDecision {
 fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[String]) -> bool {
     let has = |names: &[&str]| {
         allowed_tools.iter().any(|allowed| {
-            names.iter().any(|candidate| allowed.eq_ignore_ascii_case(candidate))
+            names
+                .iter()
+                .any(|candidate| allowed.eq_ignore_ascii_case(candidate))
         })
     };
     match effect {
@@ -46,7 +48,8 @@ pub fn pre_call_check_with_pipeline(
     arguments: &serde_json::Value,
     pipeline: Option<&RiskPipelineAssessment>,
 ) -> PreCallDecision {
-    if let Some(reason) = crate::enforcement::unsupported_shell_dialect_reason(tool_name, arguments) {
+    if let Some(reason) = crate::enforcement::unsupported_shell_dialect_reason(tool_name, arguments)
+    {
         return PreCallDecision::Block(reason.into());
     }
     let state_def = match session.definition.states.get(&session.current_state) {
@@ -61,7 +64,11 @@ pub fn pre_call_check_with_pipeline(
     // guard must not exist only in a client hook.
     let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
     if is_shell_tool(tool_name, bash_tool) {
-        if let Some(blocked_env) = state_def.blocked_env.as_ref().filter(|vars| !vars.is_empty()) {
+        if let Some(blocked_env) = state_def
+            .blocked_env
+            .as_ref()
+            .filter(|vars| !vars.is_empty())
+        {
             let Some(command) = extract_command(arguments) else {
                 return PreCallDecision::Block(format!(
                     "Shell invocation is missing command/cmd in state '{}'.",
@@ -126,7 +133,11 @@ pub fn pre_call_check_with_pipeline(
     if is_shell_tool(tool_name, bash_tool) {
         let exploratory_read_only = state_def.intent.as_deref() == Some("exploratory_read_only");
         let effective_tools = if exploratory_read_only {
-            Some(vec!["Read".to_string(), "Grep".to_string(), "Glob".to_string()])
+            Some(vec![
+                "Read".to_string(),
+                "Grep".to_string(),
+                "Glob".to_string(),
+            ])
         } else {
             state_def.allowed_tools.clone()
         };
@@ -140,7 +151,8 @@ pub fn pre_call_check_with_pipeline(
             let resolved_effect = pipeline.map(RiskPipelineAssessment::resolve_effect);
             let pipeline_admitted = resolved_effect
                 .is_some_and(|effect| pipeline_effect_has_capability(effect, &allowed_tools));
-            if exploratory_read_only && !pipeline_admitted
+            if exploratory_read_only
+                && !pipeline_admitted
                 && bash_classifier::readonly_capabilities(&command).is_none()
             {
                 return PreCallDecision::Block(format!(
@@ -149,7 +161,9 @@ pub fn pre_call_check_with_pipeline(
                 ));
             }
             if !exploratory_read_only && !pipeline_admitted {
-                if let Err(reason) = bash_classifier::check_against_allowed(&command, &allowed_tools) {
+                if let Err(reason) =
+                    bash_classifier::check_against_allowed(&command, &allowed_tools)
+                {
                     return PreCallDecision::Block(format!(
                         "Bash command blocked in state '{}': {}",
                         session.current_state, reason
@@ -401,7 +415,10 @@ mod tests {
     fn exec_command_cmd_is_checked_against_the_bash_whitelist() {
         let s = session();
         let allowed = json!({ "cmd": "pytest -x tests/" });
-        assert!(matches!(pre_call_check(&s, "exec_command", &allowed), PreCallDecision::Allow));
+        assert!(matches!(
+            pre_call_check(&s, "exec_command", &allowed),
+            PreCallDecision::Allow
+        ));
 
         let denied = json!({ "cmd": "rm -rf /" });
         match pre_call_check(&s, "exec_command", &denied) {
@@ -603,7 +620,8 @@ mod tests {
                 },
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let session = GatewaySession::new("explore".into(), def);
 
         assert!(matches!(
@@ -611,7 +629,11 @@ mod tests {
             PreCallDecision::Allow | PreCallDecision::Warn(_)
         ));
         assert!(matches!(
-            pre_call_check(&session, "Bash", &json!({"command": "echo nope > output.txt"})),
+            pre_call_check(
+                &session,
+                "Bash",
+                &json!({"command": "echo nope > output.txt"})
+            ),
             PreCallDecision::Block(_)
         ));
         for command in [
@@ -621,10 +643,13 @@ mod tests {
             "git --no-pager branch -- new-name",
             "git --no-pager tag -- new-name",
         ] {
-            assert!(matches!(
-                pre_call_check(&session, "Bash", &json!({"command": command})),
-                PreCallDecision::Block(_)
-            ), "must fail closed for {command}");
+            assert!(
+                matches!(
+                    pre_call_check(&session, "Bash", &json!({"command": command})),
+                    PreCallDecision::Block(_)
+                ),
+                "must fail closed for {command}"
+            );
         }
     }
 
@@ -714,7 +739,11 @@ mod tests {
             }
         }
 
-        for command in ["TOKEN_SUFFIX=value command", "echo $TOKEN_SUFFIX", "echo ordinary"] {
+        for command in [
+            "TOKEN_SUFFIX=value command",
+            "echo $TOKEN_SUFFIX",
+            "echo ordinary",
+        ] {
             assert!(matches!(
                 pre_call_check(&session, "exec_command", &json!({"cmd": command})),
                 PreCallDecision::Allow | PreCallDecision::Warn(_)

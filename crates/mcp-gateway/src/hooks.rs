@@ -143,15 +143,25 @@ async fn handle_pre_tool(
         .states
         .get(&initial_session.current_state)
         .and_then(|state| state.intent.as_deref());
-    let pipeline = risk_assessment::assess_native_pipeline_visible(None, &req.tool_name, &req.tool_input, intent).await;
+    let pipeline = risk_assessment::assess_native_pipeline_visible(
+        None,
+        &req.tool_name,
+        &req.tool_input,
+        intent,
+    )
+    .await;
     let session = match session_manager.get(&session_id) {
         Some(session) => session,
-        None => return Json(PreToolResponse {
-            decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
-            additional_context: Some("BLOCKED: workflow session disappeared while semantic risk was assessed".into()),
-            status_message: None,
-        }),
+        None => {
+            return Json(PreToolResponse {
+                decision: "deny".into(),
+                risk_assessment: Some(pipeline.visible_json()),
+                additional_context: Some(
+                    "BLOCKED: workflow session disappeared while semantic risk was assessed".into(),
+                ),
+                status_message: None,
+            });
+        }
     };
     let status = format!(
         "{} ({}/{})",
@@ -171,7 +181,9 @@ async fn handle_pre_tool(
         });
     }
 
-    if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
+    if let Some(reason) =
+        enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input)
+    {
         return Json(PreToolResponse {
             decision: "deny".into(),
             risk_assessment: Some(pipeline.visible_json()),
@@ -194,7 +206,9 @@ async fn handle_pre_tool(
         Some(&pipeline),
     );
     match enforcement::enforce_tool_call(&session, &policy_tool_name) {
-        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None, &pipeline),
+        EnforcementDecision::Allow => {
+            pre_tool_policy_response(&session, &req, status, None, &pipeline)
+        }
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),
             risk_assessment: Some(pipeline.visible_json()),
@@ -204,10 +218,9 @@ async fn handle_pre_tool(
         EnforcementDecision::ImplicitTransition { event, new_state } => {
             let mut execution_session = session.clone();
             execution_session.current_state = new_state.clone();
-            if let Some(reason) = enforcement::semantic_effect_capability_denial(
-                &execution_session,
-                &pipeline,
-            ) {
+            if let Some(reason) =
+                enforcement::semantic_effect_capability_denial(&execution_session, &pipeline)
+            {
                 return Json(PreToolResponse {
                     decision: "deny".into(),
                     risk_assessment: Some(pipeline.visible_json()),
@@ -217,11 +230,7 @@ async fn handle_pre_tool(
             }
             // Apply the transition in the session manager
             let old_state = session.current_state.clone();
-            session_manager.update_state(
-                &session_id,
-                new_state.clone(),
-                session.context.clone(),
-            );
+            session_manager.update_state(&session_id, new_state.clone(), session.context.clone());
             let context = Some(format!(
                 "State transitioned: {} -> {} (via {}). You are now in the {} phase.",
                 old_state, new_state, event, new_state
@@ -508,10 +517,20 @@ mod tests {
         );
         let response = handle_pre_tool(
             State(state),
-            Json(PreToolRequest { tool_name: "bash".into(), tool_input: json!({"command":"gh"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "bash".into(),
+                tool_input: json!({"command":"gh"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(response.decision, "deny");
-        assert!(response.additional_context.unwrap_or_default().contains("apr_hook"));
+        assert!(
+            response
+                .additional_context
+                .unwrap_or_default()
+                .contains("apr_hook")
+        );
     }
 
     fn exploratory_hook_state() -> Arc<RwLock<HookState>> {
@@ -520,7 +539,8 @@ mod tests {
                 "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let manager = SessionManager::new();
         manager.create("explore-session".into(), definition);
         Arc::new(RwLock::new(HookState {
@@ -539,7 +559,8 @@ mod tests {
                 },
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let manager = SessionManager::new();
         manager.create("alias-deny-session".into(), definition);
         Arc::new(RwLock::new(HookState {
@@ -586,24 +607,49 @@ mod tests {
         let _ = crate::risk_assessment::take_test_shadow_receipts();
         let allowed = handle_pre_tool(
             State(exploratory_hook_state()),
-            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "grep".into(),
+                tool_input: json!({"query":"policy"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(allowed.decision, "allow");
         // The native Grep adapter is a known read, not an opaque MCP method.
-        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"], "Low");
-        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_source"], "native_read");
-        assert!(!allowed.risk_assessment.as_ref().unwrap().to_string().contains("policy"));
+        assert_eq!(
+            allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"],
+            "Low"
+        );
+        assert_eq!(
+            allowed.risk_assessment.as_ref().unwrap()["deterministic_source"],
+            "native_read"
+        );
+        assert!(
+            !allowed
+                .risk_assessment
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("policy")
+        );
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].tool, "grep");
-        assert_eq!(receipts[0].state_intent.as_deref(), Some("exploratory_read_only"));
+        assert_eq!(
+            receipts[0].state_intent.as_deref(),
+            Some("exploratory_read_only")
+        );
         assert!(!format!("{:?}", receipts[0]).contains("policy"));
 
         crate::risk_assessment::set_test_shadow_enabled(Some(false));
         let _ = handle_pre_tool(
             State(exploratory_hook_state()),
-            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"sensitive-token"}) }),
-        ).await;
+            Json(PreToolRequest {
+                tool_name: "grep".into(),
+                tool_input: json!({"query":"sensitive-token"}),
+            }),
+        )
+        .await;
         assert!(crate::risk_assessment::take_test_shadow_receipts().is_empty());
         crate::risk_assessment::set_test_shadow_enabled(None);
 
@@ -616,9 +662,14 @@ mod tests {
                     "cmd": "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"
                 }),
             }),
-        ).await.0;
+        )
+        .await
+        .0;
         assert_eq!(compound.decision, "allow");
-        assert_eq!(compound.risk_assessment.as_ref().unwrap()["deterministic_source"], "shell_ast");
+        assert_eq!(
+            compound.risk_assessment.as_ref().unwrap()["deterministic_source"],
+            "shell_ast"
+        );
 
         let hidden_write = handle_pre_tool(
             State(exploratory_hook_state()),
@@ -626,32 +677,63 @@ mod tests {
                 tool_name: "exec_command".into(),
                 tool_input: json!({"cmd":"git rev-parse HEAD || git push origin HEAD"}),
             }),
-        ).await.0;
+        )
+        .await
+        .0;
         assert_eq!(hidden_write.decision, "deny");
         crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
 
         let denied = handle_pre_tool(
             State(exploratory_hook_state()),
-            Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd":"touch marker"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "exec_command".into(),
+                tool_input: json!({"cmd":"touch marker"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(denied.decision, "deny");
-        assert!(denied.additional_context.unwrap_or_default().contains("proven read-only"));
+        assert!(
+            denied
+                .additional_context
+                .unwrap_or_default()
+                .contains("proven read-only")
+        );
 
         let terminal = handle_pre_tool(
             State(exploratory_hook_state()),
-            Json(PreToolRequest { tool_name: "terminal".into(), tool_input: json!({"cmd":"touch marker"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "terminal".into(),
+                tool_input: json!({"cmd":"touch marker"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(terminal.decision, "deny");
 
-        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+        for command in [
+            "git --no-pager branch -- new-name",
+            "git --no-pager tag -- new-name",
+        ] {
             let state = exploratory_hook_state();
             let denied = handle_pre_tool(
                 State(state.clone()),
-                Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd": command}) }),
-            ).await.0;
+                Json(PreToolRequest {
+                    tool_name: "exec_command".into(),
+                    tool_input: json!({"cmd": command}),
+                }),
+            )
+            .await
+            .0;
             assert_eq!(denied.decision, "deny", "must reject {command}");
             assert_eq!(
-                state.read().await.session_manager.get("explore-session").unwrap().current_state,
+                state
+                    .read()
+                    .await
+                    .session_manager
+                    .get("explore-session")
+                    .unwrap()
+                    .current_state,
                 "inspect",
                 "denial must not transition for {command}"
             );
@@ -659,30 +741,55 @@ mod tests {
 
         let opaque = handle_pre_tool(
             State(exploratory_hook_state()),
-            Json(PreToolRequest { tool_name: "mcp__db__query".into(), tool_input: json!({"sql":"update users"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "mcp__db__query".into(),
+                tool_input: json!({"sql":"update users"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(opaque.decision, "deny");
-        assert!(opaque.additional_context.unwrap_or_default().contains("Unregistered adapter tool"));
+        assert!(
+            opaque
+                .additional_context
+                .unwrap_or_default()
+                .contains("Unregistered adapter tool")
+        );
     }
 
     #[tokio::test]
     async fn hook_preserves_original_and_family_denials_across_adapter_normalization() {
         let original_denied = handle_pre_tool(
             State(alias_deny_hook_state("grep")),
-            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "grep".into(),
+                tool_input: json!({"query":"policy"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(original_denied.decision, "deny");
 
         let allowed = handle_pre_tool(
             State(alias_deny_hook_state("grep")),
-            Json(PreToolRequest { tool_name: "read_file".into(), tool_input: json!({"path":"README.md"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "read_file".into(),
+                tool_input: json!({"path":"README.md"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(allowed.decision, "allow");
 
         let family_denied = handle_pre_tool(
             State(alias_deny_hook_state("Read")),
-            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
-        ).await.0;
+            Json(PreToolRequest {
+                tool_name: "grep".into(),
+                tool_input: json!({"query":"policy"}),
+            }),
+        )
+        .await
+        .0;
         assert_eq!(family_denied.decision, "deny");
     }
 

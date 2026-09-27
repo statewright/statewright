@@ -5,7 +5,7 @@
 //! it is safe to log as a bounded staging receipt.
 
 use crate::{bash_classifier::{self, OpClass}, protocol::ToolInfo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
 
@@ -49,8 +49,18 @@ pub struct SemanticRiskVector {
     pub external_or_account_effect: Probability,
 }
 
-/// Lifecycle status for a semantic result.  These statuses are telemetry only;
-/// none is consumed by authorization.
+/// Code-owned effect resolution derived from typed semantic probabilities.
+/// State capability policy must still authorize the resolved effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedEffect {
+    ReadOnly,
+    LocalWrite,
+    DenyKnownRisk,
+    DenyUncertain,
+}
+
+/// Lifecycle status for a semantic result. Only `Assessed` may authorize an
+/// otherwise opaque operation; every other outcome fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticAssessorStatus {
     Disabled,
@@ -91,14 +101,13 @@ impl SemanticShadowConfig {
 
 /// The only context a future semantic worker may receive.  It contains
 /// operation shape, never argument values, command text, paths, or payloads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SemanticAssessmentRequest {
     pub tool_family: &'static str,
     pub tool_name: String,
     pub state_intent: Option<String>,
     pub argument_keys: Vec<String>,
-    pub shell_executable: Option<String>,
-    pub shell_flags: Vec<String>,
+    pub shell_shape: Vec<bash_classifier::SemanticCommandShape>,
     pub read_only_hint: Option<bool>,
     pub destructive_hint: Option<bool>,
     pub open_world_hint: Option<bool>,
@@ -119,11 +128,8 @@ pub struct SemanticAssessmentReceipt {
     pub state_intent: Option<String>,
 }
 
-/// The assessment that travels with a pre-tool pipeline response.  It is
-/// deliberately separate from authorization: callers can observe the
-/// deterministic heuristic, the semantic failsafe's state, and the resulting
-/// conservative risk floor without giving semantic inference permission to
-/// admit an invocation.
+/// The assessment that travels with a pre-tool pipeline response. Raw model
+/// output remains separate from the code-owned authorization thresholds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RiskPipelineAssessment {
     pub deterministic: ShadowAssessment,
@@ -133,6 +139,58 @@ pub struct RiskPipelineAssessment {
 }
 
 impl RiskPipelineAssessment {
+    /// Resolve an effect class without letting inference downgrade a known
+    /// high/critical operation or silently authorize an uncertain result.
+    /// This is not final authorization: callers must enforce the state's
+    /// explicit capability denials against `ReadOnly` or `LocalWrite`.
+    pub fn resolve_effect(&self) -> ResolvedEffect {
+        use ResolvedEffect::*;
+        if matches!(self.effective_risk, RiskBand::High | RiskBand::Critical) {
+            return DenyKnownRisk;
+        }
+        match self.deterministic.risk {
+            RiskBand::Critical | RiskBand::High => DenyKnownRisk,
+            RiskBand::Low if self.effective_risk == RiskBand::Low => ReadOnly,
+            RiskBand::Low => LocalWrite,
+            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => LocalWrite,
+            RiskBand::Moderate => {
+                if !self.has_sufficient_semantic_evidence() { return DenyUncertain; }
+                let Some(vector) = self.semantic.vector.as_ref() else { return DenyUncertain; };
+                if self.semantic.status != SemanticAssessorStatus::Assessed { return DenyUncertain; }
+                if vector.read_only.get() >= 0.90
+                    && vector.may_write.get() <= 0.10
+                    && vector.destructive.get() <= 0.05
+                    && vector.irreversible.get() <= 0.05
+                    && vector.external_or_account_effect.get() <= 0.05
+                {
+                    ReadOnly
+                } else if vector.may_write.get() >= 0.90
+                    && vector.reversible.get() >= 0.80
+                    && vector.destructive.get() <= 0.05
+                    && vector.irreversible.get() <= 0.05
+                    && vector.external_or_account_effect.get() <= 0.05
+                {
+                    LocalWrite
+                } else {
+                    DenyUncertain
+                }
+            }
+        }
+    }
+
+    fn has_sufficient_semantic_evidence(&self) -> bool {
+        self.deterministic.semantic_request.as_ref().is_some_and(|request| {
+            if request.tool_family == "shell" {
+                !request.shell_shape.is_empty()
+                    && request.shell_shape.iter().all(|segment| {
+                        segment.operation.is_some() && !segment.delegates_unknown_effect
+                    })
+            } else {
+                request.tool_name != "unknown"
+            }
+        })
+    }
+
     /// Redacted, stable response shape for adapters and hooks.  It contains
     /// labels and bounded probabilities only--never arguments, command text,
     /// paths, or payload values.
@@ -243,7 +301,7 @@ async fn assess_with_provider(
     let request_shape = serde_json::json!({
         "tool_family": request.tool_family, "tool_name": request.tool_name,
         "state_intent": request.state_intent, "argument_keys": request.argument_keys,
-        "shell_executable": request.shell_executable, "shell_flags": request.shell_flags,
+        "shell_shape": request.shell_shape,
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
     });
@@ -806,17 +864,18 @@ fn semantic_request(
         .unwrap_or_default();
     argument_keys.sort();
 
-    // Shell command text is deliberately omitted until a grammar-aware
-    // redactor can distinguish flags from operands and option values.
-    let (shell_executable, shell_flags) = (None, Vec::new());
+    let shell_shape = if is_shell {
+        arguments.get("command").or_else(|| arguments.get("cmd"))
+            .and_then(|value| value.as_str())
+            .and_then(bash_classifier::semantic_command_shapes).unwrap_or_default()
+    } else { Vec::new() };
     let annotations = tool.and_then(|tool| tool.annotations.as_ref());
     SemanticAssessmentRequest {
         tool_family: if is_shell { "shell" } else { "mcp" },
         tool_name: bounded_metadata_label(tool_name),
         state_intent: state_intent.map(bounded_metadata_label),
         argument_keys,
-        shell_executable,
-        shell_flags,
+        shell_shape,
         read_only_hint: annotations.and_then(|value| value.read_only_hint),
         destructive_hint: annotations.and_then(|value| value.destructive_hint),
         open_world_hint: annotations.and_then(|value| value.open_world_hint),
@@ -948,8 +1007,9 @@ mod tests {
         );
         let request = assessment.semantic_request.unwrap();
         assert_eq!(request.tool_family, "shell");
-        assert!(request.shell_executable.is_none());
-        assert!(request.shell_flags.is_empty());
+        assert_eq!(request.shell_shape.len(), 1);
+        assert_eq!(request.shell_shape[0].executable, "git");
+        assert!(request.shell_shape[0].operation.is_none());
         assert_eq!(request.argument_keys, vec!["command".to_string()]);
         let rendered = format!("{:?}", request);
         assert!(!rendered.contains("super-secret"));
@@ -958,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_shell_shape_omits_all_command_tokens_and_bounds_metadata() {
+    fn semantic_shell_shape_omits_secrets_operands_and_ambiguous_short_flags() {
         let assessment = assess_invocation(
             None,
             "Bash",
@@ -968,8 +1028,9 @@ mod tests {
             Some("exploratory_read_only"),
         );
         let request = assessment.semantic_request.unwrap();
-        assert!(request.shell_executable.is_none());
-        assert!(request.shell_flags.is_empty());
+        assert_eq!(request.shell_shape.len(), 1);
+        assert_eq!(request.shell_shape[0].executable, "git");
+        assert!(request.shell_shape[0].operation.is_none());
         let rendered = format!("{:?}", request);
         assert!(!rendered.contains("API_TOKEN"));
         assert!(!rendered.contains("super-secret"));
@@ -1177,7 +1238,7 @@ mod tests {
         assert!(pipeline.semantic_failsafe_escalated);
         let seen = seen_receiver.await.unwrap().to_string();
         assert!(!seen.contains("/private/secret"));
-        assert!(seen.contains("shell_executable") && seen.contains("shell_flags"));
+        assert!(seen.contains("shell_shape"));
     }
 
     #[tokio::test]
@@ -1422,5 +1483,81 @@ mod tests {
         assert_eq!(receipt.status, SemanticAssessorStatus::QueueFull);
         assert!(receipt.vector.is_none());
         assert!(!format!("{:?}", receipt).contains("/private/secret"));
+    }
+
+    #[test]
+    fn semantic_effect_resolution_requires_high_confidence_and_structural_evidence() {
+        let vector = |read_only, may_write, reversible, destructive, irreversible, external| SemanticRiskVector {
+            read_only: Probability::new(read_only).unwrap(), may_write: Probability::new(may_write).unwrap(),
+            reversible: Probability::new(reversible).unwrap(), destructive: Probability::new(destructive).unwrap(),
+            irreversible: Probability::new(irreversible).unwrap(), external_or_account_effect: Probability::new(external).unwrap(),
+        };
+        let pipeline = |semantic| RiskPipelineAssessment {
+            deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux capture-pane -p"}), None),
+            effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic,
+        };
+        let assessed = |value| SemanticAssessmentReceipt {
+            tool: "exec_command".into(), status: SemanticAssessorStatus::Assessed,
+            vector: Some(value), state_intent: Some("inspect".into()),
+        };
+        assert_eq!(pipeline(assessed(vector(0.97, 0.02, 0.99, 0.01, 0.01, 0.01))).resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(pipeline(assessed(vector(0.02, 0.97, 0.91, 0.01, 0.01, 0.01))).resolve_effect(), ResolvedEffect::LocalWrite);
+        assert_eq!(pipeline(assessed(vector(0.89, 0.11, 0.90, 0.01, 0.01, 0.01))).resolve_effect(), ResolvedEffect::DenyUncertain);
+        let request = semantic_request(None, "exec_command", &json!({"cmd":"unknown"}), None, true);
+        assert_eq!(pipeline(semantic_receipt(&request, SemanticAssessorStatus::Timeout)).resolve_effect(), ResolvedEffect::DenyUncertain);
+
+        let confident_read = assessed(vector(0.99, 0.01, 0.99, 0.0, 0.0, 0.0));
+        let missing_shape = RiskPipelineAssessment {
+            deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux $(secret-helper)"}), None),
+            effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic: confident_read.clone(),
+        };
+        assert_eq!(missing_shape.resolve_effect(), ResolvedEffect::DenyUncertain);
+
+        for command in [
+            "task test", "npm run inspect", "npm test", "npm build", "pnpm lint",
+            "cargo run -- inspect", "cargo test",
+            "docker exec container inspect", "podman run image", "kubectl exec pod -- inspect",
+            "tmux send-keys -t %1 status Enter", "tmux new-session shell",
+        ] {
+            let delegated = RiskPipelineAssessment {
+                deterministic: assess_invocation(None, "exec_command", &json!({"cmd":command}), None),
+                effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false,
+                semantic: confident_read.clone(),
+            };
+            assert!(matches!(delegated.resolve_effect(), ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain), "{command}");
+        }
+    }
+
+    #[test]
+    fn semantic_effect_resolution_never_downgrades_known_or_effective_high_risk() {
+        let semantic = SemanticAssessmentReceipt {
+            tool: "exec_command".into(), status: SemanticAssessorStatus::Assessed,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(1.0).unwrap(), may_write: Probability::new(0.0).unwrap(),
+                reversible: Probability::new(1.0).unwrap(), destructive: Probability::new(0.0).unwrap(),
+                irreversible: Probability::new(0.0).unwrap(), external_or_account_effect: Probability::new(0.0).unwrap(),
+            }), state_intent: None,
+        };
+        for risk in [RiskBand::High, RiskBand::Critical] {
+            let pipeline = RiskPipelineAssessment {
+                deterministic: assessment(risk, ExposureBand::External, "shell"), effective_risk: risk,
+                semantic_failsafe_escalated: false, semantic: semantic.clone(),
+            };
+            assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyKnownRisk);
+        }
+
+        let escalated = pipeline_from_parts(
+            assess_invocation(None, "read_file", &json!({"path":"README.md"}), None),
+            SemanticAssessmentReceipt {
+                tool: "read_file".into(), status: SemanticAssessorStatus::Assessed,
+                vector: Some(SemanticRiskVector {
+                    read_only: Probability::new(0.1).unwrap(), may_write: Probability::new(0.1).unwrap(),
+                    reversible: Probability::new(0.1).unwrap(), destructive: Probability::new(0.9).unwrap(),
+                    irreversible: Probability::new(0.9).unwrap(), external_or_account_effect: Probability::new(0.0).unwrap(),
+                }), state_intent: None,
+            },
+        );
+        assert_eq!(escalated.effective_risk, RiskBand::Critical);
+        assert_eq!(escalated.resolve_effect(), ResolvedEffect::DenyKnownRisk);
     }
 }

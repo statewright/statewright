@@ -29,6 +29,77 @@ pub enum OpClass {
     Passthrough,
 }
 
+/// Privacy-bounded shell structure for semantic risk assessment.
+/// Operands and option values are intentionally omitted because they may
+/// contain source code or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SemanticCommandShape {
+    pub executable: String,
+    pub operation: Option<String>,
+    pub delegates_unknown_effect: bool,
+}
+
+/// Extract bounded command structure. Ambiguous syntax produces no shape and
+/// therefore remains fail-closed at the semantic authorization boundary.
+pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape>> {
+    let mut shapes = Vec::new();
+    for segment in split_segments(command).into_iter().take(8) {
+        let tokens = simple_command_tokens(segment.trim())?;
+        if tokens.is_empty() { continue; }
+        let mut index = 0;
+        while tokens.get(index).is_some_and(|token| token.contains('=') && !token.starts_with('=')) { index += 1; }
+        if tokens.get(index).is_some_and(|token| token.rsplit('/').next() == Some("command")) { index += 1; }
+        if tokens.get(index).is_some_and(|token| token.rsplit('/').next() == Some("env")) {
+            index += 1;
+            while tokens.get(index).is_some_and(|token| token.starts_with('-') || token.contains('=')) { index += 1; }
+        }
+        let executable = tokens.get(index)?.rsplit('/').next()?.to_ascii_lowercase();
+        if !semantic_label(&executable) { return None; }
+        index += 1;
+        let operation = semantic_operation(&executable, &tokens[index..]);
+        let delegates_unknown_effect = semantic_delegates_unknown_effect(&executable, operation.as_deref());
+        shapes.push(SemanticCommandShape { executable, operation, delegates_unknown_effect });
+    }
+    (!shapes.is_empty()).then_some(shapes)
+}
+
+fn semantic_label(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64
+        && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
+    let mut index = 0;
+    while tokens.get(index).is_some_and(|token| semantic_global_flag(executable, token)) { index += 1; }
+    let candidate = tokens.get(index)?;
+    let recognized = match executable {
+        "cargo" => matches!(candidate.as_str(), "build" | "check" | "clippy" | "doc" | "fetch" | "fix" | "install" | "metadata" | "publish" | "remove" | "run" | "test" | "uninstall" | "update"),
+        "docker" | "podman" => matches!(candidate.as_str(), "build" | "compose" | "create" | "exec" | "images" | "inspect" | "logs" | "ps" | "pull" | "push" | "rm" | "run" | "start" | "stop"),
+        "git" => matches!(candidate.as_str(), "add" | "branch" | "clean" | "clone" | "commit" | "diff" | "fetch" | "log" | "ls-files" | "ls-remote" | "pull" | "push" | "reset" | "restore" | "show" | "status" | "tag" | "worktree"),
+        "kubectl" => matches!(candidate.as_str(), "apply" | "create" | "delete" | "describe" | "exec" | "get" | "logs" | "patch" | "rollout" | "scale"),
+        "npm" | "pnpm" => matches!(candidate.as_str(), "build" | "install" | "lint" | "publish" | "run" | "test" | "uninstall" | "update"),
+        "systemctl" => matches!(candidate.as_str(), "disable" | "enable" | "is-active" | "restart" | "start" | "status" | "stop"),
+        "tmux" => matches!(candidate.as_str(), "capture-pane" | "display-message" | "has-session" | "kill-pane" | "kill-session" | "list-panes" | "list-sessions" | "new-session" | "send-keys" | "show-options"),
+        _ => false,
+    };
+    recognized.then(|| candidate.to_ascii_lowercase())
+}
+
+fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) -> bool {
+    match (executable, operation) {
+        ("task" | "cargo" | "docker" | "podman" | "kubectl" | "npm" | "pnpm", _) => true,
+        ("tmux", Some("new-session" | "send-keys")) => true,
+        _ => false,
+    }
+}
+
+fn semantic_global_flag(executable: &str, token: &str) -> bool {
+    match executable {
+        "git" => matches!(token, "--bare" | "--no-pager" | "--no-optional-locks"),
+        _ => false,
+    }
+}
+
 impl OpClass {
     /// Returns the tool names required in `allowed_tools` for this operation class.
     /// Returns an empty slice for Passthrough (always allowed if Bash is).
@@ -1180,6 +1251,49 @@ mod tests {
             "git --no-pager tag --list",
         ] {
             assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+        }
+    }
+
+    #[test]
+    fn semantic_shape_preserves_operation_but_redacts_operands_and_values() {
+        let shapes = semantic_command_shapes(
+            "API_TOKEN=secret tmux capture-pane -p -t %33 -S -80 && git --no-pager status /private/repo",
+        ).unwrap();
+        assert_eq!(shapes, vec![
+            SemanticCommandShape { executable: "tmux".into(), operation: Some("capture-pane".into()), delegates_unknown_effect: false },
+            SemanticCommandShape { executable: "git".into(), operation: Some("status".into()), delegates_unknown_effect: false },
+        ]);
+        let rendered = serde_json::to_string(&shapes).unwrap();
+        for secret in ["secret", "%33", "-80", "/private/repo"] { assert!(!rendered.contains(secret)); }
+    }
+
+    #[test]
+    fn semantic_shape_omits_unknown_arguments_and_rejects_expansion() {
+        let shape = semantic_command_shapes("opaque-wrapper private-token").unwrap();
+        assert_eq!(shape[0].executable, "opaque-wrapper");
+        assert!(shape[0].operation.is_none());
+        assert!(semantic_command_shapes("tmux $(secret-helper)").is_none());
+    }
+
+    #[test]
+    fn semantic_shape_never_promotes_option_values_to_operations() {
+        for (command, secret) in [
+            ("tmux -L privateSocket capture-pane -p", "privateSocket"),
+            ("git -C secretProject status", "secretProject"),
+            ("git --git-dir --private-client-token status", "--private-client-token"),
+            ("tmux -L --privateSocket capture-pane", "--privateSocket"),
+        ] {
+            let shape = semantic_command_shapes(command).unwrap();
+            assert!(shape[0].operation.is_none(), "{command}");
+            assert!(!serde_json::to_string(&shape).unwrap().contains(secret), "{command}");
+        }
+        let task = semantic_command_shapes("task private-client-token").unwrap();
+        assert!(task[0].operation.is_none());
+        assert!(task[0].delegates_unknown_effect);
+        assert!(!serde_json::to_string(&task).unwrap().contains("private-client-token"));
+
+        for command in ["npm test", "pnpm lint", "cargo test", "docker exec container id", "kubectl exec pod -- id", "tmux new-session shell"] {
+            assert!(semantic_command_shapes(command).unwrap()[0].delegates_unknown_effect, "{command}");
         }
     }
 }

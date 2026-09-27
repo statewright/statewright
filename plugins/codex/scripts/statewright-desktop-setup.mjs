@@ -39,7 +39,7 @@ const DESKTOP_PROFILES = Object.freeze({
     stateFile: "codex-desktop-staging.json",
     shimName: "statewright-desktop-codex-staging",
     launcherName: "statewright-desktop-staging-launch.mjs",
-    gatewayUrl: "https://statewright-mcp.casa.enhasa.cloud",
+    gatewayUrl: null,
     apiKeyFile: "staging_api_key",
   }),
 });
@@ -254,15 +254,16 @@ export function parseDesktopArgs(argv) {
     const value = rest[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const key = value.slice(2);
-    if (!["state", "original", "wrapper", "app", "profile"].includes(key)) throw new Error(`Unknown option: ${value}`);
-    options[key] = rest[++index];
-    if (!options[key]) throw new Error(`${value} requires a value.`);
+    if (!["state", "original", "wrapper", "app", "profile", "gateway-url"].includes(key)) throw new Error(`Unknown option: ${value}`);
+    const optionKey = key === "gateway-url" ? "gatewayUrl" : key;
+    options[optionKey] = rest[++index];
+    if (!options[optionKey]) throw new Error(`${value} requires a value.`);
   }
   if (options.profile) desktopProfile(options.profile);
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic } = {}) {
   const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
@@ -273,7 +274,8 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
   const launcherAppPath = join(desktopApplicationsDirectory, profile.appName);
   const shim = join(dirname(resolvedState), "bin", profile.shimName);
-  const gatewayUrl = profile.gatewayUrl;
+  const gatewayUrl = gatewayUrlOverride ?? profile.gatewayUrl;
+  if (!gatewayUrl) throw new Error(`Desktop profile ${profile.name} requires an explicit --gateway-url.`);
   const apiKeyPath = join(dirname(resolvedState), profile.apiKeyFile);
   if (!await executable(vendor)) throw new Error(`Desktop vendor executable is not executable: ${vendor}`);
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);

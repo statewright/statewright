@@ -7,8 +7,9 @@ credential was performed.
 
 ## Deployment identity
 
-The `statewright-development` deployment ran the exact image
-`registry.casa.enhasa.cloud/statewright-gateway@sha256:60955824235ed6209862f42f5ee1f830af8fe63ef976dd4606e424e08c4c3673`
+The `statewright-development` deployment ran the exact private-registry image
+digest
+`sha256:60955824235ed6209862f42f5ee1f830af8fe63ef976dd4606e424e08c4c3673`
 with `STATEWRIGHT_SHELL_AST_SHADOW=true` and `RUST_LOG=info`. Its rollout was
 ready at `1/1`, and its health endpoint returned HTTP 200.
 

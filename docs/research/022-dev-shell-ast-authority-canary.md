@@ -8,8 +8,8 @@ or branch merge was performed.
 
 ## Build and deployment identity
 
-The immutable development image is
-`registry.casa.enhasa.cloud/statewright-gateway@sha256:33e2aa1519789c37f9c62d088a9021941a104ddebf7999ddd2ab71ac2ee75668`.
+The immutable private-registry development image digest is
+`sha256:33e2aa1519789c37f9c62d088a9021941a104ddebf7999ddd2ab71ac2ee75668`.
 It was built from a context archive whose SHA-256 was
 `7875ce567fd16cec86a87ad833a94680cd54cc9b0f4890bcd511078b051191f2`.
 The Kaniko job completed successfully with exit code 0 and reported the same
@@ -31,8 +31,8 @@ known-good live ReplicaSet while changing only the image and source revision.
 The repaired rollout then completed normally. This was a development-only
 deployment error, not an application regression.
 
-The staging namespace remained ready on
-`registry.casa.enhasa.cloud/statewright-gateway@sha256:037c51c34f51a83968a3512646b0d0dd4da0c68629850b42a5bfbd09b711d97d`
+The staging namespace remained ready on private-registry image digest
+`sha256:037c51c34f51a83968a3512646b0d0dd4da0c68629850b42a5bfbd09b711d97d`
 with no shell-AST authority or shadow environment variables. Production was
 not addressed.
 
@@ -119,7 +119,7 @@ AST authority and shadow enabled, and the bounded System One provider active.
 
 The reusable authenticated canary in
 `scripts/canary/live-shell-ast-authority.mjs` then passed all ten cases against
-`https://statewright-mcp.casa.enhasa.cloud`: both compound reads were allowed;
+the staging MCP endpoint: both compound reads were allowed;
 the hidden external writes, recursive deletion, data heredoc, malformed input,
 and opaque executable were denied with the expected source, risk, and exposure;
 and every case had semantic status `Assessed`. The canary revoked its key and

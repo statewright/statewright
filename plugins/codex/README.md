@@ -167,6 +167,15 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs do
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
 
+The production profile uses the public Statewright gateway. An internal
+staging profile must receive its endpoint explicitly so private infrastructure
+is never compiled into the public plugin:
+
+```bash
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable \
+  --profile staging --gateway-url https://your-staging-gateway.example
+```
+
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;
 otherwise it refuses to overwrite the user's setting. Re-run `enable` after

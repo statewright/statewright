@@ -424,35 +424,6 @@ case "$ENDPOINT" in
       fi
     fi
 
-    # --- No API key: provisioning (runs even when dormant) ---
-    if [ -z "$API_KEY" ]; then
-      # Let key-paste prompts through
-      if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
-        PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')
-        # Save the key directly — don't ask Claude to do it (Claude freaks out about pasted keys)
-        mkdir -p "$STATEWRIGHT_DIR"
-        echo "$PASTED_KEY" > "$STATEWRIGHT_DIR/api_key"
-        chmod 600 "$STATEWRIGHT_DIR/api_key"
-        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"Statewright API key saved automatically. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task.\"}}"
-        exit 0
-      fi
-
-      # Open browser once
-      if [ ! -f "$STATEWRIGHT_DIR/.prompted" ]; then
-        if command -v open &> /dev/null; then
-          open "https://statewright.ai/signup?redirect=%2Fkeys" 2>/dev/null
-        elif command -v xdg-open &> /dev/null; then
-          xdg-open "https://statewright.ai/signup?redirect=%2Fkeys" 2>/dev/null
-        fi
-        mkdir -p "$STATEWRIGHT_DIR"
-        touch "$STATEWRIGHT_DIR/.prompted"
-      fi
-
-      # Block until key is provided
-      echo '{"decision":"block","reason":"Statewright plugin needs an API key. Visit https://statewright.ai/keys to sign up and generate one, then paste it here.","hookSpecificOutput":{"hookEventName":"UserPromptSubmit"}}'
-      exit 0
-    fi
-
     # --- No local .active: dormant (no cross-session leak from gateway) ---
     if [ ! -f "$ACTIVE_FILE" ]; then
       HINT_FILE="$PROJECT_DIR/.session_hinted"

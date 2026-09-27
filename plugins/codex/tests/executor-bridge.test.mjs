@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -114,6 +114,34 @@ const loadedState = {
     capture_output: true,
   },
 };
+
+test("native Codex hook leaves disconnected onboarding to the device-connect tool", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const statewrightDirectory = resolve(home, ".statewright");
+  await mkdir(statewrightDirectory, {recursive: true});
+  await writeFile(resolve(statewrightDirectory, ".update_checked"), "");
+  const environment = {
+    HOME: home,
+    STATEWRIGHT_API_KEY: "",
+    STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+    STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+  };
+
+  try {
+    const result = await invoke("bash", [resolve(codexRoot, "hook.sh"), "user-prompt"], {
+      session_id: "native-device-connect",
+      prompt: "sw_live_fixture_must_not_be_saved",
+    }, environment);
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.match(output.hookSpecificOutput.additionalContext, /No workflow running/);
+    assert.doesNotMatch(result.stdout, /needs an API key|paste it here/i);
+    assert.equal(output.decision, undefined);
+    await assert.rejects(readFile(resolve(statewrightDirectory, "api_key"), "utf8"));
+  } finally {
+    await rm(home, {recursive: true, force: true});
+  }
+});
 
 test("native Codex hook unwraps structured MCP workflow-load results", async () => {
   const responses = [

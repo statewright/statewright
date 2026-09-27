@@ -114,6 +114,9 @@ fn semantic_label(value: &str) -> bool {
 }
 
 fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
+    if executable == "sed" && readonly_sed_args(tokens) {
+        return Some("print".to_owned());
+    }
     let mut index = 0;
     while tokens.get(index).is_some_and(|token| semantic_global_flag(executable, token)) { index += 1; }
     let candidate = tokens.get(index)?;
@@ -549,6 +552,80 @@ fn readonly_checksum_args(executable: &str, args: &[String]) -> bool {
     })
 }
 
+/// Admit only sed's bounded print-only viewer form. Arbitrary sed programs can
+/// write files (`w`), execute commands (`e`), or load a script file, so they
+/// remain semantic-fallback candidates instead of inheriting Read authority.
+fn readonly_sed_args(args: &[String]) -> bool {
+    let Some(quiet) = args.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(quiet, "-n" | "--quiet" | "--silent") {
+        return false;
+    }
+
+    let mut index = 1;
+    if args.get(index).is_some_and(|argument| argument == "-e") {
+        index += 1;
+    }
+    let Some(program) = args.get(index) else {
+        return false;
+    };
+    if !readonly_sed_print_program(program) {
+        return false;
+    }
+    index += 1;
+
+    let has_end_of_options = args.get(index).is_some_and(|argument| argument == "--");
+    if has_end_of_options {
+        index += 1;
+    }
+    let operands = &args[index..];
+    !operands.is_empty()
+        && operands.iter().all(|operand| {
+            !operand.is_empty()
+                && (has_end_of_options || operand == "-" || !operand.starts_with('-'))
+        })
+}
+
+fn readonly_sed_print_program(program: &str) -> bool {
+    let Some(addresses) = program.strip_suffix('p') else {
+        return false;
+    };
+    if addresses.is_empty() {
+        return false;
+    }
+    let mut parts = addresses.split(',');
+    let Some(first) = parts.next() else {
+        return false;
+    };
+    let second = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    let valid_address = |address: &str| {
+        address == "$"
+            || (!address.is_empty()
+                && address.bytes().all(|byte| byte.is_ascii_digit()))
+    };
+    valid_address(first) && second.is_none_or(valid_address)
+}
+
+fn sed_has_in_place(args: &[String]) -> bool {
+    let mut end_of_options = false;
+    args.iter().any(|argument| {
+        if argument == "--" {
+            end_of_options = true;
+            return false;
+        }
+        !end_of_options
+            && (argument == "--in-place"
+                || argument.starts_with("--in-place=")
+                || (argument.starts_with('-')
+                    && !argument.starts_with("--")
+                    && argument[1..].chars().any(|flag| flag == 'i')))
+    })
+}
+
 /// Split a command string on `&&`, `||`, `;`, and `|` (single pipe).
 /// This is deliberately simple — not a full shell parser.
 fn split_segments(command: &str) -> Vec<String> {
@@ -656,8 +733,13 @@ fn classify_segment(segment: &str) -> OpClass {
 
         // File modify (in-place)
         "sed" => {
-            if tokens.iter().any(|t| *t == "-i" || t.starts_with("-i")) {
+            let Some(parsed) = simple_command_tokens(segment) else {
+                return OpClass::Passthrough;
+            };
+            if sed_has_in_place(&parsed[1..]) {
                 OpClass::FileModify
+            } else if readonly_sed_args(&parsed[1..]) {
+                OpClass::FileRead
             } else {
                 OpClass::Passthrough
             }
@@ -922,6 +1004,40 @@ mod tests {
     fn sed_without_inplace_is_passthrough() {
         let classes = classify("sed 's/old/new/' file.rs");
         assert!(classes.contains(&OpClass::Passthrough));
+    }
+
+    #[test]
+    fn sed_print_only_viewers_are_file_reads() {
+        for command in [
+            "sed -n '1,360p' README.md",
+            "sed --quiet '$p' README.md",
+            "sed --silent -e '12p' -- -leading-name.md",
+            "sed -n '1,360p' first.md && sed -n '1,360p' second.md",
+        ] {
+            assert!(classify(command).contains(&OpClass::FileRead), "{command}");
+            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+        }
+    }
+
+    #[test]
+    fn sed_write_execute_and_ambiguous_forms_do_not_borrow_read() {
+        for command in [
+            "sed -n '1,12w output.txt' README.md",
+            "sed -n 's/x/y/p' README.md",
+            "sed -f viewer.sed README.md",
+            "sed -n -e '1,12p'",
+            "sed -n '1,12p' -leading-name.md",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+        for command in [
+            "sed -ni '1,12p' README.md",
+            "sed --in-place 's/x/y/' README.md",
+            "sed --in-place=.bak 's/x/y/' README.md",
+        ] {
+            assert!(classify(command).contains(&OpClass::FileModify), "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
     }
 
     #[test]
@@ -1290,7 +1406,7 @@ mod tests {
     fn readonly_capabilities_reuse_command_classification_without_bash_escalation() {
         assert_eq!(
             readonly_capabilities("sed -n '1,12p' README.md"),
-            None,
+            Some(vec!["Read"]),
         );
         assert_eq!(
             readonly_capabilities("cat README.md | rg Statewright"),
@@ -1410,6 +1526,36 @@ mod tests {
         ]);
         let rendered = serde_json::to_string(&shapes).unwrap();
         for secret in ["secret", "%33", "-80", "/private/repo"] { assert!(!rendered.contains(secret)); }
+    }
+
+    #[test]
+    fn semantic_shape_labels_only_proven_sed_viewers() {
+        let shapes = semantic_command_shapes(
+            "sed -n '1,360p' /private/first && sed --quiet '$p' /private/second",
+        )
+        .unwrap();
+        assert_eq!(
+            shapes,
+            vec![
+                SemanticCommandShape {
+                    executable: "sed".into(),
+                    operation: Some("print".into()),
+                    delegates_unknown_effect: false,
+                },
+                SemanticCommandShape {
+                    executable: "sed".into(),
+                    operation: Some("print".into()),
+                    delegates_unknown_effect: false,
+                },
+            ]
+        );
+        let rendered = serde_json::to_string(&shapes).unwrap();
+        for private in ["1,360p", "/private/first", "$p", "/private/second"] {
+            assert!(!rendered.contains(private), "{private}");
+        }
+
+        let ambiguous = semantic_command_shapes("sed -n 's/x/y/p' /private/input").unwrap();
+        assert_eq!(ambiguous[0].operation, None);
     }
 
     #[test]

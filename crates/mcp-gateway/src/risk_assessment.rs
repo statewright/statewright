@@ -1899,6 +1899,20 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_sed_viewer_chain_precedes_system_one_fallthrough() {
+        let read = assess_invocation(
+            None,
+            "exec_command",
+            &json!({
+                "cmd": "sed -n '1,360p' /private/agentic-sdlc/SKILL.md && sed -n '1,360p' /private/optimize-statewright-usage/SKILL.md"
+            }),
+            Some("localize"),
+        );
+        assert_eq!(read.risk, RiskBand::Low);
+        assert_eq!(read.exposure, ExposureBand::Local);
+    }
+
+    #[test]
     fn visible_pipeline_submission_reports_the_actual_queue_full_outcome() {
         let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), None, false);
         let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));

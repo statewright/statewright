@@ -106,3 +106,27 @@ The development gate is satisfied. Before a controlled staging promotion or
 final merge, run the formatter, review its diff, rerun proportionate tests if
 formatting changes tracked files, and preserve a clean Git tree. Staging and
 production remain unchanged until that explicit promotion decision.
+
+## Subsequent staging promotion
+
+Later on 2026-09-27, the development-tested gateway was promoted to the
+`statewright-dev` staging namespace at immutable digest
+`sha256:ce75c46c801651559ba38b50623f4a239e00fe011a79e6737c6a0ad4ec372986`.
+The live Deployment and sole service endpoint were read back with source
+revision `36c056e820ca5d1a44f51d22bd754938e2fff58a`, build-context SHA-256
+`cac57afde9f71143054a8ffa21808b40e4f44b8eb76ff3eaa14e31fe34734bfe`,
+AST authority and shadow enabled, and the bounded System One provider active.
+
+The reusable authenticated canary in
+`scripts/canary/live-shell-ast-authority.mjs` then passed all ten cases against
+`https://statewright-mcp.casa.enhasa.cloud`: both compound reads were allowed;
+the hidden external writes, recursive deletion, data heredoc, malformed input,
+and opaque executable were denied with the expected source, risk, and exposure;
+and every case had semantic status `Assessed`. The canary revoked its key and
+deleted its synthetic user. A server-side query confirmed zero remaining
+shell-AST canary users and zero temporary cleanup superusers.
+
+The staging application and OAuth proof, including exact rollback digests and
+the pre-migration database backup, is recorded in Auldwyrm receipt
+`site/release/receipts/2026-09-27-oauth-m4a-dev-e2e.md`. Production was not
+changed.

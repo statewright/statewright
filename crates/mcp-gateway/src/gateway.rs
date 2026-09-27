@@ -851,11 +851,12 @@ impl Gateway {
                 .await;
         }
 
-        let upstream_tool = self
-            .upstream
-            .all_tools()
-            .into_iter()
-            .find(|tool| tool.name == params.name);
+        let upstream_tool = match self.upstream.tool_info(&params.name) {
+            Ok(info) => info,
+            Err(_) if self.active_workflow.is_none() => None,
+            Err(reason) => return JsonRpcResponse::success(id,
+                serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap()),
+        };
         let intent = self
             .session_manager
             .get(&self.session_id)
@@ -934,7 +935,9 @@ impl Gateway {
             );
         }
         if exploratory_read_only
-            && !upstream_tool.is_some_and(is_exploratory_read_only_tool)
+            && (!upstream_tool.is_some_and(is_exploratory_read_only_tool)
+                || (exploratory_policy == Some("Read")
+                    && pipeline.resolve_effect() != risk_assessment::ResolvedEffect::ReadOnly))
         {
             return JsonRpcResponse::success(
                 id,
@@ -1203,7 +1206,13 @@ impl Gateway {
             .states
             .get(&initial_session.current_state)
             .and_then(|state| state.intent.as_deref());
-        let pipeline = risk_assessment::assess_pipeline_visible(None, tool_name, tool_input, intent).await;
+        // Native adapters use the same registered metadata as tools/call.
+        // Caller arguments must never masquerade as a tools/list descriptor.
+        let registered_tool = match self.upstream.tool_info(tool_name) {
+            Ok(info) => info,
+            Err(reason) => return json!({"decision":"deny", "reason":reason}),
+        };
+        let pipeline = risk_assessment::assess_pipeline_visible(registered_tool, tool_name, tool_input, intent).await;
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => return json!({
@@ -1249,8 +1258,26 @@ impl Gateway {
                 "risk_assessment": pipeline.visible_json(),
             });
         }
-        let policy_tool_name =
-            enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input);
+        let original_denied = statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+            &session.definition, &session.current_state, tool_name,
+        );
+        let policy_tool_name = if is_exploratory_read_only_state(&session) && registered_tool.is_some() && !original_denied {
+            match registered_tool.and_then(exploratory_policy_tool) {
+                Some("Read") if pipeline.resolve_effect() != risk_assessment::ResolvedEffect::ReadOnly => return json!({
+                    "decision":"deny", "state":session.current_state,
+                    "reason":"MCP invocation has unresolved or mutating effects in this exploratory state.",
+                    "risk_assessment":pipeline.visible_json(),
+                }),
+                Some(policy) => policy.to_string(),
+                None => return json!({
+                    "decision":"deny", "state":session.current_state,
+                    "reason":"MCP tool is not registered as read-only in this exploratory state.",
+                    "risk_assessment":pipeline.visible_json(),
+                }),
+            }
+        } else {
+            enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input)
+        };
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
             &session,
             &policy_tool_name,
@@ -3885,6 +3912,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tool_result_json(stopped)["decision"], "block");
+    }
+
+    #[tokio::test]
+    async fn adapter_risk_uses_exact_registered_mcp_metadata() {
+        let mut gateway = exploratory_gateway();
+        let reader = gateway.adapter_pre_tool("registered_reader", &json!({})).await;
+        assert_eq!(reader["risk_assessment"]["deterministic_risk"], "Low");
+        assert_eq!(reader["risk_assessment"]["deterministic_source"], "mcp_annotation");
+        assert_eq!(reader["decision"], "allow");
+        let unknown = gateway.adapter_pre_tool("opaque_mutator", &json!({
+            "annotations":{"readOnlyHint":true}
+        })).await;
+        assert_eq!(unknown["risk_assessment"]["deterministic_risk"], "Moderate");
+        assert_eq!(unknown["decision"], "deny");
+        let deletion = gateway.adapter_pre_tool("registered_reader", &json!({"action":"delete"})).await;
+        assert_eq!(deletion["decision"], "deny");
+        assert_eq!(deletion["risk_assessment"]["deterministic_risk"], "High");
+        let direct = gateway.handle_message(JsonRpcRequest {
+            jsonrpc:"2.0".into(), method:"tools/call".into(), id:Some(json!(2)),
+            params:Some(json!({"name":"registered_reader","arguments":{"action":"delete"}})),
+        }).await.unwrap();
+        assert_eq!(direct.result.unwrap()["isError"], true);
     }
 
     #[tokio::test]

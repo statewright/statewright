@@ -121,6 +121,79 @@ pub struct SemanticAssessmentRequest {
     pub read_only_hint: Option<bool>,
     pub destructive_hint: Option<bool>,
     pub open_world_hint: Option<bool>,
+    pub mcp_shape: Option<McpInvocationShape>,
+}
+
+/// Code-owned effect labels; selector values, schemas and descriptions are
+/// never copied into the remote request. These describe intent, not authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOperationIntent { Read, Write, Destructive, ExternalWrite, Unknown }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct McpInvocationShape {
+    pub registered_metadata: bool,
+    pub operation: String,
+    pub operation_intent: McpOperationIntent,
+    pub selector_intent: Option<McpOperationIntent>,
+    pub schema_has_selector: bool,
+    pub delegates_unknown_effect: bool,
+    pub idempotent_hint: Option<bool>,
+}
+
+// Strip the MCP transport/server namespace without conflating identities.
+// This is only for inference; authorization always retains the full name.
+fn mcp_operation(tool_name: &str) -> &str {
+    tool_name.strip_prefix("mcp__")
+        .and_then(|qualified| qualified.split_once("__"))
+        .map(|(_, operation)| operation)
+        .unwrap_or(tool_name)
+}
+
+fn mcp_operation_intent(operation: &str) -> McpOperationIntent {
+    use McpOperationIntent::*;
+    let lower = operation.to_ascii_lowercase();
+    let words: Vec<_> = lower.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty()).collect();
+    let has = |verbs: &[&str]| words.iter().any(|word| verbs.contains(word));
+    if has(&["delete", "remove", "destroy", "revoke", "purge"]) { Destructive }
+    else if has(&["send", "publish", "deploy", "push"]) { ExternalWrite }
+    else if has(&["create", "update", "write", "edit", "patch", "apply", "upload", "move", "rename"]) { Write }
+    else if words.first().is_some_and(|word| ["read", "get", "list", "search", "find", "inspect", "status", "describe", "lookup"].contains(word)) { Read }
+    else { Unknown }
+}
+
+fn mcp_shape(tool: Option<&ToolInfo>, tool_name: &str, arguments: &serde_json::Value) -> McpInvocationShape {
+    use McpOperationIntent::*;
+    const SELECTORS: &[&str] = &["action", "operation", "method"];
+    let selectors: Vec<_> = SELECTORS.iter().filter_map(|key| arguments.get(key)).collect();
+    // Only exact, fixed vocabulary selector values can be disclosed as labels.
+    // "read; send secret" must not get treated as a valid operation selector.
+    let intents: Vec<_> = selectors.iter().map(|value| match value.as_str() {
+        Some("read" | "get" | "list" | "search" | "find" | "inspect" | "status" | "describe" | "lookup") => Read,
+        Some("create" | "update" | "write" | "edit" | "patch" | "apply" | "upload" | "move" | "rename") => Write,
+        Some("delete" | "remove" | "destroy" | "revoke" | "purge") => Destructive,
+        Some("send" | "publish" | "deploy" | "push") => ExternalWrite,
+        _ => Unknown,
+    }).collect();
+    let selector_intent = [Destructive, ExternalWrite, Unknown, Write, Read].into_iter()
+        .find(|intent| intents.contains(intent));
+    let schema_has_selector = tool.and_then(|tool| tool.input_schema.get("properties"))
+        .is_some_and(|properties| SELECTORS.iter().any(|key| properties.get(key).is_some()));
+    let operation = mcp_operation(tool_name);
+    let lower_operation = operation.to_ascii_lowercase();
+    let first_word = lower_operation.split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+    // Query/execution payloads cannot be judged from a redacted name alone.
+    let delegates_unknown_effect = selector_intent == Some(Unknown)
+        || (schema_has_selector && selector_intent.is_none())
+        || ["query", "execute", "run", "eval"].contains(&first_word)
+        || ["command", "cmd", "script", "code", "sql"].iter().any(|key| arguments.get(key).is_some());
+    McpInvocationShape {
+        registered_metadata: tool.is_some(), operation: bounded_metadata_label(operation),
+        operation_intent: mcp_operation_intent(operation),
+        selector_intent, schema_has_selector, delegates_unknown_effect,
+        idempotent_hint: tool.and_then(|tool| tool.annotations.as_ref()).and_then(|hints| hints.idempotent_hint),
+    }
 }
 
 /// A provider-neutral seam for a later local/open-weight worker.  The worker
@@ -169,7 +242,13 @@ impl RiskPipelineAssessment {
                 if !self.has_sufficient_semantic_evidence() { return DenyUncertain; }
                 let Some(vector) = self.semantic.vector.as_ref() else { return DenyUncertain; };
                 if self.semantic.status != SemanticAssessorStatus::Assessed { return DenyUncertain; }
-                if vector.read_only.get() >= 0.90
+                let request = self.deterministic.semantic_request.as_ref().unwrap();
+                let compatible_read = request.read_only_hint != Some(false)
+                    && request.mcp_shape.as_ref().is_none_or(|shape| {
+                        shape.operation_intent != McpOperationIntent::Write
+                            && shape.selector_intent != Some(McpOperationIntent::Write)
+                    });
+                if compatible_read && vector.read_only.get() >= 0.90
                     && vector.may_write.get() <= 0.10
                     && vector.destructive.get() <= 0.05
                     && vector.irreversible.get() <= 0.05
@@ -198,7 +277,8 @@ impl RiskPipelineAssessment {
                         segment.operation.is_some() && !segment.delegates_unknown_effect
                     })
             } else {
-                request.tool_name != "unknown"
+                request.tool_name != "unknown" && request.mcp_shape.as_ref()
+                    .is_some_and(|shape| !shape.delegates_unknown_effect)
             }
         })
     }
@@ -380,6 +460,7 @@ async fn assess_with_provider(
         "tool_family": request.tool_family, "tool_name": request.tool_name,
         "state_intent": request.state_intent, "argument_keys": request.argument_keys,
         "shell_shape": request.shell_shape,
+        "mcp_shape": request.mcp_shape,
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
     });
@@ -768,7 +849,19 @@ pub fn assess_invocation(
             .map(assess_shell)
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
-        assess_mcp(tool, tool_name)
+        let base = assess_mcp(tool, tool_name);
+        let shape = mcp_shape(tool, tool_name, arguments);
+        // Invocation-level effects can raise risk, never erase a known risk.
+        if matches!(base.risk, RiskBand::High | RiskBand::Critical) { base }
+        else { match shape.selector_intent {
+            Some(McpOperationIntent::Destructive | McpOperationIntent::ExternalWrite) =>
+                assessment(RiskBand::High, ExposureBand::Account, "mcp_selector"),
+            Some(McpOperationIntent::Write) =>
+                assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_selector"),
+            _ if shape.delegates_unknown_effect =>
+                assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_opaque_payload"),
+            _ => base,
+        } }
     };
     result.state_intent = state_intent.map(str::to_owned);
     result.semantic_request = Some(semantic_request(tool, tool_name, arguments, state_intent, is_shell));
@@ -926,8 +1019,15 @@ fn risk_rank(risk: RiskBand) -> u8 {
 }
 
 pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment {
+    let operation_intent = mcp_operation_intent(mcp_operation(tool_name));
     if let Some(tool) = tool {
-        if tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true) {
+        // Negative evidence takes precedence over an optimistic read hint.
+        if tool.annotations.as_ref().and_then(|a| a.destructive_hint) == Some(true) {
+            return assessment(RiskBand::Critical, ExposureBand::Account, "mcp_annotation");
+        }
+        if tool.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true)
+            && !matches!(operation_intent, McpOperationIntent::Write | McpOperationIntent::Destructive | McpOperationIntent::ExternalWrite)
+        {
             let exposure = if tool.annotations.as_ref().and_then(|a| a.open_world_hint) == Some(true) {
                 ExposureBand::External
             } else {
@@ -935,27 +1035,27 @@ pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment 
             };
             return assessment(RiskBand::Low, exposure, "mcp_annotation");
         }
-        if tool.annotations.as_ref().and_then(|a| a.destructive_hint) == Some(true) {
-            return assessment(RiskBand::Critical, ExposureBand::Account, "mcp_annotation");
-        }
     }
     let open_world = tool
         .and_then(|tool| tool.annotations.as_ref())
         .and_then(|annotations| annotations.open_world_hint)
         == Some(true);
-    let lower = tool_name.to_ascii_lowercase();
-    let words: Vec<_> = lower.split(|c: char| !c.is_ascii_alphanumeric()).filter(|word| !word.is_empty()).collect();
-    let has = |verbs: &[&str]| words.iter().any(|word| verbs.contains(word));
-    let result = if has(&["delete", "remove", "destroy", "revoke", "purge", "send", "publish", "deploy", "push"]) {
-        assessment(RiskBand::High, ExposureBand::Account, "mcp_name")
-    } else if has(&["create", "update", "write", "edit", "patch", "apply", "upload", "move", "rename"]) {
-        assessment(RiskBand::Moderate, ExposureBand::Local, "mcp_name")
-    } else if has(&["read", "get", "list", "search", "find", "query", "inspect", "status", "describe", "lookup"]) {
-        assessment(RiskBand::Low, ExposureBand::Local, "mcp_name")
-    } else {
-        assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_unknown")
+    let read_denied = tool.and_then(|tool| tool.annotations.as_ref())
+        .and_then(|hints| hints.read_only_hint) == Some(false);
+    // Closed-world MCP hints describe a bounded domain, NOT local execution.
+    // A remote database update can be closed-world and still change an account.
+    let known_local = matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "apply_patch" | "write_file" | "edit_file" | "patch_file" | "create_file" | "create_or_update_file");
+    let native_read = matches!(tool_name, "Grep" | "grep" | "Glob" | "glob" | "ls" | "view_image");
+    let result = match operation_intent {
+        McpOperationIntent::Destructive | McpOperationIntent::ExternalWrite =>
+            assessment(RiskBand::High, ExposureBand::Account, "mcp_name"),
+        McpOperationIntent::Write => assessment(RiskBand::Moderate,
+            if known_local { ExposureBand::Local } else { ExposureBand::Unknown }, "mcp_name"),
+        McpOperationIntent::Read if !read_denied => assessment(RiskBand::Low, ExposureBand::Local, "mcp_name"),
+        _ if native_read && !read_denied => assessment(RiskBand::Low, ExposureBand::Local, "native_read"),
+        _ => assessment(RiskBand::Moderate, ExposureBand::Unknown, "mcp_unknown"),
     };
-    if open_world && result.exposure == ExposureBand::Local {
+    if open_world && result.exposure != ExposureBand::Account {
         assessment(result.risk, ExposureBand::External, result.source)
     } else {
         result
@@ -1004,6 +1104,7 @@ fn semantic_request(
         read_only_hint: annotations.and_then(|value| value.read_only_hint),
         destructive_hint: annotations.and_then(|value| value.destructive_hint),
         open_world_hint: annotations.and_then(|value| value.open_world_hint),
+        mcp_shape: if is_shell { None } else { Some(mcp_shape(tool, tool_name, arguments)) },
     }
 }
 
@@ -1063,6 +1164,82 @@ mod tests {
             assess_mcp(Some(&writer), "update_task"),
             assessment(RiskBand::Moderate, ExposureBand::External, "mcp_name")
         );
+    }
+
+    #[test]
+    fn mcp_intent_uses_operation_not_server_namespace_and_respects_negative_hints() {
+        assert_eq!(assess_mcp(None, "mcp__delete__list_tasks").risk, RiskBand::Low);
+        assert_eq!(assess_mcp(None, "mcp__tasks__delete__list_tasks").risk, RiskBand::High);
+        assert_eq!(assess_mcp(None, "mcp__search__opaque").exposure, ExposureBand::Unknown);
+        assert_eq!(assess_mcp(None, "mcp__gtasks_work__update").exposure, ExposureBand::Unknown);
+        let contradictory: ToolInfo = serde_json::from_value(json!({
+            "name":"list_tasks", "inputSchema":{},
+            "annotations":{"readOnlyHint":true,"destructiveHint":true}
+        })).unwrap();
+        assert_eq!(assess_mcp(Some(&contradictory), "list_tasks").risk, RiskBand::Critical);
+        let mutating_reader: ToolInfo = serde_json::from_value(json!({
+            "name":"get_and_mark_read", "inputSchema":{},
+            "annotations":{"readOnlyHint":false}
+        })).unwrap();
+        assert_ne!(assess_mcp(Some(&mutating_reader), "get_and_mark_read").risk, RiskBand::Low);
+        let closed_world: ToolInfo = serde_json::from_value(json!({
+            "name":"update_task", "inputSchema":{}, "annotations":{"openWorldHint":false}
+        })).unwrap();
+        assert_eq!(assess_mcp(Some(&closed_world), "update_task").exposure, ExposureBand::Unknown);
+    }
+
+    #[test]
+    fn mcp_invocation_carries_redacted_selector_intent_not_private_payload() {
+        let tool: ToolInfo = serde_json::from_value(json!({
+            "name":"mcp__tasks__manage", "description":"private-description-sentinel",
+            "inputSchema":{"type":"object","properties":{
+                "action":{"type":"string","enum":["list","delete"]},
+                "title":{"type":"string","default":"private-schema-sentinel"}
+            }}
+        })).unwrap();
+        let deletion = assess_invocation(Some(&tool), &tool.name,
+            &json!({"action":"delete","title":"private-title-sentinel"}), None);
+        assert_eq!(deletion.risk, RiskBand::High);
+        let request = serde_json::to_value(deletion.semantic_request.unwrap()).unwrap();
+        assert_eq!(request["mcp_shape"]["selector_intent"], "destructive");
+        assert_eq!(request["mcp_shape"]["registered_metadata"], true);
+        assert_eq!(request["mcp_shape"]["schema_has_selector"], true);
+        assert!(!request.to_string().contains("sentinel"));
+        let opaque = assess_invocation(Some(&tool), &tool.name,
+            &json!({"action":"private-unknown-sentinel"}), None);
+        assert!(!serde_json::to_string(&opaque.semantic_request).unwrap().contains("sentinel"));
+    }
+
+    #[test]
+    fn mcp_model_cannot_erase_mutation_evidence_or_judge_hidden_execution_payloads() {
+        let confident = SemanticRiskVector {
+            read_only:Probability::new(0.99).unwrap(), may_write:Probability::new(0.01).unwrap(),
+            reversible:Probability::new(0.99).unwrap(), destructive:Probability::new(0.0).unwrap(),
+            irreversible:Probability::new(0.0).unwrap(), external_or_account_effect:Probability::new(0.0).unwrap(),
+        };
+        let pipeline = |name, args: serde_json::Value, enabled, status| {
+            let deterministic = assess_invocation(None, name, &args, None);
+            RiskPipelineAssessment {
+                effective_risk:deterministic.risk, deterministic,
+                semantic:SemanticAssessmentReceipt {
+                    tool:name.into(), status, vector:Some(confident.clone()), state_intent:None,
+                }, semantic_authorization_enabled:enabled, semantic_failsafe_escalated:false,
+            }
+        };
+        for (name, args) in [
+            ("mcp__tasks__update", json!({"title":"private"})),
+            ("mcp__tasks__manage", json!({"action":"update"})),
+            ("mcp__tasks__manage", json!({"action":"unrecognized"})),
+            ("mcp__db__execute_query", json!({"query":"DELETE FROM tasks"})),
+        ] {
+            assert_eq!(pipeline(name, args, true, SemanticAssessorStatus::Assessed).resolve_effect(), ResolvedEffect::DenyUncertain);
+        }
+        let name = "mcp__tasks__manage";
+        assert_eq!(pipeline(name, json!({"action":"list"}), true, SemanticAssessorStatus::Assessed).resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(pipeline(name, json!({"action":"list"}), false, SemanticAssessorStatus::Assessed).resolve_effect(), ResolvedEffect::DenyUncertain);
+        for status in [SemanticAssessorStatus::Timeout, SemanticAssessorStatus::Unavailable, SemanticAssessorStatus::Malformed, SemanticAssessorStatus::QueueFull] {
+            assert_eq!(pipeline(name, json!({"action":"list"}), true, status).resolve_effect(), ResolvedEffect::DenyUncertain);
+        }
     }
 
     #[test]
@@ -1425,23 +1602,27 @@ mod tests {
             bearer_token: Some("test-token".into()),
             timeout: std::time::Duration::from_secs(1),
         };
-        let request = semantic_request(
-            None,
-            "exec_command",
-            &json!({"cmd":"tmux capture-pane -p -t private-client-pane"}),
-            Some("inspect"),
-            true,
-        );
-        let client = reqwest::Client::builder().timeout(provider.timeout).build().unwrap();
-        let vector = assess_with_provider(&client, &provider, &request).await.unwrap();
-        assert_eq!(vector.read_only.get(), 0.98);
+        let tool: ToolInfo = serde_json::from_value(json!({
+            "name":"mcp__tasks__manage", "description":"private-description",
+            "inputSchema":{"properties":{"action":{"enum":["list","update"]}}}
+        })).unwrap();
+        let config = SemanticShadowConfig::from_values(None, None, Some("true"), Some("1"));
+        let (sender, _receiver) = mpsc::channel(1);
+        let runtime = start_semantic_shadow_runtime(&config, sender, provider.clone());
+        let pipeline = assess_pipeline_visible_with_runtime(Some(&tool), &tool.name,
+            &json!({"action":"list","title":"private-task-title","token":"private-token"}),
+            Some("inspect"), &config, Some(&runtime), provider.timeout).await;
+        assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
+        assert_eq!(pipeline.semantic.status, SemanticAssessorStatus::Assessed);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);
         let seen = seen_receiver.await.unwrap();
         assert_eq!(seen["model"], "jev-latest");
         assert_eq!(seen["questions"]["read_only"]["type"], "noul");
         assert!(seen["questions"].as_object().is_some_and(|questions| questions.len() == 6));
         let rendered = seen.to_string();
-        assert!(rendered.contains("capture-pane"));
-        assert!(!rendered.contains("private-client-pane"));
+        assert_eq!(seen["state"]["mcp_shape"]["selector_intent"], "read");
+        assert_eq!(seen["state"]["mcp_shape"]["registered_metadata"], true);
+        assert!(!rendered.contains("private-"));
     }
 
     #[tokio::test]

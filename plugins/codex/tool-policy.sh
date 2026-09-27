@@ -21,6 +21,16 @@ statewright_list_has_normalized() {
   return 1
 }
 
+# Provider identities are not capability aliases. Removing punctuation here
+# would conflate different servers and methods (for example a_b and ab).
+statewright_list_has_exact() {
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] && [ "$entry" = "$1" ] && return 0
+  done <<< "$2"
+  return 1
+}
+
 statewright_has_capability() {
   local capability="$1"
   if statewright_blacklist_mode; then
@@ -47,8 +57,7 @@ statewright_canonical_tool() {
 
 statewright_explicitly_blocked() {
   local raw="$1" canonical="$2"
-  statewright_blacklist_mode || return 1
-  statewright_list_has_normalized "$raw" "$STATEWRIGHT_DISALLOWED_TOOLS" && return 0
+  statewright_list_has_exact "$raw" "$STATEWRIGHT_DISALLOWED_TOOLS" && return 0
   [ -n "$canonical" ] && statewright_list_has_normalized "$canonical" "$STATEWRIGHT_DISALLOWED_TOOLS"
 }
 
@@ -506,6 +515,14 @@ statewright_tool_allowed() {
       fi
       return 1 ;;
   esac
+
+  # Legacy phases can authorize a provider operation explicitly. This is
+  # permission from the workflow, not an inference that its effect is safe.
+  # Built-in shell/edit checks above must not be bypassed by this rule.
+  if ! statewright_blacklist_mode && statewright_list_has_exact "$tool_name" "$STATEWRIGHT_ALLOWED_TOOLS"; then
+    STATEWRIGHT_TOOL_MODE="explicit"
+    return 0
+  fi
 
   # No substring matching: an unknown tool's effect cannot be inferred from a
   # friendly name. Standalone execution must deny it; an executor may make a

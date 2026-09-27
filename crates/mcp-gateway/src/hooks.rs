@@ -579,7 +579,9 @@ mod tests {
             Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
         ).await.0;
         assert_eq!(allowed.decision, "allow");
-        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"], "Moderate");
+        // The native Grep adapter is a known read, not an opaque MCP method.
+        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"], "Low");
+        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_source"], "native_read");
         assert!(!allowed.risk_assessment.as_ref().unwrap().to_string().contains("policy"));
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);

@@ -80,6 +80,19 @@ impl UpstreamManager {
         tools
     }
 
+    /// Metadata must come from the same server as dispatch, not the first
+    /// matching name in tools/list (different servers can expose duplicates).
+    pub fn tool_info(&self, name: &str) -> Result<Option<&ToolInfo>, &'static str> {
+        if let Some((info, _)) = self.mock_tools.get(name) { return Ok(Some(info)); }
+        let Some(index) = self.tool_to_server.get(name) else { return Ok(None); };
+        let server = self.servers.get(*index).ok_or("MCP dispatch metadata is missing")?;
+        let mut matches = server.tools.iter().filter(|tool| tool.name == name);
+        let info = matches.next().ok_or("MCP dispatch metadata is missing")?;
+        // Conflicting descriptors within one server provide no reliable hint.
+        if matches.next().is_some() { return Err("MCP dispatch metadata is ambiguous"); }
+        Ok(Some(info))
+    }
+
     /// Forward a tool call to the appropriate upstream server (or return mock result).
     pub async fn call_tool(
         &mut self,
@@ -334,6 +347,34 @@ mod tests {
         let result = mgr.call_tool("read_file", serde_json::json!({})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No upstream server"));
+    }
+
+    #[tokio::test]
+    async fn metadata_lookup_follows_dispatch_and_rejects_ambiguous_descriptors() {
+        let tool = |read_only| ToolInfo {
+            name:"shared_tool".into(), description:None, input_schema:serde_json::json!({}),
+            annotations:Some(crate::protocol::ToolAnnotations {
+                read_only_hint:Some(read_only), ..Default::default()
+            }),
+        };
+        let server = |name: &str, info| {
+            let mut child = Command::new("cat").stdin(Stdio::piped()).stdout(Stdio::piped())
+                .kill_on_drop(true).spawn().unwrap();
+            UpstreamServer {
+                name:name.into(), stdin:child.stdin.take().unwrap(),
+                reader:BufReader::new(child.stdout.take().unwrap()), child,
+                tools:vec![info], next_id:1,
+            }
+        };
+        let mut manager = UpstreamManager::empty();
+        manager.servers = vec![server("first", tool(true)), server("selected", tool(false))];
+        manager.tool_to_server.insert("shared_tool".into(), 1);
+        assert_eq!(manager.tool_info("shared_tool").unwrap().unwrap().annotations.as_ref().unwrap().read_only_hint, Some(false));
+        assert!(manager.tool_info("SHARED_TOOL").unwrap().is_none());
+        manager.servers[1].tools.push(tool(true));
+        assert_eq!(manager.tool_info("shared_tool").unwrap_err(), "MCP dispatch metadata is ambiguous");
+        manager.mock_tools.insert("shared_tool".into(), (tool(true), ToolCallResult::text("mock")));
+        assert_eq!(manager.tool_info("shared_tool").unwrap().unwrap().annotations.as_ref().unwrap().read_only_hint, Some(true));
     }
 
     #[test]

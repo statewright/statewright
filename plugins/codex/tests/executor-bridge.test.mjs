@@ -358,6 +358,56 @@ test("native gateway calls stream request JSON instead of placing it in argv", a
   assert.doesNotMatch(hookSource, /(?:-d|--data) "\$1"/);
 });
 
+test("legacy hook honors exact MCP authorization without namespace collisions", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-mcp-policy-"));
+  const environment = {
+    HOME: home,
+    STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+    STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+  };
+  const session_id = "legacy-mcp-policy";
+  try {
+    const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id,
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: { state_snapshot: {
+        state: "sync_tasks", transitions: [],
+        allowed_tools: ["mcp__gtasks_work__list_task_lists", "mcp__gtasks_work__update"],
+        disallowed_tools: ["mcp__gtaskswork__list_task_lists"],
+      } },
+    }, environment);
+    assert.equal(post.status, 0, post.stderr);
+    for (const [tool_name, allowed] of [
+      ["mcp__gtasks_work__list_task_lists", true],
+      ["mcp__gtasks_work__update", true],
+      ["mcp__gtasks_personal__update", false],
+      ["mcp__gtasks_work__delete", false],
+      ["mcp__gtaskswork__update", false],
+      ["mcp__gtasks_work__UPDATE", false],
+    ]) {
+      const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name, tool_input: { title: "private fixture" },
+      }, environment);
+      assert.equal(pre.status, 0, pre.stderr);
+      if (allowed) assert.equal(pre.stdout, "", tool_name);
+      else assert.equal(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision, "deny", tool_name);
+    }
+    const deniedPost = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id,
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: { state_snapshot: { state:"sync_tasks", transitions:[],
+        allowed_tools:["mcp__gtasks_work__update"], disallowed_tools:["mcp__gtasks_work__update"] } },
+    }, environment);
+    assert.equal(deniedPost.status, 0, deniedPost.stderr);
+    const blocked = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id, tool_name:"mcp__gtasks_work__update", tool_input:{},
+    }, environment);
+    assert.equal(JSON.parse(blocked.stdout).hookSpecificOutput.permissionDecision, "deny");
+  } finally {
+    await rm(home, {recursive: true, force: true});
+  }
+});
+
 test("legacy state without an allowlist remains unenforced", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
   const environment = {

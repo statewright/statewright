@@ -7,6 +7,7 @@ import { dirname, join, resolve as resolvePath } from "node:path";
 const STORE_FILE = "managed-client-session-ids.json";
 const LEASE_DIRECTORY = "managed-client-leases";
 export const CODEX_ROOT_SESSION_FILE = "codex-root-session.json";
+const CODEX_ROOT_TRANSFER_LOCK = "codex-root-session-transfer.lock";
 const CODEX_OPTIONS_WITH_VALUE = new Set([
   "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config",
   "--disable", "--enable", "--local-provider", "-m", "--model",
@@ -81,7 +82,7 @@ export function resumedSessionId(host, args) {
 export async function readCodexRootSession(controlDir, expectedClientId = null) {
   try {
     const registration = JSON.parse(await readFile(join(controlDir, CODEX_ROOT_SESSION_FILE), "utf8"));
-    if (registration?.version !== 1 || typeof registration.session_id !== "string" || !registration.session_id.trim()) return null;
+    if (![1, 2].includes(registration?.version) || typeof registration.session_id !== "string" || !registration.session_id.trim()) return null;
     if (!validId(registration.client_id)) return null;
     if (expectedClientId && registration.client_id !== expectedClientId) return null;
     return { sessionId: registration.session_id.trim(), clientId: registration.client_id };
@@ -90,36 +91,129 @@ export async function readCodexRootSession(controlDir, expectedClientId = null) 
   }
 }
 
-export async function resetCodexRootSession(controlDir, { sessionId = null, clientId } = {}) {
-  const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
-  await unlink(path).catch((error) => {
-    if (error?.code !== "ENOENT") throw error;
+async function withCodexRootMutationLock(controlDir, action) {
+  const lockPath = join(controlDir, CODEX_ROOT_TRANSFER_LOCK);
+  const ownerId = randomUUID();
+  let lock;
+  try {
+    lock = await open(lockPath, "wx", 0o600);
+    await lock.writeFile(`${JSON.stringify({ version: 1, owner_id: ownerId, pid: process.pid,
+      created_at: new Date().toISOString() })}\n`);
+  } catch (error) {
+    await lock?.close().catch(() => {});
+    if (error?.code === "EEXIST") {
+      throw new Error("Statewright Codex root ownership changed or is already being updated.");
+    }
+    throw error;
+  }
+  await lock.close();
+  try { return await action(); }
+  finally {
+    let existing = null;
+    try { existing = JSON.parse(await readFile(lockPath, "utf8")); } catch { /* missing/replaced lock */ }
+    if (existing?.owner_id === ownerId) {
+      // Ownership is already committed when action returns. A cleanup failure
+      // must leave a recoverable stale lock, not turn success into a false
+      // native resume error after the durable root has changed.
+      await unlink(lockPath).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Compare-and-swap a Desktop root registration after the caller has proved
+ * that both threads belong to the same immutable project root. The versioned
+ * transfer remains in the root record so historical attachment is auditable.
+ */
+export async function adoptCodexRootSession(controlDir, transfer, {
+  now = () => new Date(), renameFile = rename,
+} = {}) {
+  const required = ["transfer_id", "from_session_id", "to_session_id", "client_id", "root", "issued_at", "expires_at"];
+  const allowed = new Set(["version", "kind", ...required]);
+  if (transfer?.version !== 1 || transfer?.kind !== "codex_root_session_transfer"
+      || required.some(key => typeof transfer[key] !== "string" || !transfer[key].trim())
+      || Object.keys(transfer).some(key => !allowed.has(key))
+      || !/^[a-f0-9-]{36}$/.test(transfer.transfer_id)
+      || !validId(transfer.client_id) || transfer.from_session_id === transfer.to_session_id) {
+    throw new Error("Statewright Desktop thread adoption requires a valid typed ownership transfer.");
+  }
+  const issuedAt = new Date(transfer.issued_at);
+  const expiresAt = new Date(transfer.expires_at);
+  const lifetimeMs = expiresAt.getTime() - issuedAt.getTime();
+  const insideWindow = currentTime => currentTime >= issuedAt && currentTime <= expiresAt;
+  if (!Number.isFinite(issuedAt.getTime()) || !Number.isFinite(expiresAt.getTime())
+      || lifetimeMs <= 0 || lifetimeMs > 30_000
+      || !insideWindow(now())) {
+    throw new Error("Statewright Desktop thread adoption transfer is stale.");
+  }
+  return withCodexRootMutationLock(controlDir, async () => {
+    const existing = await readCodexRootSession(controlDir);
+    if (existing?.clientId !== transfer.client_id || existing?.sessionId !== transfer.from_session_id) {
+      throw new Error("Statewright Desktop thread adoption transfer is stale or belongs to another session.");
+    }
+    const registration = {
+      version: 2,
+      session_id: transfer.to_session_id,
+      client_id: transfer.client_id,
+      ownership_transfer: {
+        ...transfer,
+        root: resolvePath(transfer.root),
+        adopted_at: null,
+      },
+    };
+    const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
+    const temporary = `${path}.${process.pid}.${transfer.transfer_id}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(registration)}\n`, { mode: 0o600, flag: "wx" });
+      await chmod(temporary, 0o600);
+      const commitTime = now();
+      if (!insideWindow(commitTime)) throw new Error("Statewright Desktop thread adoption transfer is stale.");
+      registration.ownership_transfer.adopted_at = commitTime.toISOString();
+      await writeFile(temporary, `${JSON.stringify(registration)}\n`, { mode: 0o600, flag: "w" });
+      if (!insideWindow(now())) throw new Error("Statewright Desktop thread adoption transfer is stale.");
+      await renameFile(temporary, path);
+    } catch (error) {
+      await unlink(temporary).catch(unlinkError => { if (unlinkError?.code !== "ENOENT") throw unlinkError; });
+      throw error;
+    }
+    return registration;
   });
-  if (!sessionId) return null;
-  if (!validId(clientId)) throw new Error("Statewright Codex root registration requires a valid managed client identity.");
-  const registration = { version: 1, session_id: sessionId, client_id: clientId };
-  await writeFile(path, `${JSON.stringify(registration)}\n`, { mode: 0o600, flag: "wx" });
-  await chmod(path, 0o600);
-  return registration;
+}
+
+export async function resetCodexRootSession(controlDir, { sessionId = null, clientId } = {}) {
+  if (sessionId && !validId(clientId)) throw new Error("Statewright Codex root registration requires a valid managed client identity.");
+  return withCodexRootMutationLock(controlDir, async () => {
+    const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
+    await unlink(path).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+    if (!sessionId) return null;
+    const registration = { version: 1, session_id: sessionId, client_id: clientId };
+    await writeFile(path, `${JSON.stringify(registration)}\n`, { mode: 0o600, flag: "wx" });
+    await chmod(path, 0o600);
+    return registration;
+  });
 }
 
 // A new native thread must acquire its root registration without replacing a
 // different thread's registration (including one written concurrently by a hook).
 export async function claimCodexRootSession(controlDir, { sessionId, clientId }) {
   if (!sessionId || !validId(clientId)) throw new Error("Statewright Codex root registration requires a valid thread and client identity.");
-  const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
-  const registration = { version: 1, session_id: sessionId, client_id: clientId };
-  try {
-    const handle = await open(path, "wx", 0o600);
-    try { await handle.writeFile(`${JSON.stringify(registration)}\n`); } finally { await handle.close(); }
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    const existing = await readCodexRootSession(controlDir);
-    if (existing?.sessionId !== sessionId || existing.clientId !== clientId) {
-      throw new Error(`Statewright refused to bind Codex thread '${sessionId}' to a different root session.`);
+  return withCodexRootMutationLock(controlDir, async () => {
+    const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
+    const registration = { version: 1, session_id: sessionId, client_id: clientId };
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try { await handle.writeFile(`${JSON.stringify(registration)}\n`); } finally { await handle.close(); }
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const existing = await readCodexRootSession(controlDir);
+      if (existing?.sessionId !== sessionId || existing.clientId !== clientId) {
+        throw new Error(`Statewright refused to bind Codex thread '${sessionId}' to a different root session.`);
+      }
     }
-  }
-  return registration;
+    return registration;
+  });
 }
 
 export function codexRouteOwnsRoot(request, registration) {

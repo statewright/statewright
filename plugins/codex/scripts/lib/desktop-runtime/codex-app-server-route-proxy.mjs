@@ -290,9 +290,8 @@ export async function startCodexAppServerRouteProxy({
   getThreadCwds = async () => ({}),
   onThreadStarted = async () => {},
   onThreadResumed = async () => {},
-  // Optional host-specific ownership guard.  This runs before any upstream
-  // RPC is forwarded, so a broker can reject an unsupported second thread
-  // without creating or resuming it in the vendor App Server.
+  // Optional host-specific ownership guard. It may return a typed lifecycle
+  // whose commit runs only after the matching original upstream RPC succeeds.
   authorizeThread = async () => {},
   requiredMcpToolSuffix = null,
   requiredMcpReadyTimeoutMs = 0,
@@ -430,6 +429,7 @@ export async function startCodexAppServerRouteProxy({
     const pendingTurnStarts = new Map();
     const receipts = new Map();
     const requestMethods = new Map();
+    const pendingThreadAuthorizations = new Map();
     const pendingApprovalReleases = new Map();
     const internalRequests = new Map();
     const switchingThreads = new Set();
@@ -656,6 +656,7 @@ export async function startCodexAppServerRouteProxy({
       let approvedRelease = null;
       let requestEpoch;
       let startsGoalExecution = false;
+      let threadAuthorization = null;
       const checkCurrentRequest = () => {
         if (requestEpoch !== undefined && (operatorActivity.get(message.params.threadId) !== requestEpoch
             || downstream.readyState !== WebSocket.OPEN)) {
@@ -672,11 +673,28 @@ export async function startCodexAppServerRouteProxy({
       try {
         message = JSON.parse(payload);
         if (gate?.handleReply(message)) return;
+        if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
+          throw new Error("Statewright rejected a duplicate in-flight native JSON-RPC request ID.");
+        }
         if (message.method === "thread/start" || message.params?.threadId) {
-          await authorizeThread({
+          threadAuthorization = await authorizeThread({
             method: message.method,
             threadId: message.params?.threadId ?? null,
           });
+          if (threadAuthorization) {
+            if (message.id === undefined || threadAuthorization?.version !== 1
+                || threadAuthorization?.kind !== "statewright_thread_adoption"
+                || threadAuthorization.method !== message.method
+                || threadAuthorization.threadId !== message.params?.threadId
+                || typeof threadAuthorization.commit !== "function"
+                || typeof threadAuthorization.cancel !== "function") {
+              await threadAuthorization?.cancel?.();
+              const error = new Error("Statewright thread authorization lifecycle is malformed.");
+              error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+              throw error;
+            }
+            pendingThreadAuthorizations.set(rpcIdKey(message.id), threadAuthorization);
+          }
         }
         if (isActiveGoalSet(message)) {
           // Goal creation carries an objective only when no native goal exists.
@@ -804,6 +822,10 @@ export async function startCodexAppServerRouteProxy({
           await sendPresentation(presentation.cancel(message.params?.threadId, String(message.id))).catch(() => {});
         }
         if (!routeForwarded) {
+          if (threadAuthorization && message?.id !== undefined) {
+            pendingThreadAuthorizations.delete(rpcIdKey(message.id));
+            await threadAuthorization.cancel().catch(() => {});
+          }
           if (message?.id !== undefined) pendingApprovalReleases.delete(rpcIdKey(message.id));
           try {
             await releasePendingRoute?.();
@@ -905,6 +927,8 @@ export async function startCodexAppServerRouteProxy({
         }
         const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
         if (responseTo) requestMethods.delete(responseKey);
+        const threadAuthorization = responseKey === null ? null : pendingThreadAuthorizations.get(responseKey);
+        if (threadAuthorization) pendingThreadAuthorizations.delete(responseKey);
         const approvalRelease = responseKey === null ? null : pendingApprovalReleases.get(responseKey);
         if (approvalRelease) {
           pendingApprovalReleases.delete(responseKey);
@@ -923,6 +947,25 @@ export async function startCodexAppServerRouteProxy({
           } catch (error) {
             notification = { jsonrpc: "2.0", id: notification.id, error: { code: -32603,
               message: `Statewright could not bind the new Codex thread: ${error.message}` } };
+            payload = JSON.stringify(notification);
+          }
+        }
+        if (threadAuthorization) {
+          const resumedThreadId = String(notification?.result?.thread?.id ?? "");
+          try {
+            if (responseTo !== threadAuthorization.method) {
+              throw new Error("native response method did not match the prepared thread adoption");
+            }
+            if (notification.error || resumedThreadId !== threadAuthorization.threadId) {
+              await threadAuthorization.cancel();
+              if (!notification.error) throw new Error("native resume returned a different thread");
+            } else {
+              await threadAuthorization.commit();
+            }
+          } catch (error) {
+            await threadAuthorization.cancel().catch(() => {});
+            notification = { jsonrpc: "2.0", id: notification.id, error: { code: -32603,
+              message: `Statewright could not adopt the resumed Codex thread: ${error.message}` } };
             payload = JSON.stringify(notification);
           }
         }
@@ -1043,6 +1086,8 @@ export async function startCodexAppServerRouteProxy({
         request.reject(new Error("Codex App Server connection closed during provider switch."));
       }
       internalRequests.clear();
+      for (const authorization of pendingThreadAuthorizations.values()) void authorization.cancel().catch(() => {});
+      pendingThreadAuthorizations.clear();
       if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();
       if (downstream.readyState === WebSocket.OPEN || downstream.readyState === WebSocket.CONNECTING) downstream.close();
     };
@@ -1051,6 +1096,8 @@ export async function startCodexAppServerRouteProxy({
       if (!downstreamClosed) {
         downstreamClosed = true;
         connectedClients = Math.max(0, connectedClients - 1);
+        for (const authorization of pendingThreadAuthorizations.values()) void authorization.cancel().catch(() => {});
+        pendingThreadAuthorizations.clear();
       }
     };
     const preserveActiveOrClose = () => {

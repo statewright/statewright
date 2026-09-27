@@ -23,6 +23,18 @@ hook registers the actual Codex thread before agent tools can launch children.
 Registration is first-writer-only until the owning supervisor explicitly resets
 it for a new TUI attachment.
 
+Codex Desktop may rebind that registration only for an original user-selected
+`thread/resume`. Before forwarding, the broker prepares a versioned transfer
+that proves the registered client still owns the source thread and that the
+source and destination rollouts declare the same immutable `cwd`. The proxy
+commits the compare-and-swap only after the matching native response returns
+the requested thread. Native errors, mismatched responses, expiry, connection
+close, changed registrations, missing metadata, foreign clients, and different
+roots cancel or reject the transfer without replacing the existing root. The
+committed version-2 root record retains the typed transfer as an audit receipt.
+Internal provider replay/resume traffic does not pass through this adoption
+lifecycle.
+
 Both restart and resident App Server transports accept a route only when its
 client ID, session ID, and declared root agree with that registration. Nested
 one-shot hooks do not register roots or emit route requests. Managed child
@@ -42,6 +54,8 @@ the root-registration file.
   accepted. Missing or stale hook installation therefore fails closed.
 - A new TUI attachment to a resident App Server replaces the prior attachment's
   root registration, preserving one active routing owner per managed client.
+- A Desktop historical-thread selection can replace its prior root without
+  weakening client/root isolation or stranding that root after native refusal.
 - Rollback is limited to reverting the root-registration checks and hook
   registration; no remote data or Git history migration is involved.
 
@@ -53,3 +67,5 @@ the root-registration file.
   the resident App Server consumer.
 - Treating `resume --last` as a session ID confused a selector with the durable
   thread that Codex resolves at runtime.
+- Rebinding inside the pre-forward ownership check stranded the prior valid root
+  when native resume failed; prepare/commit/cancel preserves that rollback point.

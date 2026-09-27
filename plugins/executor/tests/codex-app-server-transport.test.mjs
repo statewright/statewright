@@ -1315,6 +1315,133 @@ test("Desktop ownership authorization refuses a second thread before upstream RP
   }
 });
 
+test("Desktop historical adoption commits only after the matching successful native resume", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let socket;
+  const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
+  let root = "current-thread";
+  let prepared = 0;
+  let committed = 0;
+  let cancelled = 0;
+  let adoptionPending = false;
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    authorizeThread: async ({ method, threadId }) => {
+      if (adoptionPending) {
+        const error = new Error("historical thread adoption is still pending");
+        error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+        throw error;
+      }
+      if (method === "thread/resume" && threadId === "historical-thread" && root === "current-thread") {
+        prepared += 1;
+        adoptionPending = true;
+        let settled = false;
+        return {
+          version: 1, kind: "statewright_thread_adoption", method, threadId,
+          commit: async () => { if (!settled) { settled = true; adoptionPending = false; committed += 1; root = threadId; } },
+          cancel: async () => { if (!settled) { settled = true; adoptionPending = false; cancelled += 1; } },
+        };
+      }
+      if (threadId && threadId !== root) {
+        const error = new Error("registered Desktop thread required");
+        error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+        throw error;
+      }
+    },
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    await connected;
+
+    let forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: { threadId: "historical-thread" } }));
+    assert.equal(JSON.parse(String(await forwarded)).method, "thread/resume");
+    let reply = once(client, "message");
+    socket.send(JSON.stringify({ id: 1, error: { code: -32603, message: "synthetic native refusal" } }));
+    assert.match(JSON.parse(String(await reply)).error.message, /synthetic native refusal/);
+    assert.deepEqual({ root, prepared, committed, cancelled }, {
+      root: "current-thread", prepared: 1, committed: 0, cancelled: 1,
+    });
+
+    forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 5, method: "thread/resume", params: { threadId: "historical-thread" } }));
+    await forwarded;
+    reply = once(client, "message");
+    socket.send(JSON.stringify({ id: 5, result: { thread: { id: "wrong-thread" } } }));
+    assert.match(JSON.parse(String(await reply)).error.message, /different thread/);
+    assert.deepEqual({ root, prepared, committed, cancelled }, {
+      root: "current-thread", prepared: 2, committed: 0, cancelled: 2,
+    });
+
+    forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 2, method: "thread/resume", params: { threadId: "historical-thread" } }));
+    await forwarded;
+    reply = once(client, "message");
+    client.send(JSON.stringify({ id: 4, method: "turn/start", params: { threadId: "current-thread", input: [] } }));
+    assert.match(JSON.parse(String(await reply)).error.message, /adoption is still pending/);
+    reply = once(client, "message");
+    socket.send(JSON.stringify({ id: 2, result: { thread: { id: "historical-thread" } } }));
+    assert.equal(JSON.parse(String(await reply)).result.thread.id, "historical-thread");
+    assert.deepEqual({ root, prepared, committed, cancelled }, {
+      root: "historical-thread", prepared: 3, committed: 1, cancelled: 2,
+    });
+
+    reply = once(client, "message");
+    socket.send(JSON.stringify({ id: 2, result: { thread: { id: "historical-thread" } } }));
+    assert.equal(JSON.parse(String(await reply)).result.thread.id, "historical-thread");
+    assert.equal(committed, 1, "a duplicate matching response cannot recommit adoption");
+
+    reply = once(client, "message");
+    client.send(JSON.stringify({ id: 3, method: "turn/start", params: { threadId: "current-thread", input: [] } }));
+    assert.match(JSON.parse(String(await reply)).error.message, /registered Desktop thread required/);
+
+    const preparedBeforeUpstreamReplay = prepared;
+    reply = once(client, "message");
+    socket.send(JSON.stringify({ method: "thread/resume", params: { threadId: "current-thread" } }));
+    assert.equal(JSON.parse(String(await reply)).method, "thread/resume");
+    assert.equal(prepared, preparedBeforeUpstreamReplay, "upstream/internal resume traffic cannot prepare adoption");
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
+test("Desktop pending adoption cancels on duplicate request ID and connection close", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let socket;
+  const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
+  let cancelled = 0;
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    authorizeThread: async ({ method, threadId }) => method === "thread/resume" ? {
+      version: 1, kind: "statewright_thread_adoption", method, threadId,
+      commit: async () => {},
+      cancel: async () => { cancelled += 1; },
+    } : null,
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    await connected;
+    const forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 9, method: "thread/resume", params: { threadId: "historical-thread" } }));
+    await forwarded;
+    const closed = once(client, "close");
+    client.send(JSON.stringify({ id: 9, method: "thread/resume", params: { threadId: "historical-thread" } }));
+    await closed;
+    while (cancelled === 0) await new Promise(resolve => setTimeout(resolve, 1));
+    assert.equal(cancelled, 1);
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
+  }
+});
+
 test("Desktop MCP readiness gate holds turn/start until Statewright tools are visible", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");

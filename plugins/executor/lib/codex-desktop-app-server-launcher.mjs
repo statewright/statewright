@@ -1,11 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { WebSocket } from "ws";
 import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
-import { claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
+import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
+import { adoptCodexRootSession, claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
 import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
 
 // A Desktop broker is a separate managed client. These names carry process
@@ -39,6 +41,79 @@ export async function startDesktopMcpBridge({ environment, clientId, bridgeFacto
   });
   await bridge.start();
   return bridge;
+}
+
+export function desktopThreadAuthorizer({ controlDir, clientId, home = homedir(),
+  readThreadCwds = options => readCodexThreadCwds(options), adoptThread = adoptCodexRootSession,
+  now = () => new Date(), transferTtlMs = 30_000 } = {}) {
+  if (!Number.isInteger(transferTtlMs) || transferTtlMs <= 0 || transferTtlMs > 30_000) {
+    throw new Error("Statewright Desktop thread adoption TTL must be between 1 and 30000 milliseconds.");
+  }
+  let startReserved = false;
+  let pendingAdoption = null;
+  return async ({ method, threadId }) => {
+    const reject = (message) => {
+      const error = new Error(message);
+      error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+      throw error;
+    };
+    if (pendingAdoption) reject("Statewright Desktop historical thread adoption is still pending native confirmation.");
+    const reservation = method === "thread/resume" && threadId ? Symbol("desktop-thread-adoption") : null;
+    if (reservation) pendingAdoption = reservation;
+    try {
+      const root = await readCodexRootSession(controlDir);
+      if (root && root.clientId !== clientId) reject("Statewright Desktop thread adoption belongs to another managed session.");
+      if (method === "thread/start") {
+        if (root || startReserved) reject("Statewright Desktop broker is single-thread experimental; disconnect it before starting another Desktop chat.");
+        startReserved = true;
+        return;
+      }
+      if (!threadId || root?.sessionId === threadId) return;
+      if (!root) reject("Statewright Desktop broker only permits its registered Desktop thread; this request was not forwarded.");
+      if (method !== "thread/resume") reject("Statewright Desktop broker only permits its registered Desktop thread; this request was not forwarded.");
+
+      const metadata = await readThreadCwds({ threadIds: [root.sessionId, threadId], home });
+      const fromRoot = metadata[root.sessionId]?.cwd;
+      const toRoot = metadata[threadId]?.cwd;
+      if (!fromRoot || !toRoot || resolve(fromRoot) !== resolve(toRoot)) {
+        reject("Statewright Desktop refused to adopt a historical thread from another or unproven project root.");
+      }
+      const issuedAt = now();
+      const transfer = {
+        version: 1,
+        kind: "codex_root_session_transfer",
+        transfer_id: randomUUID(),
+        from_session_id: root.sessionId,
+        to_session_id: threadId,
+        client_id: clientId,
+        root: resolve(fromRoot),
+        issued_at: issuedAt.toISOString(),
+        expires_at: new Date(issuedAt.getTime() + transferTtlMs).toISOString(),
+      };
+      let settled = false;
+      const lifecycle = {
+        version: 1,
+        kind: "statewright_thread_adoption",
+        method: "thread/resume",
+        threadId,
+        commit: async () => {
+          if (settled) throw new Error("Statewright Desktop thread adoption is stale or already settled.");
+          settled = true;
+          try { return await adoptThread(controlDir, transfer, { now }); }
+          finally { if (pendingAdoption === lifecycle) pendingAdoption = null; }
+        },
+        cancel: async () => {
+          if (settled) return;
+          settled = true;
+          if (pendingAdoption === lifecycle) pendingAdoption = null;
+        },
+      };
+      pendingAdoption = lifecycle;
+      return lifecycle;
+    } finally {
+      if (pendingAdoption === reservation) pendingAdoption = null;
+    }
+  };
 }
 
 function inheritedDesktopMcpBridge(environment) {
@@ -87,27 +162,7 @@ export async function runDesktopAppServerBroker({
   await mkdir(plan.controlDir, { recursive: true, mode: 0o700 });
   await claimManagedControlIdentity(plan.controlDir, { host: "codex", clientId: plan.clientId });
   const claimThread = ({ threadId }) => claimCodexRootSession(plan.controlDir, { sessionId: threadId, clientId: plan.clientId });
-  let startReserved = false;
-  const authorizeThread = async ({ method, threadId }) => {
-    const root = await readCodexRootSession(plan.controlDir, plan.clientId);
-    const reject = (message) => {
-      const error = new Error(message);
-      error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
-      throw error;
-    };
-    if (method === "thread/start") {
-      if (root || startReserved) reject("Statewright Desktop broker is single-thread experimental; disconnect it before starting another Desktop chat.");
-      // The native server chooses the thread id in its response. Reserve the
-      // one allowed creation slot before forwarding, so two concurrent starts
-      // cannot create a second unbound Desktop thread. A failed start remains
-      // fail-closed; restart the explicit experimental broker to retry.
-      startReserved = true;
-      return;
-    }
-    if (threadId && (!root || root.sessionId !== threadId)) {
-      reject("Statewright Desktop broker only permits its registered Desktop thread; this request was not forwarded.");
-    }
-  };
+  const authorizeThread = desktopThreadAuthorizer({ controlDir: plan.controlDir, clientId: plan.clientId, home });
   const inheritedBridge = inheritedDesktopMcpBridge(environment);
   const isolatedEnvironment = desktopBrokerEnvironment(environment, plan);
   // The generated launcher starts this bridge before the network-restricted

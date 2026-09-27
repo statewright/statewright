@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { WebSocketServer } from "ws";
-import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, runDesktopAppServerBroker, startDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
+import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
+import { adoptCodexRootSession, claimCodexRootSession, readCodexRootSession, resetCodexRootSession } from "../lib/managed-client-identity.mjs";
 
 function fakeMcpBridge(onClose = () => {}) {
   return async () => ({
@@ -254,6 +255,249 @@ test("Desktop broker reserves its only new-thread slot before vendor forwarding"
     await new Promise(resolve => upstream.close(resolve));
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("Desktop broker adopts a user-selected historical thread through an auditable same-root transfer", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-adopt-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const times = [
+    new Date("2026-09-27T12:00:00.000Z"), new Date("2026-09-27T12:00:00.000Z"),
+    new Date("2026-09-27T12:00:30.000Z"), new Date("2026-09-27T12:00:30.000Z"),
+  ];
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId, home, now: () => times.shift(),
+      readThreadCwds: async () => ({
+        "current-thread": { cwd: "/repo/project" },
+        "historical-thread": { cwd: "/repo/project" },
+      }),
+    });
+    const prepared = await authorize({ method: "thread/resume", threadId: "historical-thread" });
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+    await prepared.commit();
+    assert.deepEqual(await readCodexRootSession(controlDir, clientId), {
+      sessionId: "historical-thread", clientId,
+    });
+    const record = JSON.parse(await readFile(join(controlDir, "codex-root-session.json"), "utf8"));
+    assert.equal(record.version, 2);
+    assert.equal(record.ownership_transfer.kind, "codex_root_session_transfer");
+    assert.equal(record.ownership_transfer.from_session_id, "current-thread");
+    assert.equal(record.ownership_transfer.to_session_id, "historical-thread");
+    assert.equal(record.ownership_transfer.root, "/repo/project");
+    assert.ok(record.ownership_transfer.transfer_id);
+    assert.ok(record.ownership_transfer.adopted_at);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker rejects historical adoption owned by another managed session", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-wrong-session-"));
+  const controlDir = join(home, "routes");
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, {
+      sessionId: "current-thread", clientId: "swc_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId: "swc_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", home,
+      readThreadCwds: async () => { throw new Error("foreign session must fail before metadata read"); },
+    });
+    await assert.rejects(
+      authorize({ method: "thread/resume", threadId: "historical-thread" }),
+      /another managed session/,
+    );
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker rejects historical adoption from another immutable root", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-wrong-root-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId, home,
+      readThreadCwds: async () => ({
+        "current-thread": { cwd: "/repo/one" },
+        "historical-thread": { cwd: "/repo/two" },
+      }),
+    });
+    await assert.rejects(
+      authorize({ method: "thread/resume", threadId: "historical-thread" }),
+      /another or unproven project root/,
+    );
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker reserves historical adoption before asynchronous metadata reads", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-concurrent-adopt-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  let releaseMetadata;
+  const metadataGate = new Promise(resolve => { releaseMetadata = resolve; });
+  let metadataStarted;
+  const metadataStart = new Promise(resolve => { metadataStarted = resolve; });
+  let metadataReads = 0;
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId, home,
+      readThreadCwds: async () => {
+        metadataReads += 1;
+        metadataStarted();
+        await metadataGate;
+        return {
+          "current-thread": { cwd: "/repo/project" },
+          "historical-thread": { cwd: "/repo/project" },
+        };
+      },
+    });
+    const first = authorize({ method: "thread/resume", threadId: "historical-thread" });
+    await metadataStart;
+    await assert.rejects(
+      authorize({ method: "thread/resume", threadId: "other-historical-thread" }),
+      /adoption is still pending/,
+    );
+    releaseMetadata();
+    const prepared = await first;
+    await prepared.cancel();
+    assert.equal(metadataReads, 1, "the rejected concurrent request cannot reach adoption preparation effects");
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker rejects a stale historical ownership transfer", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-stale-transfer-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const times = [
+    new Date("2026-09-27T12:00:00.000Z"), new Date("2026-09-27T12:00:29.000Z"),
+    new Date("2026-09-27T12:00:29.000Z"), new Date("2026-09-27T12:00:31.000Z"),
+  ];
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId, home, now: () => times.shift(),
+      readThreadCwds: async () => ({
+        "current-thread": { cwd: "/repo/project" },
+        "historical-thread": { cwd: "/repo/project" },
+      }),
+    });
+    const prepared = await authorize({ method: "thread/resume", threadId: "historical-thread" });
+    await assert.rejects(
+      prepared.commit(),
+      /transfer is stale/,
+    );
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop adoption rejects invalid or overlong declared transfer windows", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-invalid-window-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const baseTransfer = {
+    version: 1, kind: "codex_root_session_transfer",
+    transfer_id: "01234567-89ab-cdef-0123-456789abcdef",
+    from_session_id: "current-thread", to_session_id: "historical-thread",
+    client_id: clientId, root: "/repo/project",
+  };
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    for (const [issued_at, expires_at] of [
+      ["2026-09-27T12:00:01.000Z", "2026-09-27T12:00:00.000Z"],
+      ["2026-09-27T12:00:00.000Z", "2026-09-27T12:00:30.001Z"],
+    ]) {
+      await assert.rejects(adoptCodexRootSession(controlDir, { ...baseTransfer, issued_at, expires_at }, {
+        now: () => new Date("2026-09-27T12:00:00.000Z"),
+      }), /transfer is stale/);
+    }
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop root mutations share the adoption compare-and-swap lock", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-transfer-race-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const instant = new Date("2026-09-27T12:00:00.000Z");
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    await adoptCodexRootSession(controlDir, {
+      version: 1, kind: "codex_root_session_transfer",
+      transfer_id: "01234567-89ab-cdef-0123-456789abcdef",
+      from_session_id: "current-thread", to_session_id: "historical-thread",
+      client_id: clientId, root: "/repo/project",
+      issued_at: instant.toISOString(), expires_at: new Date(instant.getTime() + 30_000).toISOString(),
+    }, {
+      now: () => instant,
+      renameFile: async (from, to) => {
+        await assert.rejects(
+          resetCodexRootSession(controlDir, { sessionId: "racing-thread", clientId }),
+          /already being updated/,
+        );
+        await rename(from, to);
+      },
+    });
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "historical-thread");
+    assert.deepEqual((await readdir(controlDir)).sort(), ["codex-root-session.json"]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop broker rejects a prepared transfer after the registered root changes", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-stale-root-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    const authorize = desktopThreadAuthorizer({
+      controlDir, clientId, home,
+      readThreadCwds: async () => ({
+        "current-thread": { cwd: "/repo/project" },
+        "historical-thread": { cwd: "/repo/project" },
+      }),
+    });
+    const prepared = await authorize({ method: "thread/resume", threadId: "historical-thread" });
+    await resetCodexRootSession(controlDir, { sessionId: "newer-thread", clientId });
+    await assert.rejects(prepared.commit(), /stale or belongs to another session/);
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "newer-thread");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop adoption cleans its temporary record when atomic commit fails", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-desktop-transfer-cleanup-"));
+  const controlDir = join(home, "routes");
+  const clientId = "swc_0123456789abcdef0123456789abcdef";
+  const issuedAt = "2026-09-27T12:00:00.000Z";
+  try {
+    await mkdir(controlDir, { recursive: true });
+    await claimCodexRootSession(controlDir, { sessionId: "current-thread", clientId });
+    await assert.rejects(adoptCodexRootSession(controlDir, {
+      version: 1,
+      kind: "codex_root_session_transfer",
+      transfer_id: "01234567-89ab-cdef-0123-456789abcdef",
+      from_session_id: "current-thread",
+      to_session_id: "historical-thread",
+      client_id: clientId,
+      root: "/repo/project",
+      issued_at: issuedAt,
+      expires_at: "2026-09-27T12:00:30.000Z",
+    }, {
+      now: () => new Date(issuedAt),
+      renameFile: async () => { throw new Error("synthetic rename failure"); },
+    }), /synthetic rename failure/);
+    assert.equal((await readCodexRootSession(controlDir, clientId)).sessionId, "current-thread");
+    assert.deepEqual((await readdir(controlDir)).sort(), ["codex-root-session.json"]);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test("Desktop broker detaches open stdin when its backend closes", async () => {

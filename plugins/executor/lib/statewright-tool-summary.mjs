@@ -26,8 +26,40 @@ function workflowCount(value) {
   return null;
 }
 
+function transitionUsage(value) {
+  const used = value?.usage?.transitions ?? value?.transition_count;
+  const limit = value?.usage?.limit;
+  const remaining = value?.usage?.remaining;
+  if (used === undefined && limit === undefined && remaining === undefined) return "";
+  const count = used === undefined ? "" : limit === undefined ? clean(used) : `${clean(used)}/${clean(limit)}`;
+  const parts = [];
+  if (count) parts.push(`${count} transition${String(used) === "1" ? "" : "s"}`);
+  if (remaining !== undefined) parts.push(`${clean(remaining)} remaining`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
+function transitionLine(value) {
+  const from = clean(value?.from);
+  const to = clean(value?.to);
+  const movement = from && to ? `${from} → ${to}` : to || from || "transition";
+  let status = "completed";
+  if (value?.status === "pending_approval" || value?.requires_approval === true) status = "approval pending";
+  else if (value?.branch_completed) status = `branch ${clean(value.branch_completed)} completed`;
+  else if (value?.forked === true) status = "forked";
+  else if (value?.joined === true) status = "joined";
+  else if (value?.forced === true) status = "forced";
+  else if (value?.transitioned === true) status = "transitioned";
+  return `${movement} · ${status}${transitionUsage(value)}`;
+}
+
+function isTransitionReceipt(value) {
+  return Boolean(value && typeof value === "object" && ([
+    "from", "to", "transitioned", "forced", "forked", "joined", "branch_completed", "requires_approval", "transition_count",
+  ].some(key => Object.hasOwn(value, key)) || value.status === "pending_approval"));
+}
+
 export function statewrightToolSummary(item) {
-  if (item?.type !== "mcpToolCall" || item.server !== "statewright" || typeof item.tool !== "string") return null;
+  if (!["mcpToolCall", "McpToolCall"].includes(item?.type) || item.server !== "statewright" || typeof item.tool !== "string") return null;
   const value = resultValue(item.result);
   const tool = item.tool.replace(/^statewright_/, "");
   const rawText = typeof value === "string" ? clean(value) : "";
@@ -37,8 +69,7 @@ export function statewrightToolSummary(item) {
   }
   if (item.tool === "statewright_get_state") return stateLine(value) ?? "state unavailable";
   if (item.tool === "statewright_transition") {
-    if (value?.status === "pending_approval") return `${clean(value.from)} → ${clean(value.to)} · approval pending`;
-    if (value?.transitioned === true || value?.forced === true) return `${clean(value.from)} → ${clean(value.to)} · transitioned`;
+    if (isTransitionReceipt(value)) return transitionLine(value);
     return stateLine(value) ?? "transition completed";
   }
   if (item.tool === "statewright_load_workflow") {
@@ -71,6 +102,31 @@ export function statewrightToolSummary(item) {
   // Search/reference results are user-facing content, not control-plane JSON.
   if (["statewright_search_docs", "statewright_search_references"].includes(item.tool)) return null;
   return `${clean(tool)} · completed`;
+}
+
+// The native Codex MCP transport displays result.content verbatim. Replace only
+// successful transition JSON with the bounded supervisor line while retaining
+// the authoritative object in structuredContent for hooks and other clients.
+export function summarizeStatewrightMcpResponse(tool, response) {
+  if (tool !== "statewright_transition" || !response?.result || response.result.isError === true) return response;
+  const value = resultValue(response.result);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return response;
+  const summary = statewrightToolSummary({
+    type: "mcpToolCall",
+    server: "statewright",
+    tool,
+    status: "completed",
+    result: { structuredContent: value },
+  });
+  if (!summary) return response;
+  return {
+    ...response,
+    result: {
+      ...response.result,
+      structuredContent: value,
+      content: [{ type: "text", text: `Statewright supervisor: ${summary}` }],
+    },
+  };
 }
 
 export function summarizeStatewrightToolCompletion(message) {

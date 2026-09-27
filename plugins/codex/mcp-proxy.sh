@@ -5,6 +5,17 @@
 # continue to read it dynamically from ~/.statewright/api_key.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MCP_RESPONSE_SUMMARIZER="${SCRIPT_DIR}/scripts/summarize-mcp-response.mjs"
+
+summarize_transition_response() {
+  local tool_name="$1" response="$2" summarized
+  if [ "$tool_name" != "statewright_transition" ] || [ ! -f "$MCP_RESPONSE_SUMMARIZER" ] || ! command -v node >/dev/null 2>&1; then
+    printf '%s' "$response"
+    return 0
+  fi
+  summarized=$(printf '%s' "$response" | node "$MCP_RESPONSE_SUMMARIZER" "$tool_name" 2>/dev/null) || summarized=""
+  if [ -n "$summarized" ]; then printf '%s' "$summarized"; else printf '%s' "$response"; fi
+}
 
 inject_codex_local_tools() {
   local response="$1"
@@ -37,6 +48,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     if [ "$method" = "tools/call" ] && run_codex_local_tool "$line"; then
       continue
     fi
@@ -46,7 +58,6 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     # the ordinary health-check timeout made managed V2 workflows silently
     # fall through to the legacy gateway before their selected model ran.
     timeout_seconds=15
-    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     [ "$method" = "tools/call" ] && [ "$tool_name" = "statewright_run_agent" ] && timeout_seconds=300
     response=$(curl -sf --max-time "$timeout_seconds" -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
@@ -55,6 +66,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     case "$method" in notifications/*) continue ;; esac
     if [ -n "$response" ]; then
       [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     else
       env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN "$0" <<<"$line"
@@ -70,6 +82,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     if [ "$method" = "tools/call" ] && run_codex_local_tool "$line"; then
       continue
     fi
@@ -80,6 +93,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
     case "$method" in notifications/*) continue ;; esac
     if [ -n "$response" ]; then
       [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     else
       id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
@@ -686,6 +700,7 @@ while IFS= read -r line; do
       FORCE_TOOL='{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}'
       RESPONSE=$(echo "$RESPONSE" | jq -c --argjson s "$SEARCH_TOOL" --argjson r "$REFERENCE_TOOL" --argjson p "$PAUSE_TOOL" --argjson f "$FORCE_TOOL" '.result.tools = ([.result.tools[] | select(.name != "statewright_search_docs" and .name != "statewright_search_references" and .name != "statewright_pause" and .name != "statewright_force_state")] + [$s, $r, $p, $f])' 2>/dev/null || echo "$RESPONSE")
     fi
+    [ "$METHOD" = "tools/call" ] && RESPONSE=$(summarize_transition_response "$TOOL_NAME" "$RESPONSE")
     echo "$RESPONSE"
   else
     ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)

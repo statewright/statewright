@@ -16,6 +16,30 @@ redirection. It does not authorize Python or OpenSSL. Hash output must be compar
 with the expected digest before claiming verification; reading a receipt alone
 does not independently verify its hash. State command restrictions still apply.
 
+## Queued human input (Desktop and TUI)
+
+The shared app shim keeps native non-blocking question cards interactive while
+independent work continues. An additive `UserPromptSubmit` hook teaches agents
+to use `request_user_input_async` when it is advertised and permitted; it runs
+without a Statewright login or active workflow. It preserves other instructions
+and the existing enforcement hook. Questions name the decision and affected
+task, and only dependent work is parked. Pending decisions belong in the normal
+handoff, not in a second task system.
+
+The native App Server owns request IDs, answer delivery and card resolution.
+The shim forwards these intact and removes only the deprecated auto-resolution
+timer from explicitly non-blocking questions. Silence, a selected default or a
+dismissal never grants approval. Blocking questions and approval gates are not
+converted to asynchronous requests. If the host does not expose async input,
+the agent records the gap and continues only authorized independent work.
+
+Chat/SMS can later project the same request, rather than creating another
+decision authority. No outbound adapter is enabled here. It would need
+authenticated responders, exact request/thread/run/scope binding, expiry,
+deduplication, revocation and privacy controls. See
+[ADR 016](../../docs/adr/016-queued-human-input.md). Reinstall/new-session pickup
+and native renderer acceptance are separate from source/transport tests.
+
 ## Install
 
 ```bash

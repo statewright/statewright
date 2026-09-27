@@ -6,8 +6,13 @@ import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.m
 import { summarizeStatewrightToolCompletion } from "./statewright-tool-summary.mjs";
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
+import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
 function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "").trim();
+}
+
+function rpcIdKey(id) {
+  return JSON.stringify([typeof id, id]);
 }
 
 /**
@@ -440,12 +445,13 @@ export async function startCodexAppServerRouteProxy({
     let protocolFailed = false;
     const internalRpc = async (method, params) => {
       const id = `statewright-provider-switch-${++internalSequence}`;
+      const idKey = rpcIdKey(id);
       const response = new Promise((resolveResponse, rejectResponse) => {
         const timer = setTimeout(() => {
-          internalRequests.delete(id);
+          internalRequests.delete(idKey);
           rejectResponse(new Error(`Codex App Server timed out switching provider during ${method}.`));
         }, 12_000);
-        internalRequests.set(id, { resolve: resolveResponse, reject: rejectResponse, timer });
+        internalRequests.set(idKey, { resolve: resolveResponse, reject: rejectResponse, timer });
       });
       await forwardPayload(upstream, JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       return response;
@@ -695,7 +701,7 @@ export async function startCodexAppServerRouteProxy({
           await waitForRequiredMcpTool(message.params.threadId, checkCurrentRequest);
         }
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
-        if (message.id !== undefined && message.method) requestMethods.set(String(message.id), message.method);
+        if (message.id !== undefined && message.method) requestMethods.set(rpcIdKey(message.id), message.method);
         message = applyThreadListCwd(message, threadListCwd);
         const compacted = compactResume && message.method === "thread/resume";
         message = applyCompactResumeRequest(message, compactResume, resumeHistoryLimit);
@@ -712,7 +718,7 @@ export async function startCodexAppServerRouteProxy({
                 throw new Error("Approval parked the prior turn; submit a new turn to continue with the approved route");
               }
             } catch (error) {
-              requestMethods.delete(String(message.id));
+              requestMethods.delete(rpcIdKey(message.id));
               await forwardWhenOpen(downstream, JSON.stringify({ id: message.id,
                 error: { code: -32603, message: error.message } }));
               await reportApprovalFailure(error);
@@ -729,11 +735,12 @@ export async function startCodexAppServerRouteProxy({
           }
           const threadId = String(message.params?.threadId ?? "");
           const requestId = message.id === undefined ? null : String(message.id);
+          const requestKey = message.id === undefined ? null : rpcIdKey(message.id);
           const reason = requestId === null ? Symbol("turn-start") : `turn-start:${requestId}`;
           if (message.method === "turn/start") {
-            provisionalTurn = { requestId, reason, threadId };
+            provisionalTurn = { requestId, requestKey, reason, threadId };
             addActivity(threadId, reason);
-            if (requestId !== null) pendingTurnStarts.set(requestId, provisionalTurn);
+            if (requestKey !== null) pendingTurnStarts.set(requestKey, provisionalTurn);
           }
           const pendingRoute = approvedRelease
             ? await takeApprovedRoute(threadId, approvedRelease.state, approvedRelease.fromState, checkReleaseOwner)
@@ -782,7 +789,7 @@ export async function startCodexAppServerRouteProxy({
         }
         await checkReleaseOwner();
         if (approvedRelease && message.id !== undefined) {
-          pendingApprovalReleases.set(String(message.id), { ...approvedRelease, threadId: message.params.threadId });
+          pendingApprovalReleases.set(rpcIdKey(message.id), { ...approvedRelease, threadId: message.params.threadId });
         }
         await forwardPayload(upstream, payload);
         routeForwarded = true;
@@ -797,7 +804,7 @@ export async function startCodexAppServerRouteProxy({
           await sendPresentation(presentation.cancel(message.params?.threadId, String(message.id))).catch(() => {});
         }
         if (!routeForwarded) {
-          if (message?.id !== undefined) pendingApprovalReleases.delete(String(message.id));
+          if (message?.id !== undefined) pendingApprovalReleases.delete(rpcIdKey(message.id));
           try {
             await releasePendingRoute?.();
           } catch (releaseError) {
@@ -807,7 +814,7 @@ export async function startCodexAppServerRouteProxy({
         releaseRouteLease?.();
         if (provisionalTurn) {
           removeActivity(provisionalTurn.threadId, provisionalTurn.reason);
-          if (provisionalTurn.requestId !== null) pendingTurnStarts.delete(provisionalTurn.requestId);
+          if (provisionalTurn.requestKey !== null) pendingTurnStarts.delete(provisionalTurn.requestKey);
         }
         void onProtocolError({ side: "native_to_upstream", message: error instanceof Error ? error.message : String(error) });
         // A rejected route is a turn-level failure, not a corrupted transport.
@@ -840,6 +847,11 @@ export async function startCodexAppServerRouteProxy({
       const prefaceMessages = [];
       try {
         let notification = JSON.parse(payload);
+        const humanInput = prepareQueuedHumanInput(notification);
+        if (humanInput !== notification) {
+          notification = humanInput;
+          payload = JSON.stringify(notification);
+        }
         const terminal = notification.method === "turn/completed" ? notification.params : null;
         const priorTurn = terminal && presentation.turns.get(terminal.threadId);
         if (terminal?.turn?.status === "interrupted" && priorTurn?.active && priorTurn.id === terminal.turn.id && explainedTurns.get(terminal.threadId) !== terminal.turn.id) {
@@ -873,20 +885,29 @@ export async function startCodexAppServerRouteProxy({
           return;
         }
         presentation.observe(notification);
-        const responseId = notification.id === undefined ? null : String(notification.id);
-        const internal = responseId === null ? null : internalRequests.get(responseId);
+        // JSON-RPC identifiers are scoped independently in each direction.
+        // An App Server request can legally reuse the id of a pending native
+        // client request. Only a result/error object (never an id-bearing
+        // method request) can consume client response correlation state.
+        const isResponse = notification?.method === undefined
+          && notification?.id !== undefined
+          && (Object.prototype.hasOwnProperty.call(notification, "result")
+            || Object.prototype.hasOwnProperty.call(notification, "error"));
+        const responseId = isResponse ? String(notification.id) : null;
+        const responseKey = isResponse ? rpcIdKey(notification.id) : null;
+        const internal = responseKey === null ? null : internalRequests.get(responseKey);
         if (internal) {
-          internalRequests.delete(responseId);
+          internalRequests.delete(responseKey);
           clearTimeout(internal.timer);
           if (notification.error) internal.reject(new Error(notification.error.message ?? "Codex App Server rejected the provider switch."));
           else internal.resolve(notification.result);
           return;
         }
-        const responseTo = responseId === null ? null : requestMethods.get(responseId);
-        if (responseTo) requestMethods.delete(responseId);
-        const approvalRelease = responseId === null ? null : pendingApprovalReleases.get(responseId);
+        const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
+        if (responseTo) requestMethods.delete(responseKey);
+        const approvalRelease = responseKey === null ? null : pendingApprovalReleases.get(responseKey);
         if (approvalRelease) {
-          pendingApprovalReleases.delete(responseId);
+          pendingApprovalReleases.delete(responseKey);
           if (!notification.error && (responseTo === "turn/start" && notification.result?.turn?.id
               || responseTo === "thread/goal/set" && notification.result?.goal?.status === "active")) {
             await gate.assertOwner(approvalRelease.threadId);
@@ -912,9 +933,9 @@ export async function startCodexAppServerRouteProxy({
           if (provider) activeProviders.set(String(notification.result.thread.id), provider);
           if (model) activeModels.set(String(notification.result.thread.id), model);
         }
-        const pendingTurn = responseId === null ? null : pendingTurnStarts.get(responseId);
+        const pendingTurn = responseKey === null ? null : pendingTurnStarts.get(responseKey);
         if (pendingTurn) {
-          pendingTurnStarts.delete(responseId);
+          pendingTurnStarts.delete(responseKey);
           if (notification.error) {
             removeActivity(pendingTurn.threadId, pendingTurn.reason);
             await sendPresentation(presentation.cancel(pendingTurn.threadId, responseId));

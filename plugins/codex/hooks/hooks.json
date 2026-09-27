@@ -8,6 +8,11 @@
             "type": "command",
             "command": "bash \"$PLUGIN_ROOT/hook.sh\" user-prompt",
             "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/scripts/human-input-hook.mjs\"",
+            "timeout": 2000
           }
         ]
       }

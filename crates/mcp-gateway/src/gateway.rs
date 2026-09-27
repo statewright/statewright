@@ -53,6 +53,39 @@ impl Gateway {
             .unwrap_or(true)
     }
 
+    fn authoritative_workflow_definition(
+        workflow_name: &str,
+        catalog_definition: MachineDefinition,
+        durable_definition: Option<serde_json::Value>,
+    ) -> Result<MachineDefinition, String> {
+        let Some(value) = durable_definition else {
+            return Ok(catalog_definition);
+        };
+        let enabled = value
+            .get("meta")
+            .and_then(|meta| meta.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if !enabled {
+            return Err(format!(
+                "Workflow '{}' is disabled and cannot be loaded or resumed.",
+                workflow_name
+            ));
+        }
+        serde_json::from_value(value).map_err(|error| {
+            format!("Stored workflow '{}' is invalid: {}", workflow_name, error)
+        })
+    }
+
+    fn execution_definition(
+        fresh_definition: MachineDefinition,
+        paused_session: Option<&crate::session::GatewaySession>,
+    ) -> MachineDefinition {
+        paused_session
+            .map(|session| session.definition.clone())
+            .unwrap_or(fresh_definition)
+    }
+
     fn available_workflow_names(&self) -> Vec<&str> {
         let mut names = self
             .workflows
@@ -2263,7 +2296,7 @@ impl Gateway {
                 }
 
                 // Clone definition to release immutable borrow before mutable calls
-                let definition = match self.workflows.get(workflow_name).cloned() {
+                let mut definition = match self.workflows.get(workflow_name).cloned() {
                     Some(d) if Self::workflow_enabled(&d) => d,
                     Some(_) => {
                         return JsonRpcResponse::success(
@@ -2301,23 +2334,22 @@ impl Gateway {
                     .await;
                     match stored {
                         Ok(Some(value)) => {
-                            let enabled = value
-                                .get("meta")
-                                .and_then(|meta| meta.get("enabled"))
-                                .and_then(serde_json::Value::as_bool)
-                                .unwrap_or(true);
-                            if !enabled {
-                                return JsonRpcResponse::success(
-                                    id,
-                                    serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                        format!(
-                                            "Workflow '{}' is disabled and cannot be loaded or resumed.",
-                                            workflow_name
-                                        ),
-                                    ))
-                                    .unwrap(),
-                                );
-                            }
+                            definition = match Self::authoritative_workflow_definition(
+                                workflow_name,
+                                definition,
+                                Some(value),
+                            ) {
+                                Ok(definition) => definition,
+                                Err(error) => {
+                                    return JsonRpcResponse::success(
+                                        id,
+                                        serde_json::to_value(
+                                            crate::protocol::ToolCallResult::error(error),
+                                        )
+                                        .unwrap(),
+                                    );
+                                }
+                            };
                         }
                         Ok(None) => {
                             return JsonRpcResponse::success(
@@ -2403,15 +2435,19 @@ impl Gateway {
                 if let Some(limit) = old_limit {
                     self.session_manager.set_plan_limit(&self.session_id, limit);
                 }
+                let execution_definition = Self::execution_definition(
+                    definition,
+                    paused.as_ref().map(|(_, session)| session),
+                );
                 self.active_workflow = Some(workflow_name.to_string());
                 self.project_id = requested_project;
 
-                let capture_output = definition
+                let capture_output = execution_definition
                     .meta
                     .as_ref()
                     .and_then(|m| m.capture_output)
                     .unwrap_or(false);
-                let agent_decision_record = definition
+                let agent_decision_record = execution_definition
                     .meta
                     .as_ref()
                     .and_then(|m| m.extra.get("agent-decision-record"))
@@ -2424,7 +2460,7 @@ impl Gateway {
                     (Some(rid), Some(session.current_state))
                 } else {
                     let rid = self
-                        .record_run_start(workflow_name, &definition.initial)
+                        .record_run_start(workflow_name, &execution_definition.initial)
                         .await;
                     (rid, None)
                 };
@@ -2443,7 +2479,7 @@ impl Gateway {
                         "adr-record".to_string(),
                         child,
                         json!({"adr_path": path, "parent_workflow": workflow_name}),
-                        definition.initial.clone(),
+                        execution_definition.initial.clone(),
                         Some("failed".to_string()),
                     );
                     Some(path)
@@ -2453,7 +2489,7 @@ impl Gateway {
                 let current_state = if adr_path.is_some() {
                     "record"
                 } else {
-                    resumed_state.as_deref().unwrap_or(&definition.initial)
+                    resumed_state.as_deref().unwrap_or(&execution_definition.initial)
                 };
                 let context_budget =
                     self.session_manager
@@ -2481,7 +2517,7 @@ impl Gateway {
                 let result = json!({
                     "loaded": workflow_name,
                     "initial_state": current_state,
-                    "states": definition.states.keys().collect::<Vec<_>>(),
+                    "states": execution_definition.states.keys().collect::<Vec<_>>(),
                     "run_id": run_id,
                     "capture_output": capture_output,
                     "resumed": resumed_state.is_some(),
@@ -3005,6 +3041,58 @@ mod tests {
             "guards": {}
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn durable_definition_replaces_stale_catalog_and_invalid_json_fails_closed() {
+        let stale_catalog = test_definition();
+        let durable = json!({
+            "id": "test",
+            "initial": "commit",
+            "states": {
+                "commit": { "type": "final" }
+            },
+            "guards": {}
+        });
+
+        let selected = Gateway::authoritative_workflow_definition(
+            "test",
+            stale_catalog,
+            Some(durable),
+        )
+        .unwrap();
+        assert_eq!(selected.initial, "commit");
+        assert_eq!(selected.states.len(), 1);
+        assert!(Gateway::authoritative_workflow_definition(
+            "test",
+            test_definition(),
+            Some(json!({"id": "test"})),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn resume_uses_the_checkpoint_definition_for_execution_metadata() {
+        let fresh_definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "test",
+            "initial": "commit",
+            "meta": { "capture_output": true },
+            "states": { "commit": { "type": "final" } },
+            "guards": {}
+        }))
+        .unwrap();
+        let paused = crate::session::GatewaySession::new(
+            "test-session".into(),
+            test_definition(),
+        );
+
+        let effective = Gateway::execution_definition(fresh_definition, Some(&paused));
+        assert_eq!(effective.initial, "planning");
+        assert_eq!(effective.states.len(), 4);
+        assert_eq!(
+            effective.meta.as_ref().and_then(|meta| meta.capture_output),
+            None
+        );
     }
 
     fn test_workflows() -> HashMap<String, MachineDefinition> {
@@ -4162,6 +4250,28 @@ mod tests {
         assert_eq!(gateway.session_manager.get("test-session").unwrap().checkpoint(), before_checkpoint);
         assert_eq!(gateway.session_id, before_session_id);
         assert_eq!(gateway.active_workflow, before_active);
+
+        // The remote catalog still supplies test_definition(), which has more
+        // states. With durable storage configured, loading must execute the
+        // same owner-scoped durable definition returned above.
+        let response = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_load_workflow",
+                    "arguments": { "name": "test" }
+                })),
+                id: Some(json!(2)),
+            })
+            .await
+            .unwrap();
+        let response = tool_result_json(response);
+        assert_eq!(response["states"], json!(["planning"]));
+        assert_eq!(
+            gateway.session_manager.get("test-session").unwrap().definition.states.len(),
+            1
+        );
         pool.close().await;
     }
 

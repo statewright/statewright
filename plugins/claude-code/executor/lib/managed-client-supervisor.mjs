@@ -547,9 +547,13 @@ async function nextRouteRequest(controlDir, consumed) {
     .filter((name) => name === "route.json" || name.endsWith(".route.json"))
     .sort();
   for (const name of entries) {
-    if (consumed.has(name)) continue;
-    const request = JSON.parse(await readFile(join(controlDir, name), "utf8"));
-    consumed.add(name);
+    const contents = await readFile(join(controlDir, name), "utf8");
+    // Native hooks atomically overwrite current.route.json at each state
+    // boundary. Deduplicating only by filename permanently blacklists every
+    // route after the first one, so remember the exact receipt instead.
+    if (consumed.get(name) === contents) continue;
+    const request = JSON.parse(contents);
+    consumed.set(name, contents);
     return request;
   }
   return null;
@@ -573,7 +577,7 @@ export async function runManagedClient({ host, command, args, environment = proc
   const launchPrefixArgs = launch.prefixArgs;
   const oneShotCodexExec = codexOneShotInvocation(host, args);
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
-  const consumed = new Set();
+  const consumed = new Map();
   const consumedApprovals = new Set();
   const preparedApprovals = new Set();
   const approvalRetryAfter = new Map();

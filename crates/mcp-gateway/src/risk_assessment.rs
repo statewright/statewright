@@ -237,7 +237,7 @@ impl RiskPipelineAssessment {
             RiskBand::Low if self.effective_risk == RiskBand::Low => ReadOnly,
             RiskBand::Low => LocalWrite,
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => LocalWrite,
-            RiskBand::Moderate => {
+            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Unknown => {
                 if !self.semantic_authorization_enabled { return DenyUncertain; }
                 if !self.has_sufficient_semantic_evidence() { return DenyUncertain; }
                 let Some(vector) = self.semantic.vector.as_ref() else { return DenyUncertain; };
@@ -266,6 +266,7 @@ impl RiskPipelineAssessment {
                     DenyUncertain
                 }
             }
+            RiskBand::Moderate => DenyKnownRisk,
         }
     }
 
@@ -987,7 +988,17 @@ fn pipeline_from_parts(
     semantic: SemanticAssessmentReceipt,
     semantic_authorization_enabled: bool,
 ) -> RiskPipelineAssessment {
-    let effective_risk = semantic_failsafe_floor(deterministic.risk, &semantic);
+    // System One is an opaque-effect fallthrough, not an override for effects
+    // already proven by code. Keep deterministic reads, local writes, and
+    // known high-risk operations authoritative; semantic inference may only
+    // raise the floor of a Moderate/Unknown assessment.
+    let effective_risk = if deterministic.risk == RiskBand::Moderate
+        && deterministic.exposure == ExposureBand::Unknown
+    {
+        semantic_failsafe_floor(deterministic.risk, &semantic)
+    } else {
+        deterministic.risk
+    };
     let semantic_failsafe_escalated = effective_risk != deterministic.risk;
     RiskPipelineAssessment {
         deterministic,
@@ -1561,8 +1572,8 @@ mod tests {
         assert_eq!(pipeline.semantic.status, SemanticAssessorStatus::Assessed);
         assert_eq!(pipeline.semantic.vector.unwrap().external_or_account_effect.get(), 0.95);
         assert_eq!(pipeline.deterministic.risk, RiskBand::Low);
-        assert_eq!(pipeline.effective_risk, RiskBand::High);
-        assert!(pipeline.semantic_failsafe_escalated);
+        assert_eq!(pipeline.effective_risk, RiskBand::Low);
+        assert!(!pipeline.semantic_failsafe_escalated);
         let seen = seen_receiver.await.unwrap().to_string();
         assert!(!seen.contains("/private/secret"));
         assert!(seen.contains("shell_shape"));
@@ -1725,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_pipeline_keeps_heuristic_as_floor_and_escalates_only_for_high_confidence_failsafes() {
+    fn visible_pipeline_keeps_proven_deterministic_effects_authoritative() {
         struct Failsafe;
         impl SemanticAssessor for Failsafe {
             fn assess(&self, _: &SemanticAssessmentRequest) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
@@ -1749,11 +1760,11 @@ mod tests {
             &enabled,
         );
         assert_eq!(pipeline.deterministic.risk, RiskBand::Low);
-        assert_eq!(pipeline.effective_risk, RiskBand::Critical);
-        assert!(pipeline.semantic_failsafe_escalated);
+        assert_eq!(pipeline.effective_risk, RiskBand::Low);
+        assert!(!pipeline.semantic_failsafe_escalated);
         let visible = pipeline.visible_json();
         assert_eq!(visible["semantic_status"], "Assessed");
-        assert_eq!(visible["effective_risk"], "Critical");
+        assert_eq!(visible["effective_risk"], "Low");
         assert!(!visible.to_string().contains("/private/secret.txt"));
 
         let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None, None);
@@ -1771,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_failsafe_is_monotonic_across_all_risk_floors_and_fallbacks() {
+    fn semantic_failsafe_is_authoritative_only_for_unknown_effect_fallthroughs() {
         let vector = |may_write, destructive, irreversible, external_or_account_effect| SemanticRiskVector {
             read_only: Probability::new(0.99).unwrap(),
             may_write: Probability::new(may_write).unwrap(),
@@ -1787,14 +1798,15 @@ mod tests {
             state_intent: Some("inspect".to_owned()),
         };
         let cases = [
-            (RiskBand::Low, assessed(vector(0.91, 0.01, 0.01, 0.01)), RiskBand::Moderate, true),
-            (RiskBand::Low, assessed(vector(0.01, 0.01, 0.01, 0.91)), RiskBand::High, true),
-            (RiskBand::Low, assessed(vector(0.01, 0.91, 0.01, 0.01)), RiskBand::Critical, true),
-            (RiskBand::Low, assessed(vector(0.01, 0.01, 0.91, 0.01)), RiskBand::Critical, true),
-            (RiskBand::Critical, assessed(vector(0.01, 0.01, 0.01, 0.01)), RiskBand::Critical, false),
+            (assessment(RiskBand::Low, ExposureBand::Local, "test"), assessed(vector(0.91, 0.91, 0.91, 0.91)), RiskBand::Low, false),
+            (assessment(RiskBand::Moderate, ExposureBand::Local, "test"), assessed(vector(0.01, 0.91, 0.91, 0.91)), RiskBand::Moderate, false),
+            (assessment(RiskBand::Moderate, ExposureBand::Unknown, "test"), assessed(vector(0.91, 0.01, 0.01, 0.01)), RiskBand::Moderate, false),
+            (assessment(RiskBand::Moderate, ExposureBand::Unknown, "test"), assessed(vector(0.01, 0.01, 0.01, 0.91)), RiskBand::High, true),
+            (assessment(RiskBand::Moderate, ExposureBand::Unknown, "test"), assessed(vector(0.01, 0.91, 0.01, 0.01)), RiskBand::Critical, true),
+            (assessment(RiskBand::Critical, ExposureBand::Account, "test"), assessed(vector(0.01, 0.01, 0.01, 0.01)), RiskBand::Critical, false),
         ];
-        for (baseline, semantic, expected, escalated) in cases {
-            let pipeline = pipeline_from_parts(assessment(baseline, ExposureBand::Local, "test"), semantic, false);
+        for (deterministic, semantic, expected, escalated) in cases {
+            let pipeline = pipeline_from_parts(deterministic, semantic, false);
             assert_eq!(pipeline.effective_risk, expected);
             assert_eq!(pipeline.semantic_failsafe_escalated, escalated);
         }
@@ -1948,6 +1960,28 @@ mod tests {
         assert_eq!(stderr_discarding_read.risk, RiskBand::Low);
         assert_eq!(stderr_discarding_read.exposure, ExposureBand::Local);
 
+        let hostile_semantic_receipt = SemanticAssessmentReceipt {
+            tool: "exec_command".to_owned(),
+            status: SemanticAssessorStatus::Assessed,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(0.19).unwrap(),
+                may_write: Probability::new(0.86).unwrap(),
+                reversible: Probability::new(0.22).unwrap(),
+                destructive: Probability::new(0.77).unwrap(),
+                irreversible: Probability::new(0.78).unwrap(),
+                external_or_account_effect: Probability::new(0.73).unwrap(),
+            }),
+            state_intent: Some("localize".to_owned()),
+        };
+        let pipeline = pipeline_from_parts(
+            stderr_discarding_read,
+            hostile_semantic_receipt,
+            true,
+        );
+        assert_eq!(pipeline.effective_risk, RiskBand::Low);
+        assert!(!pipeline.semantic_failsafe_escalated);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);
+
         let sed_lookalike = assess_invocation(
             None,
             "exec_command",
@@ -2013,6 +2047,25 @@ mod tests {
         assert_eq!(shadow_only.resolve_effect(), ResolvedEffect::DenyUncertain);
 
         let confident_read = assessed(vector(0.99, 0.01, 0.99, 0.0, 0.0, 0.0));
+
+        let external_writer: ToolInfo = serde_json::from_value(json!({
+            "name":"update_task", "inputSchema":{}, "annotations":{"openWorldHint":true}
+        })).unwrap();
+        let external_pipeline = pipeline_from_parts(
+            assess_invocation(
+                Some(&external_writer),
+                "update_task",
+                &json!({"task":"private-task"}),
+                Some("implement"),
+            ),
+            confident_read.clone(),
+            true,
+        );
+        assert_eq!(external_pipeline.deterministic.risk, RiskBand::Moderate);
+        assert_eq!(external_pipeline.deterministic.exposure, ExposureBand::External);
+        assert_eq!(external_pipeline.effective_risk, RiskBand::Moderate);
+        assert_eq!(external_pipeline.resolve_effect(), ResolvedEffect::DenyKnownRisk);
+
         let missing_shape = RiskPipelineAssessment {
             deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux $(secret-helper)"}), None),
             effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic: confident_read.clone(),
@@ -2055,7 +2108,7 @@ mod tests {
             assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyKnownRisk);
         }
 
-        let escalated = pipeline_from_parts(
+        let proven_read = pipeline_from_parts(
             assess_invocation(None, "read_file", &json!({"path":"README.md"}), None),
             SemanticAssessmentReceipt {
                 tool: "read_file".into(), status: SemanticAssessorStatus::Assessed,
@@ -2067,7 +2120,7 @@ mod tests {
             },
             true,
         );
-        assert_eq!(escalated.effective_risk, RiskBand::Critical);
-        assert_eq!(escalated.resolve_effect(), ResolvedEffect::DenyKnownRisk);
+        assert_eq!(proven_read.effective_risk, RiskBand::Low);
+        assert_eq!(proven_read.resolve_effect(), ResolvedEffect::ReadOnly);
     }
 }

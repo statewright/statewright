@@ -1,7 +1,7 @@
 use statewright_agent::tool_enforcer;
 use statewright_engine::resolve_transition;
 
-use crate::{bash_classifier, session::GatewaySession};
+use crate::{bash_classifier, risk_assessment::{ResolvedEffect, RiskPipelineAssessment}, session::GatewaySession};
 
 const UNTRUSTED_EXPLORATORY_ADAPTER: &str = "__statewright_untrusted_exploratory_adapter__";
 
@@ -223,6 +223,61 @@ pub fn enforce_tool_call(session: &GatewaySession, tool_name: &str) -> Enforceme
     }
 }
 
+fn uses_semantic_effect_policy(session: &GatewaySession) -> bool {
+    session.context.get("tool_policy_mode").and_then(|value| value.as_str())
+        == Some("blacklist_heuristic_v1")
+}
+
+/// Deny known-risk or unresolved effects before ordinary enforcement. This
+/// gate is state-independent and therefore safe to apply before a transition.
+pub fn semantic_effect_risk_denial(
+    session: &GatewaySession,
+    pipeline: &RiskPipelineAssessment,
+) -> Option<String> {
+    if !uses_semantic_effect_policy(session) {
+        return None;
+    }
+    match pipeline.resolve_effect() {
+        ResolvedEffect::DenyKnownRisk => Some(
+            "Operation has a known destructive, irreversible, or external effect and requires a separate approved execution path.".into()
+        ),
+        ResolvedEffect::DenyUncertain => Some(
+            "Operation effect remains uncertain after System One assessment; failing closed.".into()
+        ),
+        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite => None,
+    }
+}
+
+/// Apply explicit capability denials after ordinary enforcement has selected
+/// the state in which the operation will actually execute.
+pub fn semantic_effect_capability_denial(
+    execution_session: &GatewaySession,
+    pipeline: &RiskPipelineAssessment,
+) -> Option<String> {
+    if !uses_semantic_effect_policy(execution_session) {
+        return None;
+    }
+    let explicitly_denied = |capability: &str| {
+        tool_enforcer::tool_is_explicitly_disallowed(
+            &execution_session.definition,
+            &execution_session.current_state,
+            capability,
+        )
+    };
+    match pipeline.resolve_effect() {
+        ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(format!(
+            "Read-only effect is explicitly blocked in state '{}'.",
+            execution_session.current_state
+        )),
+        ResolvedEffect::LocalWrite if explicitly_denied("Write") => Some(format!(
+            "Local write effect is explicitly blocked in state '{}'.",
+            execution_session.current_state
+        )),
+        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite
+        | ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +322,104 @@ mod tests {
             mgr.update_state("test", state.into(), json!({}));
         }
         mgr.get("test").unwrap()
+    }
+
+    fn blacklist_session(disallowed: &[&str]) -> GatewaySession {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "blacklist", "initial": "inspect",
+            "context": {"tool_policy_mode":"blacklist_heuristic_v1"},
+            "states": {
+                "inspect": {"disallowed_tools": disallowed, "on": {"DONE":"done"}},
+                "done": {"type":"final"}
+            }
+        })).unwrap();
+        GatewaySession::new("blacklist".into(), definition)
+    }
+
+    fn semantic_pipeline(command: &str, vector: Option<crate::risk_assessment::SemanticRiskVector>)
+        -> crate::risk_assessment::RiskPipelineAssessment
+    {
+        use crate::risk_assessment::{SemanticAssessmentReceipt, SemanticAssessorStatus};
+        let deterministic = crate::risk_assessment::assess_invocation(
+            None, "exec_command", &json!({"cmd":command}), Some("inspect")
+        );
+        let effective_risk = deterministic.risk;
+        RiskPipelineAssessment {
+            deterministic,
+            semantic: SemanticAssessmentReceipt {
+                tool: "exec_command".into(),
+                status: if vector.is_some() { SemanticAssessorStatus::Assessed } else { SemanticAssessorStatus::Unavailable },
+                vector,
+                state_intent: Some("inspect".into()),
+            },
+            effective_risk,
+            semantic_failsafe_escalated: false,
+            semantic_authorization_enabled: true,
+        }
+    }
+
+    #[test]
+    fn blacklist_semantic_effect_policy_applies_explicit_capabilities_and_fails_closed() {
+        use crate::risk_assessment::{Probability, SemanticRiskVector};
+        let read_vector = || SemanticRiskVector {
+            read_only: Probability::new(0.98).unwrap(),
+            may_write: Probability::new(0.01).unwrap(),
+            reversible: Probability::new(0.99).unwrap(),
+            destructive: Probability::new(0.01).unwrap(),
+            irreversible: Probability::new(0.01).unwrap(),
+            external_or_account_effect: Probability::new(0.01).unwrap(),
+        };
+        let open = blacklist_session(&[]);
+        assert!(semantic_effect_risk_denial(&open, &semantic_pipeline("rg policy src", None)).is_none());
+        assert!(semantic_effect_capability_denial(&open, &semantic_pipeline("rg policy src", None)).is_none());
+        assert!(semantic_effect_capability_denial(&open, &semantic_pipeline("cp source-file local-file", None)).is_none());
+        assert!(semantic_effect_risk_denial(
+            &open,
+            &semantic_pipeline("tmux capture-pane -p -t private-pane", Some(read_vector())),
+        ).is_none());
+        assert!(semantic_effect_risk_denial(
+            &open,
+            &semantic_pipeline("tmux capture-pane -p", None),
+        ).unwrap().contains("uncertain"));
+        assert!(semantic_effect_risk_denial(
+            &open,
+            &semantic_pipeline("git push origin main", Some(read_vector())),
+        ).unwrap().contains("known"));
+
+        let no_read = blacklist_session(&["Read"]);
+        assert!(semantic_effect_capability_denial(&no_read, &semantic_pipeline("rg policy src", None)).is_some());
+        let no_write = blacklist_session(&["Write"]);
+        assert!(semantic_effect_capability_denial(&no_write, &semantic_pipeline("cp source-file local-file", None)).is_some());
+
+        let legacy = session_at("unrestricted");
+        assert!(semantic_effect_risk_denial(
+            &legacy,
+            &semantic_pipeline("git push origin main", Some(read_vector())),
+        ).is_none());
+    }
+
+    #[test]
+    fn semantic_capability_policy_applies_after_the_selected_execution_state() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id":"transition", "initial":"inspect",
+            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "states": {
+                "inspect":{"allowed_tools":["Read"], "disallowed_tools":["Write"], "on":{"IMPLEMENT":"implement"}},
+                "implement":{"allowed_tools":["Read","Edit","Write"], "on":{"DONE":"done"}},
+                "done":{"type":"final"}
+            }
+        })).unwrap();
+        let current = GatewaySession::new("transition".into(), definition);
+        let pipeline = semantic_pipeline("cp source-file local-file", None);
+        assert!(semantic_effect_risk_denial(&current, &pipeline).is_none());
+        assert!(semantic_effect_capability_denial(&current, &pipeline).is_some());
+        assert!(matches!(
+            enforce_tool_call(&current, "Edit"),
+            EnforcementDecision::ImplicitTransition { ref new_state, .. } if new_state == "implement"
+        ));
+        let mut execution = current.clone();
+        execution.current_state = "implement".into();
+        assert!(semantic_effect_capability_denial(&execution, &pipeline).is_none());
     }
 
     #[test]

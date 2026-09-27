@@ -26,6 +26,8 @@ Effect resolution is not itself permission. A resolved local write must still pa
 
 Remote evaluation receives a bounded command shape: executable, a proven first operation word for a small known command family, and whether the command delegates an omitted effect. It never receives command text, flags, operands, paths, queries, payloads, option values, or credentials. A local open-weight evaluator may use richer inputs behind the same typed contract, but it must emit the same probability vector and is subject to the same code-owned thresholds.
 
+The authoritative path is enabled explicitly with `STATEWRIGHT_SYSTEM_ONE_FALLTHROUGH=true`. `STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND=typesafe_system_one` uses the TypeSafe System One endpoint and `jev-latest` by default, with credentials supplied through `TYPESAFE_API_KEY` or the provider-specific token variable. `openai_compatible` keeps the same typed contract for a local/open-weight endpoint and never inherits a TypeSafe credential. The older staging shadow flag always remains telemetry-only; authorization additionally requires explicit fallthrough enablement and a workflow selecting `blacklist_heuristic_v1`.
+
 Standalone hooks and executor-owned adapters must consume the same gateway decision contract. Shell-specific pattern additions are not an accepted repair for opaque operations.
 
 ## Alternatives rejected

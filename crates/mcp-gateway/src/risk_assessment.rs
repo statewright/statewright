@@ -1,8 +1,9 @@
 //! Deterministic, provider-neutral pre-tool risk/exposure assessment.
 //!
-//! This is deliberately a shadow primitive: callers keep their existing
-//! authorization checks. The assessment contains no arguments or payloads so
-//! it is safe to log as a bounded staging receipt.
+//! Deterministic classifications remain authoritative for known effects. In
+//! blacklist/heuristic mode, callers may use the typed semantic result to
+//! resolve an otherwise opaque effect before applying state capabilities. The
+//! assessment contains no arguments or payloads.
 
 use crate::{bash_classifier::{self, OpClass}, protocol::ToolInfo};
 use serde::{Deserialize, Serialize};
@@ -77,23 +78,32 @@ pub enum SemanticAssessorStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticShadowConfig {
     pub enabled: bool,
+    pub authoritative_enabled: bool,
     pub queue_capacity: usize,
 }
 
 impl SemanticShadowConfig {
-    pub fn from_values(environment: Option<&str>, enabled: Option<&str>, capacity: Option<&str>) -> Self {
-        let enabled = matches!(environment, Some("staging")) && shadow_enabled_for(enabled);
+    pub fn from_values(
+        environment: Option<&str>,
+        shadow_enabled: Option<&str>,
+        fallthrough_enabled: Option<&str>,
+        capacity: Option<&str>,
+    ) -> Self {
+        let telemetry_enabled = matches!(environment, Some("staging")) && shadow_enabled_for(shadow_enabled);
+        let authoritative_enabled = shadow_enabled_for(fallthrough_enabled);
+        let enabled = telemetry_enabled || authoritative_enabled;
         let queue_capacity = capacity
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| (1..=1024).contains(value))
             .unwrap_or(64);
-        Self { enabled, queue_capacity }
+        Self { enabled, authoritative_enabled, queue_capacity }
     }
 
     pub fn from_env() -> Self {
         Self::from_values(
             std::env::var("STATEWRIGHT_ENV").ok().as_deref(),
             std::env::var("STATEWRIGHT_SEMANTIC_RISK_ASSESSMENT").ok().as_deref(),
+            std::env::var("STATEWRIGHT_SYSTEM_ONE_FALLTHROUGH").ok().as_deref(),
             std::env::var("STATEWRIGHT_SEMANTIC_RISK_QUEUE_CAPACITY").ok().as_deref(),
         )
     }
@@ -136,6 +146,7 @@ pub struct RiskPipelineAssessment {
     pub semantic: SemanticAssessmentReceipt,
     pub effective_risk: RiskBand,
     pub semantic_failsafe_escalated: bool,
+    pub semantic_authorization_enabled: bool,
 }
 
 impl RiskPipelineAssessment {
@@ -154,6 +165,7 @@ impl RiskPipelineAssessment {
             RiskBand::Low => LocalWrite,
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => LocalWrite,
             RiskBand::Moderate => {
+                if !self.semantic_authorization_enabled { return DenyUncertain; }
                 if !self.has_sufficient_semantic_evidence() { return DenyUncertain; }
                 let Some(vector) = self.semantic.vector.as_ref() else { return DenyUncertain; };
                 if self.semantic.status != SemanticAssessorStatus::Assessed { return DenyUncertain; }
@@ -211,6 +223,7 @@ impl RiskPipelineAssessment {
             "semantic_status": format!("{:?}", self.semantic.status),
             "semantic_vector": vector,
             "semantic_failsafe_escalated": self.semantic_failsafe_escalated,
+            "semantic_authorization_enabled": self.semantic_authorization_enabled,
         })
     }
 }
@@ -222,24 +235,71 @@ pub struct SemanticAssessmentJob {
 
 #[derive(Clone)]
 struct SemanticProviderConfig {
+    kind: SemanticProviderKind,
     endpoint: String,
     model: String,
     bearer_token: Option<String>,
     timeout: std::time::Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticProviderKind {
+    OpenAiCompatible,
+    TypeSafeSystemOne,
+}
+
 impl SemanticProviderConfig {
     fn from_env() -> Option<Self> {
-        let endpoint = std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_URL").ok()?;
-        let model = std::env::var("STATEWRIGHT_SEMANTIC_RISK_MODEL").ok()?;
-        if endpoint.trim().is_empty() || model.trim().is_empty() { return None; }
-        let timeout_ms = std::env::var("STATEWRIGHT_SEMANTIC_RISK_TIMEOUT_MS")
-            .ok().and_then(|value| value.parse::<u64>().ok())
+        Self::from_values(
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND").ok().as_deref(),
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_URL").ok().as_deref(),
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_MODEL").ok().as_deref(),
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_TOKEN").ok().as_deref(),
+            std::env::var("TYPESAFE_API_KEY").ok().as_deref(),
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_TIMEOUT_MS").ok().as_deref(),
+        )
+    }
+
+    fn from_values(
+        explicit_kind: Option<&str>,
+        endpoint: Option<&str>,
+        model: Option<&str>,
+        provider_token: Option<&str>,
+        typesafe_api_key: Option<&str>,
+        timeout_ms: Option<&str>,
+    ) -> Option<Self> {
+        let endpoint = endpoint.filter(|value| !value.trim().is_empty());
+        let kind = match explicit_kind.map(str::trim) {
+            Some("typesafe_system_one" | "typesafe" | "jev") => SemanticProviderKind::TypeSafeSystemOne,
+            Some("openai_compatible" | "openai") => SemanticProviderKind::OpenAiCompatible,
+            Some(_) => return None,
+            None if endpoint.is_some() => SemanticProviderKind::OpenAiCompatible,
+            None if typesafe_api_key.is_some_and(|value| !value.trim().is_empty()) => {
+                SemanticProviderKind::TypeSafeSystemOne
+            }
+            None => SemanticProviderKind::OpenAiCompatible,
+        };
+        let endpoint = endpoint.map(str::to_owned)
+            .or_else(|| (kind == SemanticProviderKind::TypeSafeSystemOne)
+                .then(|| "https://api.typesafe.ai/v1/systemone".to_owned()))?;
+        let model = model.filter(|value| !value.trim().is_empty()).map(str::to_owned)
+            .or_else(|| (kind == SemanticProviderKind::TypeSafeSystemOne)
+                .then(|| "jev-latest".to_owned()))?;
+        let timeout_ms = timeout_ms.and_then(|value| value.parse::<u64>().ok())
             .filter(|value| (50..=5_000).contains(value)).unwrap_or(1_500);
+        let provider_token = provider_token.filter(|value| !value.trim().is_empty()).map(str::to_owned);
+        let bearer_token = match kind {
+            SemanticProviderKind::OpenAiCompatible => provider_token,
+            SemanticProviderKind::TypeSafeSystemOne => provider_token.or_else(|| {
+                typesafe_api_key.filter(|value| !value.trim().is_empty()).map(str::to_owned)
+            }),
+        };
+        if kind == SemanticProviderKind::TypeSafeSystemOne && bearer_token.is_none() { return None; }
         Some(Self {
+            kind,
             endpoint: endpoint.trim_end_matches('/').to_owned(),
             model,
-            bearer_token: std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_TOKEN").ok().filter(|value| !value.is_empty()),
+            bearer_token,
             timeout: std::time::Duration::from_millis(timeout_ms),
         })
     }
@@ -293,6 +353,24 @@ struct SemanticVectorWire {
     irreversible: f32, external_or_account_effect: f32,
 }
 
+#[derive(Deserialize)]
+struct TypeSafeProviderResponse { answers: TypeSafeAnswers }
+#[derive(Deserialize)]
+struct TypeSafeAnswers {
+    read_only: TypeSafeNoulAnswer,
+    may_write: TypeSafeNoulAnswer,
+    reversible: TypeSafeNoulAnswer,
+    destructive: TypeSafeNoulAnswer,
+    irreversible: TypeSafeNoulAnswer,
+    external_or_account_effect: TypeSafeNoulAnswer,
+}
+#[derive(Deserialize)]
+struct TypeSafeNoulAnswer {
+    #[serde(rename = "type")]
+    answer_type: String,
+    noul: f32,
+}
+
 async fn assess_with_provider(
     client: &reqwest::Client,
     provider: &SemanticProviderConfig,
@@ -305,16 +383,36 @@ async fn assess_with_provider(
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
     });
-    let body = serde_json::json!({
-        "model": provider.model,
-        "temperature": 0.0,
-        "max_tokens": 160,
-        "messages": [
-            {"role":"system","content":"Return JSON only with independent numbers 0..1: read_only, may_write, reversible, destructive, irreversible, external_or_account_effect. Assess only the supplied redacted operation shape."},
-            {"role":"user","content": request_shape.to_string()}
-        ]
-    });
-    let mut call = client.post(format!("{}/chat/completions", provider.endpoint)).json(&body);
+    let (url, body) = match provider.kind {
+        SemanticProviderKind::OpenAiCompatible => (
+            format!("{}/chat/completions", provider.endpoint),
+            serde_json::json!({
+                "model": provider.model,
+                "temperature": 0.0,
+                "max_tokens": 160,
+                "messages": [
+                    {"role":"system","content":"Return JSON only with independent numbers 0..1: read_only, may_write, reversible, destructive, irreversible, external_or_account_effect. Assess only the supplied redacted operation shape."},
+                    {"role":"user","content": request_shape.to_string()}
+                ]
+            }),
+        ),
+        SemanticProviderKind::TypeSafeSystemOne => (
+            provider.endpoint.clone(),
+            serde_json::json!({
+                "state": request_shape,
+                "model": provider.model,
+                "questions": {
+                    "read_only": {"type":"noul", "instructions":"Does this operation only observe state without changing local, remote, or account state?"},
+                    "may_write": {"type":"noul", "instructions":"May this operation change local files, processes, sessions, or configuration?"},
+                    "reversible": {"type":"noul", "instructions":"If this operation changes state, is the change locally reversible without external coordination?"},
+                    "destructive": {"type":"noul", "instructions":"May this operation delete, overwrite, corrupt, or terminate resources?"},
+                    "irreversible": {"type":"noul", "instructions":"May this operation cause an effect that cannot be reliably undone?"},
+                    "external_or_account_effect": {"type":"noul", "instructions":"May this operation change remote, network, hosted-service, or user-account state?"}
+                }
+            }),
+        ),
+    };
+    let mut call = client.post(url).json(&body);
     if let Some(token) = &provider.bearer_token { call = call.bearer_auth(token); }
     let response = call.send().await.map_err(|error| {
         if error.is_timeout() { SemanticAssessorStatus::Timeout } else { SemanticAssessorStatus::Unavailable }
@@ -322,12 +420,35 @@ async fn assess_with_provider(
     let body = response.bytes().await.map_err(|error| {
         if error.is_timeout() { SemanticAssessorStatus::Timeout } else { SemanticAssessorStatus::Unavailable }
     })?;
-    let envelope: SemanticProviderResponse = serde_json::from_slice(&body)
-        .map_err(|_| SemanticAssessorStatus::Malformed)?;
-    let content = envelope.choices.into_iter().next().and_then(|choice| choice.message.content)
-        .ok_or(SemanticAssessorStatus::Malformed)?;
-    let wire: SemanticVectorWire = serde_json::from_str(content.trim().trim_matches('`').trim_start_matches("json"))
-        .map_err(|_| SemanticAssessorStatus::Malformed)?;
+    let wire = match provider.kind {
+        SemanticProviderKind::OpenAiCompatible => {
+            let envelope: SemanticProviderResponse = serde_json::from_slice(&body)
+                .map_err(|_| SemanticAssessorStatus::Malformed)?;
+            let content = envelope.choices.into_iter().next().and_then(|choice| choice.message.content)
+                .ok_or(SemanticAssessorStatus::Malformed)?;
+            serde_json::from_str(content.trim().trim_matches('`').trim_start_matches("json"))
+                .map_err(|_| SemanticAssessorStatus::Malformed)?
+        }
+        SemanticProviderKind::TypeSafeSystemOne => {
+            let envelope: TypeSafeProviderResponse = serde_json::from_slice(&body)
+                .map_err(|_| SemanticAssessorStatus::Malformed)?;
+            let answers = envelope.answers;
+            if [
+                &answers.read_only, &answers.may_write, &answers.reversible,
+                &answers.destructive, &answers.irreversible, &answers.external_or_account_effect,
+            ].iter().any(|answer| answer.answer_type != "noul") {
+                return Err(SemanticAssessorStatus::Malformed);
+            }
+            SemanticVectorWire {
+                read_only: answers.read_only.noul,
+                may_write: answers.may_write.noul,
+                reversible: answers.reversible.noul,
+                destructive: answers.destructive.noul,
+                irreversible: answers.irreversible.noul,
+                external_or_account_effect: answers.external_or_account_effect.noul,
+            }
+        }
+    };
     Ok(SemanticRiskVector {
         read_only: Probability::new(wire.read_only).map_err(|_| SemanticAssessorStatus::Malformed)?,
         may_write: Probability::new(wire.may_write).map_err(|_| SemanticAssessorStatus::Malformed)?,
@@ -664,6 +785,7 @@ pub fn assess_pipeline(
     arguments: &serde_json::Value,
     state_intent: Option<&str>,
 ) -> RiskPipelineAssessment {
+    let config = SemanticShadowConfig::from_env();
     let deterministic = assess_invocation(tool, tool_name, arguments, state_intent);
     emit_shadow(tool_name, &deterministic);
     let semantic = deterministic
@@ -676,11 +798,12 @@ pub fn assess_pipeline(
             vector: None,
             state_intent: None,
         });
-    pipeline_from_parts(deterministic, semantic)
+    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
 }
 
 /// Async visible form for hook and adapter responses. It waits only for the
-/// configured bounded provider window and never changes authorization.
+/// configured bounded provider window. Callers may consume an assessed vector
+/// only when the pipeline carries explicit authorization provenance.
 pub async fn assess_pipeline_visible(
     tool: Option<&ToolInfo>, tool_name: &str, arguments: &serde_json::Value, state_intent: Option<&str>,
 ) -> RiskPipelineAssessment {
@@ -715,7 +838,7 @@ async fn assess_pipeline_visible_with_runtime(
         Some(request) => submit_semantic_pipeline_visible_with(config, runtime, timeout, request).await,
         None => SemanticAssessmentReceipt { tool: "unknown".to_owned(), status: SemanticAssessorStatus::Malformed, vector: None, state_intent: None },
     };
-    pipeline_from_parts(deterministic, semantic)
+    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
 }
 
 /// Provider-injected form used by a future calibrated worker and focused
@@ -760,12 +883,13 @@ fn assess_pipeline_with_config<A: SemanticAssessor>(
             None => semantic_receipt(request, SemanticAssessorStatus::Unavailable),
         },
     };
-    pipeline_from_parts(deterministic, semantic)
+    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
 }
 
 fn pipeline_from_parts(
     deterministic: ShadowAssessment,
     semantic: SemanticAssessmentReceipt,
+    semantic_authorization_enabled: bool,
 ) -> RiskPipelineAssessment {
     let effective_risk = semantic_failsafe_floor(deterministic.risk, &semantic);
     let semantic_failsafe_escalated = effective_risk != deterministic.risk;
@@ -774,6 +898,7 @@ fn pipeline_from_parts(
         semantic,
         effective_risk,
         semantic_failsafe_escalated,
+        semantic_authorization_enabled,
     }
 }
 
@@ -1088,7 +1213,7 @@ mod tests {
         let deterministic = take_test_shadow_receipts();
         let request = assessment.semantic_request.as_ref().unwrap();
         let semantic = dispatch_semantic_shadow(
-            &SemanticShadowConfig::from_values(Some("production"), Some("true"), None),
+            &SemanticShadowConfig::from_values(Some("production"), Some("true"), None, None),
             None,
             request,
         )
@@ -1191,12 +1316,34 @@ mod tests {
 
     #[test]
     fn semantic_config_requires_staging_and_bounds_queue_capacity() {
-        assert!(!SemanticShadowConfig::from_values(Some("production"), Some("true"), Some("2")).enabled);
-        let configured = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("2"));
+        assert!(!SemanticShadowConfig::from_values(Some("production"), Some("true"), None, Some("2")).enabled);
+        assert!(SemanticShadowConfig::from_values(Some("production"), None, Some("true"), Some("2")).enabled);
+        let configured = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("2"));
         assert!(configured.enabled);
         assert_eq!(configured.queue_capacity, 2);
-        assert_eq!(SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("0")).queue_capacity, 64);
-        assert_eq!(SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("2048")).queue_capacity, 64);
+        assert_eq!(SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("0")).queue_capacity, 64);
+        assert_eq!(SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("2048")).queue_capacity, 64);
+    }
+
+    #[test]
+    fn provider_config_never_forwards_an_ambient_typesafe_key_to_local_openai() {
+        for kind in [Some("openai_compatible"), None] {
+            let local = SemanticProviderConfig::from_values(
+                kind,
+                Some("http://127.0.0.1:11434/v1"),
+                Some("local-model"),
+                None,
+                Some("private-typesafe-key"),
+                None,
+            ).unwrap();
+            assert_eq!(local.kind, SemanticProviderKind::OpenAiCompatible);
+            assert!(local.bearer_token.is_none());
+        }
+        let typesafe = SemanticProviderConfig::from_values(
+            None, None, None, None, Some("private-typesafe-key"), None,
+        ).unwrap();
+        assert_eq!(typesafe.kind, SemanticProviderKind::TypeSafeSystemOne);
+        assert_eq!(typesafe.bearer_token.as_deref(), Some("private-typesafe-key"));
     }
 
     #[tokio::test]
@@ -1218,8 +1365,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-        let config = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
-        let provider = SemanticProviderConfig { endpoint, model: "test".into(), bearer_token: None, timeout: std::time::Duration::from_secs(1) };
+        let config = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
+        let provider = SemanticProviderConfig { kind: SemanticProviderKind::OpenAiCompatible, endpoint, model: "test".into(), bearer_token: None, timeout: std::time::Duration::from_secs(1) };
         let (receipt_sender, _receipt_receiver) = mpsc::channel(1);
         let runtime = start_semantic_shadow_runtime(&config, receipt_sender, provider.clone());
         let pipeline = assess_pipeline_visible_with_runtime(
@@ -1239,6 +1386,62 @@ mod tests {
         let seen = seen_receiver.await.unwrap().to_string();
         assert!(!seen.contains("/private/secret"));
         assert!(seen.contains("shell_shape"));
+    }
+
+    #[tokio::test]
+    async fn typesafe_system_one_provider_uses_typed_nouls_and_redacted_state() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
+        let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));
+        let app = Router::new().route("/v1/systemone", post({
+            let seen_sender = seen_sender.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let seen_sender = seen_sender.clone();
+                async move {
+                    if let Some(sender) = seen_sender.lock().unwrap().take() { let _ = sender.send(body); }
+                    Json(json!({
+                        "model":"jev-test",
+                        "answers": {
+                            "read_only":{"type":"noul","noul":0.98},
+                            "may_write":{"type":"noul","noul":0.01},
+                            "reversible":{"type":"noul","noul":0.99},
+                            "destructive":{"type":"noul","noul":0.01},
+                            "irreversible":{"type":"noul","noul":0.01},
+                            "external_or_account_effect":{"type":"noul","noul":0.01}
+                        },
+                        "usage":{"input_tokens":1,"output_tokens":1}
+                    }))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/systemone", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let provider = SemanticProviderConfig {
+            kind: SemanticProviderKind::TypeSafeSystemOne,
+            endpoint,
+            model: "jev-latest".into(),
+            bearer_token: Some("test-token".into()),
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let request = semantic_request(
+            None,
+            "exec_command",
+            &json!({"cmd":"tmux capture-pane -p -t private-client-pane"}),
+            Some("inspect"),
+            true,
+        );
+        let client = reqwest::Client::builder().timeout(provider.timeout).build().unwrap();
+        let vector = assess_with_provider(&client, &provider, &request).await.unwrap();
+        assert_eq!(vector.read_only.get(), 0.98);
+        let seen = seen_receiver.await.unwrap();
+        assert_eq!(seen["model"], "jev-latest");
+        assert_eq!(seen["questions"]["read_only"]["type"], "noul");
+        assert!(seen["questions"].as_object().is_some_and(|questions| questions.len() == 6));
+        let rendered = seen.to_string();
+        assert!(rendered.contains("capture-pane"));
+        assert!(!rendered.contains("private-client-pane"));
     }
 
     #[tokio::test]
@@ -1262,6 +1465,7 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let provider = SemanticProviderConfig {
+            kind: SemanticProviderKind::OpenAiCompatible,
             endpoint,
             model: "test".into(),
             bearer_token: None,
@@ -1294,13 +1498,14 @@ mod tests {
             Some("inspect"),
             false,
         );
-        let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None);
+        let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None, None);
         let disabled_receipt = dispatch_semantic_shadow(&disabled, None, &request).unwrap();
         assert_eq!(disabled_receipt.status, SemanticAssessorStatus::Disabled);
 
-        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
+        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(1);
         let provider = SemanticProviderConfig {
+            kind: SemanticProviderKind::OpenAiCompatible,
             endpoint: "http://127.0.0.1:1".into(), model: "test".into(), bearer_token: None,
             timeout: std::time::Duration::from_millis(50),
         };
@@ -1350,7 +1555,7 @@ mod tests {
                 })
             }
         }
-        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None);
+        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, None);
         let pipeline = assess_pipeline_with_config(
             None,
             "read_file",
@@ -1367,7 +1572,7 @@ mod tests {
         assert_eq!(visible["effective_risk"], "Critical");
         assert!(!visible.to_string().contains("/private/secret.txt"));
 
-        let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None);
+        let disabled = SemanticShadowConfig::from_values(Some("production"), Some("true"), None, None);
         let unavailable = assess_pipeline_with_config::<Failsafe>(
             None,
             "read_file",
@@ -1405,7 +1610,7 @@ mod tests {
             (RiskBand::Critical, assessed(vector(0.01, 0.01, 0.01, 0.01)), RiskBand::Critical, false),
         ];
         for (baseline, semantic, expected, escalated) in cases {
-            let pipeline = pipeline_from_parts(assessment(baseline, ExposureBand::Local, "test"), semantic);
+            let pipeline = pipeline_from_parts(assessment(baseline, ExposureBand::Local, "test"), semantic, false);
             assert_eq!(pipeline.effective_risk, expected);
             assert_eq!(pipeline.semantic_failsafe_escalated, escalated);
         }
@@ -1422,6 +1627,7 @@ mod tests {
             let pipeline = pipeline_from_parts(
                 assessment(RiskBand::Critical, ExposureBand::Account, "test"),
                 semantic_receipt(&request, status),
+                false,
             );
             assert_eq!(pipeline.effective_risk, RiskBand::Critical, "{status:?}");
             assert!(!pipeline.semantic_failsafe_escalated, "{status:?}");
@@ -1441,7 +1647,7 @@ mod tests {
                 unreachable!("the unavailable replay path must not invoke an assessor")
             }
         }
-        let staging = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None);
+        let staging = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, None);
         for (command, expected_risk, expected_exposure) in [
             (
                 "git add plugins/executor/lib/workflow-preamble.mjs plugins/executor/lib/host-adapters.mjs plugins/executor/lib/managed-client-supervisor.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/managed-client-supervisor.test.mjs",
@@ -1475,7 +1681,7 @@ mod tests {
     #[test]
     fn visible_pipeline_submission_reports_the_actual_queue_full_outcome() {
         let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), None, false);
-        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("1"));
+        let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
         let (queue, _receiver) = SemanticAssessmentQueue::new(1);
         assert!(queue.try_submit(request.clone()).is_ok());
         let runtime = SemanticShadowRuntime { queue };
@@ -1495,6 +1701,7 @@ mod tests {
         let pipeline = |semantic| RiskPipelineAssessment {
             deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux capture-pane -p"}), None),
             effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic,
+            semantic_authorization_enabled: true,
         };
         let assessed = |value| SemanticAssessmentReceipt {
             tool: "exec_command".into(), status: SemanticAssessorStatus::Assessed,
@@ -1506,10 +1713,20 @@ mod tests {
         let request = semantic_request(None, "exec_command", &json!({"cmd":"unknown"}), None, true);
         assert_eq!(pipeline(semantic_receipt(&request, SemanticAssessorStatus::Timeout)).resolve_effect(), ResolvedEffect::DenyUncertain);
 
+        let shadow_only = RiskPipelineAssessment {
+            deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux capture-pane -p"}), None),
+            effective_risk: RiskBand::Moderate,
+            semantic_failsafe_escalated: false,
+            semantic: assessed(vector(0.99, 0.01, 0.99, 0.0, 0.0, 0.0)),
+            semantic_authorization_enabled: false,
+        };
+        assert_eq!(shadow_only.resolve_effect(), ResolvedEffect::DenyUncertain);
+
         let confident_read = assessed(vector(0.99, 0.01, 0.99, 0.0, 0.0, 0.0));
         let missing_shape = RiskPipelineAssessment {
             deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux $(secret-helper)"}), None),
             effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic: confident_read.clone(),
+            semantic_authorization_enabled: true,
         };
         assert_eq!(missing_shape.resolve_effect(), ResolvedEffect::DenyUncertain);
 
@@ -1523,6 +1740,7 @@ mod tests {
                 deterministic: assess_invocation(None, "exec_command", &json!({"cmd":command}), None),
                 effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false,
                 semantic: confident_read.clone(),
+                semantic_authorization_enabled: true,
             };
             assert!(matches!(delegated.resolve_effect(), ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain), "{command}");
         }
@@ -1542,6 +1760,7 @@ mod tests {
             let pipeline = RiskPipelineAssessment {
                 deterministic: assessment(risk, ExposureBand::External, "shell"), effective_risk: risk,
                 semantic_failsafe_escalated: false, semantic: semantic.clone(),
+                semantic_authorization_enabled: true,
             };
             assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyKnownRisk);
         }
@@ -1556,6 +1775,7 @@ mod tests {
                     irreversible: Probability::new(0.9).unwrap(), external_or_account_effect: Probability::new(0.0).unwrap(),
                 }), state_intent: None,
             },
+            true,
         );
         assert_eq!(escalated.effective_risk, RiskBand::Critical);
         assert_eq!(escalated.resolve_effect(), ResolvedEffect::DenyKnownRisk);

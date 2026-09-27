@@ -179,6 +179,14 @@ async fn handle_pre_tool(
             status_message: Some(status),
         });
     }
+    if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+        return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some(format!("BLOCKED: {}", reason)),
+            status_message: Some(status),
+        });
+    }
     let policy_tool_name = enforcement::resolve_adapter_tool_name(&session, &req.tool_name, &req.tool_input);
     match enforcement::enforce_tool_call(&session, &policy_tool_name) {
         EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None, &pipeline),
@@ -189,6 +197,19 @@ async fn handle_pre_tool(
             status_message: Some(status),
         }),
         EnforcementDecision::ImplicitTransition { event, new_state } => {
+            let mut execution_session = session.clone();
+            execution_session.current_state = new_state.clone();
+            if let Some(reason) = enforcement::semantic_effect_capability_denial(
+                &execution_session,
+                &pipeline,
+            ) {
+                return Json(PreToolResponse {
+                    decision: "deny".into(),
+                    risk_assessment: Some(pipeline.visible_json()),
+                    additional_context: Some(format!("BLOCKED: {}", reason)),
+                    status_message: Some(status),
+                });
+            }
             // Apply the transition in the session manager
             let old_state = session.current_state.clone();
             session_manager.update_state(
@@ -240,6 +261,17 @@ fn pre_tool_policy_response(
     context: Option<String>,
     pipeline: &risk_assessment::RiskPipelineAssessment,
 ) -> Json<PreToolResponse> {
+    if let Some(reason) = enforcement::semantic_effect_capability_denial(session, pipeline) {
+        return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some(match context {
+                Some(context) => format!("{} BLOCKED: {}", context, reason),
+                None => format!("BLOCKED: {}", reason),
+            }),
+            status_message: Some(status),
+        });
+    }
     match interceptors::pre_call_check(session, &req.tool_name, &req.tool_input) {
         PreCallDecision::Allow => Json(PreToolResponse {
             decision: "allow".into(),

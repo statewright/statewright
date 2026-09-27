@@ -866,15 +866,14 @@ impl Gateway {
                     .get(&session.current_state)
                     .and_then(|state| state.intent.clone())
             });
-        let _pipeline = risk_assessment::assess_pipeline(
-            upstream_tool,
-            &params.name,
-            &params.arguments,
-            intent.as_deref(),
-        );
-
         // When deactivated, pass all tool calls through without enforcement
         if self.active_workflow.is_none() {
+            let _pipeline = risk_assessment::assess_pipeline(
+                upstream_tool,
+                &params.name,
+                &params.arguments,
+                intent.as_deref(),
+            );
             return match self
                 .upstream
                 .call_tool(&params.name, params.arguments)
@@ -894,6 +893,18 @@ impl Gateway {
                 return JsonRpcResponse::error(id, -32600, "No active session");
             }
         };
+        let pipeline = risk_assessment::assess_pipeline_visible(
+            upstream_tool,
+            &params.name,
+            &params.arguments,
+            intent.as_deref(),
+        ).await;
+        if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+            return JsonRpcResponse::success(
+                id,
+                serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+            );
+        }
 
         // Tool calls can arrive without a preceding tools/list response, so
         // enforce the same registered-read-only boundary at invocation time.
@@ -949,6 +960,12 @@ impl Gateway {
 
         match enforcement::enforce_tool_call(&session, &policy_tool_name) {
             EnforcementDecision::Allow => {
+                if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                    );
+                }
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
                 let pre_warning =
                     match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
@@ -1088,6 +1105,17 @@ impl Gateway {
                 .unwrap(),
             ),
             EnforcementDecision::ImplicitTransition { event, new_state } => {
+                let mut execution_session = session.clone();
+                execution_session.current_state = new_state.clone();
+                if let Some(reason) = enforcement::semantic_effect_capability_denial(
+                    &execution_session,
+                    &pipeline,
+                ) {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                    );
+                }
                 // Apply the transition
                 let old_state = session.current_state.clone();
                 self.session_manager.update_state(
@@ -1124,6 +1152,12 @@ impl Gateway {
                 }
             }
             EnforcementDecision::CheckpointReached { iteration, max } => {
+                if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+                    return JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                    );
+                }
                 // Allow the tool but signal checkpoint in the result
                 self.session_manager.increment_iteration(&self.session_id);
                 match self
@@ -1207,6 +1241,14 @@ impl Gateway {
                 "risk_assessment": pipeline.visible_json(),
             });
         }
+        if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+            return json!({
+                "decision": "deny",
+                "reason": reason,
+                "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
+            });
+        }
         let policy_tool_name =
             enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input);
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
@@ -1227,6 +1269,19 @@ impl Gateway {
                 });
             }
             EnforcementDecision::ImplicitTransition { event, new_state } => {
+                let mut execution_session = session.clone();
+                execution_session.current_state = new_state.clone();
+                if let Some(reason) = enforcement::semantic_effect_capability_denial(
+                    &execution_session,
+                    &pipeline,
+                ) {
+                    return json!({
+                        "decision": "deny",
+                        "reason": reason,
+                        "state": session.current_state,
+                        "risk_assessment": pipeline.visible_json(),
+                    });
+                }
                 let old_state = session.current_state.clone();
                 self.session_manager.update_state(
                     &self.session_id,
@@ -1265,6 +1320,15 @@ impl Gateway {
                 (session, Some(message))
             }
         };
+
+        if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+            return json!({
+                "decision": "deny",
+                "reason": reason,
+                "state": session.current_state,
+                "risk_assessment": pipeline.visible_json(),
+            });
+        }
 
         let interceptor = interceptors::pre_call_check(&session, tool_name, tool_input);
         match interceptor {
@@ -5497,10 +5561,11 @@ mod tests {
         let def: MachineDefinition = serde_json::from_value(json!({
             "id": "implicit-test",
             "initial": "planning",
-            "context": {},
+            "context": {"tool_policy_mode":"blacklist_heuristic_v1"},
             "states": {
                 "planning": {
                     "allowed_tools": ["Read", "Grep"],
+                    "disallowed_tools": ["Write"],
                     "max_iterations": 3,
                     "on": { "READY": "implementing", "FAIL": "failed" }
                 },
@@ -5668,6 +5733,58 @@ mod tests {
             combined.contains("planning"),
             "Checkpoint should mention current state"
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cannot_bypass_blacklist_write_capability() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id":"checkpoint-policy", "initial":"inspect",
+            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "states": {
+                "inspect": {
+                    "allowed_tools":["Edit"], "disallowed_tools":["Write"],
+                    "max_iterations":1, "on":{"DONE":"done"}
+                },
+                "done":{"type":"final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("checkpoint-policy-session".into(), definition.clone());
+        manager.increment_iteration("checkpoint-policy-session");
+        let mut workflows = HashMap::new();
+        workflows.insert("checkpoint-policy".into(), definition);
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                annotations: None,
+                name: "Edit".into(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+            },
+            crate::protocol::ToolCallResult::text("must not execute"),
+        )]);
+        let mut gateway = Gateway::new(
+            manager,
+            upstream,
+            "checkpoint-policy-session".into(),
+            workflows,
+            Some("checkpoint-policy".into()),
+            String::new(),
+            None,
+        );
+        let response = gateway.handle_message(JsonRpcRequest {
+            jsonrpc:"2.0".into(), method:"tools/call".into(),
+            params:Some(json!({
+                "name":"Edit",
+                "arguments":{"file_path":"src/main.rs","old_string":"a","new_string":"b"}
+            })),
+            id:Some(json!(1)),
+        }).await.unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(result.to_string().contains("Local write effect is explicitly blocked"));
+        let session = gateway.session_manager.get("checkpoint-policy-session").unwrap();
+        assert_eq!(session.current_state, "inspect");
+        assert_eq!(session.iteration_count, 1);
     }
 
     #[tokio::test]

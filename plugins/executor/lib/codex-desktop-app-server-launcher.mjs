@@ -161,10 +161,12 @@ export async function runDesktopAppServerBroker({
   // route reader can observe it.
   await mkdir(plan.controlDir, { recursive: true, mode: 0o700 });
   await claimManagedControlIdentity(plan.controlDir, { host: "codex", clientId: plan.clientId });
-  const claimThread = ({ threadId }) => claimCodexRootSession(plan.controlDir, { sessionId: threadId, clientId: plan.clientId });
-  const authorizeThread = desktopThreadAuthorizer({ controlDir: plan.controlDir, clientId: plan.clientId, home });
-  const inheritedBridge = inheritedDesktopMcpBridge(environment);
   const isolatedEnvironment = desktopBrokerEnvironment(environment, plan);
+  const codexHome = isolatedEnvironment.CODEX_HOME ?? join(home, ".codex");
+  const readThreadMetadata = ({ threadIds }) => readCodexThreadCwds({ threadIds, codexHome });
+  const claimThread = ({ threadId }) => claimCodexRootSession(plan.controlDir, { sessionId: threadId, clientId: plan.clientId });
+  const authorizeThread = desktopThreadAuthorizer({ controlDir: plan.controlDir, clientId: plan.clientId, home, readThreadCwds: readThreadMetadata });
+  const inheritedBridge = inheritedDesktopMcpBridge(environment);
   // The generated launcher starts this bridge before the network-restricted
   // ChatGPT process. Direct CLI callers retain the in-process fallback.
   const bridge = inheritedBridge
@@ -180,6 +182,7 @@ export async function runDesktopAppServerBroker({
       },
       clientId: plan.clientId,
       nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
+      getThreadCwds: (threadIds) => readThreadMetadata({ threadIds }),
       onThreadStarted: claimThread,
       authorizeThread,
       requiredMcpToolSuffix: "statewright_get_state",

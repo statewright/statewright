@@ -74,6 +74,12 @@ test("Desktop bridge owns gateway authentication outside the App Server sandbox"
 
 test("Desktop broker buffers an immediate stdio request and initializes its private route boundary", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-desktop-control-"));
+  const codexHome = join(home, "custom-codex-home");
+  const historicalThread = "01a0e31b-188e-7a70-91a8-97cbe7107d8b";
+  const sessions = join(codexHome, "sessions", "2026", "09", "27");
+  await mkdir(sessions, { recursive: true });
+  await writeFile(join(sessions, `rollout-2026-09-27T09-43-18-${historicalThread}.jsonl`), `${JSON.stringify({ type: "session_meta", payload: { id: historicalThread, cwd: "/repo" } })}\n`);
+  await writeFile(join(codexHome, "history.jsonl"), `${JSON.stringify({ session_id: historicalThread, ts: 1, text: "Continue the historical Desktop task" })}\n`);
   const controlDir = join(home, ".statewright", "codex-desktop-app-server", "swc_0123456789abcdef0123456789abcdef", "routes");
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -96,6 +102,7 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
         STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: "/Applications/ChatGPT.app/Contents/Resources/codex",
         STATEWRIGHT_DESKTOP_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
         STATEWRIGHT_ROUTE_CONTROL_DIR: "/tmp/foreign-parent-routes",
+        CODEX_HOME: codexHome,
       },
       home,
       stdin,
@@ -105,6 +112,9 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
       startRuntime: async options => {
         assert.equal(typeof options.onThreadStarted, "function");
         assert.equal(typeof options.authorizeThread, "function");
+        assert.deepEqual(await options.getThreadCwds([historicalThread]), {
+          [historicalThread]: { cwd: "/repo", lastUserMessage: "Continue the historical Desktop task", threadSource: null },
+        });
         assert.equal(options.requiredMcpToolSuffix, "statewright_get_state");
         assert.equal(options.requiredMcpReadyTimeoutMs, 30_000);
         assert.equal(options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR, controlDir);

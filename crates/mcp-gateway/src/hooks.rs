@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::enforcement::{self, EnforcementDecision};
 use crate::interceptors::{self, PreCallDecision};
+use crate::risk_assessment;
 use crate::session::SessionManager;
 
 /// Shared state for the hook HTTP server.
@@ -30,6 +31,8 @@ pub struct PreToolRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PreToolResponse {
     pub decision: String, // "allow" | "deny"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_assessment: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,45 +122,77 @@ async fn handle_pre_tool(
     State(state): State<Arc<RwLock<HookState>>>,
     Json(req): Json<PreToolRequest>,
 ) -> Json<PreToolResponse> {
-    let state = state.read().await;
-    let session = match state.session_manager.get(&state.session_id) {
+    let (session_manager, session_id) = {
+        let state = state.read().await;
+        (state.session_manager.clone(), state.session_id.clone())
+    };
+    let initial_session = match session_manager.get(&session_id) {
         Some(s) => s,
         None => {
             return Json(PreToolResponse {
                 decision: "allow".into(),
+                risk_assessment: None,
                 additional_context: None,
                 status_message: None,
             });
         }
     };
 
+    let intent = initial_session
+        .definition
+        .states
+        .get(&initial_session.current_state)
+        .and_then(|state| state.intent.as_deref());
+    let pipeline = risk_assessment::assess_pipeline_visible(None, &req.tool_name, &req.tool_input, intent).await;
+    let session = match session_manager.get(&session_id) {
+        Some(session) => session,
+        None => return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some("BLOCKED: workflow session disappeared while semantic risk was assessed".into()),
+            status_message: None,
+        }),
+    };
     let status = format!(
         "{} ({}/{})",
         session.current_state,
         session.iteration_count,
         session.max_iterations().unwrap_or(0)
     );
+    if let Some(pending) = &session.pending_approval {
+        return Json(PreToolResponse {
+            decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
+            additional_context: Some(format!(
+                "BLOCKED: approval '{}' is pending for event '{}'",
+                pending.approval_id, pending.event,
+            )),
+            status_message: Some(status),
+        });
+    }
 
     if let Some(reason) = enforcement::unsupported_shell_dialect_reason(&req.tool_name, &req.tool_input) {
         return Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         });
     }
     let policy_tool_name = enforcement::resolve_adapter_tool_name(&session, &req.tool_name, &req.tool_input);
     match enforcement::enforce_tool_call(&session, &policy_tool_name) {
-        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None),
+        EnforcementDecision::Allow => pre_tool_policy_response(&session, &req, status, None, &pipeline),
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         }),
         EnforcementDecision::ImplicitTransition { event, new_state } => {
             // Apply the transition in the session manager
             let old_state = session.current_state.clone();
-            state.session_manager.update_state(
-                &state.session_id,
+            session_manager.update_state(
+                &session_id,
                 new_state.clone(),
                 session.context.clone(),
             );
@@ -165,15 +200,17 @@ async fn handle_pre_tool(
                 "State transitioned: {} -> {} (via {}). You are now in the {} phase.",
                 old_state, new_state, event, new_state
             ));
-            match state.session_manager.get(&state.session_id) {
+            match session_manager.get(&session_id) {
                 Some(updated) => pre_tool_policy_response(
                     &updated,
                     &req,
                     format!("{} -> {}", old_state, new_state),
                     context,
+                    &pipeline,
                 ),
                 None => Json(PreToolResponse {
                     decision: "deny".into(),
+                    risk_assessment: Some(pipeline.visible_json()),
                     additional_context: Some(
                         "BLOCKED: workflow session disappeared during implicit transition".into(),
                     ),
@@ -191,6 +228,7 @@ async fn handle_pre_tool(
                  using statewright_transition.",
                 iteration, max, session.current_state
             )),
+            &pipeline,
         ),
     }
 }
@@ -200,15 +238,18 @@ fn pre_tool_policy_response(
     req: &PreToolRequest,
     status: String,
     context: Option<String>,
+    pipeline: &risk_assessment::RiskPipelineAssessment,
 ) -> Json<PreToolResponse> {
     match interceptors::pre_call_check(session, &req.tool_name, &req.tool_input) {
         PreCallDecision::Allow => Json(PreToolResponse {
             decision: "allow".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: context,
             status_message: Some(status),
         }),
         PreCallDecision::Warn(warning) => Json(PreToolResponse {
             decision: "allow".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(match context {
                 Some(context) => format!("{} {}", context, warning),
                 None => warning,
@@ -217,6 +258,7 @@ fn pre_tool_policy_response(
         }),
         PreCallDecision::Block(reason) => Json(PreToolResponse {
             decision: "deny".into(),
+            risk_assessment: Some(pipeline.visible_json()),
             additional_context: Some(match context {
                 Some(context) => format!("{} BLOCKED: {}", context, reason),
                 None => format!("BLOCKED: {}", reason),
@@ -408,6 +450,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refreshed_hook_session_blocks_pending_approval() {
+        let state = hook_state();
+        let manager = state.read().await.session_manager.clone();
+        manager.set_pending_approval(
+            "test-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_hook".into(),
+                event: "DONE".into(),
+                from_state: "active".into(),
+                to_state: "completed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
+        let response = handle_pre_tool(
+            State(state),
+            Json(PreToolRequest { tool_name: "bash".into(), tool_input: json!({"command":"gh"}) }),
+        ).await.0;
+        assert_eq!(response.decision, "deny");
+        assert!(response.additional_context.unwrap_or_default().contains("apr_hook"));
+    }
+
+    fn exploratory_hook_state() -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-exploration", "initial": "inspect", "states": {
+                "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("explore-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "explore-session".into(),
+        }))
+    }
+
+    fn alias_deny_hook_state(denied: &str) -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-alias-deny", "initial": "inspect", "states": {
+                "inspect": {
+                    "allowed_tools": ["Read"],
+                    "disallowed_tools": [denied],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("alias-deny-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "alias-deny-session".into(),
+        }))
+    }
+
+    #[tokio::test]
     async fn pre_tool_applies_allowed_command_policy_to_tool_input() {
         let blocked = handle_pre_tool(
             State(hook_state()),
@@ -437,6 +536,87 @@ mod tests {
         .await
         .0;
         assert_eq!(allowed.decision, "allow");
+    }
+
+    #[tokio::test]
+    async fn exploratory_hook_normalizes_reads_and_blocks_mutating_shell() {
+        crate::risk_assessment::set_test_shadow_enabled(Some(true));
+        let _ = crate::risk_assessment::take_test_shadow_receipts();
+        let allowed = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(allowed.decision, "allow");
+        assert_eq!(allowed.risk_assessment.as_ref().unwrap()["deterministic_risk"], "Moderate");
+        assert!(!allowed.risk_assessment.as_ref().unwrap().to_string().contains("policy"));
+        let receipts = crate::risk_assessment::take_test_shadow_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].tool, "grep");
+        assert_eq!(receipts[0].state_intent.as_deref(), Some("exploratory_read_only"));
+        assert!(!format!("{:?}", receipts[0]).contains("policy"));
+
+        crate::risk_assessment::set_test_shadow_enabled(Some(false));
+        let _ = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"sensitive-token"}) }),
+        ).await;
+        assert!(crate::risk_assessment::take_test_shadow_receipts().is_empty());
+        crate::risk_assessment::set_test_shadow_enabled(None);
+
+        let denied = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd":"touch marker"}) }),
+        ).await.0;
+        assert_eq!(denied.decision, "deny");
+        assert!(denied.additional_context.unwrap_or_default().contains("proven read-only"));
+
+        let terminal = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "terminal".into(), tool_input: json!({"cmd":"touch marker"}) }),
+        ).await.0;
+        assert_eq!(terminal.decision, "deny");
+
+        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+            let state = exploratory_hook_state();
+            let denied = handle_pre_tool(
+                State(state.clone()),
+                Json(PreToolRequest { tool_name: "exec_command".into(), tool_input: json!({"cmd": command}) }),
+            ).await.0;
+            assert_eq!(denied.decision, "deny", "must reject {command}");
+            assert_eq!(
+                state.read().await.session_manager.get("explore-session").unwrap().current_state,
+                "inspect",
+                "denial must not transition for {command}"
+            );
+        }
+
+        let opaque = handle_pre_tool(
+            State(exploratory_hook_state()),
+            Json(PreToolRequest { tool_name: "mcp__db__query".into(), tool_input: json!({"sql":"update users"}) }),
+        ).await.0;
+        assert_eq!(opaque.decision, "deny");
+        assert!(opaque.additional_context.unwrap_or_default().contains("Unregistered adapter tool"));
+    }
+
+    #[tokio::test]
+    async fn hook_preserves_original_and_family_denials_across_adapter_normalization() {
+        let original_denied = handle_pre_tool(
+            State(alias_deny_hook_state("grep")),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(original_denied.decision, "deny");
+
+        let allowed = handle_pre_tool(
+            State(alias_deny_hook_state("grep")),
+            Json(PreToolRequest { tool_name: "read_file".into(), tool_input: json!({"path":"README.md"}) }),
+        ).await.0;
+        assert_eq!(allowed.decision, "allow");
+
+        let family_denied = handle_pre_tool(
+            State(alias_deny_hook_state("Read")),
+            Json(PreToolRequest { tool_name: "grep".into(), tool_input: json!({"query":"policy"}) }),
+        ).await.0;
+        assert_eq!(family_denied.decision, "deny");
     }
 
     #[tokio::test]

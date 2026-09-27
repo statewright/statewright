@@ -1,17 +1,55 @@
 #!/usr/bin/env bash
-# Provider compatibility policy. `allowed_tools` names capabilities, while
-# Codex may expose a provider-specific concrete tool name.
+# Provider compatibility policy. Legacy workflows use an allowlist. Only an
+# explicit opt-in workflow policy may use blacklist/heuristic admission.
 
 STATEWRIGHT_TOOL_MODE=""
 STATEWRIGHT_ALLOWED_TOOLS=""
+STATEWRIGHT_DISALLOWED_TOOLS=""
+STATEWRIGHT_TOOL_POLICY_MODE=""
+
+statewright_blacklist_mode() {
+  [ "$STATEWRIGHT_TOOL_POLICY_MODE" = "blacklist_heuristic_v1" ]
+}
+
+statewright_list_has_normalized() {
+  local wanted entry
+  wanted=$(statewright_normalize_tool "$1")
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    [ "$(statewright_normalize_tool "$entry")" = "$wanted" ] && return 0
+  done <<< "$2"
+  return 1
+}
 
 statewright_has_capability() {
   local capability="$1"
-  printf '%s\n' "$STATEWRIGHT_ALLOWED_TOOLS" | grep -Fqx "$capability"
+  if statewright_blacklist_mode; then
+    ! statewright_list_has_normalized "$capability" "$STATEWRIGHT_DISALLOWED_TOOLS"
+  else
+    statewright_list_has_normalized "$capability" "$STATEWRIGHT_ALLOWED_TOOLS"
+  fi
 }
 
 statewright_normalize_tool() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'
+}
+
+statewright_canonical_tool() {
+  case "$(statewright_normalize_tool "$1")" in
+    read|readfile|grep|searchfiles|glob|find|findfiles|ls|listdirectory|viewimage) printf 'Read' ;;
+    edit|write|multiedit|applypatch|patchfile|editfile|writefile|createfile|createorupdatefile|writestdin) printf 'Write' ;;
+    bash|execcommand|runcommand|shell|zsh) printf 'Bash' ;;
+    webrun|websearch|webfetch) printf 'WebSearch' ;;
+    imagegen|imagegenimagegen) printf 'ImageGen' ;;
+    *) printf '' ;;
+  esac
+}
+
+statewright_explicitly_blocked() {
+  local raw="$1" canonical="$2"
+  statewright_blacklist_mode || return 1
+  statewright_list_has_normalized "$raw" "$STATEWRIGHT_DISALLOWED_TOOLS" && return 0
+  [ -n "$canonical" ] && statewright_list_has_normalized "$canonical" "$STATEWRIGHT_DISALLOWED_TOOLS"
 }
 
 statewright_is_shell_tool() {
@@ -189,6 +227,96 @@ $(printf '%s\n' "$normalized" | sed -E 's/&&|\|\||[;|]/\n/g')
 EOF
 }
 
+statewright_utility_has_exec_effect() {
+  local command="$1" executable
+  case "$command" in
+    find[[:space:]]*|rg[[:space:]]*|ripgrep[[:space:]]*|fd[[:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  statewright_readonly_tokens "$command" || return 0
+  executable="${STATEWRIGHT_TOKENS[0]##*/}"
+  case "$executable" in
+    find|rg|ripgrep|fd)
+      # Reuse the quote-aware token parser and per-utility flag rules above.
+      # A rejected utility argument is not safe merely because the executable
+      # itself normally reads files.
+      statewright_readonly_segment_capability "$command" || return 0 ;;
+  esac
+  return 1
+}
+
+# Classify Git by effect after the shell tokenizer has ruled out expansion and
+# sequencing. It is a positive parser: unrecognized aliases/options remain
+# opaque rather than becoming local writes solely because their executable is Git.
+statewright_git_effect() {
+  local command="$1" subcommand option token index=1
+  statewright_readonly_tokens "$command" || return 1
+  [ "${STATEWRIGHT_TOKENS[0]##*/}" = "git" ] || return 1
+  while [ "$index" -lt "${#STATEWRIGHT_TOKENS[@]}" ]; do
+    token="${STATEWRIGHT_TOKENS[$index]}"
+    case "$token" in
+      -C|--git-dir|--work-tree|--namespace)
+        index=$((index + 1))
+        [ "$index" -lt "${#STATEWRIGHT_TOKENS[@]}" ] || { printf 'opaque'; return; }
+        index=$((index + 1)) ;;
+      -C?*|--git-dir=*|--work-tree=*|--namespace=*) index=$((index + 1)) ;;
+      -c|-c?*) printf 'opaque'; return ;;
+      -*) printf 'opaque'; return ;;
+      *) break ;;
+    esac
+  done
+  subcommand="${STATEWRIGHT_TOKENS[$index]:-}"
+  [ -n "$subcommand" ] || { printf 'opaque'; return; }
+  case "$subcommand" in
+    push|fetch|pull|clone|ls-remote) printf 'external'; return ;;
+    reset)
+      for option in "${STATEWRIGHT_TOKENS[@]:$((index + 1))}"; do [ "$option" = '--hard' ] && { printf 'irreversible'; return; }; done ;;
+    clean)
+      for option in "${STATEWRIGHT_TOKENS[@]:$((index + 1))}"; do [[ "$option" =~ ^-[^-]*f ]] && { printf 'irreversible'; return; }; done ;;
+  esac
+  local effect=""
+  case "$subcommand" in
+    status|log|diff|show|rev-parse|ls-files|grep|describe) effect='read' ;;
+    branch)
+      for option in "${STATEWRIGHT_TOKENS[@]:$((index + 1))}"; do
+        case "$option" in --show-current|--list|-l|--no-color) ;; *) effect='local_write'; break ;; esac
+      done
+      [ -n "$effect" ] || effect='read' ;;
+    tag)
+      for option in "${STATEWRIGHT_TOKENS[@]:$((index + 1))}"; do
+        case "$option" in --list|-l|--contains|--points-at|--no-contains|--merged|--no-merged) ;; *) effect='local_write'; break ;; esac
+      done
+      [ -n "$effect" ] || effect='read' ;;
+    remote)
+      case "${STATEWRIGHT_TOKENS[$((index + 1))]:-}" in ''|-v|get-url) effect='read' ;; *) effect='local_write' ;; esac ;;
+    worktree)
+      case "${STATEWRIGHT_TOKENS[$((index + 1))]:-}" in list) effect='read' ;; *) effect='local_write' ;; esac ;;
+    add|commit|restore|switch|checkout|merge|rebase|stash|config|reset|clean) effect='local_write' ;;
+    *) printf 'opaque'; return ;;
+  esac
+  if [ "$effect" = 'read' ]; then
+    for option in "${STATEWRIGHT_TOKENS[@]:$((index + 1))}"; do
+      case "$option" in --output|--output=*) printf 'local_write'; return ;; esac
+    done
+  fi
+  printf '%s' "$effect"
+}
+
+# A redirect is a local write only when the command producing the output is a
+# known non-executing producer.  A redirect cannot make an unknown executable
+# safe to run.
+statewright_known_redirect_write() {
+  local command="$1" base
+  base=$(printf '%s' "$command" | sed -E 's/[[:space:]][012]?>.*$//')
+  case "$base" in
+    printf[[:space:]]*|echo[[:space:]]*|cat[[:space:]]*|head[[:space:]]*|tail[[:space:]]*|wc[[:space:]]*|grep[[:space:]]*|rg[[:space:]]*|git[[:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  if [[ "$base" == git[[:space:]]* ]]; then
+    [ "$(statewright_git_effect "$base")" = 'read' ] || return 1
+  fi
+}
+
 statewright_has_file_write_redirect() {
   local command="$1" normalized
   normalized=$(statewright_unquoted_shell "$command" | sed -E \
@@ -228,9 +356,11 @@ statewright_has_inplace_file_modify() {
 }
 
 statewright_has_file_write_primitive() {
-  local normalized
-  normalized=$(statewright_unquoted_shell "$1")
-  printf '%s\n' "$normalized" | grep -qE '(^|[[:space:];|&])(tee|dd|cp|mv|ln|install|rsync|mkdir|touch|chmod|chown)([[:space:]]|$)'
+  local command="$1" executable
+  statewright_readonly_tokens "$command" || return 1
+  executable="${STATEWRIGHT_TOKENS[0]##*/}"
+  case "$executable" in tee|dd|cp|mv|ln|install|rsync|mkdir|touch|chmod|chown) return 0 ;; esac
+  return 1
 }
 
 statewright_web_allowed() {
@@ -247,20 +377,73 @@ statewright_web_allowed() {
   done <<< "$required"
 }
 
-statewright_tool_allowed() {
-  local tool_name="$1" hook_input="$2" normalized command
-  STATEWRIGHT_TOOL_MODE=""
+statewright_shell_effect() {
+  local command="$1" normalized
+  normalized=$(printf '%s' "$command" | sed -E 's/^[[:space:]]+//; s/^[[:space:]]*command[[:space:]]+//')
+  case "$normalized" in *$'\n'*|*$'\r'*) printf 'opaque'; return ;; esac
+  # A bare newline is a shell command separator. It must never inherit the
+  # effect classification of the first line.
+  # An irreversible or remote side-effect wins even when it follows a wrapper.
+  if printf '%s\n' "$normalized" | grep -qE '(^|[;&|][[:space:]]*|[[:space:]])(/[^[:space:]]*/)?(rm|rmdir|shred|truncate|dd)([[:space:]]|$)|git[[:space:]]+(reset[[:space:]]+--hard|clean[[:space:]]+-[^[:space:]]*f)'; then
+    printf 'irreversible'
+  elif printf '%s\n' "$normalized" | grep -qE '(^|[;&|][[:space:]]*)(curl|wget|ssh|scp|rsync[[:space:]].*[^[:space:]]:|git[[:space:]]+(push|fetch|pull|clone|ls-remote)|docker|podman|nerdctl|crictl)([[:space:]]|$)'; then
+    printf 'external'
+  elif [[ "$normalized" == *'&&'* ]]; then
+    local segment effect
+    while IFS= read -r segment; do
+      effect=$(statewright_shell_effect "$segment")
+      [ "$effect" = "read" ] || { printf 'opaque'; return; }
+    done < <(printf '%s\n' "$normalized" | sed -E 's/[[:space:]]*&&[[:space:]]*/\n/g')
+    printf 'read'
+  elif statewright_utility_has_exec_effect "$normalized"; then
+    # These utilities have quote-aware token parsing above. A leading read
+    # executable is not sufficient evidence of a read-only effect.
+    printf 'opaque'
+  # A guarded shell command is a single operation. Do not let a safe first
+  # word bless an unknown command hidden after sequencing, substitution, a
+  # pipe, or input redirection. Output redirects are classified below because
+  # authorised local writes are a valid implementation-phase operation.
+  elif printf '%s\n' "$normalized" | grep -qE '[;&|`]|\$\(|<'; then
+    printf 'opaque'
+  elif statewright_has_file_write_redirect "$normalized"; then
+    statewright_known_redirect_write "$normalized" && printf 'local_write' || printf 'opaque'
+  else
+    local git_effect
+    git_effect="$(statewright_git_effect "$normalized" 2>/dev/null || true)"
+    case "$git_effect" in
+      read|local_write|external|irreversible|opaque) printf '%s' "$git_effect" ;;
+      '')
+        if statewright_has_file_write_primitive "$normalized"; then
+          printf 'local_write'
+        elif printf '%s\n' "$normalized" | grep -qE '^(ls|cat|head|tail|wc|file|find|tree|pwd|date|which|type|printenv|grep|rg|fd|ag)([[:space:]]|$)|^task[[:space:]]+(test|lint|check|build)(:|[[:space:]]|$)|^(npm|pnpm)[[:space:]]+(test|lint|check|build)([[:space:]]|$)|^pytest([[:space:]]|$)|^cargo[[:space:]]+(test|check|clippy)([[:space:]]|$)'; then
+          printf 'read'
+        else
+          printf 'opaque'
+        fi ;;
+    esac
+  fi
+}
 
-  # Poll an existing native command without admitting arbitrary stdin writes.
-  # Interactive input requires an explicit write_stdin capability.
-  if [ "$tool_name" = "write_stdin" ] && ! statewright_has_capability "write_stdin"; then
+statewright_tool_allowed() {
+  local tool_name="$1" hook_input="$2" normalized command canonical
+  STATEWRIGHT_TOOL_MODE=""
+  canonical=$(statewright_canonical_tool "$tool_name")
+
+  # In deny mode, raw provider names and their canonical capability are both
+  # hard denials. This must happen before poll/read/shell shortcuts.
+  if statewright_explicitly_blocked "$tool_name" "$canonical"; then
+    STATEWRIGHT_TOOL_MODE="blocked"
+    return 1
+  fi
+
+  # Polling an existing native command is read-only. Sending input is a write
+  # capability and must remain blocked in phases that explicitly disallow it.
+  if [ "$tool_name" = "write_stdin" ]; then
     if printf '%s' "$hook_input" | jq -e '.tool_input | (has("chars") | not) or .chars == ""' >/dev/null 2>&1; then
-      if statewright_has_capability "Bash" || statewright_has_capability "bash" || statewright_has_capability "Read" ||
-         statewright_has_capability "Grep" || statewright_has_capability "Glob"; then
-        STATEWRIGHT_TOOL_MODE="poll"
-        return 0
-      fi
+      STATEWRIGHT_TOOL_MODE="poll"
+      return 0
     fi
+    statewright_has_capability "Write" && { STATEWRIGHT_TOOL_MODE="stdin_write"; return 0; }
     return 1
   fi
 
@@ -271,6 +454,10 @@ statewright_tool_allowed() {
     statewright_uses_unsupported_shell "$tool_name" "$hook_input" && return 1
     command=$(statewright_input_command "$hook_input")
     [ -n "$command" ] || return 1
+    if statewright_blacklist_mode; then
+      STATEWRIGHT_TOOL_MODE="bash"
+      return 0
+    fi
     # Provider shell adapters are also the concrete transport for canonical
     # Read operations. Classify strict reads before broad Bash authority so a
     # phase that grants both capabilities does not turn `cat`/`rg`/`find` into
@@ -286,36 +473,43 @@ statewright_tool_allowed() {
     return 1
   fi
 
-  statewright_has_capability "$tool_name" && { STATEWRIGHT_TOOL_MODE="direct"; return 0; }
-
   case "$tool_name" in
     Read|read_file|Grep|grep|search_files|Glob|glob|find|find_files|ls|list_directory)
       if statewright_has_capability "Read"; then
         STATEWRIGHT_TOOL_MODE="read"
         return 0
-      fi ;;
+      fi
+      return 1 ;;
     Edit|Write|MultiEdit|apply_patch|patch_file|edit_file|write_file|create_file|create_or_update_file)
       if statewright_has_capability "Write"; then
         STATEWRIGHT_TOOL_MODE="edit"
         return 0
-      fi ;;
+      fi
+      return 1 ;;
     view_image)
       if statewright_has_capability "Read"; then
         STATEWRIGHT_TOOL_MODE="read"
         return 0
-      fi ;;
+      fi
+      return 1 ;;
   esac
 
   normalized=$(statewright_normalize_tool "$tool_name")
   case "$normalized" in
     webrun)
-      statewright_web_allowed "$hook_input" && { STATEWRIGHT_TOOL_MODE="web"; return 0; } ;;
+      statewright_web_allowed "$hook_input" && { STATEWRIGHT_TOOL_MODE="web"; return 0; }
+      return 1 ;;
     imagegenimagegen|imagegen)
       if statewright_has_capability "ImageGen"; then
         STATEWRIGHT_TOOL_MODE="image"
         return 0
-      fi ;;
+      fi
+      return 1 ;;
   esac
 
+  # No substring matching: an unknown tool's effect cannot be inferred from a
+  # friendly name. Standalone execution must deny it; an executor may make a
+  # semantic-risk/approval decision before invoking the real provider tool.
+  STATEWRIGHT_TOOL_MODE="opaque"
   return 1
 }

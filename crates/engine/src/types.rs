@@ -44,6 +44,11 @@ pub struct StateDef {
     /// When set, all tools EXCEPT these are permitted. Takes precedence if both are set.
     #[serde(default)]
     pub disallowed_tools: Option<Vec<String>>,
+    /// Declared execution intent for a state. `exploratory_read_only` allows
+    /// registered/recognised read operations while denying mutations without
+    /// requiring a brittle enumeration of every read-only MCP tool.
+    #[serde(default)]
+    pub intent: Option<String>,
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]

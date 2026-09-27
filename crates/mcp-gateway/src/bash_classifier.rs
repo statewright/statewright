@@ -144,12 +144,17 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
     let mut capabilities = Vec::new();
     for segment in split_segments(command) {
         let segment = segment.trim();
-        let first = segment.split_whitespace().next()?;
+        let tokens = simple_command_tokens(segment)?;
+        let first = tokens.first()?;
         if first.contains('=') {
             return None;
         }
         if readonly_search_has_external_hook(segment) {
             return None;
+        }
+        if first.rsplit('/').next()? == "git" {
+            capabilities.push(readonly_git_capability(&tokens)?);
+            continue;
         }
         let capability = match classify_segment(segment) {
             OpClass::FileRead | OpClass::GitRead => "Read",
@@ -167,6 +172,81 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
     capabilities.sort_unstable();
     capabilities.dedup();
     (!capabilities.is_empty()).then_some(capabilities)
+}
+
+/// `classify_git` is deliberately broad for ordinary Bash capability checks.
+/// Exploratory admission is intentionally a small proof surface. It admits
+/// only Git forms that disable the configurable helpers Git can execute; it
+/// does not try to classify every Git read-like subcommand. In particular,
+/// log/show/reflog/stash are excluded because signature and log configuration
+/// can invoke an externally configured verifier.
+fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
+    let args = tokens.get(1..)?;
+    // The end-of-options marker is meaningful to Git: operands after it can
+    // create a branch/tag, so retain the complete argv rather than slicing it
+    // away before the command grammar inspects it.
+    let subcommand_index = args.iter().position(|arg| !arg.starts_with('-'))?;
+    let subcommand = args.get(subcommand_index)?.as_str();
+    let global_options = &args[..subcommand_index];
+    let command_args = &args[subcommand_index + 1..];
+    let unsafe_flag = |arg: &String| {
+        matches!(arg.as_str(), "-c" | "--config-env" | "--exec-path" | "--ext-diff" | "--no-index" | "--output" | "-o" | "--textconv")
+            || arg.starts_with("-c")
+            || arg.starts_with("--config-env=")
+            || arg.starts_with("--exec-path=")
+            || arg.starts_with("--output=")
+    };
+    if args.iter().any(unsafe_flag)
+        || !global_options.iter().all(|arg| matches!(arg.as_str(), "--no-pager" | "--no-optional-locks"))
+    {
+        return None;
+    }
+    let no_pager = global_options.iter().any(|arg| arg == "--no-pager");
+    match subcommand {
+        "diff" if no_pager => {
+            let boundary = command_args
+                .iter()
+                .position(|arg| arg == "--")
+                .unwrap_or(command_args.len());
+            let options = &command_args[..boundary];
+            // A deliberately finite grammar: only these two helper-disabling
+            // options precede optional revision/path operands.  This avoids
+            // treating a flag-shaped operand or another option's value as a
+            // proof that Git cannot start a configured helper.
+            (options.iter().any(|arg| arg == "--no-ext-diff")
+                && options.iter().any(|arg| arg == "--no-textconv")
+                && options.iter().all(|arg| {
+                    matches!(arg.as_str(), "--no-ext-diff" | "--no-textconv")
+                }))
+            .then_some("Read")
+        }
+        "branch" | "tag" if no_pager => {
+            let boundary = command_args
+                .iter()
+                .position(|arg| arg == "--")
+                .unwrap_or(command_args.len());
+            let before_boundary = &command_args[..boundary];
+            let has_boundary = boundary < command_args.len();
+            let after_boundary = if has_boundary {
+                &command_args[boundary + 1..]
+            } else {
+                &[]
+            };
+            if command_args.is_empty() {
+                Some("Read")
+            } else if matches!(before_boundary.first().map(String::as_str), Some("--list" | "-l"))
+                && before_boundary[1..]
+                    .iter()
+                    .all(|arg| !arg.starts_with('-') && !arg.is_empty())
+                && (!has_boundary || after_boundary.iter().all(|arg| !arg.is_empty()))
+            {
+                Some("Read")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Match one simple command against an allowed token prefix.
@@ -255,7 +335,7 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     match executable {
         "sha256sum" | "shasum" if readonly_checksum_args(executable, &tokens[1..]) => Some("Read"),
         "ls" | "pwd" | "stat" | "file" | "wc" | "du" | "dirname" | "basename" | "realpath"
-        | "jq" | "cut" | "tr" | "sort" | "uniq" | "which" | "true" | "false" => Some("Read"),
+        | "jq" | "cut" | "tr" | "which" | "true" | "false" => Some("Read"),
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
@@ -378,7 +458,7 @@ fn classify_segment(segment: &str) -> OpClass {
 
     match base_cmd {
         // File read commands
-        "cat" | "head" | "tail" | "less" | "more" | "bat" | "xxd" => {
+        "cat" | "head" | "tail" => {
             // cat with redirect is FileWrite — handled by has_output_redirect
             OpClass::FileRead
         }
@@ -1050,5 +1130,56 @@ mod tests {
         assert_eq!(readonly_capabilities("git tag v1"), None);
         assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
         assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
+    }
+
+    #[test]
+    fn readonly_git_admission_rejects_mutators_and_output_writes() {
+        for command in [
+            "git switch -c feature",
+            "git restore tracked.txt",
+            "git checkout main",
+            "git diff --output=review.patch",
+            "git diff --output review.patch",
+            "git diff",
+            "git log --oneline",
+            "git show HEAD",
+            "git diff --textconv",
+            "git show --textconv HEAD:README.md",
+            "git --no-pager log --no-ext-diff --no-textconv --show-signature",
+            "git --no-pager log --no-ext-diff --no-textconv --oneline",
+            "git --no-pager show --no-ext-diff --no-textconv HEAD",
+            "git --no-pager reflog show",
+            "git --no-pager stash list",
+            "git --no-pager stash show",
+            "git --no-pager diff --no-ext-diff -- --no-textconv",
+            "git -ccore.fsmonitor=/tmp/helper status",
+            "git status",
+            "git --no-pager branch -- new-name",
+            "git --no-pager tag -- new-name",
+            "git --no-pager branch --list --delete",
+            "git --no-pager diff --output review.patch --no-ext-diff --no-textconv",
+            "git --no-pager diff --no-ext-diff --word-diff --no-textconv",
+            "sort -o output.txt input.txt",
+            "uniq input.txt output.txt",
+            "xxd input.txt output.txt",
+            "xxd -r input.hex output.bin",
+            "less README.md",
+            "more README.md",
+            "bat README.md",
+            "git add README.md",
+            "git stash push",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+        for command in [
+            "git --no-pager diff --no-ext-diff --no-textconv",
+            "git --no-pager diff --no-ext-diff --no-textconv -- README.md",
+            "git --no-pager branch --list",
+            "git --no-pager branch --list feature*",
+            "git --no-pager branch --list -- feature*",
+            "git --no-pager tag --list",
+        ] {
+            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+        }
     }
 }

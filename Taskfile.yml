@@ -66,6 +66,7 @@ tasks:
     desc: "Run the focused Codex and Claude provider-neutral tool-policy checks"
     cmds:
       - bash plugins/codex/tests/tool-policy.test.sh
+      - node --test plugins/codex/tests/executor-bridge.test.mjs
       - bash plugins/claude-code/tests/bash-discernment.test.sh
       - bash -n plugins/codex/hook.sh plugins/codex/tool-policy.sh
       - bash -n plugins/claude-code/hook.sh

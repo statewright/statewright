@@ -9,6 +9,66 @@ pub struct ToolEnforcementResult {
     pub implicit_transition: Option<String>,
 }
 
+/// Coarse deterministic tool intent used only for the explicit
+/// `exploratory_read_only` state policy. It is deliberately conservative:
+/// unknown tools are blocked until a registry/annotation or a later semantic
+/// shadow assessor can classify them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolIntent {
+    ReadOnly,
+    Mutating,
+    Unknown,
+}
+
+fn classify_tool_intent(tool: &str) -> ToolIntent {
+    let lower = tool.to_ascii_lowercase();
+    if lower == "bash" || lower == "shell" || lower == "terminal" {
+        // Bash is admitted here so the separate operation classifier can
+        // inspect the command arguments for redirects, interpreters, etc.
+        return ToolIntent::ReadOnly;
+    }
+
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has = |verbs: &[&str]| words.iter().any(|word| verbs.contains(word));
+
+    if has(&[
+        "create", "update", "delete", "remove", "write", "edit", "patch", "send",
+        "publish", "deploy", "apply", "commit", "push", "move", "rename", "upload",
+        "archive", "trash", "execute",
+    ]) {
+        ToolIntent::Mutating
+    } else if has(&[
+        "read", "get", "list", "search", "find", "query", "inspect", "status",
+        "describe", "fetch", "lookup",
+    ]) {
+        ToolIntent::ReadOnly
+    } else {
+        ToolIntent::Unknown
+    }
+}
+
+fn is_explicitly_disallowed(tool: &str, disallowed: &[String]) -> bool {
+    disallowed.iter().any(|blocked| blocked.eq_ignore_ascii_case(tool))
+}
+
+/// Explicit denials always take precedence over inferred capabilities.  Gateway
+/// adapters use this before normalizing a native name to Read/Bash so a policy
+/// cannot be bypassed by an alias.
+pub fn tool_is_explicitly_disallowed(
+    definition: &MachineDefinition,
+    current_state: &str,
+    tool: &str,
+) -> bool {
+    definition
+        .states
+        .get(current_state)
+        .and_then(|state| state.disallowed_tools.as_ref())
+        .is_some_and(|disallowed| is_explicitly_disallowed(tool, disallowed))
+}
+
 /// Given a state machine definition and the current state, check which
 /// of the requested tools are allowed and which are blocked.
 pub fn enforce_tools(
@@ -16,41 +76,51 @@ pub fn enforce_tools(
     current_state: &str,
     requested_tools: &[String],
 ) -> ToolEnforcementResult {
-    let allowed_set = get_allowed_tools(definition, current_state);
+    let state_def = definition.states.get(current_state);
 
     let mut allowed = Vec::new();
     let mut blocked = Vec::new();
 
     for tool in requested_tools {
-        match &allowed_set {
-            Some(permitted) => {
-                if permitted.contains(tool) {
-                    allowed.push(tool.clone());
-                } else {
-                    blocked.push(tool.clone());
+        let is_final = state_def
+            .and_then(|s| s.state_type.as_ref())
+            .is_some_and(|t| matches!(t, statewright_engine::StateType::Final));
+        let permitted = if is_final {
+            false
+        } else if let Some(state) = state_def {
+            if state
+                .disallowed_tools
+                .as_ref()
+                .is_some_and(|disallowed| is_explicitly_disallowed(tool, disallowed))
+            {
+                false
+            } else if state.intent.as_deref() == Some("exploratory_read_only") {
+                matches!(classify_tool_intent(tool), ToolIntent::ReadOnly)
+            } else {
+                match &state.allowed_tools {
+                    Some(permitted) => permitted.iter().any(|entry| entry.eq_ignore_ascii_case(tool)),
+                    None => true,
                 }
             }
-            None => {
-                // No restrictions — state has no allowed_tools defined
-                // But final states block everything (no work should happen)
-                let is_final = definition
-                    .states
-                    .get(current_state)
-                    .and_then(|s| s.state_type.as_ref())
-                    .is_some_and(|t| matches!(t, statewright_engine::StateType::Final));
+        } else {
+            false
+        };
 
-                if is_final {
-                    blocked.push(tool.clone());
-                } else {
-                    allowed.push(tool.clone());
-                }
-            }
+        if permitted {
+            allowed.push(tool.clone());
+        } else {
+            blocked.push(tool.clone());
         }
     }
 
     // Check if any blocked tool belongs to a reachable next state
-    let implicit_transition = if !blocked.is_empty() {
-        find_implicit_transition(definition, current_state, &blocked)
+    let transitionable = blocked
+        .iter()
+        .filter(|tool| !tool_is_explicitly_disallowed(definition, current_state, tool))
+        .cloned()
+        .collect::<Vec<_>>();
+    let implicit_transition = if !transitionable.is_empty() {
+        find_implicit_transition(definition, current_state, &transitionable)
     } else {
         None
     };
@@ -92,7 +162,18 @@ pub fn get_allowed_tools(
     definition: &MachineDefinition,
     current_state: &str,
 ) -> Option<Vec<String>> {
-    definition.states.get(current_state)?.allowed_tools.clone()
+    let state = definition.states.get(current_state)?;
+    if state.intent.as_deref() == Some("exploratory_read_only") {
+        None
+    } else {
+        state.allowed_tools.clone().map(|allowed| {
+            let denied = state.disallowed_tools.as_deref().unwrap_or_default();
+            allowed
+                .into_iter()
+                .filter(|tool| !is_explicitly_disallowed(tool, denied))
+                .collect()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +267,17 @@ mod tests {
     }
 
     #[test]
+    fn get_allowed_tools_preserves_allowlist_when_a_blocklist_is_also_present() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "mixed", "initial": "inspect", "states": {
+                "inspect": {"allowed_tools": ["Read", "Write"], "disallowed_tools": ["Write"], "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        assert_eq!(get_allowed_tools(&def, "inspect"), Some(vec!["Read".into()]));
+    }
+
+    #[test]
     fn blocks_all_tools_in_final_state() {
         let def = agent_machine();
         let requested = vec!["read_file".into(), "write_file".into()];
@@ -193,5 +285,61 @@ mod tests {
         // Final states have no transitions, no allowed_tools — block everything
         assert!(result.allowed.is_empty());
         assert_eq!(result.blocked, vec!["read_file", "write_file"]);
+    }
+
+    #[test]
+    fn disallowed_tools_is_a_real_blocklist() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "blocklist", "initial": "inspect", "states": {
+                "inspect": {"disallowed_tools": ["Write", "Delete"], "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let requested = vec!["mcp__docs__list".into(), "Write".into(), "Delete".into()];
+        let result = enforce_tools(&def, "inspect", &requested);
+        assert_eq!(result.allowed, vec!["mcp__docs__list".to_string()]);
+        assert_eq!(result.blocked, vec!["Write".to_string(), "Delete".to_string()]);
+    }
+
+    #[test]
+    fn exploratory_read_only_allows_read_surface_and_blocks_mutation_or_unknown() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "explore", "initial": "inspect", "states": {
+                "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let requested = vec![
+            "mcp__statewright__statewright_list_workflows".into(),
+            "mcp__gmail__read_email".into(),
+            "Bash".into(),
+            "mcp__gmail__send_email".into(),
+            "mcp__opaque__perform_thing".into(),
+        ];
+        let result = enforce_tools(&def, "inspect", &requested);
+        assert_eq!(result.allowed, vec![
+            "mcp__statewright__statewright_list_workflows".to_string(),
+            "mcp__gmail__read_email".to_string(),
+            "Bash".to_string(),
+        ]);
+        assert_eq!(result.blocked, vec![
+            "mcp__gmail__send_email".to_string(),
+            "mcp__opaque__perform_thing".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn exploratory_explicit_denial_wins_and_never_suggests_transition() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "deny-explore", "initial": "inspect", "states": {
+                "inspect": {"intent": "exploratory_read_only", "disallowed_tools": ["Read", "grep"], "on": {"NEXT": "next"}},
+                "next": {"allowed_tools": ["Read", "grep"]},
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let result = enforce_tools(&def, "inspect", &["Read".into(), "grep".into()]);
+        assert!(result.allowed.is_empty());
+        assert_eq!(result.blocked, vec!["Read", "grep"]);
+        assert!(result.implicit_transition.is_none());
     }
 }

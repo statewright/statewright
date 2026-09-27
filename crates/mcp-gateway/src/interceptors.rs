@@ -67,20 +67,34 @@ pub fn pre_call_check(
         }
     }
 
-    // 2b. Bash operation classifier: when allowed_commands is NOT set but Bash is allowed,
-    // classify the command and block operations that require tools not in allowed_tools.
-    // This prevents agents from bypassing Write restrictions via Bash redirects/sed -i.
-    if state_def.allowed_commands.is_none() {
-        let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
-        if is_shell_tool(tool_name, bash_tool) {
-            if let Some(ref allowed_tools) = state_def.allowed_tools {
-                let Some(command) = extract_command(arguments) else {
-                    return PreCallDecision::Block(format!(
-                        "Shell invocation is missing command/cmd in state '{}'.",
-                        session.current_state
-                    ));
-                };
-                if let Err(reason) = bash_classifier::check_against_allowed(&command, allowed_tools) {
+    // 2b. Always apply the operation classifier after any command-prefix policy.
+    // A prefix match is an optional narrowing mechanism, never a reason to skip
+    // deterministic redirect/in-place/destructive checks. Exploratory states use
+    // the read capabilities as their effective shell policy even though their
+    // MCP tool surface is selected by semantic intent rather than an allowlist.
+    let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
+    if is_shell_tool(tool_name, bash_tool) {
+        let exploratory_read_only = state_def.intent.as_deref() == Some("exploratory_read_only");
+        let effective_tools = if exploratory_read_only {
+            Some(vec!["Read".to_string(), "Grep".to_string(), "Glob".to_string()])
+        } else {
+            state_def.allowed_tools.clone()
+        };
+        if let Some(allowed_tools) = effective_tools {
+            let Some(command) = extract_command(arguments) else {
+                return PreCallDecision::Block(format!(
+                    "Shell invocation is missing command/cmd in state '{}'.",
+                    session.current_state
+                ));
+            };
+            if exploratory_read_only && bash_classifier::readonly_capabilities(&command).is_none() {
+                return PreCallDecision::Block(format!(
+                    "Bash command blocked in exploratory state '{}': only proven read-only commands are permitted.",
+                    session.current_state
+                ));
+            }
+            if !exploratory_read_only {
+                if let Err(reason) = bash_classifier::check_against_allowed(&command, &allowed_tools) {
                     return PreCallDecision::Block(format!(
                         "Bash command blocked in state '{}': {}",
                         session.current_state, reason
@@ -231,7 +245,7 @@ fn extract_command(arguments: &serde_json::Value) -> Option<String> {
 fn is_shell_tool(tool_name: &str, configured_tool: &str) -> bool {
     tool_name.eq_ignore_ascii_case(configured_tool)
         || (configured_tool.eq_ignore_ascii_case("Bash")
-            && matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "exec_command" | "run_command" | "shell"))
+            && matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "exec_command" | "run_command" | "shell" | "terminal"))
 }
 
 fn extract_file_path(arguments: &serde_json::Value) -> Option<String> {
@@ -517,9 +531,45 @@ mod tests {
     }
 
     #[test]
-    fn bash_classifier_skipped_when_allowed_commands_set() {
-        // When allowed_commands is set, the prefix whitelist takes precedence
-        // and the classifier does NOT run (to avoid double-blocking)
+    fn exploratory_read_only_allows_read_shell_operations_and_blocks_writes() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "explore",
+            "initial": "inspect",
+            "states": {
+                "inspect": {
+                    "intent": "exploratory_read_only",
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        })).unwrap();
+        let session = GatewaySession::new("explore".into(), def);
+
+        assert!(matches!(
+            pre_call_check(&session, "Bash", &json!({"command": "cat Cargo.toml"})),
+            PreCallDecision::Allow | PreCallDecision::Warn(_)
+        ));
+        assert!(matches!(
+            pre_call_check(&session, "Bash", &json!({"command": "echo nope > output.txt"})),
+            PreCallDecision::Block(_)
+        ));
+        for command in [
+            "touch output.txt",
+            "python3 -c 'open(\"x\", \"w\")'",
+            "git add Cargo.toml",
+            "git --no-pager branch -- new-name",
+            "git --no-pager tag -- new-name",
+        ] {
+            assert!(matches!(
+                pre_call_check(&session, "Bash", &json!({"command": command})),
+                PreCallDecision::Block(_)
+            ), "must fail closed for {command}");
+        }
+    }
+
+    #[test]
+    fn bash_classifier_runs_when_allowed_commands_set() {
+        // Prefix constraints and operation classification are complementary.
         let s = session(); // has allowed_commands: ["pytest", "cargo test"]
         let args = json!({ "command": "pytest -x tests/" });
         match pre_call_check(&s, "Bash", &args) {

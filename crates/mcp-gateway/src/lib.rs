@@ -1,4 +1,5 @@
 pub mod bash_classifier;
+pub mod risk_assessment;
 pub mod config;
 pub mod custom_tools;
 pub mod enforcement;

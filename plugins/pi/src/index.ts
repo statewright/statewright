@@ -469,6 +469,144 @@ function toolNamesMatch(gwName: string, piName: string): boolean {
   return false
 }
 
+function canonicalToolName(name: string): string {
+  const normalized = normalizeToolName(name).replace(/[^a-z0-9]/g, "")
+  if (["read", "readfile", "grep", "searchfiles", "glob", "find", "findfiles", "ls", "listdirectory", "viewimage"].includes(normalized)) return "read"
+  if (["write", "edit", "multiedit", "applypatch", "patchfile", "editfile", "writefile", "createfile", "createorupdatefile", "writestdin"].includes(normalized)) return "write"
+  if (["bash", "execcommand", "runcommand", "shell", "zsh"].includes(normalized)) return "bash"
+  if (["webrun", "websearch", "search"].includes(normalized)) return "websearch"
+  if (["webfetch", "fetch"].includes(normalized)) return "webfetch"
+  if (["imagegen", "imagegenimagegen"].includes(normalized)) return "imagegen"
+  return normalized
+}
+
+function isBlacklistHeuristicMode(state: StateCache): boolean {
+  return state.toolPolicyMode === "blacklist_heuristic_v1"
+}
+
+function toolExplicitlyBlocked(state: StateCache, toolName: string): boolean {
+  const canonical = canonicalToolName(toolName)
+  return state.disallowedTools.some((entry) =>
+    toolNamesMatch(entry, toolName) ||
+    canonicalToolName(entry) === canonical,
+  )
+}
+
+function stateAllowsLocalWrite(state: StateCache): boolean {
+  // An explicit denial is a hard boundary in both the legacy allowlist and
+  // blacklist-heuristic modes. A simultaneous legacy grant must not override
+  // it when this helper is reached through a Bash fallback.
+  if (state.disallowedTools.some((entry) => canonicalToolName(entry) === "write")) return false
+  if (isBlacklistHeuristicMode(state)) return !state.disallowedTools.some((entry) => canonicalToolName(entry) === "write")
+  return state.allowedTools.length === 0 || state.allowedTools.some((entry) => canonicalToolName(entry) === "write")
+}
+
+function legacyReadFallbackAllowed(state: StateCache, command: string): boolean {
+  if (isBlacklistHeuristicMode(state) || state.allowedTools.length === 0) return false
+  if (!state.allowedTools.some((entry) => canonicalToolName(entry) === "read")) return false
+  // Probe the same effect classifier as a Read-only phase. A command that
+  // needs Write will fail this probe, while deterministic reads retain the
+  // provider's historical shell fallback.
+  const readOnlyState = { ...state, allowedTools: ["Read"], disallowedTools: [...state.disallowedTools, "Write"] }
+  return evaluateCommandTier(command, readOnlyState) === "allow"
+}
+
+function bashCommandAllowed(state: StateCache, command: string): boolean {
+  if (evaluateCommandTier(command, state) !== "allow") return false
+  if (isBlacklistHeuristicMode(state) || state.allowedTools.length === 0) return true
+  return state.allowedTools.some((entry) => canonicalToolName(entry) === "bash") || legacyReadFallbackAllowed(state, command)
+}
+
+function shellWords(command: string): string[] | null {
+  const words: string[] = []
+  let word = ""
+  let quote: "'" | '"' | null = null
+  let escaped = false
+  let started = false
+  for (const character of command.trim()) {
+    if (escaped) {
+      word += character
+      escaped = false
+      started = true
+      continue
+    }
+    if (character === "\\") {
+      escaped = true
+      started = true
+      continue
+    }
+    if (quote) {
+      if (character === quote) quote = null
+      else word += character
+      started = true
+      continue
+    }
+    if (character === "'" || character === '"') {
+      quote = character
+      started = true
+      continue
+    }
+    if (/\s/.test(character)) {
+      if (started) words.push(word)
+      word = ""
+      started = false
+      continue
+    }
+    word += character
+    started = true
+  }
+  if (escaped || quote) return null
+  if (started) words.push(word)
+  return words
+}
+
+function gitCommandEffect(command: string): "read" | "local_write" | "external" | "irreversible" | null {
+  // This is deliberately a small, positive parser. The shell metacharacters
+  // have already been rejected by the caller; removing quote delimiters gives
+  // us the words the Git executable receives without blessing arbitrary Git
+  // aliases or unsupported global options.
+  const tokens = shellWords(command)
+  if (!tokens) return null
+  if (tokens[0] !== "git") return null
+  let index = 1
+  while (index < tokens.length) {
+    const token = tokens[index]
+    if (["-C", "--git-dir", "--work-tree", "--namespace"].includes(token)) {
+      if (!tokens[index + 1]) return null
+      index += 2
+      continue
+    }
+    if (/^-C.+/.test(token) || /^(--git-dir|--work-tree|--namespace)=/.test(token)) {
+      index += 1
+      continue
+    }
+    // Configuration can invoke hooks or helpers. Do not admit it until it has
+    // a dedicated, effect-aware policy.
+    if (token === "-c" || token.startsWith("-c")) return null
+    // Do not infer an effect for global options we have not modeled.
+    if (token.startsWith("-")) return null
+    break
+  }
+  const subcommand = tokens[index] ?? ""
+  const args = tokens.slice(index + 1)
+  if (!subcommand) return null
+  if (["push", "fetch", "pull", "clone", "ls-remote"].includes(subcommand)) return "external"
+  if ((subcommand === "reset" && args.includes("--hard")) || (subcommand === "clean" && args.some((arg) => /^-[^-]*f/.test(arg)))) return "irreversible"
+  const writesOutput = args.some((arg) => arg === "--output" || arg.startsWith("--output="))
+  if (["status", "log", "diff", "show", "rev-parse", "ls-files", "grep", "describe"].includes(subcommand)) return writesOutput ? "local_write" : "read"
+  if (subcommand === "branch" && args.every((arg) => ["--show-current", "--list", "-l", "--no-color"].includes(arg))) return "read"
+  if (subcommand === "tag" && args.every((arg) => ["--list", "-l", "--contains", "--points-at", "--no-contains", "--merged", "--no-merged"].includes(arg))) return "read"
+  if (subcommand === "remote" && (args.length === 0 || ["-v", "get-url"].includes(args[0]))) return "read"
+  if (subcommand === "worktree" && args[0] === "list") return "read"
+  if (["add", "commit", "worktree", "branch", "tag", "remote", "restore", "switch", "checkout", "merge", "rebase", "stash", "config", "reset", "clean"].includes(subcommand)) return "local_write"
+  return null
+}
+
+function isKnownNativeTool(toolName: string): boolean {
+  const canonical = canonicalToolName(toolName)
+  return ["read", "write", "bash", "websearch", "webfetch", "imagegen"].includes(canonical)
+}
+
 // --- State cache ---
 
 interface WorkflowMeta {
@@ -497,6 +635,7 @@ interface StateCache {
   isFinal: boolean
   allowedTools: string[]
   disallowedTools: string[]
+  toolPolicyMode: string | null
   allowedCommands: string[]
   instructions: string | null
   transitions: Array<{ event: string; target: string }>
@@ -557,6 +696,7 @@ function cacheState(raw: Record<string, any>): StateCache {
     meta: (raw.meta as WorkflowMeta) ?? {},
     allowedCommands: raw.allowed_commands ?? [],
     disallowedTools: raw.disallowed_tools ?? [],
+    toolPolicyMode: raw.context?.tool_policy_mode ?? raw.tool_policy_mode ?? null,
     directExecution: raw.direct_execution ?? false,
     modelLadder: raw.model_ladder ?? null,
     pendingApproval: (raw.pending_approval as StateCache["pendingApproval"]) ?? null,
@@ -1220,7 +1360,7 @@ function buildTier3Prompt(command: string, state: StateCache): string {
   return [
     `You are a security gate for an AI coding agent.`,
     `Current workflow phase: ${state.state}`,
-    `Allowed commands: ${state.allowedCommands.join(", ") || "(any)"}`,
+    `Policy mode: ${state.toolPolicyMode ?? "legacy_allowlist"}; explicit blocks: ${state.disallowedTools.join(", ") || "(none)"}`,
     `Phase instructions: ${state.instructions || "none"}`,
     ``,
     `The agent wants to run: ${command}`,
@@ -1315,40 +1455,63 @@ function evaluateCommandTier(
   command: string,
   state: StateCache,
 ): "allow" | "deny" | "ambiguous" {
-  const safePattern = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/
-  const dangerousPattern = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s/
+  const normalized = command.trim().replace(/^command\s+/, "")
+  // Shell concatenates adjacent quoted and unquoted fragments into one token.
+  // This shadow is intentionally conservative: it lets flag recognition see
+  // `--p""re`, `-e""xec`, and `-H''Ix` as the executable receives them.
+  const tokenShadow = normalized.replace(/["']/g, "")
+  const safePattern = /^(ls|cat|head|tail|wc|file|find|tree|pwd|date|which|type|printenv|grep|rg|fd|ag)\b|^git\s+(status|log|diff|branch|show|remote|worktree\s+list)\b|^(pytest|cargo\s+(test|check|clippy)|npm\s+(test|run\s+(test|lint|check|build))|pnpm\s+(test|lint|check|build)|task\s+(test|lint|check|build)(:|\s|$))\b/
+  const hardDestructivePattern = /(^|[;&|]\s*|\s)(\/[^\s]*\/)?(rm|rmdir|shred|truncate|dd)\b|git\s+(reset\s+--hard|clean\s+-[^\s]*f)/
+  const externalOrOpaquePattern = /(^|[;&|]\s*)(curl|wget|ssh|scp|docker|podman|nerdctl|crictl|git\s+(push|fetch|pull|clone|ls-remote))\b/
+  const redirectPattern = /(^|[^>])>/
+  const localWriteCommandPattern = /^(cp|mv|mkdir|chmod|chown|sed\s+-i|tee|touch|install|rsync)\b/
+  const knownRedirectWriter = /^(printf|echo|cat|head|tail|wc|grep|rg)\b/
   const scriptPattern = /\b(python3?|node|ruby|perl|php)\b/
   const leavesDir = /\.\.\/?|^\s*cd\s/
+  const gitWorktreeLifecycle = /^git\s+worktree\s+(add|remove|move|prune|lock|unlock)\b/
+  const embeddedExecutionFlag = /^\s*find\s+.*(-exec|-execdir|-ok|-okdir|-delete|-fls|-fprint|-fprint0|-fprintf)|^\s*(rg|ripgrep)\s+.*--pre|^\s*fd\s+.*(-x|-X|--exec|--exec-batch|-[^-]*[xX][^-]*)/
 
-  // Tier 1: safe read-only
-  if (safePattern.test(command) && !dangerousPattern.test(command) && !leavesDir.test(command)) {
-    return "allow"
-  }
-
-  // Tier 2: clearly destructive
-  if (dangerousPattern.test(command) || leavesDir.test(command)) {
+  if (/[\r\n]/.test(normalized) || toolExplicitlyBlocked(state, "bash") || hardDestructivePattern.test(tokenShadow) || externalOrOpaquePattern.test(tokenShadow) || (leavesDir.test(normalized) && !gitWorktreeLifecycle.test(normalized))) {
     return "deny"
   }
 
-  // Tier 2b: scripting interpreter without write tools
-  const hasWriteTools = state.allowedTools.some(t =>
-    toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
-  if (!hasWriteTools && scriptPattern.test(command)) {
+  if (embeddedExecutionFlag.test(tokenShadow)) return "deny"
+
+  if (normalized.includes("&&")) {
+    return normalized.split(/\s*&&\s*/).every((segment) => evaluateCommandTier(segment, state) === "allow") ? "allow" : "deny"
+  }
+
+  if (/[;&|`]|\$\(|</.test(normalized)) return "deny"
+
+  const hasWriteTools = stateAllowsLocalWrite(state)
+  if (!hasWriteTools && scriptPattern.test(normalized)) {
     return "deny"
   }
 
-  // Tier 2c: check against allowed_commands if present
-  if (state.allowedCommands.length > 0) {
-    const matchesAllowed = state.allowedCommands.some(pattern => {
-      // Support glob patterns via minimatch
-      return minimatch(command, pattern, { matchBase: true }) ||
-             minimatch(command.split(/\s+/)[0], pattern, { matchBase: true })
-    })
-    if (!matchesAllowed) return "deny"
+  const gitEffect = gitCommandEffect(normalized)
+  const isGitCommand = shellWords(normalized)?.[0] === "git"
+  if (gitEffect === "external" || gitEffect === "irreversible") return "deny"
+  if (isGitCommand && !gitEffect) return "deny"
+  if (redirectPattern.test(normalized)) {
+    // A read-only Git producer may redirect its output, but that composite
+    // command is still a local file write. Resolve Git's own effect first so
+    // an opaque or external subcommand cannot borrow the redirect exception.
+    if (gitEffect === "read") return hasWriteTools ? "allow" : "deny"
+    if (!knownRedirectWriter.test(normalized)) return "deny"
+    return hasWriteTools ? "allow" : "deny"
   }
+  if (gitEffect === "read") return "allow"
+  if (gitEffect === "local_write") return hasWriteTools ? "allow" : "deny"
 
-  // Tier 3: ambiguous
-  return "ambiguous"
+  // Match a mutating executable, not a mutating-looking argument of an
+  // unknown executable. Unknown commands remain opaque to this local gate.
+  if (localWriteCommandPattern.test(normalized)) return hasWriteTools ? "allow" : "deny"
+
+  if (safePattern.test(normalized)) return "allow"
+
+  // In local execution, unknown effects cannot be delegated safely. Executor
+  // mode has already taken the admission path above this evaluator.
+  return "deny"
 }
 
 // --- Extension entry ---
@@ -2600,7 +2763,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
 
     // --- Native tool restrictions ---
     try {
-      if (state.allowedTools.length > 0) {
+      if (state.allowedTools.length > 0 && !isBlacklistHeuristicMode(state)) {
         if (!originalTools) {
           originalTools = pi.getActiveTools()
           swLog(`tools] saved original tools: ${originalTools.join(", ")}`)
@@ -3055,67 +3218,34 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       return { block: true, reason: "Workflow complete. No tools available. Stop working." }
     }
 
-    // Disallowed tools (blacklist) — check before whitelist
-    if (stateCache.disallowedTools.length > 0) {
-      const isBlocked = stateCache.disallowedTools.some((t) => toolNamesMatch(t, event.toolName))
-      if (isBlocked) {
-        return {
-          block: true,
-          reason: `Tool '${event.toolName}' is blocked in the '${stateCache.state}' phase.`,
-        }
+    // Raw native aliases and canonical capabilities are both hard denials.
+    // This is before all shell/read shortcuts so aliases cannot bypass policy.
+    if (toolExplicitlyBlocked(stateCache, event.toolName)) {
+      return { block: true, reason: `Tool '${event.toolName}' is explicitly blocked in the '${stateCache.state}' phase.` }
+    }
+
+    if (isBlacklistHeuristicMode(stateCache) && !isKnownNativeTool(event.toolName)) {
+      return { block: true, reason: `Tool '${event.toolName}' has opaque mutation semantics in the '${stateCache.state}' phase.` }
+    }
+
+    // Bash effects are enforced in both policy modes. New-mode admission uses
+    // blacklist semantics; legacy states retain their existing visible tools.
+    if (canonicalToolName(event.toolName) === "bash") {
+      const cmd = (event.input?.command ?? event.input?.cmd ?? "") as string
+      if (bashCommandAllowed(stateCache, cmd)) return
+      return { block: true, reason: "Bash command blocked: explicit policy or unresolved command effect requires executor-owned semantic-risk approval." }
+    }
+
+    // The compatibility change is opt-in. Existing workflows keep their
+    // provider-visible allowlist semantics until explicitly migrated.
+    if (!isBlacklistHeuristicMode(stateCache) && stateCache.allowedTools.length > 0) {
+      const isAllowed = stateCache.allowedTools.some((tool) => toolNamesMatch(tool, event.toolName))
+      if (!isAllowed) {
+        return { block: true, reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase.` }
       }
     }
 
-    // Bash discernment: always applies for bash, even with empty allowed_tools.
-    // If writes are disallowed (blacklist) or not in whitelist, block write-like bash commands.
-    if (event.toolName === "bash" || event.toolName === "Bash") {
-      const cmd = (event.input?.command ?? "") as string
-      const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
-      const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s|docker\s|podman\s|nerdctl\s|crictl\s/.test(cmd)
-      // Block scripting interpreters when writes are disallowed (blacklist or not in whitelist)
-      const writesBlacklisted = stateCache.disallowedTools.some((t) => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
-      const hasWriteTools = !writesBlacklisted && (
-        stateCache.allowedTools.length === 0 || // empty whitelist = no restriction (unless blacklisted)
-        stateCache.allowedTools.some((t) => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
-      )
-      const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
-      const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
-      const bashAllowed = stateCache.allowedTools.length === 0 ||
-        stateCache.allowedTools.some((t) => toolNamesMatch(t, "bash"))
-      if (bashAllowed && !isDangerous && !isScriptWrite) {
-        return // Bash allowed (or no whitelist) and command isn't destructive/write — pass through
-      }
-      if (!bashAllowed && isSafe && !isDangerous && !leavesDir && !isScriptWrite) {
-        return // Bash not in whitelist but command is safe read-only — pass through
-      }
-      // Bash attempted but not safe — explain why
-      const reasons: string[] = []
-      if (isDangerous) reasons.push("contains destructive or write operations")
-      if (isScriptWrite) reasons.push("scripting interpreter can write files — use edit tool instead")
-      if (leavesDir) reasons.push("attempts to leave the working directory")
-      if (!isSafe && !isDangerous && !isScriptWrite) reasons.push("not a recognized read-only command")
-      return {
-        block: true,
-        reason: `Bash command blocked: ${reasons.join(", ")}. Safe read-only commands (ls, cat, grep, git status, etc.) are allowed. Destructive commands, writes, and directory traversal are not.`,
-      }
-    }
-
-    // No whitelist = no further enforcement (blacklist + bash discernment already applied above)
-    if (stateCache.allowedTools.length === 0) return
-
-    const isAllowed = stateCache.allowedTools.some((t) => toolNamesMatch(t, event.toolName))
-    if (!isAllowed) {
-      const available = stateCache.allowedTools.map(normalizeToolName).join(", ")
-      const transitionHints = stateCache.transitions.map((t) =>
-        describeTransition(t, stateCache!),
-      ).join(", ")
-      return {
-        block: true,
-        reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase. Available: ${available}. To advance, use statewright_transition with: ${transitionHints}.`,
-      }
-    }
-
-    // Tool call allowed through. Inactivity timer is NOT reset here —
+    // Default allow after blacklist and Bash discernment. Inactivity timer is NOT reset here —
     // it only resets on state transitions (via applyModelRouting).
     // A model calling tools without transitioning is still stuck.
   })
@@ -3621,15 +3751,10 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
           }
           else if (name === "bash" || tc.name === "run_command" || tc.name === "run_test") {
             const cmd = (args.command ?? args.cmd) as string
-            // Apply the same bash discernment as the tool_call enforcement layer.
-            // Recovery-executed commands must not bypass write/destructive restrictions.
-            const isSafe = /^\s*(ls|cat|head|tail|wc|file|find|tree|pwd|echo|date|which|type|env|printenv|git\s+(status|log|diff|branch|show|remote)|grep|rg|fd|ag|pytest|cargo\s+test|npm\s+test|make\s+test)\b/.test(cmd)
-            const isDangerous = /[>|]|&&\s*(rm|mv|cp)|;\s*(rm|mv|cp)|rm\s|rmdir|shred|truncate|mv\s|cp\s|mkdir|chmod|chown|curl|wget|sed\s+-i|dd\s|tee\s|docker\s|podman\s|nerdctl\s|crictl\s/.test(cmd)
-            const hasWriteTools = stateCache.allowedTools.some(t => toolNamesMatch(t, "edit") || toolNamesMatch(t, "write"))
-            const isScriptWrite = !hasWriteTools && /\b(python3?|node|ruby|perl|php)\b/.test(cmd)
-            const leavesDir = /\.\.\/?|^\s*cd\s/.test(cmd)
-            if (isDangerous || isScriptWrite || leavesDir || (!isSafe && !stateCache.allowedTools.some(t => toolNamesMatch(t, "bash")))) {
-              result = `Bash command blocked by enforcement: "${cmd}". Only safe read-only commands are allowed in recovery mode.`
+            // Share the runtime command classifier. Text-tool recovery must
+            // never be a bypass around native preflight enforcement.
+            if (!bashCommandAllowed(stateCache, cmd)) {
+              result = `Bash command blocked by enforcement: "${cmd}". Explicitly blocked capabilities, irreversible operations, and external or opaque commands remain guarded.`
             } else {
               const execResult = await pi.exec("bash", ["-c", cmd])
               result = execText(execResult)

@@ -538,14 +538,21 @@ case "$ENDPOINT" in
 
     STATE_JSON=$(cat "$CACHE_FILE")
     ALLOWED=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | .[]' 2>/dev/null || true)
+    DISALLOWED=$(echo "$STATE_JSON" | jq -r '.disallowed_tools // [] | .[]' 2>/dev/null || true)
+    POLICY_MODE=$(echo "$STATE_JSON" | jq -r '.context.tool_policy_mode // .tool_policy_mode // empty' 2>/dev/null || true)
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // "unknown"' 2>/dev/null || true)
     TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event) | join(", ")' 2>/dev/null || true)
 
-    if [ -z "$ALLOWED" ]; then
-      exit 0  # No allowed_tools list = no enforcement
-    fi
-
     STATEWRIGHT_ALLOWED_TOOLS="$ALLOWED"
+    STATEWRIGHT_DISALLOWED_TOOLS="$DISALLOWED"
+    STATEWRIGHT_TOOL_POLICY_MODE="$POLICY_MODE"
+
+    # Existing workflows that omitted allowed_tools intentionally had no
+    # standalone Codex restriction. Preserve that legacy contract; only the
+    # explicit deny/heuristic mode activates omission-as-unrestricted logic.
+    if ! statewright_blacklist_mode && [ -z "$ALLOWED" ]; then
+      exit 0
+    fi
 
     if statewright_uses_unsupported_shell "$TOOL_NAME" "$HOOK_INPUT"; then
       jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy."}}'
@@ -561,8 +568,27 @@ case "$ENDPOINT" in
       if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] || [ "$STATEWRIGHT_TOOL_MODE" = "readonly_shell" ]; then
         COMMAND=$(statewright_input_command "$HOOK_INPUT")
         if [ -n "$COMMAND" ]; then
-          # Check for file write operations (redirects, heredocs) when Write is not allowed.
-          HAS_WRITE=$(echo "$ALLOWED" | grep -qx "Write" && echo "yes" || echo "no")
+          if statewright_blacklist_mode; then
+            EFFECT=$(statewright_shell_effect "$COMMAND")
+            case "$EFFECT" in
+              irreversible)
+                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: irreversible operation requires a separate approved execution path."}}'
+                exit 0 ;;
+              external)
+                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: external operation requires executor-owned semantic-risk approval."}}'
+                exit 0 ;;
+              opaque)
+                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: opaque command effect requires executor-owned semantic-risk approval."}}'
+                exit 0 ;;
+              local_write)
+                if ! statewright_has_capability "Write"; then
+                  jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: local write attempted while Write is explicitly blocked."}}'
+                  exit 0
+                fi ;;
+            esac
+          fi
+          # Check for file write operations when Write is explicitly blocked.
+          HAS_WRITE=$(statewright_has_capability "Write" && echo "yes" || echo "no")
           if [ "$HAS_WRITE" = "no" ]; then
             if statewright_has_file_write_redirect "$COMMAND"; then
               REASON="Bash command blocked: output redirect detected but Write is not in allowed tools for '$CURRENT' phase."
@@ -595,22 +621,19 @@ case "$ENDPOINT" in
             jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Destructive operation not permitted in this phase."}}'
             exit 0
           fi
-          # allowed_commands constrains broad Bash authority. A strict
-          # readonly_shell command is the provider-specific implementation of
-          # canonical Read and was already validated by tool-policy.sh.
-          ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
-          if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] && [ -n "$ALLOWED_CMDS" ]; then
-            CMD_OK=false
-            while IFS= read -r pattern; do
-              # Preserve the historical literal-prefix form while accepting
-              # Claude-compatible glob patterns in allowed_commands.
-              # shellcheck disable=SC2254
-              case "$COMMAND" in "$pattern"|"$pattern "*|$pattern) CMD_OK=true; break ;; esac
-            done <<< "$ALLOWED_CMDS"
-            if [ "$CMD_OK" = false ]; then
-              REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
-              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
-              exit 0
+          # Legacy workflows retain the historical command-prefix contract.
+          if ! statewright_blacklist_mode; then
+            ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
+            if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] && [ -n "$ALLOWED_CMDS" ]; then
+              CMD_OK=false
+              while IFS= read -r pattern; do
+                case "$COMMAND" in "$pattern"|"$pattern "*|$pattern) CMD_OK=true; break ;; esac
+              done <<< "$ALLOWED_CMDS"
+              if [ "$CMD_OK" = false ]; then
+                REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
+                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+                exit 0
+              fi
             fi
           fi
           # Check blocked_env — deny commands referencing blocked environment variables
@@ -629,9 +652,14 @@ case "$ENDPOINT" in
       exit 0  # Allowed — silent pass
     fi
 
-    # Tool denied — use correct hookSpecificOutput format
-    ALLOWED_LIST=$(echo "$ALLOWED" | tr '\n' ', ' | sed 's/,$//')
-    REASON="Tool '$TOOL_NAME' is not available in the '$CURRENT' phase. Allowed: ${ALLOWED_LIST}.${TRANSITIONS:+ To advance, use statewright_transition with: $TRANSITIONS.}"
+    # Tool denied by an explicit capability blacklist or opaque-tool gate.
+    if [ "$STATEWRIGHT_TOOL_MODE" = "opaque" ]; then
+      REASON="Tool '$TOOL_NAME' has opaque mutation semantics in the '$CURRENT' phase. Use an executor-owned semantic-risk approval gate before running it."
+      jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+      exit 0
+    fi
+    BLOCKED_LIST=$(echo "$DISALLOWED" | tr '\n' ', ' | sed 's/,$//')
+    REASON="Tool '$TOOL_NAME' is blocked in the '$CURRENT' phase. Explicitly blocked: ${BLOCKED_LIST:-none}.${TRANSITIONS:+ To advance, use statewright_transition with: $TRANSITIONS.}"
     jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
     exit 0
     ;;

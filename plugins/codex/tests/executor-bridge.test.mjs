@@ -146,7 +146,10 @@ test("native Codex hook treats safe shell reads as Read when Bash is also allowe
   };
   const session_id = "native-read-alias";
   const state = {state_snapshot: {...loadedState.state_snapshot,
-    allowed_tools: ["Read", "Bash"], allowed_commands: ["task test:unit"]}};
+    allowed_tools: ["Read", "Bash"],
+    allowed_commands: ["task test:unit"],
+    disallowed_tools: ["Write"],
+    context: {...loadedState.state_snapshot.context, tool_policy_mode: "blacklist_heuristic_v1"}}};
 
   try {
     const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
@@ -157,7 +160,7 @@ test("native Codex hook treats safe shell reads as Read when Bash is also allowe
     assert.equal(post.status, 0, post.stderr);
 
     for (const command of ["cat README.md", "cat README.md && cat package.json",
-      "rg -n needle src", "find src -name '*.mjs'"]) {
+      "rg -n needle src", "find src -name '*.mjs'", 'git -C "path with spaces" status']) {
       const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
         session_id,
         tool_name: "exec_command",
@@ -175,13 +178,91 @@ test("native Codex hook treats safe shell reads as Read when Bash is also allowe
     assert.equal(allowedBash.status, 0, allowedBash.stderr);
     assert.equal(allowedBash.stdout, "");
 
-    const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+    const unlisted = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "exec_command",
       tool_input: {cmd: "npm test"},
     }, environment);
-    assert.equal(denied.status, 0, denied.stderr);
-    assert.match(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason, /not in allowed commands/);
+    assert.equal(unlisted.status, 0, unlisted.stderr);
+    assert.equal(unlisted.stdout, "");
+
+    const writeDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "exec_command",
+      tool_input: {cmd: "printf x > marker.txt"},
+    }, environment);
+    assert.equal(writeDenied.status, 0, writeDenied.stderr);
+    assert.match(JSON.parse(writeDenied.stdout).hookSpecificOutput.permissionDecisionReason, /local write attempted/);
+
+    const deleteDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "exec_command",
+      tool_input: {cmd: "rm -rf target"},
+    }, environment);
+    assert.equal(deleteDenied.status, 0, deleteDenied.stderr);
+    assert.match(JSON.parse(deleteDenied.stdout).hookSpecificOutput.permissionDecisionReason, /irreversible operation/);
+
+    const opaqueDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "opaque_mutation_tool",
+      tool_input: {},
+    }, environment);
+    assert.equal(opaqueDenied.status, 0, opaqueDenied.stderr);
+    assert.match(JSON.parse(opaqueDenied.stdout).hookSpecificOutput.permissionDecisionReason, /opaque mutation semantics/);
+
+    for (const cmd of ["git push origin HEAD", "git -C . push origin HEAD", 'git "push" origin HEAD', "git reset --hard", "git -C . reset --hard", "git unknown-alias", "git unknown-alias --output=marker.txt", "git push origin HEAD --output=marker.txt", "git reset --hard --output=marker.txt", "git -c core.fsmonitor=./opaque-wrapper status", "opaque-wrapper touch marker.txt", "git -C . push origin touch", "git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt", "/bin/rm -rf target", " command git push origin HEAD", "env git push origin HEAD", "git status; opaque-wrapper", "find . -exec opaque-wrapper {} +", "rg --pre opaque-wrapper needle .", "fd -x opaque-wrapper", 'find . -e""xec opaque-wrapper {} +', 'rg --p""re opaque-wrapper needle .', "fd -H''Ix opaque-wrapper", "task deploy"]) {
+      const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id,
+        tool_name: "exec_command",
+        tool_input: {cmd},
+      }, environment);
+      assert.equal(denied.status, 0, denied.stderr);
+      assert.match(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason, /requires|local write attempted/);
+    }
+
+    const writable = {state_snapshot: {...state.state_snapshot, disallowed_tools: []}};
+    const writablePost = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id,
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: writable,
+    }, environment);
+    assert.equal(writablePost.status, 0, writablePost.stderr);
+    for (const cmd of ["git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt"]) {
+      const allowed = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id,
+        tool_name: "exec_command",
+        tool_input: {cmd},
+      }, environment);
+      assert.equal(allowed.status, 0, allowed.stderr);
+      assert.equal(allowed.stdout, "", cmd);
+    }
+  } finally {
+    await rm(home, {recursive: true, force: true});
+  }
+});
+
+test("legacy state without an allowlist remains unenforced", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const environment = {
+    HOME: home,
+    STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+    STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
+  };
+  const session_id = "legacy-empty-policy";
+  try {
+    const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+      session_id,
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: { state_snapshot: { state: "legacy", transitions: [] } },
+    }, environment);
+    assert.equal(post.status, 0, post.stderr);
+    const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "apply_patch",
+      tool_input: {},
+    }, environment);
+    assert.equal(pre.status, 0, pre.stderr);
+    assert.equal(pre.stdout, "");
   } finally {
     await rm(home, {recursive: true, force: true});
   }

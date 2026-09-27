@@ -379,7 +379,7 @@ mod tests {
         ).is_none());
         assert!(semantic_effect_risk_denial(
             &open,
-            &semantic_pipeline("tmux capture-pane -p", None),
+            &semantic_pipeline("tmux new-session shell", None),
         ).unwrap().contains("uncertain"));
         assert!(semantic_effect_risk_denial(
             &open,
@@ -388,6 +388,10 @@ mod tests {
 
         let no_read = blacklist_session(&["Read"]);
         assert!(semantic_effect_capability_denial(&no_read, &semantic_pipeline("rg policy src", None)).is_some());
+        assert!(semantic_effect_capability_denial(
+            &no_read,
+            &semantic_pipeline("tmux capture-pane -p -t %36", None),
+        ).is_some());
         let no_write = blacklist_session(&["Write"]);
         assert!(semantic_effect_capability_denial(&no_write, &semantic_pipeline("cp source-file local-file", None)).is_some());
 

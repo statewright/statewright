@@ -25,6 +25,8 @@ pub enum OpClass {
     GitWrite,
     /// Git read operations (requires Read).
     GitRead,
+    /// A bounded local state change (requires Write).
+    LocalWrite,
     /// Benign or unclassifiable — allowed if Bash itself is allowed.
     Passthrough,
 }
@@ -149,7 +151,7 @@ impl OpClass {
     /// Returns `&["__BLOCKED__"]` for operations that require an explicit approval gate.
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
-            OpClass::FileWrite | OpClass::FileModify => &["Write"],
+            OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
             OpClass::FileRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
             // calls as well as read-only shell searches.  Grep and Glob are
@@ -180,6 +182,13 @@ pub fn classify(command: &str) -> Vec<OpClass> {
             continue;
         }
         classes.push(classify_segment(seg));
+    }
+
+    // `send-keys` can execute arbitrary terminal input, so only promote the
+    // one orchestration form whose complete command is structurally proven.
+    if segments.len() == 1 && is_bounded_tmux_goal_dispatch(command) {
+        classes.retain(|class| *class != OpClass::Passthrough);
+        classes.push(OpClass::LocalWrite);
     }
 
     // Check for output redirects across the whole command (they can appear anywhere)
@@ -277,6 +286,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::Passthrough => readonly_passthrough_capability(segment)?,
             OpClass::FileWrite
             | OpClass::FileModify
+            | OpClass::LocalWrite
             | OpClass::Destructive
             | OpClass::Network
             | OpClass::GitWrite => return None,
@@ -453,6 +463,52 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
+}
+
+fn classify_tmux(segment: &str) -> OpClass {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return OpClass::Passthrough;
+    };
+    if tokens.first().and_then(|token| token.rsplit('/').next()) != Some("tmux") {
+        return OpClass::Passthrough;
+    }
+    let Some(operation) = tokens.get(1).map(String::as_str) else {
+        return OpClass::Passthrough;
+    };
+    let args = &tokens[2..];
+    let has_shell_format = args.iter().any(|argument| argument.contains("#("));
+    match operation {
+        "capture-pane" if args.iter().any(|argument| argument == "-p")
+            && !args.iter().any(|argument| argument == "-b" || argument.starts_with("-b="))
+            && !has_shell_format => OpClass::FileRead,
+        "display-message" if args.iter().any(|argument| argument == "-p")
+            && !has_shell_format => OpClass::FileRead,
+        "has-session" | "list-panes" | "list-sessions" | "show-options"
+            if !has_shell_format => OpClass::FileRead,
+        "capture-pane" | "display-message" => OpClass::LocalWrite,
+        "kill-pane" | "kill-session" => OpClass::Destructive,
+        _ => OpClass::Passthrough,
+    }
+}
+
+fn is_bounded_tmux_goal_dispatch(command: &str) -> bool {
+    if command.len() > 4_096 || command.chars().any(char::is_control) {
+        return false;
+    }
+    let Some(tokens) = simple_command_tokens(command.trim()) else {
+        return false;
+    };
+    let [executable, operation, target_flag, target, goal, submit] = tokens.as_slice() else {
+        return false;
+    };
+    executable.rsplit('/').next() == Some("tmux")
+        && operation == "send-keys"
+        && target_flag == "-t"
+        && target.strip_prefix('%').is_some_and(|pane| {
+            !pane.is_empty() && pane.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && goal.strip_prefix("/goal ").is_some_and(|body| !body.trim().is_empty())
+        && matches!(submit.as_str(), "Enter" | "C-m")
 }
 
 /// Ripgrep's `--pre` option starts an arbitrary preprocessor for each searched
@@ -641,6 +697,10 @@ fn classify_segment(segment: &str) -> OpClass {
 
         // Git — classify by subcommand
         "git" => classify_git(&tokens),
+
+        // Tmux reads and bounded local orchestration. Arbitrary send-keys and
+        // session creation remain passthrough for semantic fail-closed review.
+        "tmux" => classify_tmux(segment),
 
         // Everything else
         _ => OpClass::Passthrough,
@@ -1244,6 +1304,48 @@ mod tests {
         assert_eq!(readonly_capabilities("git tag v1"), None);
         assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
         assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
+    }
+
+    #[test]
+    fn tmux_reads_are_deterministic_but_executable_formats_are_not() {
+        for command in [
+            "tmux capture-pane -p -t %36 -S -80 | tail -80",
+            "tmux list-panes -a -F '#{pane_id} #{pane_title}'",
+            "tmux list-sessions",
+            "tmux has-session -t weekly-top5",
+            "tmux display-message -p '#{session_name}'",
+            "tmux show-options -g status",
+        ] {
+            assert!(readonly_capabilities(command).is_some(), "{command}");
+        }
+        for command in [
+            "tmux capture-pane -t %36",
+            "tmux display-message hello",
+            "tmux list-panes -F '#(touch /tmp/marker)'",
+            "tmux send-keys -t %36 status Enter",
+            "tmux new-session shell",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn only_one_complete_goal_dispatch_is_a_local_write() {
+        for command in [
+            "tmux send-keys -t %36 '/goal finish the OAuth boundary' Enter",
+            "tmux send-keys -t %1 '/goal validate the staged canary' C-m",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
+        }
+        for command in [
+            "tmux send-keys -t pane-name '/goal unsafe target' Enter",
+            "tmux send-keys -t %36 status Enter",
+            "tmux send-keys -t %36 '/goal ' Enter",
+            "tmux send-keys -t %36 '/goal work' Enter extra",
+            "tmux send-keys -t %36 '/goal work' Enter; opaque-wrapper",
+        ] {
+            assert!(!classify(command).contains(&OpClass::LocalWrite), "{command}");
+        }
     }
 
     #[test]

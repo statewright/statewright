@@ -819,6 +819,9 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell");
     }
+    if classes.contains(&OpClass::LocalWrite) {
+        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
+    }
     if classes.contains(&OpClass::FileWrite) || classes.contains(&OpClass::FileModify) {
         return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
     }
@@ -1860,6 +1863,42 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_tmux_effects_precede_system_one_fallthrough() {
+        let read = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"tmux capture-pane -p -t %36 -S -80 | tail -80"}),
+            Some("intake"),
+        );
+        assert_eq!(read.risk, RiskBand::Low);
+        assert_eq!(read.exposure, ExposureBand::Local);
+
+        let goal = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"tmux send-keys -t %36 '/goal finish OAuth' Enter"}),
+            Some("implement"),
+        );
+        assert_eq!(goal.risk, RiskBand::Moderate);
+        assert_eq!(goal.exposure, ExposureBand::Local);
+
+        for command in [
+            "tmux send-keys -t %36 status Enter",
+            "tmux new-session shell",
+            "tmux list-panes -F '#(touch /tmp/marker)'",
+        ] {
+            let unknown = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd":command}),
+                Some("implement"),
+            );
+            assert_eq!(unknown.risk, RiskBand::Moderate, "{command}");
+            assert_eq!(unknown.exposure, ExposureBand::Unknown, "{command}");
+        }
+    }
+
+    #[test]
     fn visible_pipeline_submission_reports_the_actual_queue_full_outcome() {
         let request = semantic_request(None, "read_file", &json!({"path":"/private/secret"}), None, false);
         let enabled = SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
@@ -1880,7 +1919,12 @@ mod tests {
             irreversible: Probability::new(irreversible).unwrap(), external_or_account_effect: Probability::new(external).unwrap(),
         };
         let pipeline = |semantic| RiskPipelineAssessment {
-            deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux capture-pane -p"}), None),
+            deterministic: assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd":"systemctl status statewright"}),
+                None,
+            ),
             effective_risk: RiskBand::Moderate, semantic_failsafe_escalated: false, semantic,
             semantic_authorization_enabled: true,
         };
@@ -1895,7 +1939,12 @@ mod tests {
         assert_eq!(pipeline(semantic_receipt(&request, SemanticAssessorStatus::Timeout)).resolve_effect(), ResolvedEffect::DenyUncertain);
 
         let shadow_only = RiskPipelineAssessment {
-            deterministic: assess_invocation(None, "exec_command", &json!({"cmd":"tmux capture-pane -p"}), None),
+            deterministic: assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd":"systemctl status statewright"}),
+                None,
+            ),
             effective_risk: RiskBand::Moderate,
             semantic_failsafe_escalated: false,
             semantic: assessed(vector(0.99, 0.01, 0.99, 0.0, 0.0, 0.0)),

@@ -143,6 +143,7 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
 fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) -> bool {
     match (executable, operation) {
         ("task" | "cargo" | "docker" | "podman" | "kubectl" | "npm" | "pnpm", _) => true,
+        ("bash" | "sh" | "dash" | "ksh" | "zsh" | "python" | "python3" | "node" | "ruby" | "perl" | "eval" | "xargs", _) => true,
         ("tmux", Some("new-session" | "send-keys")) => true,
         _ => false,
     }
@@ -505,7 +506,7 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
 
 // --- Internal helpers ---
 
-fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
+pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut chars = command.chars().peekable();

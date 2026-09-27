@@ -5,7 +5,11 @@
 //! resolve an otherwise opaque effect before applying state capabilities. The
 //! assessment contains no arguments or payloads.
 
-use crate::{bash_classifier::{self, OpClass}, protocol::ToolInfo};
+use crate::{
+    bash_classifier::{self, OpClass},
+    protocol::ToolInfo,
+    shell_ast_shadow::{self, AstShadowAssessment, ParseStatus, ShellAstSemanticShape},
+};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
@@ -118,6 +122,8 @@ pub struct SemanticAssessmentRequest {
     pub state_intent: Option<String>,
     pub argument_keys: Vec<String>,
     pub shell_shape: Vec<bash_classifier::SemanticCommandShape>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell_ast_shape: Option<ShellAstSemanticShape>,
     pub read_only_hint: Option<bool>,
     pub destructive_hint: Option<bool>,
     pub open_world_hint: Option<bool>,
@@ -457,7 +463,7 @@ async fn assess_with_provider(
     provider: &SemanticProviderConfig,
     request: &SemanticAssessmentRequest,
 ) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
-    let request_shape = serde_json::json!({
+    let mut request_shape = serde_json::json!({
         "tool_family": request.tool_family, "tool_name": request.tool_name,
         "state_intent": request.state_intent, "argument_keys": request.argument_keys,
         "shell_shape": request.shell_shape,
@@ -465,6 +471,9 @@ async fn assess_with_provider(
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
     });
+    if let Some(shape) = request.shell_ast_shape.as_ref() {
+        request_shape["shell_ast_shape"] = serde_json::json!(shape);
+    }
     let (url, body) = match provider.kind {
         SemanticProviderKind::OpenAiCompatible => (
             format!("{}/chat/completions", provider.endpoint),
@@ -622,6 +631,7 @@ pub struct ShadowAssessment {
     /// deterministic authorization decision in this shadow-only milestone.
     pub state_intent: Option<String>,
     semantic_request: Option<SemanticAssessmentRequest>,
+    ast_semantic_request: Option<SemanticAssessmentRequest>,
 }
 
 /// The bounded record emitted by the shadow path.  It deliberately has no
@@ -635,11 +645,30 @@ pub struct ShadowReceipt {
     pub state_intent: Option<String>,
 }
 
+/// Privacy-bounded comparison between the authoritative string classifier and
+/// the non-authoritative Bash AST shadow. No invocation values are retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellAstShadowReceipt {
+    pub status: ParseStatus,
+    pub executable_nodes: usize,
+    pub shell_heredocs: usize,
+    pub foreign_code_heredocs: usize,
+    pub opaque_heredocs: usize,
+    pub legacy_risk: RiskBand,
+    pub legacy_exposure: ExposureBand,
+    pub ast_risk: RiskBand,
+    pub ast_exposure: ExposureBand,
+    pub disagrees: bool,
+    pub ast_is_stricter: bool,
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_SHADOW_ENABLED: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST_SHADOW_RECEIPTS: RefCell<Vec<ShadowReceipt>> = const { RefCell::new(Vec::new()) };
     static TEST_SEMANTIC_RECEIPTS: RefCell<Vec<SemanticAssessmentReceipt>> = const { RefCell::new(Vec::new()) };
+    static TEST_SHELL_AST_SHADOW_ENABLED: Cell<Option<bool>> = const { Cell::new(None) };
+    static TEST_SHELL_AST_RECEIPTS: RefCell<Vec<ShellAstShadowReceipt>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -655,6 +684,16 @@ pub fn take_test_shadow_receipts() -> Vec<ShadowReceipt> {
 #[cfg(test)]
 pub fn take_test_semantic_receipts() -> Vec<SemanticAssessmentReceipt> {
     TEST_SEMANTIC_RECEIPTS.with(|receipts| std::mem::take(&mut *receipts.borrow_mut()))
+}
+
+#[cfg(test)]
+pub fn set_test_shell_ast_shadow_enabled(enabled: Option<bool>) {
+    TEST_SHELL_AST_SHADOW_ENABLED.with(|value| value.set(enabled));
+}
+
+#[cfg(test)]
+pub fn take_test_shell_ast_receipts() -> Vec<ShellAstShadowReceipt> {
+    TEST_SHELL_AST_RECEIPTS.with(|receipts| std::mem::take(&mut *receipts.borrow_mut()))
 }
 
 /// The global evaluator is inert unless a staging deployment opts in. This
@@ -842,6 +881,72 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
 }
 
+fn shell_ast_shadow_enabled() -> bool {
+    let enabled = shadow_enabled_for(std::env::var("STATEWRIGHT_SHELL_AST_SHADOW").ok().as_deref());
+    #[cfg(test)]
+    let enabled = TEST_SHELL_AST_SHADOW_ENABLED
+        .with(|override_value| override_value.get().unwrap_or(enabled));
+    enabled
+}
+
+fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
+    let classes = &ast.classes;
+    if classes.contains(&OpClass::Destructive) {
+        return assessment(RiskBand::Critical, ExposureBand::Local, "shell_ast");
+    }
+    if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
+        return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
+    }
+    if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
+        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast");
+    }
+    if classes.iter().any(|class| matches!(class,
+        OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite))
+    {
+        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell_ast");
+    }
+    if classes.iter().all(|class| matches!(class,
+        OpClass::FileRead | OpClass::ContentSearch | OpClass::FileSearch
+            | OpClass::GitRead | OpClass::SafeOutput))
+    {
+        return assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
+    }
+    assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast")
+}
+
+fn emit_shell_ast_comparison(legacy: &ShadowAssessment, ast: &AstShadowAssessment) {
+    let ast_assessment = assess_shell_ast(ast);
+    let receipt = ShellAstShadowReceipt {
+        status: ast.status,
+        executable_nodes: ast.executable_nodes,
+        shell_heredocs: ast.shell_heredocs,
+        foreign_code_heredocs: ast.foreign_code_heredocs,
+        opaque_heredocs: ast.opaque_heredocs,
+        legacy_risk: legacy.risk,
+        legacy_exposure: legacy.exposure,
+        ast_risk: ast_assessment.risk,
+        ast_exposure: ast_assessment.exposure,
+        disagrees: legacy.risk != ast_assessment.risk || legacy.exposure != ast_assessment.exposure,
+        ast_is_stricter: risk_rank(ast_assessment.risk) > risk_rank(legacy.risk),
+    };
+    #[cfg(test)]
+    TEST_SHELL_AST_RECEIPTS.with(|receipts| receipts.borrow_mut().push(receipt.clone()));
+    tracing::info!(
+        parse_status = ?receipt.status,
+        executable_nodes = receipt.executable_nodes,
+        shell_heredocs = receipt.shell_heredocs,
+        foreign_code_heredocs = receipt.foreign_code_heredocs,
+        opaque_heredocs = receipt.opaque_heredocs,
+        legacy_risk = ?receipt.legacy_risk,
+        legacy_exposure = ?receipt.legacy_exposure,
+        ast_risk = ?receipt.ast_risk,
+        ast_exposure = ?receipt.ast_exposure,
+        disagrees = receipt.disagrees,
+        ast_is_stricter = receipt.ast_is_stricter,
+        "statewright shell AST shadow comparison"
+    );
+}
+
 /// Produce exactly one deterministic assessment for an actual invocation.
 /// Shell commands are classified from their command text; all other calls use
 /// registered MCP metadata plus the conservative name fallback.
@@ -865,11 +970,12 @@ fn assess_invocation_with_origin(
         tool_name.to_ascii_lowercase().as_str(),
         "bash" | "shell" | "terminal" | "exec_command" | "run_command"
     );
-    let mut result = if is_shell {
-        arguments
-            .get("command")
-            .or_else(|| arguments.get("cmd"))
+    let shell_command = is_shell.then(|| {
+        arguments.get("command").or_else(|| arguments.get("cmd"))
             .and_then(|value| value.as_str())
+    }).flatten();
+    let mut result = if is_shell {
+        shell_command
             .map(assess_shell)
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
@@ -897,7 +1003,15 @@ fn assess_invocation_with_origin(
         } }
     };
     result.state_intent = state_intent.map(str::to_owned);
-    result.semantic_request = Some(semantic_request(tool, tool_name, arguments, state_intent, is_shell));
+    let semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
+    if shell_ast_shadow_enabled() {
+        if let Some(command) = shell_command {
+            let ast = shell_ast_shadow::assess(command);
+            emit_shell_ast_comparison(&result, &ast);
+            result.ast_semantic_request = Some(shell_ast_semantic_request(&semantic_request, &ast));
+        }
+    }
+    result.semantic_request = Some(semantic_request);
     result
 }
 
@@ -924,6 +1038,9 @@ pub fn assess_pipeline(
             vector: None,
             state_intent: None,
         });
+    if let Some(request) = deterministic.ast_semantic_request.as_ref() {
+        let _ = submit_semantic_pipeline(request);
+    }
     pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
 }
 
@@ -999,6 +1116,9 @@ async fn assess_pipeline_visible_with_runtime(
         Some(request) => submit_semantic_pipeline_visible_with(config, runtime, timeout, request).await,
         None => SemanticAssessmentReceipt { tool: "unknown".to_owned(), status: SemanticAssessorStatus::Malformed, vector: None, state_intent: None },
     };
+    if let Some(request) = deterministic.ast_semantic_request.as_ref() {
+        let _ = submit_semantic_pipeline_with(config, runtime, request);
+    }
     pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
 }
 
@@ -1139,7 +1259,10 @@ pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment 
 }
 
 fn assessment(risk: RiskBand, exposure: ExposureBand, source: &'static str) -> ShadowAssessment {
-    ShadowAssessment { risk, exposure, source, state_intent: None, semantic_request: None }
+    ShadowAssessment {
+        risk, exposure, source, state_intent: None,
+        semantic_request: None, ast_semantic_request: None,
+    }
 }
 
 fn semantic_request(
@@ -1177,11 +1300,23 @@ fn semantic_request(
         state_intent: state_intent.map(bounded_metadata_label),
         argument_keys,
         shell_shape,
+        shell_ast_shape: None,
         read_only_hint: annotations.and_then(|value| value.read_only_hint),
         destructive_hint: annotations.and_then(|value| value.destructive_hint),
         open_world_hint: annotations.and_then(|value| value.open_world_hint),
         mcp_shape: if is_shell { None } else { Some(mcp_shape(tool, tool_name, arguments)) },
     }
+}
+
+fn shell_ast_semantic_request(
+    legacy: &SemanticAssessmentRequest,
+    ast: &AstShadowAssessment,
+) -> SemanticAssessmentRequest {
+    let mut request = legacy.clone();
+    request.tool_name = bounded_metadata_label(&format!("{}_ast_shadow", legacy.tool_name));
+    request.shell_shape = ast.semantic_shapes.clone();
+    request.shell_ast_shape = Some(ast.semantic_shape());
+    request
 }
 
 fn bounded_metadata_label(value: &str) -> String {
@@ -1777,6 +1912,7 @@ mod tests {
         let seen = seen_receiver.await.unwrap().to_string();
         assert!(!seen.contains("/private/secret"));
         assert!(seen.contains("shell_shape"));
+        assert!(!seen.contains("shell_ast_shape"));
     }
 
     #[tokio::test]
@@ -2322,5 +2458,124 @@ mod tests {
         );
         assert_eq!(proven_read.effective_risk, RiskBand::Low);
         assert_eq!(proven_read.resolve_effect(), ResolvedEffect::ReadOnly);
+    }
+
+    #[test]
+    fn shell_ast_shadow_feeds_bounded_features_to_a_separate_semantic_request() {
+        set_test_shell_ast_shadow_enabled(Some(true));
+        let _ = take_test_shell_ast_receipts();
+
+        let assessment = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"if git rev-parse HEAD; then git push origin private-canary-path; fi"}),
+            Some("inspect"),
+        );
+        let legacy = assessment.semantic_request.as_ref().unwrap();
+        let ast = assessment.ast_semantic_request.as_ref().unwrap();
+        assert!(legacy.shell_ast_shape.is_none());
+        assert!(ast.tool_name.ends_with("_ast_shadow"));
+        let shape = ast.shell_ast_shape.as_ref().unwrap();
+        assert!(shape.conditional_nodes >= 1);
+        assert!(shape.effect_candidates.contains(&"git_write"));
+        assert!(shape.commands.iter().any(|command| command.operation.as_deref() == Some("push")));
+        let serialized = serde_json::to_string(ast).unwrap();
+        assert!(serialized.contains("shell_ast_shape"));
+        assert!(!serialized.contains("private-canary-path"));
+
+        let receipts = take_test_shell_ast_receipts();
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].disagrees);
+        assert!(receipts[0].ast_is_stricter);
+        assert_eq!(receipts[0].ast_risk, RiskBand::High);
+        assert!(!format!("{:?}", receipts[0]).contains("private-canary-path"));
+
+        set_test_shell_ast_shadow_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_shadow_distinguishes_executable_and_data_heredocs() {
+        set_test_shell_ast_shadow_enabled(Some(true));
+        let _ = take_test_shell_ast_receipts();
+        let shell = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"bash <<'EOF'\ngit push origin HEAD\nEOF"}),
+            None,
+        );
+        let data = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"cat > artifact <<'EOF'\ngit push origin HEAD\nEOF"}),
+            None,
+        );
+        let shell_shape = shell.ast_semantic_request.unwrap().shell_ast_shape.unwrap();
+        let data_shape = data.ast_semantic_request.unwrap().shell_ast_shape.unwrap();
+        assert_eq!(shell_shape.shell_heredocs, 1);
+        assert!(shell_shape.effect_candidates.contains(&"git_write"));
+        assert_eq!(data_shape.data_heredocs, 1);
+        assert!(!data_shape.effect_candidates.contains(&"git_write"));
+        assert!(data_shape.effect_candidates.contains(&"file_write"));
+        set_test_shell_ast_shadow_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_shadow_is_inert_without_explicit_opt_in() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        let _ = take_test_shell_ast_receipts();
+        let assessment = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"git rev-parse HEAD"}),
+            None,
+        );
+        assert!(assessment.ast_semantic_request.is_none());
+        assert!(take_test_shell_ast_receipts().is_empty());
+        set_test_shell_ast_shadow_enabled(None);
+    }
+
+    #[tokio::test]
+    async fn shell_ast_shadow_features_reach_the_system_one_provider_without_source_values() {
+        use axum::{Json, Router, routing::post};
+        use std::sync::{Arc, Mutex};
+        let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
+        let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));
+        let app = Router::new().route("/chat/completions", post({
+            let seen_sender = seen_sender.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let seen_sender = seen_sender.clone();
+                async move {
+                    if let Some(sender) = seen_sender.lock().unwrap().take() { let _ = sender.send(body); }
+                    Json(json!({"choices":[{"message":{"content":r#"{"read_only":0.01,"may_write":0.99,"reversible":0.2,"destructive":0.1,"irreversible":0.2,"external_or_account_effect":0.99}"#}}]}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let provider = SemanticProviderConfig {
+            kind: SemanticProviderKind::OpenAiCompatible,
+            endpoint,
+            model: "test".into(),
+            bearer_token: None,
+            timeout: std::time::Duration::from_secs(1),
+        };
+
+        set_test_shell_ast_shadow_enabled(Some(true));
+        let assessment = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"if git rev-parse HEAD; then git push origin never-forward-this; fi"}),
+            Some("inspect"),
+        );
+        set_test_shell_ast_shadow_enabled(None);
+        let request = assessment.ast_semantic_request.unwrap();
+        let vector = assess_with_provider(&reqwest::Client::new(), &provider, &request).await.unwrap();
+        assert_eq!(vector.external_or_account_effect.get(), 0.99);
+        let seen = seen_receiver.await.unwrap().to_string();
+        assert!(seen.contains("shell_ast_shape"));
+        assert!(seen.contains("git_write"));
+        assert!(seen.contains("exec_command_ast_shadow"));
+        assert!(!seen.contains("never-forward-this"));
     }
 }

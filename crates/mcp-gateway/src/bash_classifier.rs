@@ -63,6 +63,49 @@ pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape
     (!shapes.is_empty()).then_some(shapes)
 }
 
+/// Conservatively detect a reference to a named environment variable without
+/// executing a shell or using a text-search subprocess. Exact identifier
+/// boundaries avoid treating `TOKEN_SUFFIX` as a reference to `TOKEN`.
+pub fn references_environment_variable(command: &str, name: &str) -> bool {
+    if name.is_empty()
+        || !name.chars().all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return false;
+    }
+    let bytes = command.as_bytes();
+    let name_bytes = name.as_bytes();
+    let is_name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'$' {
+            let start = index + 1;
+            if bytes.get(start) == Some(&b'{') {
+                let variable_start = start + 1;
+                if bytes.get(variable_start..variable_start + name_bytes.len()) == Some(name_bytes)
+                    && bytes.get(variable_start + name_bytes.len()).is_some_and(|byte| !is_name(*byte))
+                {
+                    return true;
+                }
+            } else if bytes.get(start..start + name_bytes.len()) == Some(name_bytes)
+                && bytes.get(start + name_bytes.len()).is_none_or(|byte| !is_name(*byte))
+            {
+                return true;
+            }
+        }
+        let assignment_boundary = index == 0
+            || bytes[index - 1].is_ascii_whitespace()
+            || matches!(bytes[index - 1], b';' | b'|' | b'&' | b'(');
+        if assignment_boundary
+            && bytes.get(index..index + name_bytes.len()) == Some(name_bytes)
+            && bytes.get(index + name_bytes.len()) == Some(&b'=')
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 fn semantic_label(value: &str) -> bool {
     !value.is_empty() && value.len() <= 64
         && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
@@ -1295,5 +1338,19 @@ mod tests {
         for command in ["npm test", "pnpm lint", "cargo test", "docker exec container id", "kubectl exec pod -- id", "tmux new-session shell"] {
             assert!(semantic_command_shapes(command).unwrap()[0].delegates_unknown_effect, "{command}");
         }
+    }
+
+    #[test]
+    fn blocked_environment_references_use_exact_identifier_boundaries() {
+        for command in [
+            "TOKEN=value command", "env TOKEN=value command", "echo $TOKEN",
+            "echo ${TOKEN}", "echo ${TOKEN:-fallback}", "echo x$TOKEN/path",
+        ] {
+            assert!(references_environment_variable(command, "TOKEN"), "{command}");
+        }
+        for command in ["echo $TOKEN_SUFFIX", "TOKEN_SUFFIX=value command", "echo ordinary"] {
+            assert!(!references_environment_variable(command, "TOKEN"), "{command}");
+        }
+        assert!(!references_environment_variable("echo $TOKEN", "TOKEN-NOT-A-NAME"));
     }
 }

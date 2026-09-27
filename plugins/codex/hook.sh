@@ -66,6 +66,7 @@ SESSION_KEY="${SESSION_KEY:0:16}"
 PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
+GATEWAY_UNAVAILABLE_FILE="$PROJECT_DIR/.gateway_unavailable"
 SESSION_HEADER_ARGS=(-H "X-Statewright-Client-Id: ${CLIENT_ID}")
 if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
   SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
@@ -95,11 +96,26 @@ fi
 
 # --- Helper: call MCP gateway ---
 mcp_call() {
-  curl -sf --max-time 5 -X POST "$GW_URL/" \
+  printf '%s' "$1" | curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
     "${SESSION_HEADER_ARGS[@]}" \
-    -d "$1" 2>/dev/null | perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+    --data-binary @- 2>/dev/null | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+}
+
+adapter_pre_tool_call() {
+  local tool_name="$1"
+  local tool_input request
+  tool_input=$(printf '%s' "$HOOK_INPUT" | jq -c '
+    (.tool_input // .input // {}) as $input
+    | if ($input | type) == "object" then $input else {} end
+  ' 2>/dev/null || true)
+  [ -n "$tool_input" ] || tool_input='{}'
+  request=$(jq -cn \
+    --arg tool_name "$tool_name" \
+    --argjson tool_input "$tool_input" \
+    '{jsonrpc:"2.0",method:"tools/call",params:{name:"statewright_adapter_pre_tool",arguments:{tool_name:$tool_name,tool_input:$tool_input}},id:1}')
+  mcp_call "$request"
 }
 
 # Codex has emitted MCP results as a raw text value, a ContentBlock array, and
@@ -454,15 +470,17 @@ case "$ENDPOINT" in
 
     # Gateway unreachable — graceful degradation
     if [ -z "$CURRENT" ]; then
-      echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. Running without workflow enforcement this turn."}}'
-      rm -f "$CACHE_FILE"  # Clear cache so PreToolUse allows all tools
+      mkdir -p "$PROJECT_DIR"
+      touch "$GATEWAY_UNAVAILABLE_FILE"
+      echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. The active workflow remains fail-closed until authoritative state is restored."}}'
       exit 0
     fi
+    rm -f "$GATEWAY_UNAVAILABLE_FILE"
 
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
+      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
     fi
@@ -531,9 +549,15 @@ case "$ENDPOINT" in
       *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
     esac
 
-    # Read cached state (written by UserPromptSubmit — ZERO network calls)
+    if [ -f "$GATEWAY_UNAVAILABLE_FILE" ]; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway state is unavailable; the active workflow fails closed."}}'
+      exit 0
+    fi
+
+    # Read cached state (written by UserPromptSubmit).
     if [ ! -f "$CACHE_FILE" ]; then
-      exit 0  # No cache = no enforcement yet
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright state cache is unavailable; the active workflow fails closed."}}'
+      exit 0
     fi
 
     STATE_JSON=$(cat "$CACHE_FILE")
@@ -559,34 +583,44 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # Normalize concrete Codex tool names to workflow capabilities before
-    # applying policy. Read-only shell use is admitted only by the strict
-    # classifier; broader shell use continues through Bash discernment below.
+    # blacklist_heuristic_v1 has one authoritative decision path. The gateway
+    # combines deterministic classification with the configured System One
+    # fallback; duplicating command patterns here can preempt that fallback.
+    if statewright_blacklist_mode; then
+      ADAPTER_RESULT=$(adapter_pre_tool_call "$TOOL_NAME")
+      if ! printf '%s' "$ADAPTER_RESULT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway decision unavailable; blacklist policy fails closed."}}'
+        exit 0
+      fi
+
+      ADAPTER_ACTIVE=$(printf '%s' "$ADAPTER_RESULT" | jq -r 'if has("active") then .active else true end' 2>/dev/null || true)
+      ADAPTER_DECISION=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.decision // empty' 2>/dev/null || true)
+      if [ "$ADAPTER_ACTIVE" = "false" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway has no active workflow for the locally active blacklist policy."}}'
+        exit 0
+      fi
+      if [ "$ADAPTER_DECISION" = "allow" ]; then
+        ADAPTER_CONTEXT=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.additional_context // .additionalContext // empty' 2>/dev/null || true)
+        if [ -n "$ADAPTER_CONTEXT" ]; then
+          jq -n --arg context "$ADAPTER_CONTEXT" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":$context}}'
+        fi
+        exit 0
+      fi
+
+      ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
+      [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
+      jq -n --arg reason "$ADAPTER_REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}'
+      exit 0
+    fi
+
+    # Legacy workflows retain their local capability and command-prefix
+    # behavior. blacklist_heuristic_v1 has already exited through the gateway.
     if statewright_tool_allowed "$TOOL_NAME" "$HOOK_INPUT"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
       # to prevent bypass of Write/Destructive restrictions via shell redirects
       if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] || [ "$STATEWRIGHT_TOOL_MODE" = "readonly_shell" ]; then
         COMMAND=$(statewright_input_command "$HOOK_INPUT")
         if [ -n "$COMMAND" ]; then
-          if statewright_blacklist_mode; then
-            EFFECT=$(statewright_shell_effect "$COMMAND")
-            case "$EFFECT" in
-              irreversible)
-                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: irreversible operation requires a separate approved execution path."}}'
-                exit 0 ;;
-              external)
-                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: external operation requires executor-owned semantic-risk approval."}}'
-                exit 0 ;;
-              opaque)
-                jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: opaque command effect requires executor-owned semantic-risk approval."}}'
-                exit 0 ;;
-              local_write)
-                if ! statewright_has_capability "Write"; then
-                  jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Bash command blocked: local write attempted while Write is explicitly blocked."}}'
-                  exit 0
-                fi ;;
-            esac
-          fi
           # Check for file write operations when Write is explicitly blocked.
           HAS_WRITE=$(statewright_has_capability "Write" && echo "yes" || echo "no")
           if [ "$HAS_WRITE" = "no" ]; then
@@ -622,18 +656,16 @@ case "$ENDPOINT" in
             exit 0
           fi
           # Legacy workflows retain the historical command-prefix contract.
-          if ! statewright_blacklist_mode; then
-            ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
-            if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] && [ -n "$ALLOWED_CMDS" ]; then
-              CMD_OK=false
-              while IFS= read -r pattern; do
-                case "$COMMAND" in "$pattern"|"$pattern "*|$pattern) CMD_OK=true; break ;; esac
-              done <<< "$ALLOWED_CMDS"
-              if [ "$CMD_OK" = false ]; then
-                REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
-                jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
-                exit 0
-              fi
+          ALLOWED_CMDS=$(echo "$STATE_JSON" | jq -r '.allowed_commands // [] | .[]' 2>/dev/null || true)
+          if [ "$STATEWRIGHT_TOOL_MODE" = "bash" ] && [ -n "$ALLOWED_CMDS" ]; then
+            CMD_OK=false
+            while IFS= read -r pattern; do
+              case "$COMMAND" in "$pattern"|"$pattern "*|$pattern) CMD_OK=true; break ;; esac
+            done <<< "$ALLOWED_CMDS"
+            if [ "$CMD_OK" = false ]; then
+              REASON="Bash command blocked: not in allowed commands for '$CURRENT' phase."
+              jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+              exit 0
             fi
           fi
           # Check blocked_env — deny commands referencing blocked environment variables
@@ -758,6 +790,7 @@ case "$ENDPOINT" in
         rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq"
         echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
         echo "$STATE_JSON" > "$CACHE_FILE"
+        rm -f "$GATEWAY_UNAVAILABLE_FILE"
         INITIAL_EPOCH=$(echo "$STATE_JSON" | jq -r '.state_epoch // 1' 2>/dev/null || echo "1")
         case "$INITIAL_EPOCH" in ''|*[!0-9]*) INITIAL_EPOCH=1 ;; esac
         reset_native_telemetry_state "$INITIAL_EPOCH"
@@ -779,7 +812,7 @@ case "$ENDPOINT" in
       stop)
         # Deactivate enforcement
         clear_interactive_route_requests
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
         ;;
       transition)
         # Read previous state before refreshing
@@ -797,6 +830,7 @@ case "$ENDPOINT" in
         STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
         if [ -n "$STATE_JSON" ]; then
           echo "$STATE_JSON" > "$CACHE_FILE"
+          rm -f "$GATEWAY_UNAVAILABLE_FILE"
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
           NEW_TRANSITION_COUNT=$(echo "$STATE_JSON" | jq -r '.transition_count // empty' 2>/dev/null || true)
           IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
@@ -865,7 +899,7 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
             echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
@@ -876,6 +910,8 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Now in ${NEW_STATE}. Tools: ${NEXT_TOOLS}. Next transitions: ${NEXT_TRANSITIONS}. Use ONLY these exact event names with statewright_transition. KEEP WORKING -- do not stop or wait for user input.\"}}"
             fi
           fi
+        else
+          touch "$GATEWAY_UNAVAILABLE_FILE"
         fi
         ;;
       refresh_cache)
@@ -886,12 +922,15 @@ case "$ENDPOINT" in
             PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
             AUTHORITATIVE_EPOCH=$(echo "$STATE_JSON" | jq -r '.state_epoch // empty' 2>/dev/null || true)
             echo "$STATE_JSON" > "$CACHE_FILE"
+            rm -f "$GATEWAY_UNAVAILABLE_FILE"
             case "$PREV_EPOCH" in ''|*[!0-9]*) PREV_EPOCH=0 ;; esac
             case "$AUTHORITATIVE_EPOCH" in ''|*[!0-9]*) AUTHORITATIVE_EPOCH="$PREV_EPOCH" ;; esac
             if [ "$AUTHORITATIVE_EPOCH" -gt 0 ] && [ "$AUTHORITATIVE_EPOCH" -ne "$PREV_EPOCH" ]; then
               reset_native_telemetry_state "$AUTHORITATIVE_EPOCH"
               emit_native_telemetry "state_boundary" "$STATE_JSON"
             fi
+          else
+            touch "$GATEWAY_UNAVAILABLE_FILE"
           fi
         fi
         ;;

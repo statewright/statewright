@@ -29,6 +29,30 @@ pub fn pre_call_check(
 
     let mut warnings: Vec<String> = Vec::new();
 
+    // Environment restrictions are part of the gateway's authoritative shell
+    // policy. Adapters may delegate blacklist-mode decisions here, so this
+    // guard must not exist only in a client hook.
+    let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
+    if is_shell_tool(tool_name, bash_tool) {
+        if let Some(blocked_env) = state_def.blocked_env.as_ref().filter(|vars| !vars.is_empty()) {
+            let Some(command) = extract_command(arguments) else {
+                return PreCallDecision::Block(format!(
+                    "Shell invocation is missing command/cmd in state '{}'.",
+                    session.current_state
+                ));
+            };
+            if blocked_env
+                .iter()
+                .any(|name| bash_classifier::references_environment_variable(&command, name))
+            {
+                return PreCallDecision::Block(format!(
+                    "Shell invocation references a blocked environment variable in state '{}'.",
+                    session.current_state
+                ));
+            }
+        }
+    }
+
     // 1. Edit guard: reject edits exceeding max_edit_lines
     if let Some(max_lines) = state_def.max_edit_lines {
         if is_edit_tool(tool_name) {
@@ -72,7 +96,6 @@ pub fn pre_call_check(
     // deterministic redirect/in-place/destructive checks. Exploratory states use
     // the read capabilities as their effective shell policy even though their
     // MCP tool surface is selected by semantic intent rather than an allowlist.
-    let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
     if is_shell_tool(tool_name, bash_tool) {
         let exploratory_read_only = state_def.intent.as_deref() == Some("exploratory_read_only");
         let effective_tools = if exploratory_read_only {
@@ -244,8 +267,14 @@ fn extract_command(arguments: &serde_json::Value) -> Option<String> {
 
 fn is_shell_tool(tool_name: &str, configured_tool: &str) -> bool {
     tool_name.eq_ignore_ascii_case(configured_tool)
-        || (configured_tool.eq_ignore_ascii_case("Bash")
-            && matches!(tool_name.to_ascii_lowercase().as_str(), "bash" | "exec_command" | "run_command" | "shell" | "terminal"))
+        || (is_native_shell_tool(configured_tool) && is_native_shell_tool(tool_name))
+}
+
+fn is_native_shell_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name.to_ascii_lowercase().as_str(),
+        "bash" | "exec_command" | "run_command" | "shell" | "terminal"
+    )
 }
 
 fn extract_file_path(arguments: &serde_json::Value) -> Option<String> {
@@ -618,6 +647,71 @@ mod tests {
                     _ => "unknown".into(),
                 }
             ),
+        }
+    }
+
+    #[test]
+    fn blocked_environment_variables_are_enforced_by_the_gateway() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "blocked-env",
+            "initial": "active",
+            "states": {
+                "active": {
+                    "blocked_env": ["TOKEN"],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("blocked-env".into(), def);
+
+        for command in [
+            "TOKEN=value command",
+            "env TOKEN=value command",
+            "echo $TOKEN",
+            "echo ${TOKEN:-fallback}",
+        ] {
+            match pre_call_check(&session, "exec_command", &json!({"cmd": command})) {
+                PreCallDecision::Block(reason) => {
+                    assert!(reason.contains("blocked environment variable"));
+                    assert!(!reason.contains("TOKEN"));
+                    assert!(!reason.contains(command));
+                }
+                _ => panic!("blocked environment reference must be denied: {command}"),
+            }
+        }
+
+        for command in ["TOKEN_SUFFIX=value command", "echo $TOKEN_SUFFIX", "echo ordinary"] {
+            assert!(matches!(
+                pre_call_check(&session, "exec_command", &json!({"cmd": command})),
+                PreCallDecision::Allow | PreCallDecision::Warn(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn blocked_environment_variables_cover_native_shell_aliases() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "blocked-env-aliases",
+            "initial": "active",
+            "states": {
+                "active": {
+                    "allowed_commands_tool": "exec_command",
+                    "blocked_env": ["TOKEN"],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("blocked-env-aliases".into(), def);
+
+        for tool_name in ["Bash", "exec_command", "run_command", "shell", "terminal"] {
+            assert!(matches!(
+                pre_call_check(&session, tool_name, &json!({"command": "echo $TOKEN"})),
+                PreCallDecision::Block(_)
+            ));
         }
     }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -38,6 +38,48 @@ async function startBridge() {
     } else {
       response.writeHead(404).end();
     }
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  return {
+    requests,
+    url: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolveClose) => server.close(resolveClose)),
+  };
+}
+
+async function startNativeGateway() {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    let text = "";
+    for await (const chunk of request) text += chunk;
+    const body = JSON.parse(text);
+    requests.push({ authorization: request.headers.authorization, body });
+    const toolName = body.params?.arguments?.tool_name;
+    let decision;
+    if (body.params?.name === "statewright_get_state") {
+      decision = {
+        state: "intake",
+        allowed_tools: ["Read", "Bash"],
+        disallowed_tools: ["Write"],
+        transitions: [],
+        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+      };
+    } else if (toolName === "opaque_mutation_tool") {
+      decision = { decision: "allow", additional_context: "System One approved the bounded operation." };
+    } else if (toolName === "Read") {
+      decision = { decision: "deny", reason: "Gateway denied this read fixture." };
+    } else if (toolName === "stale_fixture") {
+      decision = { decision: "allow", active: false };
+    } else {
+      decision = { unexpected: true };
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: { content: [{ type: "text", text: JSON.stringify(decision) }] },
+    }));
   });
   await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
   const { port } = server.address();
@@ -137,17 +179,19 @@ test("native Codex hook leaves malformed workflow-load results inactive", async 
   }
 });
 
-test("native Codex hook treats safe shell reads as Read when Bash is also allowed", async () => {
+test("native Codex hook delegates blacklist policy to the authoritative gateway", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const gateway = await startNativeGateway();
   const environment = {
     HOME: home,
+    STATEWRIGHT_API_KEY: "fixture-key",
+    STATEWRIGHT_GATEWAY_URL: gateway.url,
     STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
     STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
   };
-  const session_id = "native-read-alias";
+  const session_id = "native-gateway-delegation";
   const state = {state_snapshot: {...loadedState.state_snapshot,
     allowed_tools: ["Read", "Bash"],
-    allowed_commands: ["task test:unit"],
     disallowed_tools: ["Write"],
     context: {...loadedState.state_snapshot.context, tool_policy_mode: "blacklist_heuristic_v1"}}};
 
@@ -159,86 +203,131 @@ test("native Codex hook treats safe shell reads as Read when Bash is also allowe
     }, environment);
     assert.equal(post.status, 0, post.stderr);
 
-    for (const command of ["cat README.md", "cat README.md && cat package.json",
-      "rg -n needle src", "find src -name '*.mjs'", 'git -C "path with spaces" status']) {
-      const pre = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-        session_id,
-        tool_name: "exec_command",
-        tool_input: {cmd: command},
-      }, environment);
-      assert.equal(pre.status, 0, pre.stderr);
-      assert.equal(pre.stdout, "", command);
-    }
-
-    const allowedBash = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id,
-      tool_name: "exec_command",
-      tool_input: {cmd: "task test:unit"},
-    }, environment);
-    assert.equal(allowedBash.status, 0, allowedBash.stderr);
-    assert.equal(allowedBash.stdout, "");
-
-    const unlisted = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id,
-      tool_name: "exec_command",
-      tool_input: {cmd: "npm test"},
-    }, environment);
-    assert.equal(unlisted.status, 0, unlisted.stderr);
-    assert.equal(unlisted.stdout, "");
-
-    const writeDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id,
-      tool_name: "exec_command",
-      tool_input: {cmd: "printf x > marker.txt"},
-    }, environment);
-    assert.equal(writeDenied.status, 0, writeDenied.stderr);
-    assert.match(JSON.parse(writeDenied.stdout).hookSpecificOutput.permissionDecisionReason, /local write attempted/);
-
-    const deleteDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id,
-      tool_name: "exec_command",
-      tool_input: {cmd: "rm -rf target"},
-    }, environment);
-    assert.equal(deleteDenied.status, 0, deleteDenied.stderr);
-    assert.match(JSON.parse(deleteDenied.stdout).hookSpecificOutput.permissionDecisionReason, /irreversible operation/);
-
-    const opaqueDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+    const allowed = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "opaque_mutation_tool",
+      tool_input: {operation: "bounded-fixture"},
+    }, environment);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(gateway.requests.length, 1, allowed.stdout);
+    assert.equal(
+      JSON.parse(allowed.stdout).hookSpecificOutput.additionalContext,
+      "System One approved the bounded operation.",
+      allowed.stdout,
+    );
+    assert.equal(gateway.requests[0].authorization, "Bearer fixture-key");
+    assert.equal(gateway.requests[0].body.params.name, "statewright_adapter_pre_tool");
+    assert.deepEqual(gateway.requests[0].body.params.arguments, {
+      tool_name: "opaque_mutation_tool",
+      tool_input: {operation: "bounded-fixture"},
+    });
+
+    const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "Read",
+      tool_input: {file_path: "README.md"},
+    }, environment);
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.equal(
+      JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason,
+      "Gateway denied this read fixture.",
+    );
+
+    const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "stale_fixture",
       tool_input: {},
     }, environment);
-    assert.equal(opaqueDenied.status, 0, opaqueDenied.stderr);
-    assert.match(JSON.parse(opaqueDenied.stdout).hookSpecificOutput.permissionDecisionReason, /opaque mutation semantics/);
+    assert.equal(stale.status, 0, stale.stderr);
+    assert.match(
+      JSON.parse(stale.stdout).hookSpecificOutput.permissionDecisionReason,
+      /no active workflow/,
+    );
 
-    for (const cmd of ["git push origin HEAD", "git -C . push origin HEAD", 'git "push" origin HEAD', "git reset --hard", "git -C . reset --hard", "git unknown-alias", "git unknown-alias --output=marker.txt", "git push origin HEAD --output=marker.txt", "git reset --hard --output=marker.txt", "git -c core.fsmonitor=./opaque-wrapper status", "opaque-wrapper touch marker.txt", "git -C . push origin touch", "git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt", "/bin/rm -rf target", " command git push origin HEAD", "env git push origin HEAD", "git status; opaque-wrapper", "find . -exec opaque-wrapper {} +", "rg --pre opaque-wrapper needle .", "fd -x opaque-wrapper", 'find . -e""xec opaque-wrapper {} +', 'rg --p""re opaque-wrapper needle .', "fd -H''Ix opaque-wrapper", "task deploy"]) {
-      const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-        session_id,
-        tool_name: "exec_command",
-        tool_input: {cmd},
-      }, environment);
-      assert.equal(denied.status, 0, denied.stderr);
-      assert.match(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecisionReason, /requires|local write attempted/);
-    }
+    const malformed = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "unknown_fixture",
+      tool_input: {},
+    }, environment);
+    assert.equal(malformed.status, 0, malformed.stderr);
+    assert.equal(
+      JSON.parse(malformed.stdout).hookSpecificOutput.permissionDecisionReason,
+      "Blocked by Statewright gateway policy.",
+    );
 
-    const writable = {state_snapshot: {...state.state_snapshot, disallowed_tools: []}};
-    const writablePost = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+    const unavailable = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "Read",
+      tool_input: {},
+    }, {...environment, STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:1"});
+    assert.equal(unavailable.status, 0, unavailable.stderr);
+    assert.match(
+      JSON.parse(unavailable.stdout).hookSpecificOutput.permissionDecisionReason,
+      /decision unavailable; blacklist policy fails closed/,
+    );
+
+    const [sessionDirectory] = await readdir(resolve(home, ".statewright", "sessions"));
+    await unlink(resolve(home, ".statewright", "sessions", sessionDirectory, ".state_cache"));
+    const requestCountBeforeMissingCache = gateway.requests.length;
+    const missingCache = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "Read",
+      tool_input: {},
+    }, environment);
+    assert.equal(missingCache.status, 0, missingCache.stderr);
+    assert.match(
+      JSON.parse(missingCache.stdout).hookSpecificOutput.permissionDecisionReason,
+      /state cache is unavailable; the active workflow fails closed/,
+    );
+    assert.equal(gateway.requests.length, requestCountBeforeMissingCache);
+
+    const reload = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
       session_id,
       tool_name: "mcp__statewright__statewright_load_workflow",
-      tool_response: writable,
+      tool_response: state,
     }, environment);
-    assert.equal(writablePost.status, 0, writablePost.stderr);
-    for (const cmd of ["git status > marker.txt", "git status 2> marker.txt", "git status >> marker.txt", "git diff --output=marker.txt"]) {
-      const allowed = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-        session_id,
-        tool_name: "exec_command",
-        tool_input: {cmd},
-      }, environment);
-      assert.equal(allowed.status, 0, allowed.stderr);
-      assert.equal(allowed.stdout, "", cmd);
-    }
+    assert.equal(reload.status, 0, reload.stderr);
+    await writeFile(resolve(home, ".statewright", ".update_checked"), "");
+
+    const unreachablePrompt = await invoke("bash", [resolve(codexRoot, "hook.sh"), "user-prompt"], {
+      session_id,
+    }, {...environment, STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:1"});
+    assert.equal(unreachablePrompt.status, 0, unreachablePrompt.stderr);
+    assert.match(
+      JSON.parse(unreachablePrompt.stdout).hookSpecificOutput.additionalContext,
+      /active workflow remains fail-closed/,
+    );
+    const requestCountBeforeUnavailableState = gateway.requests.length;
+    const unavailableState = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "Read",
+      tool_input: {},
+    }, environment);
+    assert.equal(unavailableState.status, 0, unavailableState.stderr);
+    assert.match(
+      JSON.parse(unavailableState.stdout).hookSpecificOutput.permissionDecisionReason,
+      /gateway state is unavailable; the active workflow fails closed/,
+    );
+    assert.equal(gateway.requests.length, requestCountBeforeUnavailableState);
+
+    const recoveredPrompt = await invoke("bash", [resolve(codexRoot, "hook.sh"), "user-prompt"], {
+      session_id,
+    }, environment);
+    assert.equal(recoveredPrompt.status, 0, recoveredPrompt.stderr);
+    assert.match(
+      JSON.parse(recoveredPrompt.stdout).hookSpecificOutput.additionalContext,
+      /Phase: intake/,
+    );
   } finally {
+    await gateway.close();
     await rm(home, {recursive: true, force: true});
   }
+});
+
+test("native gateway calls stream request JSON instead of placing it in argv", async () => {
+  const hookSource = await readFile(resolve(codexRoot, "hook.sh"), "utf8");
+  assert.match(hookSource, /printf '%s' "\$1" \| curl[\s\S]*--data-binary @-/);
+  assert.doesNotMatch(hookSource, /(?:-d|--data) "\$1"/);
 });
 
 test("legacy state without an allowlist remains unenforced", async () => {

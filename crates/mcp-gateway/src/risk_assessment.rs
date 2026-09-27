@@ -1936,6 +1936,26 @@ mod tests {
             assert_eq!(unknown.risk, RiskBand::Moderate, "{command}");
             assert_eq!(unknown.exposure, ExposureBand::Unknown, "{command}");
         }
+
+        let stderr_discarding_read = assess_invocation(
+            None,
+            "exec_command",
+            &json!({
+                "cmd": "rg --files -g '*oauth*' -g '*receipt*' . /private/statewright 2>/dev/null | sed -n '1,240p'"
+            }),
+            Some("localize"),
+        );
+        assert_eq!(stderr_discarding_read.risk, RiskBand::Low);
+        assert_eq!(stderr_discarding_read.exposure, ExposureBand::Local);
+
+        let sed_lookalike = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd": "/tmp/sed -n '1,20p'"}),
+            Some("localize"),
+        );
+        assert_eq!(sed_lookalike.risk, RiskBand::Moderate);
+        assert_eq!(sed_lookalike.exposure, ExposureBand::Unknown);
     }
 
     #[test]

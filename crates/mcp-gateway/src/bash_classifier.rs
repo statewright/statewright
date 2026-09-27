@@ -261,14 +261,15 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
     if command.trim().is_empty()
         || command
             .chars()
-            .any(|character| ['\n', '\r', '<', '>', '`'].contains(&character))
+            .any(|character| ['\n', '\r', '`'].contains(&character))
         || command.contains("$(")
     {
         return None;
     }
+    let command = strip_readonly_stderr_sink(command)?;
 
     let mut capabilities = Vec::new();
-    for segment in split_segments(command) {
+    for segment in split_segments(&command) {
         let segment = segment.trim();
         let tokens = simple_command_tokens(segment)?;
         let first = tokens.first()?;
@@ -276,6 +277,9 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             return None;
         }
         if readonly_search_has_external_hook(segment) {
+            return None;
+        }
+        if first.rsplit('/').next() == Some("sed") && first != "sed" {
             return None;
         }
         if first.rsplit('/').next()? == "git" {
@@ -299,6 +303,64 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
     capabilities.sort_unstable();
     capabilities.dedup();
     (!capabilities.is_empty()).then_some(capabilities)
+}
+
+/// Remove only the shell's exact stderr-to-null discard form. Every other
+/// unquoted redirection stays outside the read-only proof surface.
+fn strip_readonly_stderr_sink(command: &str) -> Option<String> {
+    const SINK: &str = "2>/dev/null";
+    let mut normalized = String::with_capacity(command.len());
+    let mut index = 0;
+    let mut quote = None;
+
+    while index < command.len() {
+        let rest = command.get(index..)?;
+        let character = rest.chars().next()?;
+        if let Some(active_quote) = quote {
+            normalized.push(character);
+            index += character.len_utf8();
+            if character == active_quote {
+                quote = None;
+            } else if active_quote == '"' && character == '\\' {
+                let escaped = command.get(index..)?.chars().next()?;
+                normalized.push(escaped);
+                index += escaped.len_utf8();
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            normalized.push(character);
+            index += character.len_utf8();
+            continue;
+        }
+        let previous_is_boundary = index == 0
+            || command[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|value| value.is_whitespace() || matches!(value, ';' | '|' | '&'));
+        if previous_is_boundary && rest.starts_with(SINK) {
+            let end = index + SINK.len();
+            let next_is_boundary = command.get(end..).is_some_and(|tail| {
+                tail.is_empty()
+                    || tail
+                        .chars()
+                        .next()
+                        .is_some_and(|value| value.is_whitespace() || matches!(value, ';' | '|' | '&'))
+            });
+            if next_is_boundary {
+                normalized.push(' ');
+                index = end;
+                continue;
+            }
+        }
+        if matches!(character, '<' | '>') {
+            return None;
+        }
+        normalized.push(character);
+        index += character.len_utf8();
+    }
+    quote.is_none().then_some(normalized)
 }
 
 /// `classify_git` is deliberately broad for ordinary Bash capability checks.
@@ -578,7 +640,8 @@ fn readonly_sed_args(args: &[String]) -> bool {
     }
 
     let mut index = 1;
-    if args.get(index).is_some_and(|argument| argument == "-e") {
+    let explicit_program_flag = args.get(index).is_some_and(|argument| argument == "-e");
+    if explicit_program_flag {
         index += 1;
     }
     let Some(program) = args.get(index) else {
@@ -594,11 +657,15 @@ fn readonly_sed_args(args: &[String]) -> bool {
         index += 1;
     }
     let operands = &args[index..];
-    !operands.is_empty()
-        && operands.iter().all(|operand| {
-            !operand.is_empty()
-                && (has_end_of_options || operand == "-" || !operand.starts_with('-'))
-        })
+    // With no operand, sed reads stdin. The admitted program grammar is still
+    // print-only, so this is safe for a pipeline viewer and cannot write or
+    // execute merely because the producer is connected through a pipe.
+    (operands.is_empty() && !explicit_program_flag)
+        || (!operands.is_empty()
+            && operands.iter().all(|operand| {
+                !operand.is_empty()
+                    && (has_end_of_options || operand == "-" || !operand.starts_with('-'))
+            }))
 }
 
 fn readonly_sed_print_program(program: &str) -> bool {
@@ -1434,6 +1501,25 @@ mod tests {
         assert_eq!(readonly_capabilities("git tag v1"), None);
         assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
         assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
+    }
+
+    #[test]
+    fn readonly_discovery_may_discard_stderr_only_to_dev_null() {
+        let command = "rg --files -g '*oauth*' -g '*receipt*' . /private/statewright 2>/dev/null | sed -n '1,240p'";
+        assert_eq!(readonly_capabilities(command), Some(vec!["Grep", "Read"]));
+        assert_eq!(readonly_capabilities("sed -n '1,20p'"), Some(vec!["Read"]));
+
+        for unsafe_command in [
+            "rg --files 2>receipt.txt",
+            "rg --files 2>>/dev/null",
+            "rg --files 2>/dev/null/path",
+            "rg --files 3>/dev/null",
+            "rg --files 2>&1",
+            "rg --files 2>/dev/null && touch marker",
+            "/tmp/sed -n '1,20p'",
+        ] {
+            assert_eq!(readonly_capabilities(unsafe_command), None, "{unsafe_command}");
+        }
     }
 
     #[test]

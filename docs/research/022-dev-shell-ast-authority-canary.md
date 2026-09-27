@@ -130,3 +130,13 @@ The staging application and OAuth proof, including exact rollback digests and
 the pre-migration database backup, is recorded in Auldwyrm receipt
 `site/release/receipts/2026-09-27-oauth-m4a-dev-e2e.md`. Production was not
 changed.
+
+## Final release-prep integration
+
+The later `release/codex-0.3.4-prep` integration performed the formatter work
+that this development receipt deliberately deferred. The broad Rust cleanup is
+isolated in `6ce64ba` (`style: format Rust workspace`), followed by generated
+Claude managed-client synchronization in `8a9ae59`. A fresh integrated
+`cargo test --workspace` passed, including 310 gateway tests with zero failures
+and one ignored test. This later local evidence does not replace or rerun the
+staging canary above, and no production change was made.

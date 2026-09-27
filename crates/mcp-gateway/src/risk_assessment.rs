@@ -1253,14 +1253,14 @@ mod tests {
         assert_eq!(assess_shell("git \"push\" origin main >receipt.txt"), assessment(RiskBand::High, ExposureBand::External, "shell"));
         assert_eq!(assess_shell("git pu\\sh origin main >receipt.txt"), assessment(RiskBand::High, ExposureBand::External, "shell"));
         assert_eq!(assess_shell("git > receipt.txt \"push\" origin main"), assessment(RiskBand::High, ExposureBand::External, "shell"));
-        assert_eq!(assess_shell("git rev-parse HEAD"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
-        assert_eq!(assess_shell("git branch --all --no-color"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
+        assert_eq!(assess_shell("git rev-parse HEAD"), assessment(RiskBand::Low, ExposureBand::Local, "shell"));
+        assert_eq!(assess_shell("git branch --all --no-color"), assessment(RiskBand::Low, ExposureBand::Local, "shell"));
         assert_eq!(assess_shell("touch output.txt"), assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"));
         assert_eq!(assess_shell("git switch -c feature").risk, RiskBand::Moderate);
     }
 
     #[test]
-    fn system_one_can_resolve_recognized_git_introspection() {
+    fn recognized_git_introspection_does_not_depend_on_system_one_confidence() {
         struct ReadAssessor;
         impl SemanticAssessor for ReadAssessor {
             fn assess(
@@ -1292,8 +1292,8 @@ mod tests {
                 Some(&ReadAssessor),
                 &enabled,
             );
-            assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate, "{command}");
-            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Unknown, "{command}");
+            assert_eq!(pipeline.deterministic.risk, RiskBand::Low, "{command}");
+            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local, "{command}");
             assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly, "{command}");
         }
     }

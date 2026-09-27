@@ -411,6 +411,18 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
     }
     let no_pager = global_options.iter().any(|arg| arg == "--no-pager");
     match subcommand {
+        // These built-in Git plumbing/introspection commands do not invoke
+        // configurable diff, text-conversion, signing, or pager helpers. The
+        // shell parser above has already rejected expansion, redirection, and
+        // unsafe global options, so they are deterministic local reads.
+        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" => Some("Read"),
+        // Branch listing is also a bounded read. Keep creation/deletion forms
+        // out by reusing the complete argv classifier instead of matching the
+        // subcommand name alone.
+        "branch" if matches!(
+            classify_git(&tokens.iter().map(String::as_str).collect::<Vec<_>>()),
+            OpClass::GitRead
+        ) => Some("Read"),
         "diff" if no_pager => {
             let boundary = command_args
                 .iter()
@@ -1230,6 +1242,32 @@ fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
         return OpClass::GitWrite;
     };
     let args = &tokens[index + 1..];
+    // Mutation flags remain authoritative even when combined with --list.
+    // Git accepts several of these in mixed forms, so an earlier listing flag
+    // must never erase a later create/delete/move/copy/upstream operation.
+    if args.iter().any(|token| {
+        matches!(
+            *token,
+            "-d" | "-D"
+                | "-m"
+                | "-M"
+                | "-c"
+                | "-C"
+                | "--delete"
+                | "--move"
+                | "--copy"
+                | "--edit-description"
+                | "--set-upstream-to"
+                | "--unset-upstream"
+                | "--create-reflog"
+                | "--track"
+                | "--no-track"
+                | "--recurse-submodules"
+        ) || token.starts_with("--set-upstream-to=")
+            || token.starts_with("--track=")
+    }) {
+        return OpClass::GitWrite;
+    }
     if args.is_empty()
         || args.iter().any(|token| matches!(*token, "-l" | "--list" | "--show-current"))
         || args.iter().all(|token| {
@@ -1865,6 +1903,11 @@ mod tests {
         assert_eq!(readonly_capabilities("awk 'BEGIN { system(\"touch marker\") }'"), None);
         assert_eq!(readonly_capabilities("git branch feature"), None);
         assert_eq!(readonly_capabilities("git tag v1"), None);
+        assert_eq!(readonly_capabilities("git rev-parse HEAD"), Some(vec!["Read"]));
+        assert_eq!(
+            readonly_capabilities("git branch --all --no-color"),
+            Some(vec!["Read"]),
+        );
         assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
         assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
     }
@@ -2002,6 +2045,8 @@ mod tests {
             "git --no-pager branch -- new-name",
             "git --no-pager tag -- new-name",
             "git --no-pager branch --list --delete",
+            "git branch --all --delete old",
+            "git branch --list --set-upstream-to=origin/main main",
             "git --no-pager diff --output review.patch --no-ext-diff --no-textconv",
             "git --no-pager diff --no-ext-diff --word-diff --no-textconv",
             "sort -o output.txt input.txt",

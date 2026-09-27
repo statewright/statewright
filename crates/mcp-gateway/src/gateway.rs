@@ -3984,6 +3984,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adapter_rpc_allows_deterministic_git_introspection_without_semantic_confidence() {
+        let mut gateway = exploratory_gateway();
+        for command in ["git rev-parse HEAD", "git branch --all --no-color"] {
+            let response = gateway.handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {"cmd": command}
+                    }
+                })),
+                id: Some(json!(8)),
+            }).await.unwrap();
+            let result = tool_result_json(response);
+            assert_eq!(result["decision"], "allow", "must admit {command}");
+            assert_eq!(result["risk_assessment"]["deterministic_risk"], "Low");
+            assert_eq!(result["risk_assessment"]["deterministic_exposure"], "Local");
+        }
+    }
+
+    #[tokio::test]
     async fn tools_list_at_checkpoint_returns_only_custom() {
         let mgr = SessionManager::new();
         mgr.create("test-session".into(), test_definition());

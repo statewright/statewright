@@ -283,6 +283,9 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             return None;
         }
         if first.rsplit('/').next()? == "git" {
+            if first != "git" {
+                return None;
+            }
             capabilities.push(readonly_git_capability(&tokens)?);
             continue;
         }
@@ -534,6 +537,19 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     {
         return Some("Read");
     }
+    // `test` and `[` are shell predicates. With expansions, redirections, and
+    // composition already rejected by `simple_command_tokens`, they can only
+    // inspect strings, shell state, or filesystem metadata. Require the exact
+    // builtin spellings so a path-qualified lookalike cannot borrow Read.
+    if invoked == "test" && readonly_test_predicate(&tokens[1..]) {
+        return Some("Read");
+    }
+    if invoked == "["
+        && tokens.last().is_some_and(|token| token == "]")
+        && readonly_test_predicate(&tokens[1..tokens.len() - 1])
+    {
+        return Some("Read");
+    }
     let executable = invoked.rsplit('/').next()?;
     match executable {
         "sha256sum" | "shasum" if readonly_checksum_args(executable, &tokens[1..]) => Some("Read"),
@@ -542,6 +558,45 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
         "command" if tokens.get(1).is_some_and(|argument| argument == "-v") => Some("Read"),
         _ => None,
     }
+}
+
+/// Admit a deliberately finite subset of shell predicates. In particular,
+/// Bash's `-v array[index-expression]` form evaluates the subscript as shell
+/// arithmetic and can mutate variables, so only scalar identifiers are
+/// accepted for `-v`.
+fn readonly_test_predicate(args: &[String]) -> bool {
+    let args = if args.first().is_some_and(|argument| argument == "!") {
+        &args[1..]
+    } else {
+        args
+    };
+    match args {
+        [value] => !value.is_empty(),
+        [operator, operand]
+            if matches!(
+                operator.as_str(),
+                "-b" | "-c" | "-d" | "-e" | "-f" | "-h" | "-L" | "-n" | "-p"
+                    | "-r" | "-S" | "-s" | "-t" | "-v" | "-w" | "-x" | "-z"
+            ) =>
+        {
+            operator != "-v" || is_shell_identifier(operand)
+        }
+        [_, operator, _]
+            if matches!(
+                operator.as_str(),
+                "=" | "==" | "!=" | "-ef" | "-eq" | "-ge" | "-gt" | "-le" | "-lt"
+                    | "-ne" | "-nt" | "-ot"
+            ) => true,
+        _ => false,
+    }
+}
+
+fn is_shell_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn classify_tmux(segment: &str) -> OpClass {
@@ -776,13 +831,13 @@ fn classify_segment(segment: &str) -> OpClass {
     let cmd_idx = tokens
         .iter()
         .position(|t| !t.contains('=') || t.starts_with('-'));
-    let base_cmd = match cmd_idx {
+    let invoked = match cmd_idx {
         Some(idx) => tokens[idx],
         None => return OpClass::Passthrough,
     };
 
     // Strip path prefix: /usr/bin/grep → grep
-    let base_cmd = base_cmd.rsplit('/').next().unwrap_or(base_cmd);
+    let base_cmd = invoked.rsplit('/').next().unwrap_or(invoked);
 
     match base_cmd {
         // File read commands
@@ -859,7 +914,8 @@ fn classify_segment(segment: &str) -> OpClass {
         "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
 
         // Git — classify by subcommand
-        "git" => classify_git(&tokens),
+        "git" if invoked == "git" => classify_git(&tokens),
+        "git" => OpClass::Passthrough,
 
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
@@ -904,10 +960,20 @@ fn fd_has_execution(segment: &str) -> bool {
 
 /// Classify a git command by its subcommand.
 fn classify_git(tokens: &[&str]) -> OpClass {
-    // Find the git subcommand (skip flags like -C, -c)
-    let subcmd = tokens.iter().skip(1).find(|t| !t.starts_with('-'));
+    // Admit only global switches that do not consume a following operand or
+    // configure executable helpers. Treat `-C`, `-c`, `--config-env`, and all
+    // other global forms as opaque rather than mistaking their values for the
+    // subcommand.
+    let mut subcommand_index = 1;
+    while matches!(
+        tokens.get(subcommand_index).copied(),
+        Some("--no-pager" | "--no-optional-locks")
+    ) {
+        subcommand_index += 1;
+    }
+    let subcmd = tokens.get(subcommand_index).copied().filter(|token| !token.starts_with('-'));
 
-    match subcmd.map(|s| *s) {
+    match subcmd {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
         | Some("reflog") => OpClass::GitRead,
 
@@ -920,6 +986,7 @@ fn classify_git(tokens: &[&str]) -> OpClass {
                 OpClass::GitWrite
             }
         }
+        Some("worktree") => classify_git_worktree(tokens),
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -937,6 +1004,22 @@ fn classify_git(tokens: &[&str]) -> OpClass {
         Some("clone") | Some("fetch") | Some("pull") => OpClass::Network,
         Some("add") => OpClass::Passthrough, // staging is local, not a write
         _ => OpClass::Passthrough,
+    }
+}
+
+/// `git worktree` without an action, or with `list`, is observational. Every
+/// other recognized action mutates repository metadata and/or the filesystem.
+/// Unknown forms fail closed through the ordinary semantic fallback.
+fn classify_git_worktree(tokens: &[&str]) -> OpClass {
+    let Some(index) = tokens.iter().position(|token| *token == "worktree") else {
+        return OpClass::Passthrough;
+    };
+    match tokens.get(index + 1).copied() {
+        None | Some("list") => OpClass::GitRead,
+        Some("add" | "lock" | "move" | "prune" | "remove" | "repair" | "unlock") => {
+            OpClass::GitWrite
+        }
+        Some(_) => OpClass::Passthrough,
     }
 }
 
@@ -1168,6 +1251,34 @@ mod tests {
         assert!(classify("git stash list").contains(&OpClass::GitRead));
         assert!(classify("git branch --list feature*").contains(&OpClass::GitRead));
         assert!(classify("git tag --list v*").contains(&OpClass::GitRead));
+    }
+
+    #[test]
+    fn git_worktree_effects_are_classified_by_action() {
+        for command in ["git worktree", "git worktree list", "git worktree list --porcelain"] {
+            assert!(classify(command).contains(&OpClass::GitRead), "{command}");
+        }
+        for command in [
+            "git worktree add /private/worktree main",
+            "git worktree lock /private/worktree",
+            "git worktree move /private/old /private/new",
+            "git worktree prune",
+            "git worktree remove /private/worktree",
+            "git worktree repair /private/worktree",
+            "git worktree unlock /private/worktree",
+        ] {
+            assert!(classify(command).contains(&OpClass::GitWrite), "{command}");
+        }
+        assert_eq!(classify("git worktree opaque"), vec![OpClass::Passthrough]);
+        assert_eq!(classify("/tmp/git worktree add /private/worktree main"), vec![OpClass::Passthrough]);
+        for command in [
+            "git -C worktree add /private/worktree main",
+            "git -c worktree list",
+            "git --git-dir worktree list",
+            "git --config-env worktree list",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
     }
 
     #[test]
@@ -1504,6 +1615,32 @@ mod tests {
     }
 
     #[test]
+    fn readonly_shell_predicates_are_bounded_builtins() {
+        assert_eq!(
+            readonly_capabilities("test ! -e /private/worktree"),
+            Some(vec!["Read"]),
+        );
+        assert_eq!(
+            readonly_capabilities("[ -f README.md ]"),
+            Some(vec!["Read"]),
+        );
+        assert_eq!(readonly_capabilities("test -v SAFE_NAME"), Some(vec!["Read"]));
+        for command in [
+            "test",
+            "[ -f README.md",
+            "/tmp/test ! -e /private/worktree",
+            "/tmp/[ -f README.md ]",
+            "test -v 'BASH_ARGV[i=7]'",
+            "[ -v 'BASH_ARGV[i++]' ]",
+            "test left -a right",
+            "test ! -e /private/worktree && touch marker",
+            "test \"$(touch marker)\"",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn readonly_discovery_may_discard_stderr_only_to_dev_null() {
         let command = "rg --files -g '*oauth*' -g '*receipt*' . /private/statewright 2>/dev/null | sed -n '1,240p'";
         assert_eq!(readonly_capabilities(command), Some(vec!["Grep", "Read"]));
@@ -1604,6 +1741,7 @@ mod tests {
             "git --no-pager stash list",
             "git --no-pager stash show",
             "git --no-pager diff --no-ext-diff -- --no-textconv",
+            "/tmp/git --no-pager diff --no-ext-diff --no-textconv",
             "git -ccore.fsmonitor=/tmp/helper status",
             "git status",
             "git --no-pager branch -- new-name",

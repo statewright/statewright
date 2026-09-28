@@ -187,6 +187,38 @@ const cases = [
     exposure: 'Local'
   },
   {
+    name: 'python_inline_output',
+    command: "python3 -c 'print(1)'",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Unknown'
+  },
+  {
+    name: 'python_inline_write',
+    command: "python3 -c 'open(\"artifact\", \"w\").write(\"x\")'",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Unknown'
+  },
+  {
+    name: 'python_inline_destructive',
+    command: "python3 -c 'import shutil; shutil.rmtree(\"artifact\")'",
+    decision: 'deny',
+    source: 'shell_ast',
+    risk: 'Critical',
+    exposure: 'Local'
+  },
+  {
+    name: 'python_inline_unresolved',
+    command: "python3 -c 'private_framework.execute()'",
+    decision: 'deny',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Unknown'
+  },
+  {
     name: 'malformed_shell',
     command: 'if git status --short; then',
     decision: 'deny',
@@ -206,6 +238,7 @@ const cases = [
 
 const results = []
 const nativeAliasResults = []
+const restrictedResults = []
 let failure
 
 try {
@@ -241,7 +274,15 @@ try {
         context: { tool_policy_mode: 'denylist_heuristic_v1' },
         meta: { classifier_policy: { risk_tolerance: 'assessed_moderate_local' } },
         states: {
-          implement: { disallowed_tools: [], on: { DONE: 'done' } },
+          implement: {
+            disallowed_tools: [],
+            on: { RESTRICT: 'read_only', DONE: 'done' }
+          },
+          read_only: {
+            allowed_tools: ['Read', 'Bash'],
+            classifier_policy: { risk_tolerance: 'assessed_moderate_local' },
+            on: { DONE: 'done' }
+          },
           done: { type: 'final' }
         },
         guards: {}
@@ -347,6 +388,45 @@ try {
     assert(risk.resolved_effect === 'local_write', `${alias}: expected local_write, got ${risk.resolved_effect}`)
     nativeAliasResults.push({ alias, decision: result.decision, source: risk.deterministic_source })
   }
+
+  await tool('statewright_transition', {
+    event: 'RESTRICT',
+    data: { rationale: 'Verify resolved effects against a state without Write authority.' }
+  })
+  for (const entry of [
+    {
+      name: 'restricted_python_output',
+      command: "python3 -c 'print(1)'",
+      decision: 'allow',
+      effect: 'read_only'
+    },
+    {
+      name: 'restricted_python_write',
+      command: "python3 -c 'open(\"artifact\", \"w\").write(\"x\")'",
+      decision: 'deny',
+      effect: 'local_write'
+    },
+    {
+      name: 'restricted_compound_worktree',
+      command: 'git rev-parse HEAD && git worktree add -b fix/structural .agent-worktrees/structural HEAD',
+      decision: 'deny',
+      effect: 'local_write'
+    }
+  ]) {
+    const result = await tool('statewright_adapter_pre_tool', {
+      tool_name: 'exec_command',
+      tool_input: { cmd: entry.command }
+    })
+    const risk = result.risk_assessment || {}
+    assert(result.decision === entry.decision, `${entry.name}: expected ${entry.decision}, got ${result.decision}`)
+    assert(risk.resolved_effect === entry.effect, `${entry.name}: expected effect ${entry.effect}, got ${risk.resolved_effect}`)
+    restrictedResults.push({
+      name: entry.name,
+      decision: result.decision,
+      effect: risk.resolved_effect,
+      denial_basis: risk.final_denial_basis || null
+    })
+  }
 } catch (error) {
   failure = error
 } finally {
@@ -383,6 +463,7 @@ console.log(
     mcp_url: mcpUrl,
     cases: results,
     native_aliases: nativeAliasResults,
+    restricted_cases: restrictedResults,
     cleanup: { api_key_revoked: true, user_deleted: true }
   })
 )

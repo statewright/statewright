@@ -82,10 +82,13 @@ test, formatter checks, plugin bundle synchronization, and the complete
 `task test:plugin-release` gate. Details and the separate Auldwyrm baseline
 limitation are recorded in the companion pre-release review receipt.
 
-The prior staging OAuth lifecycle, mobile and desktop Playwright runs, and the
-10-case shell-AST authority canary are inherited evidence from the exact
-deployed source receipts. They were not independently rerun against this local
-integration head.
+The earlier mobile and desktop Playwright runs remain inherited evidence from
+their exact deployed source receipts. This review independently reran the
+staging OAuth device-grant and classifier path against gateway `v67`: all 12
+shell-AST/System One cases and 10 native write aliases passed, including
+bounded local directory creation and data-only heredoc writes. The temporary
+credential was revoked and the temporary user deleted. Production was not
+changed.
 
 ## Remaining cut gates
 

@@ -13,6 +13,7 @@ if (!appUrl || !mcpUrl) {
 const marker = `${Date.now()}-${randomBytes(6).toString('hex')}`
 const email = `shell-ast-canary-${marker}@statewright.dev`
 const password = `ShellAst-${randomBytes(18).toString('base64url')}-9!`
+const workflowName = `classifier-canary-${marker}`
 let userId
 let userToken
 let keyId
@@ -39,6 +40,21 @@ async function jsonRequest(url, options = {}) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
+}
+
+function boundedFailure(body) {
+  if (!body || typeof body !== 'object') return 'no structured error'
+  const code = typeof body.error === 'string' ? body.error : null
+  const message = typeof body.message === 'string' ? body.message : null
+  const fields = body.data && typeof body.data === 'object'
+    ? Object.entries(body.data)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, detail]) => `${name}:${detail?.code || detail?.message || 'invalid'}`)
+      .join(',')
+    : null
+  return [code && `error=${code}`, message && `message=${message}`, fields && `fields=${fields}`]
+    .filter(Boolean)
+    .join(' ') || 'no bounded error fields'
 }
 
 function parseMcpBody(response, text) {
@@ -157,7 +173,7 @@ const cases = [
   {
     name: 'data_heredoc_redirect',
     command: "cat > artifact <<'EOF'\ngit push origin HEAD\nEOF",
-    decision: 'deny',
+    decision: 'allow',
     source: 'shell_ast',
     risk: 'Moderate',
     exposure: 'Local'
@@ -212,19 +228,41 @@ try {
   assert(authenticated.response.ok, `authentication returned HTTP ${authenticated.response.status}`)
   userToken = authenticated.body.token
 
+  const workflow = await jsonRequest(`${appUrl}/api/collections/workflows/records`, {
+    method: 'POST',
+    headers: { Authorization: userToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      owner: userId,
+      name: workflowName,
+      active: true,
+      definition: {
+        id: workflowName,
+        initial: 'implement',
+        context: { tool_policy_mode: 'denylist_heuristic_v1' },
+        meta: { classifier_policy: { risk_tolerance: 'assessed_moderate_local' } },
+        states: {
+          implement: { disallowed_tools: [], on: { DONE: 'done' } },
+          done: { type: 'final' }
+        },
+        guards: {}
+      }
+    })
+  })
+  assert(workflow.response.ok, `workflow creation returned HTTP ${workflow.response.status}: ${boundedFailure(workflow.body)}`)
+
   const issued = await jsonRequest(`${appUrl}/api/oauth/device/code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ client_id: 'statewright-codex', scope: 'mcp' })
   })
-  assert(issued.response.ok, `device code issuance returned HTTP ${issued.response.status}`)
+  assert(issued.response.ok, `device code issuance returned HTTP ${issued.response.status}: ${boundedFailure(issued.body)}`)
 
   const approved = await jsonRequest(`${appUrl}/api/oauth/device/authorization`, {
     method: 'POST',
     headers: { Authorization: userToken, 'Content-Type': 'application/json' },
     body: JSON.stringify({ user_code: issued.body.user_code, decision: 'approve' })
   })
-  assert(approved.response.ok, `device approval returned HTTP ${approved.response.status}`)
+  assert(approved.response.ok, `device approval returned HTTP ${approved.response.status}: ${boundedFailure(approved.body)}`)
   assert(approved.body?.status === 'approved', `device approval returned ${approved.body?.status || 'no status'}`)
 
   const exchanged = await jsonRequest(`${appUrl}/api/oauth/device/token`, {
@@ -236,9 +274,9 @@ try {
       device_code: issued.body.device_code
     })
   })
-  assert(exchanged.response.ok, `device token exchange returned HTTP ${exchanged.response.status}`)
+  assert(exchanged.response.ok, `device token exchange returned HTTP ${exchanged.response.status}: ${boundedFailure(exchanged.body)}`)
   apiKey = exchanged.body.access_token
-  assert(/^sw_live_[0-9a-f]{32}$/.test(apiKey), 'device token exchange returned an invalid access token')
+  assert(/^sw_live_[A-Za-z0-9_-]{64}$/.test(apiKey), 'device token exchange returned an invalid access token')
 
   const listed = await jsonRequest(`${appUrl}/api/keys`, {
     headers: { Authorization: userToken }
@@ -253,7 +291,7 @@ try {
     clientInfo: { name: 'shell-ast-authority-canary', version: '1' }
   })
   await rpc('notifications/initialized', {}, { notification: true })
-  await tool('statewright_load_workflow', { name: 'bugfix' })
+  await tool('statewright_load_workflow', { name: workflowName })
 
   for (const entry of cases) {
     const result = await tool('statewright_adapter_pre_tool', {
@@ -285,13 +323,6 @@ try {
     })
   }
 
-  await tool('statewright_load_workflow', { name: 'agentic-engineering-v2' })
-  for (const event of ['INTAKE_COMPLETE', 'LOCALIZED', 'BASELINED']) {
-    await tool('statewright_transition', {
-      event,
-      data: { rationale: 'isolated classifier-family staging canary' }
-    })
-  }
   for (const alias of [
     'Write',
     'write',

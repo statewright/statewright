@@ -131,14 +131,21 @@ Checks executed successfully in this worktree:
   post-migration rerun exposed one unrelated Desktop setup concurrency failure;
   its complete focused file then passed 18/18. This intermittent gate result is
   retained as a release caveat rather than reported as green;
-- shell and JavaScript syntax checks for the Codex hook and staging canary.
+- shell and JavaScript syntax checks for the Codex hook and staging canary;
 - a first-party terminology sweep replaced legacy inclusionary/exclusionary
   wording with allowlist/denylist wording; the old policy wire value remains accepted
   only as a deprecated input alias during migration. The affected gateway
   Bash-guard and executor approval-service tests passed.
 
-The live staging canary has not yet been run against this source. No production
-deployment, remote push, tag, or publication occurred.
+The live staging canary passed against gateway `v67` (OCI digest
+`sha256:9a1230350b74863a7913607b0dca9013c60ab4f745caf7fe3b78551c677a39a9`),
+annotated to source `f8309e6ca76facc1e2190dfbec249bf4fb243cf8`. It provisioned
+and revoked its credential through the OAuth device grant, exercised 12 shell
+AST/System One cases and 10 native write aliases, and deleted its temporary
+user. `mkdir` and a data-only heredoc redirect were admitted as assessed
+moderate local writes; executable heredocs, external pushes, recursive delete,
+malformed shell, and opaque execution were denied. No production deployment,
+remote push, tag, or publication occurred.
 
 ## Independent adversarial review
 

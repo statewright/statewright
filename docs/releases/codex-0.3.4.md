@@ -15,6 +15,18 @@ has not been tagged or published.
   active workflow's capability boundary or override a proven risky effect.
 - Native MCP calls now carry typed tool intent through the same enforcement
   boundary instead of depending on executable-name matching alone.
+- Native editor aliases now share one provenance-aware intent resolver across
+  enforcement and risk assessment. Supported case and adapter variants receive
+  the same bounded local-write decision, while same-named upstream MCP tools
+  remain remote and conservative.
+- Workflow and state metadata may select a bounded classifier tolerance with
+  `classifier_policy.risk_tolerance`. The setting can narrow local authority or
+  admit the calibrated System One fallback, but cannot authorize known
+  destructive, external, irreversible, account, or high-risk effects.
+- Denials now report a redacted resolution basis, required authority, semantic
+  status and probabilities, and equivalent-retry guidance so agents can
+  reformulate on the failed axis without receiving raw command or payload
+  contents.
 - The MCP gateway binds OAuth access tokens to the exact protected resource.
   Authorization-code issuance uses PKCE S256, one-time codes, scoped expiring
   access tokens, refresh rotation, replay rejection, and revocation.
@@ -46,6 +58,10 @@ Production was not changed during development or staging validation.
 Historical-thread adoption is limited to the same canonical checkout and one
 managed client. It does not authorize cross-project attachment, replacing an
 active writer, or bulk ownership changes.
+
+Directory creation is classified as a deterministic bounded local write.
+Delegated Taskfile targets remain unresolved unless their effect is known; a
+target name alone is not evidence that the underlying recipe is local or safe.
 
 ## Release review status
 

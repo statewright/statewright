@@ -1,7 +1,7 @@
 //! Deterministic, provider-neutral pre-tool risk/exposure assessment.
 //!
 //! Deterministic classifications remain authoritative for known effects. In
-//! blacklist/heuristic mode, callers may use the typed semantic result to
+//! denylist/heuristic mode, callers may use the typed semantic result to
 //! resolve an otherwise opaque effect before applying state capabilities. The
 //! assessment contains no arguments or payloads.
 
@@ -9,6 +9,7 @@ use crate::{
     bash_classifier::{self, OpClass},
     protocol::ToolInfo,
     shell_ast_shadow::{self, AstShadowAssessment, ParseStatus, ShellAstSemanticShape},
+    tool_intent::{NativeToolFamily, native_tool_family},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -304,33 +305,60 @@ pub struct RiskPipelineAssessment {
     pub semantic_authorization_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDecisionContext<'a> {
+    Allowed,
+    Denied {
+        basis: &'a str,
+        required_authority: &'a str,
+    },
+}
+
+impl<'a> FinalDecisionContext<'a> {
+    pub const fn denied(basis: &'a str, required_authority: &'a str) -> Self {
+        Self::Denied {
+            basis,
+            required_authority,
+        }
+    }
+}
+
 impl RiskPipelineAssessment {
     /// Resolve an effect class without letting inference downgrade a known
     /// high/critical operation or silently authorize an uncertain result.
     /// This is not final authorization: callers must enforce the state's
     /// explicit capability denials against `ReadOnly` or `LocalWrite`.
     pub fn resolve_effect(&self) -> ResolvedEffect {
+        self.resolve_effect_with_basis().0
+    }
+
+    /// Return the selected effect and a stable, payload-free explanation code.
+    pub fn resolve_effect_with_basis(&self) -> (ResolvedEffect, &'static str) {
         use ResolvedEffect::*;
         if matches!(self.effective_risk, RiskBand::High | RiskBand::Critical) {
-            return DenyKnownRisk;
+            return (DenyKnownRisk, "effective_known_risk");
         }
         match self.deterministic.risk {
-            RiskBand::Critical | RiskBand::High => DenyKnownRisk,
-            RiskBand::Low if self.effective_risk == RiskBand::Low => ReadOnly,
-            RiskBand::Low => LocalWrite,
-            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => LocalWrite,
+            RiskBand::Critical | RiskBand::High => (DenyKnownRisk, "deterministic_known_risk"),
+            RiskBand::Low if self.effective_risk == RiskBand::Low => {
+                (ReadOnly, "deterministic_read_only")
+            }
+            RiskBand::Low => (LocalWrite, "semantic_risk_escalation"),
+            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => {
+                (LocalWrite, "deterministic_local_write")
+            }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Unknown => {
                 if !self.semantic_authorization_enabled {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_authorization_disabled");
                 }
                 if !self.has_sufficient_semantic_evidence() {
-                    return DenyUncertain;
+                    return (DenyUncertain, "incomplete_structural_evidence");
                 }
                 let Some(vector) = self.semantic.vector.as_ref() else {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_vector_unavailable");
                 };
                 if self.semantic.status != SemanticAssessorStatus::Assessed {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_assessment_incomplete");
                 }
                 let request = self.deterministic.semantic_request.as_ref().unwrap();
                 let compatible_read = request.read_only_hint != Some(false)
@@ -345,19 +373,19 @@ impl RiskPipelineAssessment {
                     && vector.irreversible.get() <= 0.05
                     && vector.external_or_account_effect.get() <= 0.05
                 {
-                    ReadOnly
+                    (ReadOnly, "semantic_read_only")
                 } else if vector.may_write.get() >= 0.90
                     && vector.reversible.get() >= 0.80
                     && vector.destructive.get() <= 0.05
                     && vector.irreversible.get() <= 0.05
                     && vector.external_or_account_effect.get() <= 0.05
                 {
-                    LocalWrite
+                    (LocalWrite, "semantic_local_write")
                 } else {
-                    DenyUncertain
+                    (DenyUncertain, "semantic_threshold_not_met")
                 }
             }
-            RiskBand::Moderate => DenyKnownRisk,
+            RiskBand::Moderate => (DenyKnownRisk, "deterministic_nonlocal_risk"),
         }
     }
 
@@ -385,6 +413,29 @@ impl RiskPipelineAssessment {
     /// labels and bounded probabilities only--never arguments, command text,
     /// paths, or payload values.
     pub fn visible_json(&self) -> serde_json::Value {
+        self.visible_json_for_decision(FinalDecisionContext::Allowed)
+    }
+
+    /// Attach the final policy decision to the classifier receipt. A
+    /// classifier-resolved read or local write may still be denied by the
+    /// workflow capability or interceptor, in which case an equivalent retry
+    /// must not be suggested.
+    pub fn visible_json_for_decision(
+        &self,
+        final_decision: FinalDecisionContext<'_>,
+    ) -> serde_json::Value {
+        let (resolved_effect, resolution_basis) = self.resolve_effect_with_basis();
+        let (decision_allowed, final_denial_basis, required_authority) = match final_decision {
+            FinalDecisionContext::Allowed => (
+                true,
+                serde_json::Value::Null,
+                resolved_effect.required_authority(),
+            ),
+            FinalDecisionContext::Denied {
+                basis,
+                required_authority,
+            } => (false, serde_json::json!(basis), required_authority),
+        };
         let vector = self.semantic.vector.as_ref().map(|value| {
             serde_json::json!({
                 "read_only": value.read_only.get(),
@@ -404,7 +455,41 @@ impl RiskPipelineAssessment {
             "semantic_vector": vector,
             "semantic_failsafe_escalated": self.semantic_failsafe_escalated,
             "semantic_authorization_enabled": self.semantic_authorization_enabled,
+            "resolved_effect": resolved_effect.label(),
+            "resolution_basis": resolution_basis,
+            "final_denial_basis": final_denial_basis,
+            "required_authority": required_authority,
+            "equivalent_retry_allowed": decision_allowed
+                && !matches!(resolved_effect, ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain),
         })
+    }
+
+    pub fn visible_json_for_denial(
+        &self,
+        basis: &str,
+        required_authority: &str,
+    ) -> serde_json::Value {
+        self.visible_json_for_decision(FinalDecisionContext::denied(basis, required_authority))
+    }
+}
+
+impl ResolvedEffect {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::LocalWrite => "local_write",
+            Self::DenyKnownRisk => "deny_known_risk",
+            Self::DenyUncertain => "deny_uncertain",
+        }
+    }
+
+    pub const fn required_authority(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Read",
+            Self::LocalWrite => "Write",
+            Self::DenyKnownRisk => "separate_approved_execution_path",
+            Self::DenyUncertain => "complete_structural_evidence_or_separate_approval",
+        }
     }
 }
 
@@ -1292,18 +1377,8 @@ fn assess_invocation_with_origin(
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
         let known_native_write = trusted_native_adapter
-            && matches!(
-                tool_name,
-                "Write"
-                    | "Edit"
-                    | "MultiEdit"
-                    | "apply_patch"
-                    | "write_file"
-                    | "edit_file"
-                    | "patch_file"
-                    | "create_file"
-                    | "create_or_update_file"
-            );
+            && tool.is_none()
+            && native_tool_family(tool_name) == Some(NativeToolFamily::Write);
         let base = if known_native_write {
             assessment(RiskBand::Moderate, ExposureBand::Local, "native_write")
         } else {
@@ -1419,8 +1494,8 @@ pub async fn assess_pipeline_visible(
 
 /// Assess a call arriving through the trusted Codex/Claude native-tool
 /// adapter. This provenance is what permits canonical filesystem Write tools
-/// to remain local; an upstream MCP tool with a colliding name never receives
-/// this treatment.
+/// to remain local when no upstream registration exists. A registered MCP tool
+/// with a colliding name retains its metadata-derived remote/unknown posture.
 pub async fn assess_native_pipeline_visible(
     tool: Option<&ToolInfo>,
     tool_name: &str,
@@ -1975,27 +2050,23 @@ mod tests {
 
         for native in [
             "Write",
+            "write",
             "Edit",
+            "edit",
             "MultiEdit",
+            "multiedit",
             "apply_patch",
+            "functions.apply_patch",
+            "StrReplace",
+            "str_replace",
             "write_file",
             "edit_file",
             "patch_file",
             "create_file",
             "create_or_update_file",
         ] {
-            let annotated: ToolInfo = serde_json::from_value(json!({
-                "name":native,
-                "inputSchema":{},
-                "annotations":{
-                    "readOnlyHint":false,
-                    "destructiveHint":true,
-                    "openWorldHint":true
-                }
-            }))
-            .unwrap();
             let assessed = assess_invocation_with_origin(
-                Some(&annotated),
+                None,
                 native,
                 &json!({"patch":"redacted"}),
                 Some("implement"),
@@ -2005,6 +2076,17 @@ mod tests {
             assert_eq!(assessed.exposure, ExposureBand::Local, "{native}");
             assert_eq!(assessed.source, "native_write", "{native}");
         }
+
+        let registered_collision = assess_invocation_with_origin(
+            Some(&upstream_collision),
+            "apply_patch",
+            &json!({"patch":"redacted"}),
+            Some("implement"),
+            true,
+        );
+        assert_eq!(registered_collision.risk, RiskBand::Critical);
+        assert_eq!(registered_collision.exposure, ExposureBand::Account);
+        assert_ne!(registered_collision.source, "native_write");
     }
 
     #[test]
@@ -3225,6 +3307,18 @@ mod tests {
             missing_shape.resolve_effect(),
             ResolvedEffect::DenyUncertain
         );
+        let visible = missing_shape.visible_json();
+        assert_eq!(visible["resolved_effect"], "deny_uncertain");
+        assert_eq!(
+            visible["resolution_basis"],
+            "incomplete_structural_evidence"
+        );
+        assert_eq!(
+            visible["required_authority"],
+            "complete_structural_evidence_or_separate_approval"
+        );
+        assert_eq!(visible["equivalent_retry_allowed"], false);
+        assert!(!visible.to_string().contains("secret-helper"));
 
         for command in [
             "task test",
@@ -3411,6 +3505,15 @@ mod tests {
             assert_eq!(assessed.risk, RiskBand::Low, "{command}");
             assert_eq!(assessed.exposure, ExposureBand::Local, "{command}");
         }
+        let status = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"git status --short"}),
+            Some("inspect"),
+        );
+        assert_eq!(status.source, "shell_ast");
+        assert_eq!(status.risk, RiskBand::Low);
+        assert_eq!(status.exposure, ExposureBand::Local);
         for (command, risk) in [
             ("git status --short && git push origin HEAD", RiskBand::High),
             ("printf '%s\\n' \"$(git push origin HEAD)\"", RiskBand::High),
@@ -3445,6 +3548,15 @@ mod tests {
         assert_eq!(data.source, "shell_ast");
         assert_eq!(data.risk, RiskBand::Moderate);
         assert_eq!(data.exposure, ExposureBand::Local);
+        let mkdir = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"mkdir -p docs/plans"}),
+            Some("implement"),
+        );
+        assert_eq!(mkdir.source, "shell_ast");
+        assert_eq!(mkdir.risk, RiskBand::Moderate);
+        assert_eq!(mkdir.exposure, ExposureBand::Local);
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
     }

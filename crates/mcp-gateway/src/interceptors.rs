@@ -60,7 +60,7 @@ pub fn pre_call_check_with_pipeline(
     let mut warnings: Vec<String> = Vec::new();
 
     // Environment restrictions are part of the gateway's authoritative shell
-    // policy. Adapters may delegate blacklist-mode decisions here, so this
+    // policy. Adapters may delegate denylist-mode decisions here, so this
     // guard must not exist only in a client hook.
     let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
     if is_shell_tool(tool_name, bash_tool) {
@@ -101,7 +101,7 @@ pub fn pre_call_check_with_pipeline(
         }
     }
 
-    // 2. Bash guard: check command against allowed_commands whitelist
+    // 2. Bash guard: check command against the allowed_commands allowlist
     if let Some(ref allowed_cmds) = state_def.allowed_commands {
         let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
         if is_shell_tool(tool_name, bash_tool) {
@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_guard_allows_whitelisted() {
+    fn bash_guard_allows_allowlisted() {
         let s = session();
         let args = json!({ "command": "pytest -x tests/" });
         match pre_call_check(&s, "Bash", &args) {
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_guard_blocks_non_whitelisted() {
+    fn bash_guard_blocks_non_allowlisted() {
         let s = session();
         let args = json!({ "command": "rm -rf /" });
         match pre_call_check(&s, "Bash", &args) {
@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn exec_command_cmd_is_checked_against_the_bash_whitelist() {
+    fn exec_command_cmd_is_checked_against_the_bash_allowlist() {
         let s = session();
         let allowed = json!({ "cmd": "pytest -x tests/" });
         assert!(matches!(
@@ -660,7 +660,7 @@ mod tests {
         let args = json!({ "command": "pytest -x tests/" });
         match pre_call_check(&s, "Bash", &args) {
             PreCallDecision::Allow | PreCallDecision::Warn(_) => {}
-            PreCallDecision::Block(msg) => panic!("should allow whitelisted command: {}", msg),
+            PreCallDecision::Block(msg) => panic!("should allow allowlisted command: {}", msg),
         }
     }
 
@@ -675,7 +675,7 @@ mod tests {
             let args = json!({ "command": command });
             match pre_call_check(&s, "Bash", &args) {
                 PreCallDecision::Block(_) => {}
-                _ => panic!("should block command whitelist bypass: {}", command),
+                _ => panic!("should block command allowlist bypass: {}", command),
             }
         }
     }

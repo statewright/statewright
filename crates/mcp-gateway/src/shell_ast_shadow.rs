@@ -364,6 +364,7 @@ fn sanitize_semantic_shape(
             | "less"
             | "ls"
             | "make"
+            | "mkdir"
             | "more"
             | "mv"
             | "mysql"

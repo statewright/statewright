@@ -457,14 +457,14 @@ describe("statewright Pi extension", () => {
       expect(results[0]).toBeUndefined()
     })
 
-    it("uses explicit blacklist precedence and shared shell risk admission in deny mode", async () => {
-      const blacklistState = {
+    it("uses explicit denylist precedence and shared shell risk admission in deny mode", async () => {
+      const denylistState = {
         ...MOCK_STATE,
         allowed_tools: [],
         disallowed_tools: ["Write"],
-        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+        context: { tool_policy_mode: "denylist_heuristic_v1" },
       }
-      setupFetch([{ match: "/mcp", body: blacklistState }])
+      setupFetch([{ match: "/mcp", body: denylistState }])
       vi.spyOn(console, "log").mockImplementation(() => {})
       const pi = createMockPi()
       const ctx = createCtx()
@@ -493,7 +493,7 @@ describe("statewright Pi extension", () => {
       }
 
       const webBlockedState = {
-        ...blacklistState,
+        ...denylistState,
         disallowed_tools: ["Write", "WebSearch", "WebFetch"],
       }
       setupFetch([{ match: "/mcp", body: webBlockedState }])
@@ -506,7 +506,7 @@ describe("statewright Pi extension", () => {
         expect(result[0]).toEqual(expect.objectContaining({ block: true }))
       }
 
-      const writableState = { ...blacklistState, disallowed_tools: [] }
+      const writableState = { ...denylistState, disallowed_tools: [] }
       setupFetch([{ match: "/mcp", body: writableState }])
       const writablePi = createMockPi()
       const writableCtx = createCtx()
@@ -524,7 +524,24 @@ describe("statewright Pi extension", () => {
       }
     })
 
-    it("preserves legacy blacklist and shell enforcement in native and recovery paths", async () => {
+    it("accepts the deprecated denylist policy wire alias during migration", async () => {
+      setupFetch([{ match: "/mcp", body: {
+        ...MOCK_STATE,
+        allowed_tools: [],
+        disallowed_tools: ["Write"],
+        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+      } }])
+      vi.spyOn(console, "log").mockImplementation(() => {})
+      const pi = createMockPi()
+      const ctx = createCtx()
+      await statewrightExtension(asPi(pi))
+      await pi._fire("before_agent_start", {}, ctx)
+
+      const result = await pi._fire("tool_call", { toolName: "Write" }, ctx)
+      expect(result[0]).toEqual(expect.objectContaining({ block: true }))
+    })
+
+    it("preserves explicit denials and shell enforcement in native and recovery paths", async () => {
       const legacyState = {
         ...MOCK_STATE,
         allowed_tools: ["Read", "Write", "Bash"],
@@ -1378,13 +1395,13 @@ describe("statewright Pi extension", () => {
     })
 
     it("uses the same deny-mode classifier for recovered shell calls", async () => {
-      const blacklistState = {
+      const denylistState = {
         ...RECON_STATE,
         allowed_tools: [],
         disallowed_tools: ["Write"],
-        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+        context: { tool_policy_mode: "denylist_heuristic_v1" },
       }
-      setupFetch([{ match: "/mcp", body: blacklistState }])
+      setupFetch([{ match: "/mcp", body: denylistState }])
       vi.spyOn(console, "log").mockImplementation(() => {})
       const pi = createMockPi()
       const ctx = createCtx()

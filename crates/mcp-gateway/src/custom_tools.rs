@@ -2,7 +2,7 @@ use serde_json::json;
 use statewright_engine::resolve_transition;
 
 use crate::protocol::{ToolAnnotations, ToolInfo};
-use crate::session::GatewaySession;
+use crate::session::{GatewaySession, canonicalize_tool_policy_mode};
 
 /// Handle the statewright_transition tool call.
 /// Returns the new state info on success, or an error message.
@@ -60,6 +60,7 @@ pub fn handle_transition(
 
             session.current_state = result.new_state.clone();
             session.context = result.new_context;
+            canonicalize_tool_policy_mode(&mut session.context);
             session.iteration_count = 0;
             // Note: transition_count is incremented by SessionManager::update_state, not here
 
@@ -131,6 +132,8 @@ pub fn handle_transition(
 
 /// Handle the statewright_get_state tool call.
 pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
+    let mut context = session.context.clone();
+    canonicalize_tool_policy_mode(&mut context);
     let state_def = session.definition.states.get(&session.current_state);
 
     let allowed_tools = state_def
@@ -161,6 +164,17 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
     let thinking_level = state_def.and_then(|s| s.thinking_level.as_ref()).cloned();
     let direct_execution = state_def.and_then(|s| s.direct_execution).unwrap_or(false);
     let model_ladder = state_def.and_then(|s| s.model_ladder.as_ref()).cloned();
+    let classifier_policy = state_def
+        .and_then(|state| state.classifier_policy.as_ref())
+        .or_else(|| {
+            session
+                .definition
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.classifier_policy.as_ref())
+        })
+        .cloned()
+        .unwrap_or_default();
 
     // Include guard definitions for transitions that use them
     let guard_info: serde_json::Value = state_def
@@ -218,7 +232,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "transition_count": session.transition_count,
         "blocked_env": blocked_env,
         "env_overrides": env_overrides,
-        "context": session.context,
+        "context": context,
         "guards": guard_info,
         "meta": session.definition.meta,
         "allowed_commands": allowed_commands,
@@ -226,6 +240,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "intent": intent,
         "direct_execution": direct_execution,
         "model_ladder": model_ladder,
+        "classifier_policy": classifier_policy,
     });
 
     // Include interrupt definitions for client-side detection (built-in tools)
@@ -643,6 +658,58 @@ mod tests {
 
         let transitions = state["transitions"].as_array().unwrap();
         assert!(transitions.iter().any(|t| t["event"] == "READY"));
+    }
+
+    #[test]
+    fn get_state_projects_effective_classifier_policy() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "classifier-policy-state",
+            "initial": "inspect",
+            "meta": {
+                "classifier_policy": {"risk_tolerance": "low_local"}
+            },
+            "states": {
+                "inspect": {
+                    "classifier_policy": {"risk_tolerance": "moderate_local"},
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("classifier-policy-state".into(), definition);
+
+        let state = handle_get_state(&session);
+        assert_eq!(
+            state["classifier_policy"]["risk_tolerance"],
+            "moderate_local"
+        );
+    }
+
+    #[test]
+    fn get_state_canonicalizes_deprecated_denylist_policy_input() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "legacy-denylist-projection",
+            "initial": "inspect",
+            "context": {"tool_policy_mode": "blacklist_heuristic_v1"},
+            "states": {
+                "inspect": {"on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            },
+            "guards": {}
+        }))
+        .unwrap();
+        let session = GatewaySession::new("legacy-denylist-projection".into(), definition);
+
+        let state = handle_get_state(&session);
+        assert_eq!(
+            state["context"]["tool_policy_mode"],
+            "denylist_heuristic_v1"
+        );
+        assert_eq!(
+            session.definition.context["tool_policy_mode"],
+            "denylist_heuristic_v1"
+        );
     }
 
     #[test]

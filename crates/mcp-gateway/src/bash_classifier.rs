@@ -1290,6 +1290,9 @@ fn classify_segment(segment: &str) -> OpClass {
         "tee" => OpClass::FileWrite,
         "cp" | "mv" | "install" | "rsync" => OpClass::FileWrite,
         "dd" => OpClass::FileWrite,
+        // Creating a directory is a bounded local mutation. It is not
+        // destructive and does not delegate execution to another program.
+        "mkdir" => OpClass::LocalWrite,
 
         // Destructive
         "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
@@ -1582,6 +1585,11 @@ mod tests {
     fn append_redirect_is_file_write() {
         let classes = classify("echo 'hello' >> output.txt");
         assert!(classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn mkdir_is_a_bounded_local_write() {
+        assert_eq!(classify("mkdir -p docs/plans"), vec![OpClass::LocalWrite]);
     }
 
     #[test]

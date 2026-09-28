@@ -91,6 +91,14 @@ async function tool(name, args = {}) {
 
 const cases = [
   {
+    name: 'plain_git_status',
+    command: 'git status --short',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Low',
+    exposure: 'Local'
+  },
+  {
     name: 'compound_read',
     command: 'if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi',
     decision: 'allow',
@@ -155,6 +163,14 @@ const cases = [
     exposure: 'Local'
   },
   {
+    name: 'mkdir_local_write',
+    command: 'mkdir -p docs/plans',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local'
+  },
+  {
     name: 'malformed_shell',
     command: 'if git status --short; then',
     decision: 'deny',
@@ -173,6 +189,7 @@ const cases = [
 ]
 
 const results = []
+const nativeAliasResults = []
 let failure
 
 try {
@@ -223,6 +240,15 @@ try {
     assert(risk.deterministic_risk === entry.risk, `${entry.name}: expected risk ${entry.risk}, got ${risk.deterministic_risk}`)
     assert(risk.deterministic_exposure === entry.exposure, `${entry.name}: expected exposure ${entry.exposure}, got ${risk.deterministic_exposure}`)
     assert(risk.semantic_status === 'Assessed', `${entry.name}: expected semantic status Assessed, got ${risk.semantic_status}`)
+    assert(typeof risk.resolution_basis === 'string', `${entry.name}: missing resolution_basis`)
+    assert(typeof risk.required_authority === 'string', `${entry.name}: missing required_authority`)
+    if (entry.decision === 'deny') {
+      assert(typeof risk.final_denial_basis === 'string', `${entry.name}: missing final_denial_basis`)
+    }
+    assert(
+      risk.equivalent_retry_allowed === (entry.decision === 'allow'),
+      `${entry.name}: retry guidance did not match the decision`
+    )
     results.push({
       name: entry.name,
       decision: result.decision,
@@ -231,6 +257,38 @@ try {
       exposure: risk.deterministic_exposure,
       semantic_status: risk.semantic_status
     })
+  }
+
+  await tool('statewright_load_workflow', { name: 'agentic-engineering-v2' })
+  for (const event of ['INTAKE_COMPLETE', 'LOCALIZED', 'BASELINED']) {
+    await tool('statewright_transition', {
+      event,
+      data: { rationale: 'isolated classifier-family staging canary' }
+    })
+  }
+  for (const alias of [
+    'Write',
+    'write',
+    'Edit',
+    'edit',
+    'MultiEdit',
+    'multiedit',
+    'apply_patch',
+    'functions.apply_patch',
+    'StrReplace',
+    'str_replace'
+  ]) {
+    const result = await tool('statewright_adapter_pre_tool', {
+      tool_name: alias,
+      tool_input: { path: 'classifier-family-canary', patch: 'classifier-family-canary' }
+    })
+    const risk = result.risk_assessment || {}
+    assert(result.decision === 'allow', `${alias}: expected allow, got ${result.decision}`)
+    assert(risk.deterministic_source === 'native_write', `${alias}: expected native_write, got ${risk.deterministic_source}`)
+    assert(risk.deterministic_risk === 'Moderate', `${alias}: expected Moderate, got ${risk.deterministic_risk}`)
+    assert(risk.deterministic_exposure === 'Local', `${alias}: expected Local, got ${risk.deterministic_exposure}`)
+    assert(risk.resolved_effect === 'local_write', `${alias}: expected local_write, got ${risk.resolved_effect}`)
+    nativeAliasResults.push({ alias, decision: result.decision, source: risk.deterministic_source })
   }
 } catch (error) {
   failure = error
@@ -266,6 +324,7 @@ console.log(
     app_url: appUrl,
     mcp_url: mcpUrl,
     cases: results,
+    native_aliases: nativeAliasResults,
     cleanup: { api_key_revoked: true, user_deleted: true }
   })
 )

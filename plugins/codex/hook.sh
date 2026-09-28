@@ -109,7 +109,7 @@ statewright_tools_label() {
   policy_mode=$(printf '%s' "$state_json" | jq -r '.context.tool_policy_mode // .tool_policy_mode // empty' 2>/dev/null || true)
   allowed=$(printf '%s' "$state_json" | jq -r '.allowed_tools // [] | join(", ")' 2>/dev/null || true)
   disallowed=$(printf '%s' "$state_json" | jq -r '.disallowed_tools // [] | join(", ")' 2>/dev/null || true)
-  if [ "$policy_mode" = "blacklist_heuristic_v1" ]; then
+  if statewright_policy_mode_is_denylist "$policy_mode"; then
     printf 'unrestricted except explicit blocks: %s' "${disallowed:-(none)}"
   elif [ -n "$allowed" ]; then
     printf '%s' "$allowed"
@@ -564,7 +564,7 @@ case "$ENDPOINT" in
     # Existing workflows that omitted allowed_tools intentionally had no
     # standalone Codex restriction. Preserve that legacy contract; only the
     # explicit deny/heuristic mode activates omission-as-unrestricted logic.
-    if ! statewright_blacklist_mode && [ -z "$ALLOWED" ]; then
+    if ! statewright_denylist_mode && [ -z "$ALLOWED" ]; then
       exit 0
     fi
 
@@ -573,20 +573,20 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # blacklist_heuristic_v1 has one authoritative decision path. The gateway
+    # denylist_heuristic_v1 has one authoritative decision path. The gateway
     # combines deterministic classification with the configured System One
     # fallback; duplicating command patterns here can preempt that fallback.
-    if statewright_blacklist_mode; then
+    if statewright_denylist_mode; then
       ADAPTER_RESULT=$(adapter_pre_tool_call "$TOOL_NAME")
       if ! printf '%s' "$ADAPTER_RESULT" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway decision unavailable; blacklist policy fails closed."}}'
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway decision unavailable; denylist policy fails closed."}}'
         exit 0
       fi
 
       ADAPTER_ACTIVE=$(printf '%s' "$ADAPTER_RESULT" | jq -r 'if has("active") then .active else true end' 2>/dev/null || true)
       ADAPTER_DECISION=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.decision // empty' 2>/dev/null || true)
       if [ "$ADAPTER_ACTIVE" = "false" ]; then
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway has no active workflow for the locally active blacklist policy."}}'
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway has no active workflow for the locally active denylist policy."}}'
         exit 0
       fi
       if [ "$ADAPTER_DECISION" = "allow" ]; then
@@ -599,12 +599,34 @@ case "$ENDPOINT" in
 
       ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
       [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
+      ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
+        .risk_assessment? as $risk
+        | if ($risk | type) != "object" then empty else
+            "Classifier receipt: basis=" + (($risk.final_denial_basis // $risk.resolution_basis // "unknown") | tostring)
+            + "; deterministic=" + (($risk.deterministic_risk // "unknown") | tostring)
+            + "/" + (($risk.deterministic_exposure // "unknown") | tostring)
+            + " via " + (($risk.deterministic_source // "unknown") | tostring)
+            + "; System One=" + (($risk.semantic_status // "unknown") | tostring)
+            + (if ($risk.semantic_vector | type) == "object" then
+                " p(read=" + (($risk.semantic_vector.read_only // "n/a") | tostring)
+                + ", write=" + (($risk.semantic_vector.may_write // "n/a") | tostring)
+                + ", destructive=" + (($risk.semantic_vector.destructive // "n/a") | tostring)
+                + ", irreversible=" + (($risk.semantic_vector.irreversible // "n/a") | tostring)
+                + ", external=" + (($risk.semantic_vector.external_or_account_effect // "n/a") | tostring) + ")"
+              else "" end)
+            + "; required=" + (($risk.required_authority // "unknown") | tostring)
+            + "; equivalent retry=" + (($risk.equivalent_retry_allowed // false) | tostring) + "."
+          end
+      ' 2>/dev/null || true)
+      if [ -n "$ADAPTER_RECEIPT" ]; then
+        ADAPTER_REASON="$ADAPTER_REASON $ADAPTER_RECEIPT"
+      fi
       jq -n --arg reason "$ADAPTER_REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}'
       exit 0
     fi
 
     # Legacy workflows retain their local capability and command-prefix
-    # behavior. blacklist_heuristic_v1 has already exited through the gateway.
+    # behavior. denylist_heuristic_v1 has already exited through the gateway.
     if statewright_tool_allowed "$TOOL_NAME" "$HOOK_INPUT"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
       # to prevent bypass of Write/Destructive restrictions via shell redirects
@@ -674,7 +696,7 @@ case "$ENDPOINT" in
       exit 0  # Allowed — silent pass
     fi
 
-    # Tool denied by an explicit capability blacklist or opaque-tool gate.
+    # Tool denied by an explicit capability denylist or opaque-tool gate.
     if [ "$STATEWRIGHT_TOOL_MODE" = "opaque" ]; then
       REASON="Tool '$TOOL_NAME' has opaque mutation semantics in the '$CURRENT' phase. Use an executor-owned semantic-risk approval gate before running it."
       jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'

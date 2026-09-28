@@ -1,10 +1,13 @@
 use statewright_agent::tool_enforcer;
-use statewright_engine::resolve_transition;
+use statewright_engine::{ClassifierRiskTolerance, resolve_transition};
 
 use crate::{
     bash_classifier,
     risk_assessment::{ResolvedEffect, RiskPipelineAssessment},
-    session::GatewaySession,
+    session::{
+        DENYLIST_HEURISTIC_POLICY_MODE, GatewaySession, LEGACY_DENYLIST_HEURISTIC_POLICY_MODE,
+    },
+    tool_intent::{NativeToolFamily, native_tool_family},
 };
 
 const UNTRUSTED_EXPLORATORY_ADAPTER: &str = "__statewright_untrusted_exploratory_adapter__";
@@ -26,26 +29,10 @@ pub enum EnforcementDecision {
     CheckpointReached { iteration: u32, max: u32 },
 }
 
-fn adapter_tool_family(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "read" | "read_file" | "grep" | "search_files" | "glob" | "find" | "find_files" | "ls"
-        | "list_directory" => Some("read"),
-        "edit"
-        | "edit_file"
-        | "apply_patch"
-        | "patch_file"
-        | "multiedit"
-        | "write"
-        | "write_file"
-        | "create_file"
-        | "create_or_update_file" => Some("write"),
-        "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some("command"),
-        "run_test" => Some("test"),
-        "webfetch" | "fetch" | "http_request" => Some("fetch"),
-        "websearch" | "web_search" => Some("search"),
-        "agent" | "subagent" => Some("agent"),
-        _ => None,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterToolOrigin {
+    NativeUnregistered,
+    RegisteredUpstream,
 }
 
 /// Return the policy error for a shell dialect that Statewright does not
@@ -78,11 +65,11 @@ pub fn unsupported_shell_dialect_reason(
     }
 }
 
-fn allowed_name_for_family(session: &GatewaySession, family: &str) -> Option<String> {
+fn allowed_name_for_family(session: &GatewaySession, family: NativeToolFamily) -> Option<String> {
     tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
         .unwrap_or_default()
         .into_iter()
-        .find(|candidate| adapter_tool_family(candidate) == Some(family))
+        .find(|candidate| native_tool_family(candidate) == Some(family))
 }
 
 fn allowed_general_read_name(session: &GatewaySession) -> Option<String> {
@@ -108,7 +95,7 @@ fn readonly_shell_policy_name(
         .trim();
     let mut selected = None;
     for capability in bash_classifier::readonly_capabilities(command)? {
-        let family = adapter_tool_family(capability)?;
+        let family = native_tool_family(capability)?;
         let allowed = allowed_name_for_family(session, family)?;
         selected.get_or_insert(allowed);
     }
@@ -123,7 +110,13 @@ pub fn resolve_adapter_tool_name(
     requested: &str,
     tool_input: &serde_json::Value,
 ) -> String {
-    resolve_adapter_tool_name_with_pipeline(session, requested, tool_input, None)
+    resolve_adapter_tool_name_with_pipeline_and_origin(
+        session,
+        requested,
+        tool_input,
+        None,
+        AdapterToolOrigin::NativeUnregistered,
+    )
 }
 
 /// Resolve a native adapter tool after the risk pipeline has classified its
@@ -136,6 +129,22 @@ pub fn resolve_adapter_tool_name_with_pipeline(
     tool_input: &serde_json::Value,
     pipeline: Option<&RiskPipelineAssessment>,
 ) -> String {
+    resolve_adapter_tool_name_with_pipeline_and_origin(
+        session,
+        requested,
+        tool_input,
+        pipeline,
+        AdapterToolOrigin::NativeUnregistered,
+    )
+}
+
+pub fn resolve_adapter_tool_name_with_pipeline_and_origin(
+    session: &GatewaySession,
+    requested: &str,
+    tool_input: &serde_json::Value,
+    pipeline: Option<&RiskPipelineAssessment>,
+    origin: AdapterToolOrigin,
+) -> String {
     // Preserve the original identity before adapter aliases collapse it to a
     // provider-neutral family. This makes an explicit `grep` denial effective
     // even when `grep` would otherwise normalize to `Read`.
@@ -144,6 +153,12 @@ pub fn resolve_adapter_tool_name_with_pipeline(
         &session.current_state,
         requested,
     ) {
+        return requested.to_string();
+    }
+    // Registered upstream tools retain exact identity. Adapter transport
+    // provenance says who delivered the call, not that the underlying tool is
+    // a local native capability.
+    if origin == AdapterToolOrigin::RegisteredUpstream {
         return requested.to_string();
     }
     let exploratory = session
@@ -156,9 +171,9 @@ pub fn resolve_adapter_tool_name_with_pipeline(
         // Adapter-native read aliases have no MCP metadata.  Normalize only
         // the small built-in family; unknown adapters remain unknown.  Shell
         // admission is still decided from its arguments by interceptors.
-        return match adapter_tool_family(requested) {
-            Some("read") => "Read".to_string(),
-            Some("command") => "Bash".to_string(),
+        return match native_tool_family(requested) {
+            Some(NativeToolFamily::Read) => "Read".to_string(),
+            Some(NativeToolFamily::Command) => "Bash".to_string(),
             _ => format!("{UNTRUSTED_EXPLORATORY_ADAPTER}:{requested}"),
         };
     }
@@ -167,10 +182,10 @@ pub fn resolve_adapter_tool_name_with_pipeline(
     if allowed.iter().any(|name| name == requested) {
         return requested.to_string();
     }
-    let Some(family) = adapter_tool_family(requested) else {
+    let Some(family) = native_tool_family(requested) else {
         return requested.to_string();
     };
-    if family == "command" {
+    if family == NativeToolFamily::Command {
         if pipeline
             .is_some_and(|assessment| assessment.resolve_effect() == ResolvedEffect::ReadOnly)
         {
@@ -184,7 +199,7 @@ pub fn resolve_adapter_tool_name_with_pipeline(
     }
     allowed
         .into_iter()
-        .find(|candidate| adapter_tool_family(candidate) == Some(family))
+        .find(|candidate| native_tool_family(candidate) == Some(family))
         .unwrap_or_else(|| requested.to_string())
 }
 
@@ -271,11 +286,51 @@ pub fn enforce_tool_call(session: &GatewaySession, tool_name: &str) -> Enforceme
 }
 
 fn uses_semantic_effect_policy(session: &GatewaySession) -> bool {
+    matches!(
+        session
+            .context
+            .get("tool_policy_mode")
+            .and_then(|value| value.as_str()),
+        Some(DENYLIST_HEURISTIC_POLICY_MODE | LEGACY_DENYLIST_HEURISTIC_POLICY_MODE)
+    )
+}
+
+fn classifier_risk_tolerance(session: &GatewaySession) -> ClassifierRiskTolerance {
     session
-        .context
-        .get("tool_policy_mode")
-        .and_then(|value| value.as_str())
-        == Some("blacklist_heuristic_v1")
+        .definition
+        .states
+        .get(&session.current_state)
+        .and_then(|state| state.classifier_policy.as_ref())
+        .or_else(|| {
+            session
+                .definition
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.classifier_policy.as_ref())
+        })
+        .map(|policy| policy.risk_tolerance)
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticEffectDenial {
+    pub reason: String,
+    pub basis: &'static str,
+    pub required_authority: &'static str,
+}
+
+impl SemanticEffectDenial {
+    fn new(
+        reason: impl Into<String>,
+        basis: &'static str,
+        required_authority: &'static str,
+    ) -> Self {
+        Self {
+            reason: reason.into(),
+            basis,
+            required_authority,
+        }
+    }
 }
 
 /// Deny known-risk or unresolved effects before ordinary enforcement. This
@@ -284,16 +339,69 @@ pub fn semantic_effect_risk_denial(
     session: &GatewaySession,
     pipeline: &RiskPipelineAssessment,
 ) -> Option<String> {
+    semantic_effect_risk_denial_details(session, pipeline).map(|denial| denial.reason)
+}
+
+pub fn semantic_effect_risk_denial_details(
+    session: &GatewaySession,
+    pipeline: &RiskPipelineAssessment,
+) -> Option<SemanticEffectDenial> {
     if !uses_semantic_effect_policy(session) {
         return None;
     }
-    match pipeline.resolve_effect() {
-        ResolvedEffect::DenyKnownRisk => Some(
-            "Operation has a known destructive, irreversible, or external effect and requires a separate approved execution path.".into()
-        ),
-        ResolvedEffect::DenyUncertain => Some(
-            "Operation effect remains uncertain after System One assessment; failing closed.".into()
-        ),
+    let (effect, basis) = pipeline.resolve_effect_with_basis();
+    match effect {
+        ResolvedEffect::DenyKnownRisk => Some(SemanticEffectDenial::new(
+            format!(
+                "Operation denied: classifier axis '{basis}' resolved a known destructive, irreversible, or non-local effect. Required authority: {}. Equivalent retries are not allowed.",
+                effect.required_authority(),
+            ),
+            basis,
+            effect.required_authority(),
+        )),
+        ResolvedEffect::DenyUncertain => Some(SemanticEffectDenial::new(
+            format!(
+                "Operation denied: classifier axis '{basis}' left the effect uncertain after System One assessment. Required authority: {}. Inspect risk_assessment for the redacted bands and probabilities; do not retry the equivalent operation through another executable.",
+                effect.required_authority(),
+            ),
+            basis,
+            effect.required_authority(),
+        )),
+        ResolvedEffect::ReadOnly
+            if basis.starts_with("semantic_")
+                && classifier_risk_tolerance(session)
+                    != ClassifierRiskTolerance::AssessedModerateLocal =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Operation denied: workflow classifier_policy does not admit semantic resolution at axis '{basis}'. Required authority: assessed_moderate_local. Equivalent retries are not allowed."
+                ),
+                "classifier_policy_semantic_resolution",
+                "assessed_moderate_local",
+            ))
+        }
+        ResolvedEffect::LocalWrite
+            if classifier_risk_tolerance(session) == ClassifierRiskTolerance::LowLocal =>
+        {
+            Some(SemanticEffectDenial::new(
+                "Operation denied: workflow classifier_policy permits only low-risk local reads. Required authority: moderate_local or assessed_moderate_local. Equivalent retries are not allowed.",
+                "classifier_policy_low_local",
+                "moderate_local_or_assessed_moderate_local",
+            ))
+        }
+        ResolvedEffect::LocalWrite
+            if basis.starts_with("semantic_")
+                && classifier_risk_tolerance(session)
+                    != ClassifierRiskTolerance::AssessedModerateLocal =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Operation denied: workflow classifier_policy does not admit semantic local-write resolution at axis '{basis}'. Required authority: assessed_moderate_local. Equivalent retries are not allowed."
+                ),
+                "classifier_policy_semantic_local_write",
+                "assessed_moderate_local",
+            ))
+        }
         ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite => None,
     }
 }
@@ -304,6 +412,14 @@ pub fn semantic_effect_capability_denial(
     execution_session: &GatewaySession,
     pipeline: &RiskPipelineAssessment,
 ) -> Option<String> {
+    semantic_effect_capability_denial_details(execution_session, pipeline)
+        .map(|denial| denial.reason)
+}
+
+pub fn semantic_effect_capability_denial_details(
+    execution_session: &GatewaySession,
+    pipeline: &RiskPipelineAssessment,
+) -> Option<SemanticEffectDenial> {
     if !uses_semantic_effect_policy(execution_session) {
         return None;
     }
@@ -315,14 +431,24 @@ pub fn semantic_effect_capability_denial(
         )
     };
     match pipeline.resolve_effect() {
-        ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(format!(
-            "Read-only effect is explicitly blocked in state '{}'.",
-            execution_session.current_state
+        ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(SemanticEffectDenial::new(
+            format!(
+                "Read-only effect is explicitly blocked in state '{}'.",
+                execution_session.current_state
+            ),
+            "workflow_capability_read_denied",
+            "Read",
         )),
-        ResolvedEffect::LocalWrite if explicitly_denied("Write") => Some(format!(
-            "Local write effect is explicitly blocked in state '{}'.",
-            execution_session.current_state
-        )),
+        ResolvedEffect::LocalWrite if explicitly_denied("Write") => {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Local write effect is explicitly blocked in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_write_denied",
+                "Write",
+            ))
+        }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
         | ResolvedEffect::DenyKnownRisk
@@ -376,17 +502,48 @@ mod tests {
         mgr.get("test").unwrap()
     }
 
-    fn blacklist_session(disallowed: &[&str]) -> GatewaySession {
+    fn denylist_session(disallowed: &[&str]) -> GatewaySession {
         let definition: MachineDefinition = serde_json::from_value(json!({
-            "id": "blacklist", "initial": "inspect",
-            "context": {"tool_policy_mode":"blacklist_heuristic_v1"},
+            "id": "denylist", "initial": "inspect",
+            "context": {"tool_policy_mode":"denylist_heuristic_v1"},
             "states": {
                 "inspect": {"disallowed_tools": disallowed, "on": {"DONE":"done"}},
                 "done": {"type":"final"}
             }
         }))
         .unwrap();
-        GatewaySession::new("blacklist".into(), definition)
+        GatewaySession::new("denylist".into(), definition)
+    }
+
+    fn denylist_session_with_tolerance(risk_tolerance: &str) -> GatewaySession {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "denylist-policy", "initial": "inspect",
+            "context": {"tool_policy_mode":"denylist_heuristic_v1"},
+            "meta": {"classifier_policy": {"risk_tolerance": "low_local"}},
+            "states": {
+                "inspect": {
+                    "classifier_policy": {"risk_tolerance": risk_tolerance},
+                    "on": {"DONE":"done"}
+                },
+                "done": {"type":"final"}
+            }
+        }))
+        .unwrap();
+        GatewaySession::new("denylist-policy".into(), definition)
+    }
+
+    #[test]
+    fn legacy_denylist_policy_wire_value_remains_accepted() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "legacy-denylist", "initial": "inspect",
+            "context": {"tool_policy_mode": LEGACY_DENYLIST_HEURISTIC_POLICY_MODE},
+            "states": {"inspect": {"on": {"DONE":"done"}}, "done": {"type":"final"}},
+            "guards": {}
+        }))
+        .unwrap();
+        let session = GatewaySession::new("legacy-denylist".into(), definition);
+
+        assert!(uses_semantic_effect_policy(&session));
     }
 
     fn semantic_pipeline(
@@ -420,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn blacklist_semantic_effect_policy_applies_explicit_capabilities_and_fails_closed() {
+    fn denylist_semantic_effect_policy_applies_explicit_capabilities_and_fails_closed() {
         use crate::risk_assessment::{Probability, SemanticRiskVector};
         let read_vector = || SemanticRiskVector {
             read_only: Probability::new(0.98).unwrap(),
@@ -430,7 +587,7 @@ mod tests {
             irreversible: Probability::new(0.01).unwrap(),
             external_or_account_effect: Probability::new(0.01).unwrap(),
         };
-        let open = blacklist_session(&[]);
+        let open = denylist_session(&[]);
         assert!(
             semantic_effect_risk_denial(&open, &semantic_pipeline("rg policy src", None)).is_none()
         );
@@ -466,7 +623,7 @@ mod tests {
             .contains("known")
         );
 
-        let no_read = blacklist_session(&["Read"]);
+        let no_read = denylist_session(&["Read"]);
         assert!(
             semantic_effect_capability_denial(&no_read, &semantic_pipeline("rg policy src", None))
                 .is_some()
@@ -478,7 +635,7 @@ mod tests {
             )
             .is_some()
         );
-        let no_write = blacklist_session(&["Write"]);
+        let no_write = denylist_session(&["Write"]);
         assert!(
             semantic_effect_capability_denial(
                 &no_write,
@@ -498,10 +655,61 @@ mod tests {
     }
 
     #[test]
+    fn classifier_policy_selects_only_bounded_local_tolerance() {
+        use crate::risk_assessment::{Probability, SemanticRiskVector};
+        let semantic_read = SemanticRiskVector {
+            read_only: Probability::new(0.99).unwrap(),
+            may_write: Probability::new(0.01).unwrap(),
+            reversible: Probability::new(0.99).unwrap(),
+            destructive: Probability::new(0.0).unwrap(),
+            irreversible: Probability::new(0.0).unwrap(),
+            external_or_account_effect: Probability::new(0.0).unwrap(),
+        };
+        let local_write = semantic_pipeline("cp source target", None);
+        let inferred_read = semantic_pipeline("systemctl status statewright", Some(semantic_read));
+        let external = semantic_pipeline("git push origin main", None);
+
+        let low = denylist_session_with_tolerance("low_local");
+        let low_denial = semantic_effect_risk_denial_details(&low, &local_write).unwrap();
+        assert!(low_denial.reason.contains("low-risk local reads"));
+        assert_eq!(low_denial.basis, "classifier_policy_low_local");
+        assert_eq!(
+            low_denial.required_authority,
+            "moderate_local_or_assessed_moderate_local"
+        );
+
+        let moderate = denylist_session_with_tolerance("moderate_local");
+        assert!(semantic_effect_risk_denial(&moderate, &local_write).is_none());
+        let semantic_denial =
+            semantic_effect_risk_denial_details(&moderate, &inferred_read).unwrap();
+        assert!(
+            semantic_denial
+                .reason
+                .contains("does not admit semantic resolution")
+        );
+        assert_eq!(
+            semantic_denial.basis,
+            "classifier_policy_semantic_resolution"
+        );
+        assert_eq!(
+            semantic_denial.required_authority,
+            "assessed_moderate_local"
+        );
+
+        let assessed = denylist_session_with_tolerance("assessed_moderate_local");
+        assert!(semantic_effect_risk_denial(&assessed, &inferred_read).is_none());
+        assert!(
+            semantic_effect_risk_denial(&assessed, &external)
+                .unwrap()
+                .contains("known")
+        );
+    }
+
+    #[test]
     fn semantic_capability_policy_applies_after_the_selected_execution_state() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"transition", "initial":"inspect",
-            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},
             "states": {
                 "inspect":{"allowed_tools":["Read"], "disallowed_tools":["Write"], "on":{"IMPLEMENT":"implement"}},
                 "implement":{"allowed_tools":["Read","Edit","Write"], "on":{"DONE":"done"}},
@@ -714,7 +922,7 @@ mod tests {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id": "pipeline-map",
             "initial": "planning",
-            "context": {"tool_policy_mode": "blacklist_heuristic_v1"},
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
             "states": {
                 "planning": {
                     "allowed_tools": ["Read", "Grep", "Glob"],
@@ -780,9 +988,13 @@ mod tests {
         }
         for native in [
             "Edit",
+            "edit",
             "apply_patch",
+            "functions.apply_patch",
             "patch_file",
             "MultiEdit",
+            "multiedit",
+            "StrReplace",
             "write_file",
             "create_or_update_file",
         ] {

@@ -70,12 +70,36 @@ async function startNativeGateway() {
         allowed_tools: ["Read", "Bash"],
         disallowed_tools: ["Write"],
         transitions: [],
-        context: { tool_policy_mode: "blacklist_heuristic_v1" },
+        context: { tool_policy_mode: "denylist_heuristic_v1" },
       };
     } else if (toolName === "opaque_mutation_tool") {
       decision = { decision: "allow", additional_context: "System One approved the bounded operation." };
     } else if (toolName === "Read") {
       decision = { decision: "deny", reason: "Gateway denied this read fixture." };
+    } else if (toolName === "classifier_denied") {
+      decision = {
+        decision: "deny",
+        reason: "Classifier denied this fixture.",
+        risk_assessment: {
+          deterministic_risk: "Moderate",
+          deterministic_exposure: "Local",
+          deterministic_source: "shell_ast",
+          semantic_status: "Assessed",
+          semantic_vector: {
+            read_only: 0.04,
+            may_write: 0.96,
+            reversible: 0.92,
+            destructive: 0.01,
+            irreversible: 0.01,
+            external_or_account_effect: 0.01,
+          },
+          resolution_basis: "deterministic_local_write",
+          final_denial_basis: "classifier_policy_low_local",
+          required_authority: "moderate_local_or_assessed_moderate_local",
+          equivalent_retry_allowed: false,
+          command: "private-command-sentinel",
+        },
+      };
     } else if (toolName === "stale_fixture") {
       decision = { decision: "allow", active: false };
     } else {
@@ -216,7 +240,7 @@ test("native Codex hook leaves malformed workflow-load results inactive", async 
   }
 });
 
-test("native Codex hook delegates blacklist policy to the authoritative gateway", async () => {
+test("native Codex hook delegates denylist policy to the authoritative gateway", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
   const gateway = await startNativeGateway();
   const environment = {
@@ -230,7 +254,7 @@ test("native Codex hook delegates blacklist policy to the authoritative gateway"
   const state = {state_snapshot: {...loadedState.state_snapshot,
     allowed_tools: ["Read", "Bash"],
     disallowed_tools: ["Write"],
-    context: {...loadedState.state_snapshot.context, tool_policy_mode: "blacklist_heuristic_v1"}}};
+    context: {...loadedState.state_snapshot.context, tool_policy_mode: "denylist_heuristic_v1"}}};
 
   try {
     const post = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
@@ -275,6 +299,20 @@ test("native Codex hook delegates blacklist policy to the authoritative gateway"
       "Gateway denied this read fixture.",
     );
 
+    const classifierDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "classifier_denied",
+      tool_input: {command: "private-input-sentinel"},
+    }, environment);
+    assert.equal(classifierDenied.status, 0, classifierDenied.stderr);
+    const classifierReason = JSON.parse(classifierDenied.stdout).hookSpecificOutput.permissionDecisionReason;
+    assert.match(classifierReason, /basis=classifier_policy_low_local/);
+    assert.match(classifierReason, /deterministic=Moderate\/Local via shell_ast/);
+    assert.match(classifierReason, /System One=Assessed p\(read=0\.04, write=0\.96/);
+    assert.match(classifierReason, /required=moderate_local_or_assessed_moderate_local/);
+    assert.match(classifierReason, /equivalent retry=false/);
+    assert.doesNotMatch(classifierReason, /private-(command|input)-sentinel/);
+
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "stale_fixture",
@@ -305,7 +343,7 @@ test("native Codex hook delegates blacklist policy to the authoritative gateway"
     assert.equal(unavailable.status, 0, unavailable.stderr);
     assert.match(
       JSON.parse(unavailable.stdout).hookSpecificOutput.permissionDecisionReason,
-      /decision unavailable; blacklist policy fails closed/,
+      /decision unavailable; denylist policy fails closed/,
     );
 
     const [sessionDirectory] = await readdir(resolve(home, ".statewright", "sessions"));

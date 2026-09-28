@@ -155,7 +155,10 @@ async fn handle_pre_tool(
         None => {
             return Json(PreToolResponse {
                 decision: "deny".into(),
-                risk_assessment: Some(pipeline.visible_json()),
+                risk_assessment: Some(pipeline.visible_json_for_denial(
+                    "workflow_session_unavailable",
+                    "active_workflow_session",
+                )),
                 additional_context: Some(
                     "BLOCKED: workflow session disappeared while semantic risk was assessed".into(),
                 ),
@@ -172,7 +175,9 @@ async fn handle_pre_tool(
     if let Some(pending) = &session.pending_approval {
         return Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
+            risk_assessment: Some(
+                pipeline.visible_json_for_denial("approval_pending", "human_approval"),
+            ),
             additional_context: Some(format!(
                 "BLOCKED: approval '{}' is pending for event '{}'",
                 pending.approval_id, pending.event,
@@ -186,16 +191,21 @@ async fn handle_pre_tool(
     {
         return Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
+            risk_assessment: Some(
+                pipeline
+                    .visible_json_for_denial("unsupported_shell_dialect", "supported_bash_dialect"),
+            ),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         });
     }
-    if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+    if let Some(denial) = enforcement::semantic_effect_risk_denial_details(&session, &pipeline) {
         return Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
-            additional_context: Some(format!("BLOCKED: {}", reason)),
+            risk_assessment: Some(
+                pipeline.visible_json_for_denial(denial.basis, denial.required_authority),
+            ),
+            additional_context: Some(format!("BLOCKED: {}", denial.reason)),
             status_message: Some(status),
         });
     }
@@ -211,20 +221,26 @@ async fn handle_pre_tool(
         }
         EnforcementDecision::Block { reason, .. } => Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
+            risk_assessment: Some(
+                pipeline
+                    .visible_json_for_denial("workflow_tool_policy", "declared_tool_capability"),
+            ),
             additional_context: Some(format!("BLOCKED: {}", reason)),
             status_message: Some(status),
         }),
         EnforcementDecision::ImplicitTransition { event, new_state } => {
             let mut execution_session = session.clone();
             execution_session.current_state = new_state.clone();
-            if let Some(reason) =
-                enforcement::semantic_effect_capability_denial(&execution_session, &pipeline)
-            {
+            if let Some(denial) = enforcement::semantic_effect_capability_denial_details(
+                &execution_session,
+                &pipeline,
+            ) {
                 return Json(PreToolResponse {
                     decision: "deny".into(),
-                    risk_assessment: Some(pipeline.visible_json()),
-                    additional_context: Some(format!("BLOCKED: {}", reason)),
+                    risk_assessment: Some(
+                        pipeline.visible_json_for_denial(denial.basis, denial.required_authority),
+                    ),
+                    additional_context: Some(format!("BLOCKED: {}", denial.reason)),
                     status_message: Some(status),
                 });
             }
@@ -245,7 +261,10 @@ async fn handle_pre_tool(
                 ),
                 None => Json(PreToolResponse {
                     decision: "deny".into(),
-                    risk_assessment: Some(pipeline.visible_json()),
+                    risk_assessment: Some(pipeline.visible_json_for_denial(
+                        "workflow_session_unavailable",
+                        "active_workflow_session",
+                    )),
                     additional_context: Some(
                         "BLOCKED: workflow session disappeared during implicit transition".into(),
                     ),
@@ -275,13 +294,16 @@ fn pre_tool_policy_response(
     context: Option<String>,
     pipeline: &risk_assessment::RiskPipelineAssessment,
 ) -> Json<PreToolResponse> {
-    if let Some(reason) = enforcement::semantic_effect_capability_denial(session, pipeline) {
+    if let Some(denial) = enforcement::semantic_effect_capability_denial_details(session, pipeline)
+    {
         return Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
+            risk_assessment: Some(
+                pipeline.visible_json_for_denial(denial.basis, denial.required_authority),
+            ),
             additional_context: Some(match context {
-                Some(context) => format!("{} BLOCKED: {}", context, reason),
-                None => format!("BLOCKED: {}", reason),
+                Some(context) => format!("{} BLOCKED: {}", context, denial.reason),
+                None => format!("BLOCKED: {}", denial.reason),
             }),
             status_message: Some(status),
         });
@@ -309,7 +331,9 @@ fn pre_tool_policy_response(
         }),
         PreCallDecision::Block(reason) => Json(PreToolResponse {
             decision: "deny".into(),
-            risk_assessment: Some(pipeline.visible_json()),
+            risk_assessment: Some(
+                pipeline.visible_json_for_denial("interceptor_policy", "interceptor_clearance"),
+            ),
             additional_context: Some(match context {
                 Some(context) => format!("{} BLOCKED: {}", context, reason),
                 None => format!("BLOCKED: {}", reason),

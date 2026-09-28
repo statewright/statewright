@@ -549,7 +549,7 @@ async function nextRouteRequest(controlDir, consumed) {
   for (const name of entries) {
     const contents = await readFile(join(controlDir, name), "utf8");
     // Native hooks atomically overwrite current.route.json at each state
-    // boundary. Deduplicating only by filename permanently blacklists every
+    // boundary. Deduplicating only by filename permanently denies every
     // route after the first one, so remember the exact receipt instead.
     if (consumed.get(name) === contents) continue;
     const request = JSON.parse(contents);

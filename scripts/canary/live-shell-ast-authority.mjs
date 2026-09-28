@@ -212,14 +212,40 @@ try {
   assert(authenticated.response.ok, `authentication returned HTTP ${authenticated.response.status}`)
   userToken = authenticated.body.token
 
-  const generated = await jsonRequest(`${appUrl}/api/keys/generate`, {
+  const issued = await jsonRequest(`${appUrl}/api/oauth/device/code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: 'statewright-codex', scope: 'mcp' })
+  })
+  assert(issued.response.ok, `device code issuance returned HTTP ${issued.response.status}`)
+
+  const approved = await jsonRequest(`${appUrl}/api/oauth/device/authorization`, {
     method: 'POST',
     headers: { Authorization: userToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: `shell-ast-canary-${marker}` })
+    body: JSON.stringify({ user_code: issued.body.user_code, decision: 'approve' })
   })
-  assert(generated.response.ok, `key generation returned HTTP ${generated.response.status}`)
-  keyId = generated.body.id
-  apiKey = generated.body.key
+  assert(approved.response.ok, `device approval returned HTTP ${approved.response.status}`)
+  assert(approved.body?.status === 'approved', `device approval returned ${approved.body?.status || 'no status'}`)
+
+  const exchanged = await jsonRequest(`${appUrl}/api/oauth/device/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      client_id: 'statewright-codex',
+      device_code: issued.body.device_code
+    })
+  })
+  assert(exchanged.response.ok, `device token exchange returned HTTP ${exchanged.response.status}`)
+  apiKey = exchanged.body.access_token
+  assert(/^sw_live_[0-9a-f]{32}$/.test(apiKey), 'device token exchange returned an invalid access token')
+
+  const listed = await jsonRequest(`${appUrl}/api/keys`, {
+    headers: { Authorization: userToken }
+  })
+  assert(listed.response.ok, `key listing returned HTTP ${listed.response.status}`)
+  keyId = listed.body?.keys?.find((entry) => entry.prefix === apiKey.substring(0, 12))?.id
+  assert(keyId, 'OAuth-created API key was not visible to its owner')
 
   await rpc('initialize', {
     protocolVersion: '2025-03-26',
@@ -321,6 +347,7 @@ if (failure) {
 console.log(
   JSON.stringify({
     status: 'pass',
+    credential_path: 'oauth_device_grant',
     app_url: appUrl,
     mcp_url: mcpUrl,
     cases: results,

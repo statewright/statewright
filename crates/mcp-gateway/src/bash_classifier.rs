@@ -27,6 +27,8 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
+    /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
+    GitLocalWrite,
     /// A known command whose only direct effect is bounded stdout output.
     SafeOutput,
     /// Shell syntax was recognized but could not be safely normalized.
@@ -275,6 +277,9 @@ fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) 
             _,
         ) => true,
         ("tmux", Some("new-session" | "send-keys")) => true,
+        // Git staging can invoke repository-configured clean/filter-process
+        // helpers. Generic `git add` therefore remains delegated/unknown.
+        ("git", Some("add")) => true,
         _ => false,
     }
 }
@@ -286,6 +291,7 @@ impl OpClass {
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
+            OpClass::GitLocalWrite => &["GitLocalWrite"],
             OpClass::FileRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
             // calls as well as read-only shell searches.  Grep and Glob are
@@ -437,6 +443,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::FileWrite
             | OpClass::FileModify
             | OpClass::LocalWrite
+            | OpClass::GitLocalWrite
             | OpClass::Destructive
             | OpClass::Network
             | OpClass::GitWrite => return None,
@@ -1307,6 +1314,10 @@ fn classify_segment(segment: &str) -> OpClass {
         }
         "git" => OpClass::Passthrough,
 
+        "statewright-git-closeout" if invoked == "statewright-git-closeout" => {
+            classify_statewright_git_closeout(segment)
+        }
+
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
         "tmux" => classify_tmux(segment),
@@ -1398,7 +1409,7 @@ fn classify_git(tokens: &[&str]) -> OpClass {
 
         Some("clean") => OpClass::Destructive,
         Some("clone") | Some("fetch") | Some("pull") => OpClass::Network,
-        Some("add") => OpClass::Passthrough, // staging is local, not a write
+        Some("add") => OpClass::Passthrough,
         _ => OpClass::Passthrough,
     }
 }
@@ -1412,6 +1423,16 @@ fn git_subcommand_index<T: AsRef<str>>(tokens: &[T], mut index: usize) -> Option
         let argument = tokens.get(index)?.as_ref();
         match argument {
             "--no-pager" | "--no-optional-locks" => index += 1,
+            "-c" => {
+                let config = tokens.get(index + 1)?.as_ref();
+                if !matches!(
+                    config,
+                    "core.hooksPath=/dev/null" | "core.fsmonitor=false" | "commit.gpgSign=false"
+                ) {
+                    return None;
+                }
+                index += 2;
+            }
             "-C" => {
                 let path = tokens.get(index + 1)?.as_ref();
                 if path.is_empty() || path.starts_with('-') {
@@ -1465,6 +1486,50 @@ fn classify_git_init(tokens: &[&str], subcommand_index: usize) -> OpClass {
     }
 
     OpClass::LocalWrite
+}
+
+fn literal_git_path(path: &str) -> bool {
+    const MAX_PATH_BYTES: usize = 4096;
+    !path.is_empty()
+        && path.len() <= MAX_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && !path.starts_with(':')
+        && !path.starts_with('~')
+        && !path.contains('\\')
+        && !matches!(path, "." | ".." | "--")
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+        && !path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '*' | '?' | '[' | ']'))
+}
+
+fn classify_statewright_git_closeout(segment: &str) -> OpClass {
+    // GitLocalWrite relies on the managed client installing this command from
+    // the signed/validated plugin bundle. The local OS account and shim path
+    // are trusted control-plane inputs; the remote gateway cannot attest a
+    // deliberately replaced same-user executable from shell text alone.
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return OpClass::Passthrough;
+    };
+    if tokens.len() < 5
+        || tokens[0] != "statewright-git-closeout"
+        || tokens[1] != "--message"
+        || tokens[2].is_empty()
+        || tokens[2].len() > 160
+        || tokens[2].chars().any(char::is_control)
+        || tokens[3] != "--"
+        || tokens.len() > 36
+        || !tokens[4..].iter().all(|path| literal_git_path(path))
+    {
+        // The executable is the trusted closeout helper, but this invocation
+        // is outside its bounded grammar. Treat it as an ordinary local write
+        // so a commit-only state that grants GitLocalWrite cannot inherit it.
+        return OpClass::LocalWrite;
+    }
+    OpClass::GitLocalWrite
 }
 
 /// `git worktree` without an action, or with `list`, is observational. Bounded
@@ -1900,6 +1965,79 @@ mod tests {
             "git init --separate-git-dir /private/git /Users/ben/dev/panoply",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_add_remains_delegated_unknown() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json",
+            "git -C /Users/ben/dev/panoply add -- README.md docs/plan/001-plan.md",
+            "git add -- 'docs/a file.md'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+        for command in [
+            "git add",
+            "git add README.md",
+            "git add --",
+            "git add -A",
+            "git add --all",
+            "git add --patch README.md",
+            "git add --pathspec-from-file=paths.txt",
+            "git add -- .",
+            "git add -- docs",
+            "git add -- docs/",
+            "git add -- -leading-dash",
+            "git add -- ~/README.md",
+            "git add -- ':(top)README.md'",
+            "git add -- ':(glob)**/*.rs'",
+            "git add -- '*.rs'",
+            "git add -- 'src/[ab].rs'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn semantic_shape_never_hides_git_add_delegation() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md",
+            "git add -- docs",
+            "git add -- .",
+            "git add -- '*.rs'",
+            "git add README.md",
+        ] {
+            let shape = semantic_command_shapes(command).unwrap();
+            assert_eq!(shape[0].operation.as_deref(), Some("add"), "{command}");
+            assert!(shape[0].delegates_unknown_effect, "{command}");
+        }
+    }
+
+    #[test]
+    fn trusted_git_closeout_is_a_dedicated_bounded_capability() {
+        let command = "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json";
+        assert_eq!(classify(command), vec![OpClass::GitLocalWrite]);
+        assert_eq!(OpClass::GitLocalWrite.required_tools(), &["GitLocalWrite"]);
+    }
+
+    #[test]
+    fn git_closeout_rejects_scope_escape_and_ambiguous_forms() {
+        for command in [
+            "statewright-git-closeout",
+            "statewright-git-closeout --message test README.md",
+            "statewright-git-closeout --message '' -- README.md",
+            "statewright-git-closeout --message test -- /tmp/secret",
+            "statewright-git-closeout --message test -- ../secret",
+            "statewright-git-closeout --message test -- docs/../secret",
+            "statewright-git-closeout --message test -- docs//secret",
+            "statewright-git-closeout --message test -- 'docs/*.md'",
+            "/tmp/statewright-git-closeout --message test -- README.md",
+            "statewright-git-closeout --message test -- README.md && git push",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::GitLocalWrite], "{command}");
         }
     }
 

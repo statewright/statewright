@@ -402,7 +402,9 @@ pub fn semantic_effect_risk_denial_details(
                 "assessed_moderate_local",
             ))
         }
-        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite => None,
+        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite | ResolvedEffect::GitLocalWrite => {
+            None
+        }
     }
 }
 
@@ -430,6 +432,17 @@ pub fn semantic_effect_capability_denial_details(
             capability,
         )
     };
+    let explicitly_allowed = |capability: &str| {
+        tool_enforcer::get_allowed_tools(
+            &execution_session.definition,
+            &execution_session.current_state,
+        )
+        .is_some_and(|allowed| {
+            allowed
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(capability))
+        })
+    };
     match pipeline.resolve_effect() {
         ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(SemanticEffectDenial::new(
             format!(
@@ -449,8 +462,21 @@ pub fn semantic_effect_capability_denial_details(
                 "Write",
             ))
         }
+        ResolvedEffect::GitLocalWrite
+            if explicitly_denied("GitLocalWrite") || !explicitly_allowed("GitLocalWrite") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Bounded local Git closeout is not explicitly authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_git_local_write_not_allowed",
+                "GitLocalWrite",
+            ))
+        }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
+        | ResolvedEffect::GitLocalWrite
         | ResolvedEffect::DenyKnownRisk
         | ResolvedEffect::DenyUncertain => None,
     }
@@ -961,6 +987,41 @@ mod tests {
             ),
             "exec_command",
         );
+    }
+
+    #[test]
+    fn git_closeout_capability_does_not_inherit_native_write_authority() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "git-closeout-capability",
+            "initial": "intake",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "intake": {
+                    "disallowed_tools": ["Write"],
+                    "on": {"READY": "commit"}
+                },
+                "commit": {
+                    "allowed_tools": ["Read", "Bash", "GitLocalWrite"],
+                    "disallowed_tools": ["Write"],
+                    "on": {"DONE": "complete"}
+                },
+                "complete": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let mut session = GatewaySession::new("git-closeout-capability".into(), definition);
+        let closeout = semantic_pipeline(
+            "statewright-git-closeout --message 'docs: bounded closeout' -- docs/one.md",
+            None,
+        );
+        let ordinary_write = semantic_pipeline("mkdir output", None);
+
+        assert_eq!(closeout.resolve_effect(), ResolvedEffect::GitLocalWrite);
+        assert!(semantic_effect_capability_denial(&session, &closeout).is_some());
+        session.current_state = "commit".into();
+        assert!(semantic_effect_capability_denial(&session, &closeout).is_none());
+        assert_eq!(ordinary_write.resolve_effect(), ResolvedEffect::LocalWrite);
+        assert!(semantic_effect_capability_denial(&session, &ordinary_write).is_some());
     }
 
     #[test]

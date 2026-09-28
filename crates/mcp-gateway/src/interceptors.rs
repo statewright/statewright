@@ -24,6 +24,7 @@ fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[Strin
     match effect {
         ResolvedEffect::ReadOnly => has(&["Read", "read_file"]),
         ResolvedEffect::LocalWrite => has(&["Write", "write_file"]),
+        ResolvedEffect::GitLocalWrite => has(&["GitLocalWrite"]),
         ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => false,
     }
 }
@@ -677,6 +678,71 @@ mod tests {
                 PreCallDecision::Block(_) => {}
                 _ => panic!("should block command allowlist bypass: {}", command),
             }
+        }
+    }
+
+    #[test]
+    fn agentic_commit_state_admits_only_the_helper_bypassing_git_closeout() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "agentic-engineering-v2-commit-policy",
+            "initial": "commit",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "commit": {
+                    "allowed_tools": ["Read", "Bash", "GitLocalWrite"],
+                    "disallowed_tools": ["Write"],
+                    "allowed_commands": [
+                        "git status",
+                        "git diff",
+                        "git diff --check",
+                        "statewright-git-closeout --message"
+                    ],
+                    "on": {"COMMIT_RECORDED": "complete", "BLOCKED": "blocked"}
+                },
+                "complete": {"type": "final"},
+                "blocked": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let mut session = GatewaySession::new("agentic-commit".into(), definition);
+        session.current_state = "commit".into();
+
+        for command in [
+            "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json",
+        ] {
+            assert!(
+                matches!(
+                    pre_call_check(&session, "Bash", &json!({"command": command})),
+                    PreCallDecision::Allow | PreCallDecision::Warn(_)
+                ),
+                "safe closeout command should be admitted: {command}"
+            );
+        }
+
+        for command in [
+            "git add -- docs/research/001-anytype.md",
+            "git hash-object -w --no-filters -- docs/research/001-anytype.md",
+            "git commit -m 'docs: unsafe closeout'",
+            "statewright-git-closeout --message test -- ../secret",
+            "/tmp/statewright-git-closeout --message test -- README.md",
+        ] {
+            assert!(
+                matches!(
+                    pre_call_check(&session, "Bash", &json!({"command": command})),
+                    PreCallDecision::Block(_)
+                ),
+                "unsafe closeout command must remain blocked: {command}"
+            );
+        }
+
+        for tool in ["Write", "Edit", "apply_patch", "write_file", "create_file"] {
+            assert!(
+                matches!(
+                    crate::enforcement::enforce_tool_call(&session, tool),
+                    crate::enforcement::EnforcementDecision::Block { .. }
+                ),
+                "commit-only state must not expose native mutation tool {tool}"
+            );
         }
     }
 

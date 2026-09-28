@@ -73,6 +73,7 @@ pub struct SemanticRiskVector {
 pub enum ResolvedEffect {
     ReadOnly,
     LocalWrite,
+    GitLocalWrite,
     DenyKnownRisk,
     DenyUncertain,
 }
@@ -344,6 +345,12 @@ impl RiskPipelineAssessment {
                 (ReadOnly, "deterministic_read_only")
             }
             RiskBand::Low => (LocalWrite, "semantic_risk_escalation"),
+            RiskBand::Moderate
+                if self.deterministic.exposure == ExposureBand::Local
+                    && self.deterministic.required_capability == Some("GitLocalWrite") =>
+            {
+                (GitLocalWrite, "deterministic_git_local_write")
+            }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => {
                 (LocalWrite, "deterministic_local_write")
             }
@@ -478,6 +485,7 @@ impl ResolvedEffect {
         match self {
             Self::ReadOnly => "read_only",
             Self::LocalWrite => "local_write",
+            Self::GitLocalWrite => "git_local_write",
             Self::DenyKnownRisk => "deny_known_risk",
             Self::DenyUncertain => "deny_uncertain",
         }
@@ -487,6 +495,7 @@ impl ResolvedEffect {
         match self {
             Self::ReadOnly => "Read",
             Self::LocalWrite => "Write",
+            Self::GitLocalWrite => "GitLocalWrite",
             Self::DenyKnownRisk => "separate_approved_execution_path",
             Self::DenyUncertain => "complete_structural_evidence_or_separate_approval",
         }
@@ -896,6 +905,7 @@ pub struct ShadowAssessment {
     /// Workflow intent is context for calibration only; it never changes the
     /// deterministic authorization decision in this shadow-only milestone.
     pub state_intent: Option<String>,
+    required_capability: Option<&'static str>,
     semantic_request: Option<SemanticAssessmentRequest>,
     ast_semantic_request: Option<SemanticAssessmentRequest>,
 }
@@ -1170,6 +1180,14 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if classes.contains(&OpClass::Passthrough) {
         return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
     }
+    if classes.as_slice() == [OpClass::GitLocalWrite] {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell",
+            "GitLocalWrite",
+        );
+    }
     if classes.contains(&OpClass::LocalWrite) {
         return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
     }
@@ -1230,6 +1248,14 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     }
     if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
         return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast");
+    }
+    if classes.as_slice() == [OpClass::GitLocalWrite] {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell_ast",
+            "GitLocalWrite",
+        );
     }
     if classes.iter().any(|class| {
         matches!(
@@ -1737,8 +1763,21 @@ fn assessment(risk: RiskBand, exposure: ExposureBand, source: &'static str) -> S
         exposure,
         source,
         state_intent: None,
+        required_capability: None,
         semantic_request: None,
         ast_semantic_request: None,
+    }
+}
+
+fn assessment_with_capability(
+    risk: RiskBand,
+    exposure: ExposureBand,
+    source: &'static str,
+    required_capability: &'static str,
+) -> ShadowAssessment {
+    ShadowAssessment {
+        required_capability: Some(required_capability),
+        ..assessment(risk, exposure, source)
     }
 }
 
@@ -1947,6 +1986,27 @@ mod tests {
             assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
         );
         assert_eq!(
+            assess_shell(
+                "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json"
+            ),
+            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+        );
+        assert_eq!(
+            assess_shell(
+                "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md"
+            ),
+            assessment_with_capability(
+                RiskBand::Moderate,
+                ExposureBand::Local,
+                "shell",
+                "GitLocalWrite"
+            )
+        );
+        assert_eq!(
+            assess_shell("statewright-git-closeout --message test -- ../secret"),
+            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
             assess_shell("touch output.txt"),
             assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
         );
@@ -2134,6 +2194,73 @@ mod tests {
         assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
         assert_eq!(pipeline.effective_risk, RiskBand::Moderate);
         assert_eq!(pipeline.resolve_effect(), ResolvedEffect::LocalWrite);
+    }
+
+    #[tokio::test]
+    async fn trusted_git_closeout_pipeline_preserves_its_narrow_capability() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        let command = "statewright-git-closeout --message 'docs: bounded closeout' -- docs/one.md";
+
+        for ast_authoritative in [false, true] {
+            set_test_shell_ast_shadow_enabled(Some(ast_authoritative));
+            set_test_shell_ast_authority_enabled(Some(ast_authoritative));
+            let pipeline = assess_pipeline_visible_with_runtime(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("commit"),
+                true,
+                &config,
+                None,
+                std::time::Duration::ZERO,
+            )
+            .await;
+
+            assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
+            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
+            assert_eq!(pipeline.resolve_effect(), ResolvedEffect::GitLocalWrite);
+            assert_eq!(
+                pipeline.visible_json()["required_authority"],
+                "GitLocalWrite"
+            );
+        }
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
+    async fn trusted_git_closeout_cannot_launder_compound_writes() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        for command in [
+            "statewright-git-closeout --message test -- docs/one.md && mkdir escaped",
+            "statewright-git-closeout --message test -- docs/one.md > receipt",
+        ] {
+            for ast_authoritative in [false, true] {
+                set_test_shell_ast_shadow_enabled(Some(ast_authoritative));
+                set_test_shell_ast_authority_enabled(Some(ast_authoritative));
+                let pipeline = assess_pipeline_visible_with_runtime(
+                    None,
+                    "exec_command",
+                    &json!({"cmd": command}),
+                    Some("commit"),
+                    true,
+                    &config,
+                    None,
+                    std::time::Duration::ZERO,
+                )
+                .await;
+
+                assert_ne!(
+                    pipeline.resolve_effect(),
+                    ResolvedEffect::GitLocalWrite,
+                    "compound command must not inherit GitLocalWrite: {command}"
+                );
+            }
+        }
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
     }
 
     #[test]
@@ -3085,6 +3212,11 @@ mod tests {
                 ExposureBand::Unknown,
             ),
             (
+                "git add -- plugins/executor/lib/workflow-preamble.mjs plugins/executor/lib/host-adapters.mjs plugins/executor/lib/managed-client-supervisor.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/managed-client-supervisor.test.mjs",
+                RiskBand::Moderate,
+                ExposureBand::Unknown,
+            ),
+            (
                 "git commit -m \"fix(executor): reinforce workflow continuation\"",
                 RiskBand::High,
                 ExposureBand::External,
@@ -3604,6 +3736,15 @@ mod tests {
         assert_eq!(mkdir.source, "shell_ast");
         assert_eq!(mkdir.risk, RiskBand::Moderate);
         assert_eq!(mkdir.exposure, ExposureBand::Local);
+        let git_add = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json"}),
+            Some("implement"),
+        );
+        assert_eq!(git_add.source, "shell_ast");
+        assert_eq!(git_add.risk, RiskBand::Moderate);
+        assert_eq!(git_add.exposure, ExposureBand::Unknown);
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
     }

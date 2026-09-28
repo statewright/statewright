@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -85,6 +86,69 @@ test("workflow load emits an atomic route restart request only for a supervised 
     });
     assert.match(route.client_id, /^swc_[0-9a-f]{32}$/);
   } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(controlDir, { recursive: true, force: true });
+  }
+});
+
+test("transition refresh publishes the next managed route under a hostile inherited locale", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-hook-"));
+  const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-"));
+  const authoritative = {
+    workflow: "routing-test",
+    state: "localize",
+    model: "openai-codex/gpt-5.6-terra",
+    thinking_level: "medium",
+    run_id: "run-locale",
+    transition_count: 2,
+    state_epoch: 2,
+    allowed_tools: ["Read"],
+    transitions: [{ event: "DECISION_REQUIRED", target: "decision" }],
+    is_final: false,
+  };
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {
+      content: [{ type: "text", text: JSON.stringify(authoritative) }],
+    } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = {
+    HOME: home,
+    LC_ALL: "C.UTF-8",
+    LANG: "C.UTF-8",
+    STATEWRIGHT_API_KEY: "test-key",
+    STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}`,
+    STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
+  };
+  try {
+    const registration = await invokeHook({ thread_id: "session-locale", prompt: "start" }, environment, "user-prompt");
+    assert.equal(registration.status, 0, registration.stderr);
+    const loaded = await invokeHook({
+      thread_id: "session-locale",
+      turn_id: "turn-load",
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: JSON.stringify({ state_snapshot: { ...authoritative,
+        state: "intake", thinking_level: "low", transition_count: 1, state_epoch: 1,
+      } }),
+    }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const transitioned = await invokeHook({
+      thread_id: "session-locale",
+      turn_id: "turn-transition",
+      tool_name: "mcp__statewright__statewright_transition",
+      tool_response: JSON.stringify({ transitioned: true, from: "intake", to: "localize" }),
+    }, environment);
+    assert.equal(transitioned.status, 0, transitioned.stderr);
+    const route = JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8"));
+    assert.equal(route.run_id, "run-locale");
+    assert.equal(route.state, "localize");
+    assert.equal(route.model, "openai-codex/gpt-5.6-terra");
+    assert.equal(route.effort, "medium");
+    assert.equal(route.turn_id, "turn-transition");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
     await rm(home, { recursive: true, force: true });
     await rm(controlDir, { recursive: true, force: true });
   }
@@ -238,6 +302,84 @@ if (!existsSync(marker)) {
     assert.equal(invocations.length, 2);
     assert.match(invocations[0], /-m gpt-5\.6-terra -c model_reasoning_effort="low"/);
     assert.match(invocations[1], /-m gpt-5\.6-sol -c model_reasoning_effort="high" resume session-1/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("interactive supervisor preserves a routed primary receipt while an attached peer remains isolated", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-canary-"));
+  const primary = resolve(root, "primary-codex.mjs");
+  const peer = resolve(root, "peer-codex.mjs");
+  const primaryCalls = resolve(root, "primary-calls.jsonl");
+  const peerCalls = resolve(root, "peer-calls.jsonl");
+  const peerReady = resolve(root, "peer-ready");
+  const routeCompleted = resolve(root, "route-completed");
+  const primaryHome = resolve(root, "primary-home");
+  const peerHome = resolve(root, "peer-home");
+  const waitFor = async (path, timeoutMs = 3_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await access(path).then(() => true, () => false)) return;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
+    throw new Error(`Timed out waiting for ${path}`);
+  };
+  try {
+    await writeFile(primary, `#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;
+const marker = join(control, "primary-started");
+const route = join(control, "route.json");
+const invocation = { args: process.argv.slice(2), client_id: process.env.STATEWRIGHT_CLIENT_ID };
+if (existsSync(route)) invocation.route = JSON.parse(readFileSync(route, "utf8"));
+appendFileSync(${JSON.stringify(primaryCalls)}, JSON.stringify(invocation) + "\\n");
+if (!existsSync(marker)) {
+  writeFileSync(marker, "");
+  writeFileSync(join(control, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: "primary-thread", client_id: process.env.STATEWRIGHT_CLIENT_ID }));
+  writeFileSync(route, JSON.stringify({ session_id: "primary-thread", root_session_id: "primary-thread", client_id: process.env.STATEWRIGHT_CLIENT_ID, run_id: "primary-run", state: "routed", model: "openai-codex/gpt-5.6-sol", effort: "high" }));
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+  setInterval(() => {}, 1000);
+} else {
+  writeFileSync(${JSON.stringify(routeCompleted)}, "");
+}
+`);
+    await writeFile(peer, `#!/usr/bin/env node
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(peerCalls)}, JSON.stringify({ args: process.argv.slice(2), client_id: process.env.STATEWRIGHT_CLIENT_ID }) + "\\n");
+writeFileSync(${JSON.stringify(peerReady)}, "");
+const deadline = Date.now() + 3_000;
+const timer = setInterval(() => {
+  if (existsSync(${JSON.stringify(routeCompleted)})) process.exit(0);
+  if (Date.now() >= deadline) process.exit(3);
+}, 10);
+process.on("SIGINT", () => { clearInterval(timer); process.exit(0); });
+`);
+    await Promise.all([chmod(primary, 0o755), chmod(peer, 0o755)]);
+    const peerRun = run({
+      workflow: "peer-workflow", prompt: ["remain attached"], codexBin: peer,
+      fallbackModel: "gpt-5.6-terra", fallbackEffort: "medium", environment: { ...process.env, HOME: peerHome, STATEWRIGHT_CLIENT_ID: "peer-terminal" },
+    });
+    await waitFor(peerReady);
+    assert.equal(await run({
+      workflow: "primary-workflow", prompt: ["route this terminal"], codexBin: primary,
+      fallbackModel: "gpt-5.6-terra", fallbackEffort: "medium", environment: { ...process.env, HOME: primaryHome, STATEWRIGHT_CLIENT_ID: "primary-terminal" },
+    }), 0);
+    assert.equal(await peerRun, 0);
+    const primaryInvocations = (await readFile(primaryCalls, "utf8")).trim().split("\n").map(JSON.parse);
+    const peerInvocations = (await readFile(peerCalls, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(primaryInvocations.length, 2);
+    assert.match(primaryInvocations[0].args.join(" "), /-m gpt-5\.6-terra -c model_reasoning_effort="medium"/);
+    assert.match(primaryInvocations[1].args.join(" "), /-m gpt-5\.6-sol -c model_reasoning_effort="high" resume primary-thread/);
+    assert.equal(primaryInvocations[1].route.run_id, "primary-run");
+    assert.equal(primaryInvocations[1].route.session_id, "primary-thread");
+    assert.equal(primaryInvocations[1].route.model, "openai-codex/gpt-5.6-sol");
+    assert.equal(primaryInvocations[1].route.effort, "high");
+    assert.equal(peerInvocations.length, 1);
+    assert.match(peerInvocations[0].args.join(" "), /-m gpt-5\.6-terra -c model_reasoning_effort="medium"/);
+    assert.notEqual(peerInvocations[0].client_id, primaryInvocations[0].client_id);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

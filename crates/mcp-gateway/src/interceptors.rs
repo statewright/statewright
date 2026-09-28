@@ -1,7 +1,9 @@
 use crate::bash_classifier;
 use crate::protocol::ToolCallResult;
 use crate::risk_assessment::{ResolvedEffect, RiskPipelineAssessment};
-use crate::session::GatewaySession;
+use crate::session::{
+    DENYLIST_HEURISTIC_POLICY_MODE, GatewaySession, LEGACY_DENYLIST_HEURISTIC_POLICY_MODE,
+};
 
 /// Pre-call interception result.
 pub enum PreCallDecision {
@@ -11,6 +13,16 @@ pub enum PreCallDecision {
     Block(String),
     /// Allow but append a warning to the result.
     Warn(String),
+}
+
+fn uses_semantic_effect_policy(session: &GatewaySession) -> bool {
+    matches!(
+        session
+            .context
+            .get("tool_policy_mode")
+            .and_then(|value| value.as_str()),
+        Some(DENYLIST_HEURISTIC_POLICY_MODE | LEGACY_DENYLIST_HEURISTIC_POLICY_MODE)
+    )
 }
 
 fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[String]) -> bool {
@@ -25,6 +37,9 @@ fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[Strin
         ResolvedEffect::ReadOnly => has(&["Read", "read_file"]),
         ResolvedEffect::LocalWrite => has(&["Write", "write_file"]),
         ResolvedEffect::GitLocalWrite => has(&["GitLocalWrite"]),
+        ResolvedEffect::LocalWriteAndGitLocalWrite => {
+            has(&["Write", "write_file"]) && has(&["GitLocalWrite"])
+        }
         ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => false,
     }
 }
@@ -40,9 +55,10 @@ pub fn pre_call_check(
 }
 
 /// Run pre-call interceptors with the already-resolved risk pipeline. The
-/// pipeline is authoritative for effect classification; command allowlists,
-/// blocked environment variables, edit bounds, and state capabilities remain
-/// independently enforced around it.
+/// pipeline is authoritative for effect classification; blocked environment
+/// variables, edit bounds, and state capabilities remain independently
+/// enforced around it. In semantic-effect mode, `allowed_commands` is retained
+/// only as legacy workflow metadata and never grants execution authority.
 pub fn pre_call_check_with_pipeline(
     session: &GatewaySession,
     tool_name: &str,
@@ -102,36 +118,60 @@ pub fn pre_call_check_with_pipeline(
         }
     }
 
-    // 2. Bash guard: check command against the allowed_commands allowlist
-    if let Some(ref allowed_cmds) = state_def.allowed_commands {
-        let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
-        if is_shell_tool(tool_name, bash_tool) {
-            let Some(command) = extract_command(arguments) else {
-                return PreCallDecision::Block(format!(
-                    "Shell invocation is missing command/cmd in state '{}'.",
-                    session.current_state
-                ));
-            };
-            let allowed = allowed_cmds
-                .iter()
-                .any(|allowed| bash_classifier::matches_allowed_command(&command, allowed));
-            if !allowed {
-                return PreCallDecision::Block(format!(
-                    "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
-                    command,
-                    session.current_state,
-                    allowed_cmds.join(", ")
-                ));
+    // Legacy workflows retain their prefix policy until migrated. In the
+    // semantic-effect policy, executable names never grant authority.
+    if !uses_semantic_effect_policy(session) {
+        if let Some(ref allowed_cmds) = state_def.allowed_commands {
+            let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
+            if is_shell_tool(tool_name, bash_tool) {
+                let Some(command) = extract_command(arguments) else {
+                    return PreCallDecision::Block(format!(
+                        "Shell invocation is missing command/cmd in state '{}'.",
+                        session.current_state
+                    ));
+                };
+                let allowed = allowed_cmds
+                    .iter()
+                    .any(|allowed| bash_classifier::matches_allowed_command(&command, allowed));
+                if !allowed {
+                    return PreCallDecision::Block(format!(
+                        "Command rejected: '{}' is not in the allowed commands for state '{}'. Allowed: {}",
+                        command,
+                        session.current_state,
+                        allowed_cmds.join(", ")
+                    ));
+                }
             }
         }
     }
 
-    // 2b. Always apply the operation classifier after any command-prefix policy.
-    // A prefix match is an optional narrowing mechanism, never a reason to skip
-    // deterministic redirect/in-place/destructive checks. Exploratory states use
+    // 2. Always apply the operation classifier. Exploratory states use
     // the read capabilities as their effective shell policy even though their
     // MCP tool surface is selected by semantic intent rather than an allowlist.
     if is_shell_tool(tool_name, bash_tool) {
+        let Some(command) = extract_command(arguments) else {
+            return PreCallDecision::Block(format!(
+                "Shell invocation is missing command/cmd in state '{}'.",
+                session.current_state
+            ));
+        };
+        let resolved_effect = pipeline.map(RiskPipelineAssessment::resolve_effect);
+        let deterministic_classes = bash_classifier::classify(&command);
+        let unresolved_without_pipeline = uses_semantic_effect_policy(session)
+            && pipeline.is_none()
+            && deterministic_classes.iter().any(|class| {
+                matches!(
+                    class,
+                    bash_classifier::OpClass::Opaque | bash_classifier::OpClass::Passthrough
+                )
+            });
+        if unresolved_without_pipeline {
+            return PreCallDecision::Block(format!(
+                "Shell command blocked in state '{}': unresolved execution requires the risk pipeline.",
+                session.current_state
+            ));
+        }
+
         let exploratory_read_only = state_def.intent.as_deref() == Some("exploratory_read_only");
         let effective_tools = if exploratory_read_only {
             Some(vec![
@@ -143,15 +183,17 @@ pub fn pre_call_check_with_pipeline(
             state_def.allowed_tools.clone()
         };
         if let Some(allowed_tools) = effective_tools {
-            let Some(command) = extract_command(arguments) else {
-                return PreCallDecision::Block(format!(
-                    "Shell invocation is missing command/cmd in state '{}'.",
-                    session.current_state
-                ));
-            };
-            let resolved_effect = pipeline.map(RiskPipelineAssessment::resolve_effect);
             let pipeline_admitted = resolved_effect
                 .is_some_and(|effect| pipeline_effect_has_capability(effect, &allowed_tools));
+            if uses_semantic_effect_policy(session)
+                && resolved_effect.is_some()
+                && !pipeline_admitted
+            {
+                return PreCallDecision::Block(format!(
+                    "Shell effect is not authorized by the capabilities in state '{}'.",
+                    session.current_state,
+                ));
+            }
             if exploratory_read_only
                 && !pipeline_admitted
                 && bash_classifier::readonly_capabilities(&command).is_none()
@@ -336,6 +378,11 @@ fn extract_file_path(arguments: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::risk_assessment::{
+        Probability, RiskPipelineAssessment, SemanticAssessmentReceipt, SemanticAssessorStatus,
+        SemanticRiskVector, assess_invocation, set_test_shell_ast_authority_enabled,
+        set_test_shell_ast_shadow_enabled,
+    };
     use crate::session::GatewaySession;
     use serde_json::json;
     use statewright_engine::MachineDefinition;
@@ -366,6 +413,40 @@ mod tests {
 
     fn session() -> GatewaySession {
         GatewaySession::new("test".into(), def_with_guards())
+    }
+
+    fn assessed_python_pipeline(command: &str, read_only: bool) -> RiskPipelineAssessment {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+        let deterministic = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd": command}),
+            Some("implement"),
+        );
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+        let semantic = SemanticAssessmentReceipt {
+            tool: "exec_command".into(),
+            status: SemanticAssessorStatus::Assessed,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(if read_only { 0.98 } else { 0.01 }).unwrap(),
+                may_write: Probability::new(if read_only { 0.01 } else { 0.98 }).unwrap(),
+                reversible: Probability::new(0.98).unwrap(),
+                destructive: Probability::new(0.01).unwrap(),
+                irreversible: Probability::new(0.01).unwrap(),
+                external_or_account_effect: Probability::new(0.01).unwrap(),
+            }),
+            state_intent: Some("implement".into()),
+        };
+        let effective_risk = deterministic.risk;
+        RiskPipelineAssessment {
+            deterministic,
+            semantic,
+            effective_risk,
+            semantic_failsafe_escalated: false,
+            semantic_authorization_enabled: true,
+        }
     }
 
     #[test]
@@ -744,6 +825,85 @@ mod tests {
                 "commit-only state must not expose native mutation tool {tool}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_effect_policy_ignores_legacy_command_name_allowlists() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "semantic-policy",
+            "initial": "implement",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "implement": {
+                    "allowed_tools": ["Read", "Write", "Bash"],
+                    "allowed_commands": ["pytest"],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("semantic-policy".into(), definition);
+        let arguments = json!({"command": "mkdir -p docs/plans"});
+        let pipeline =
+            crate::risk_assessment::assess_pipeline(None, "Bash", &arguments, Some("implement"));
+
+        assert!(matches!(
+            pre_call_check_with_pipeline(&session, "Bash", &arguments, Some(&pipeline)),
+            PreCallDecision::Allow | PreCallDecision::Warn(_)
+        ));
+    }
+
+    #[test]
+    fn semantic_effect_policy_requires_capability_for_assessed_delegated_effect() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "semantic-capability",
+            "initial": "implement",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "implement": {
+                    "allowed_tools": ["Read", "Bash"],
+                    "classifier_policy": {"risk_tolerance": "assessed_moderate_local"},
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("semantic-capability".into(), definition);
+        let arguments = json!({
+            "cmd": "python3 -c 'open(\"artifact\", \"w\").write(\"x\")'"
+        });
+        let pipeline = assessed_python_pipeline(arguments["cmd"].as_str().unwrap(), false);
+
+        assert!(matches!(
+            pre_call_check_with_pipeline(&session, "exec_command", &arguments, Some(&pipeline)),
+            PreCallDecision::Block(_)
+        ));
+    }
+
+    #[test]
+    fn semantic_effect_policy_requires_pipeline_without_an_allowlist() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "semantic-pipeline",
+            "initial": "implement",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "implement": {"on": {"DONE": "done"}},
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("semantic-pipeline".into(), definition);
+
+        assert!(matches!(
+            pre_call_check(
+                &session,
+                "exec_command",
+                &json!({"cmd": "python3 -c 'private_framework.execute()'"})
+            ),
+            PreCallDecision::Block(_)
+        ));
     }
 
     #[test]

@@ -38,6 +38,8 @@ pub struct ShellAstSemanticShape {
     pub data_heredocs: usize,
     pub external_heredocs: usize,
     pub opaque_heredocs: usize,
+    pub foreign_code_units: usize,
+    pub foreign_code_units_with_effect_evidence: usize,
     pub effect_candidates: Vec<&'static str>,
     pub commands: Vec<bash_classifier::SemanticCommandShape>,
 }
@@ -57,6 +59,8 @@ pub struct AstShadowAssessment {
     pub data_heredocs: usize,
     pub external_heredocs: usize,
     pub opaque_heredocs: usize,
+    pub foreign_code_units: usize,
+    pub foreign_code_units_with_effect_evidence: usize,
     pub classes: Vec<OpClass>,
     pub semantic_shapes: Vec<bash_classifier::SemanticCommandShape>,
 }
@@ -77,6 +81,8 @@ impl AstShadowAssessment {
             data_heredocs: 0,
             external_heredocs: 0,
             opaque_heredocs: 0,
+            foreign_code_units: 0,
+            foreign_code_units_with_effect_evidence: 0,
             classes: vec![OpClass::Opaque],
             semantic_shapes: Vec::new(),
         }
@@ -122,6 +128,12 @@ impl AstShadowAssessment {
             .external_heredocs
             .saturating_add(nested.external_heredocs);
         self.opaque_heredocs = self.opaque_heredocs.saturating_add(nested.opaque_heredocs);
+        self.foreign_code_units = self
+            .foreign_code_units
+            .saturating_add(nested.foreign_code_units);
+        self.foreign_code_units_with_effect_evidence = self
+            .foreign_code_units_with_effect_evidence
+            .saturating_add(nested.foreign_code_units_with_effect_evidence);
         for class in nested.classes {
             self.push_class(class);
         }
@@ -147,6 +159,8 @@ impl AstShadowAssessment {
             data_heredocs: self.data_heredocs,
             external_heredocs: self.external_heredocs,
             opaque_heredocs: self.opaque_heredocs,
+            foreign_code_units: self.foreign_code_units,
+            foreign_code_units_with_effect_evidence: self.foreign_code_units_with_effect_evidence,
             effect_candidates: self.classes.iter().map(effect_label).collect(),
             commands: self.semantic_shapes.clone(),
         }
@@ -211,6 +225,8 @@ fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAsse
         data_heredocs: 0,
         external_heredocs: 0,
         opaque_heredocs: 0,
+        foreign_code_units: 0,
+        foreign_code_units_with_effect_evidence: 0,
         classes: Vec::new(),
         semantic_shapes: Vec::new(),
     };
@@ -285,6 +301,7 @@ fn walk(
                         .extend(shapes.into_iter().map(sanitize_semantic_shape));
                 }
                 classify_inline_shell(text, recursive_shell_depth, assessment);
+                classify_inline_foreign_code(text, assessment);
             } else {
                 assessment.push_class(OpClass::Opaque);
             }
@@ -469,6 +486,7 @@ fn classify_heredoc(
         HeredocConsumer::ForeignCode => {
             assessment.foreign_code_heredocs += 1;
             assessment.push_class(OpClass::Opaque);
+            classify_foreign_code_body(body, assessment);
         }
         HeredocConsumer::PatchOrWrite => assessment.push_class(OpClass::FileModify),
         HeredocConsumer::ExternalShell => {
@@ -520,6 +538,130 @@ fn classify_inline_shell(
     };
     let nested = assess_at_depth(script, recursive_shell_depth + 1);
     assessment.absorb_nested(nested);
+}
+
+fn classify_inline_foreign_code(command: &str, assessment: &mut AstShadowAssessment) {
+    let Some(tokens) = bash_classifier::simple_command_tokens(command) else {
+        return;
+    };
+    let (executable, arguments) = unwrap_command(&tokens);
+    let Some(executable) = executable else {
+        return;
+    };
+    let inline_flag = match executable {
+        "python" | "python3" | "ruby" | "perl" => "-c",
+        "node" => "-e",
+        _ => return,
+    };
+    let Some(arguments) = arguments else {
+        return;
+    };
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == inline_flag)
+    {
+        if let Some(body) = arguments.get(index + 1) {
+            classify_foreign_code_body(body, assessment);
+        } else {
+            assessment.foreign_code_units += 1;
+        }
+    } else if !arguments.is_empty() {
+        // A script path delegates behavior whose contents are unavailable at
+        // this boundary. It may still be assessed semantically, but it cannot
+        // be authorized as resolved structural evidence.
+        assessment.foreign_code_units += 1;
+    }
+}
+
+/// Extract privacy-bounded effect evidence from an inline foreign-language
+/// body. No source text, literals, paths, or identifiers leave this function;
+/// only conservative effect classes are added to the semantic shape.
+fn classify_foreign_code_body(body: &str, assessment: &mut AstShadowAssessment) {
+    assessment.foreign_code_units += 1;
+    let normalized = body.to_ascii_lowercase();
+    let mut evidence = Vec::new();
+
+    let destructive = [
+        "shutil.rmtree(",
+        "os.remove(",
+        "os.unlink(",
+        "os.rmdir(",
+        "fs.rmsync(",
+        "fs.unlinksync(",
+        "fs.rmdirsync(",
+        "fileutils.rm_rf(",
+        "rm -rf",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern));
+    if destructive {
+        evidence.push(OpClass::Destructive);
+    }
+
+    let network = [
+        "requests.",
+        "urllib.",
+        "http.client",
+        "socket.",
+        "fetch(",
+        "axios.",
+        "net.http",
+        "tcpsocket",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern));
+    if network {
+        evidence.push(OpClass::Network);
+    }
+
+    let writes = [
+        ".write(",
+        ".write_text(",
+        ".write_bytes(",
+        "writefile(",
+        "writefilesync(",
+        "appendfile(",
+        "appendfilesync(",
+        "mkdir(",
+        "makedirs(",
+        "create_dir(",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern))
+        || (normalized.contains("open(")
+            && ["'w'", "\"w\"", "'a'", "\"a\"", "'x'", "\"x\""]
+                .iter()
+                .any(|mode| normalized.contains(mode)));
+    if writes {
+        evidence.push(OpClass::FileWrite);
+    }
+
+    let reads = [
+        ".read(",
+        ".read_text(",
+        ".read_bytes(",
+        "readfile(",
+        "readfilesync(",
+    ]
+    .iter()
+    .any(|pattern| normalized.contains(pattern));
+    if reads {
+        evidence.push(OpClass::FileRead);
+    }
+
+    let safe_output = ["print(", "console.log(", "puts ", "system.out.print"]
+        .iter()
+        .any(|pattern| normalized.contains(pattern));
+    if safe_output {
+        evidence.push(OpClass::SafeOutput);
+    }
+
+    if !evidence.is_empty() {
+        assessment.foreign_code_units_with_effect_evidence += 1;
+        for class in evidence {
+            assessment.push_class(class);
+        }
+    }
 }
 
 fn classify_file_redirect(redirect: Node<'_>, source: &[u8], assessment: &mut AstShadowAssessment) {
@@ -653,14 +795,42 @@ mod tests {
     }
 
     #[test]
-    fn foreign_code_and_unknown_consumers_stay_opaque() {
+    fn foreign_code_is_opaque_but_exports_privacy_bounded_effect_evidence() {
         let python = assess("python3 <<'PY'\nopen('artifact', 'w').write('x')\nPY");
         assert_eq!(python.foreign_code_heredocs, 1);
+        assert_eq!(python.foreign_code_units, 1);
+        assert_eq!(python.foreign_code_units_with_effect_evidence, 1);
         assert!(python.classes.contains(&OpClass::Opaque));
+        assert!(python.classes.contains(&OpClass::FileWrite));
 
         let unknown = assess("custom-runner <<'EOF'\nmutate everything\nEOF");
         assert_eq!(unknown.opaque_heredocs, 1);
         assert!(unknown.classes.contains(&OpClass::Opaque));
+    }
+
+    #[test]
+    fn inline_foreign_code_bodies_have_distinct_bounded_effect_shapes() {
+        let benign = assess("python3 -c 'print(1)'");
+        let write = assess("python3 -c 'open(\"artifact\", \"w\").write(\"x\")'");
+        let destructive = assess("python3 -c 'import shutil; shutil.rmtree(\"artifact\")'");
+        let unresolved = assess("python3 -c 'private_framework.execute()'");
+
+        assert!(benign.classes.contains(&OpClass::SafeOutput));
+        assert!(write.classes.contains(&OpClass::FileWrite));
+        assert!(destructive.classes.contains(&OpClass::Destructive));
+        assert_eq!(benign.foreign_code_units_with_effect_evidence, 1);
+        assert_eq!(write.foreign_code_units_with_effect_evidence, 1);
+        assert_eq!(destructive.foreign_code_units_with_effect_evidence, 1);
+        assert_eq!(unresolved.foreign_code_units, 1);
+        assert_eq!(unresolved.foreign_code_units_with_effect_evidence, 0);
+
+        let benign_shape = serde_json::to_string(&benign.semantic_shape()).unwrap();
+        let destructive_shape = serde_json::to_string(&destructive.semantic_shape()).unwrap();
+        assert_ne!(benign_shape, destructive_shape);
+        for sensitive in ["artifact", "private_framework", "shutil.rmtree"] {
+            assert!(!benign_shape.contains(sensitive));
+            assert!(!destructive_shape.contains(sensitive));
+        }
     }
 
     #[test]

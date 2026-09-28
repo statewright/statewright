@@ -615,6 +615,35 @@ mod tests {
         }))
     }
 
+    fn structural_shell_hook_state(allow_write: bool) -> Arc<RwLock<HookState>> {
+        let allowed_tools = if allow_write {
+            json!(["Read", "Write", "Bash"])
+        } else {
+            json!(["Read", "Bash"])
+        };
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-structural-shell",
+            "initial": "implement",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "implement": {
+                    "allowed_tools": allowed_tools,
+                    "allowed_commands": ["git status"],
+                    "classifier_policy": {"risk_tolerance": "moderate_local"},
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("structural-shell-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "structural-shell-session".into(),
+        }))
+    }
+
     #[tokio::test]
     async fn native_patch_freeform_payload_uses_write_authority_not_opaque_fallback() {
         let response = handle_pre_tool(
@@ -635,6 +664,52 @@ mod tests {
         assert_eq!(risk["deterministic_risk"], "Moderate");
         assert_eq!(risk["deterministic_exposure"], "Local");
         assert_eq!(risk["resolved_effect"], "local_write");
+    }
+
+    #[tokio::test]
+    async fn hook_uses_structural_pipeline_and_capabilities_not_stale_command_names() {
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let input = json!({
+            "cmd": "git rev-parse HEAD && git worktree add -b fix/structural .agent-worktrees/structural HEAD"
+        });
+
+        let allowed = handle_pre_tool(
+            State(structural_shell_hook_state(true)),
+            Json(PreToolRequest {
+                tool_name: "exec_command".into(),
+                tool_input: input.clone(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(allowed.decision, "allow");
+        assert_eq!(
+            allowed.risk_assessment.as_ref().unwrap()["deterministic_source"],
+            "shell_ast"
+        );
+        assert_eq!(
+            allowed.risk_assessment.as_ref().unwrap()["resolved_effect"],
+            "local_write"
+        );
+
+        let denied = handle_pre_tool(
+            State(structural_shell_hook_state(false)),
+            Json(PreToolRequest {
+                tool_name: "exec_command".into(),
+                tool_input: input,
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(denied.decision, "deny");
+        assert!(
+            denied
+                .additional_context
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Local write effect")
+        );
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
     }
 
     #[tokio::test]

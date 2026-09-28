@@ -74,6 +74,7 @@ pub enum ResolvedEffect {
     ReadOnly,
     LocalWrite,
     GitLocalWrite,
+    LocalWriteAndGitLocalWrite,
     DenyKnownRisk,
     DenyUncertain,
 }
@@ -325,6 +326,23 @@ impl<'a> FinalDecisionContext<'a> {
 }
 
 impl RiskPipelineAssessment {
+    fn deterministic_local_effect(&self) -> ResolvedEffect {
+        match self.deterministic.required_capability {
+            Some("GitLocalWrite") => ResolvedEffect::GitLocalWrite,
+            Some("Write+GitLocalWrite") => ResolvedEffect::LocalWriteAndGitLocalWrite,
+            _ => ResolvedEffect::LocalWrite,
+        }
+    }
+
+    fn semantic_local_effect(&self) -> ResolvedEffect {
+        match self.deterministic.required_capability {
+            Some("GitLocalWrite" | "Write+GitLocalWrite") => {
+                ResolvedEffect::LocalWriteAndGitLocalWrite
+            }
+            _ => ResolvedEffect::LocalWrite,
+        }
+    }
+
     /// Resolve an effect class without letting inference downgrade a known
     /// high/critical operation or silently authorize an uncertain result.
     /// This is not final authorization: callers must enforce the state's
@@ -345,14 +363,14 @@ impl RiskPipelineAssessment {
                 (ReadOnly, "deterministic_read_only")
             }
             RiskBand::Low => (LocalWrite, "semantic_risk_escalation"),
-            RiskBand::Moderate
-                if self.deterministic.exposure == ExposureBand::Local
-                    && self.deterministic.required_capability == Some("GitLocalWrite") =>
-            {
-                (GitLocalWrite, "deterministic_git_local_write")
-            }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => {
-                (LocalWrite, "deterministic_local_write")
+                let effect = self.deterministic_local_effect();
+                let basis = match effect {
+                    GitLocalWrite => "deterministic_git_local_write",
+                    LocalWriteAndGitLocalWrite => "deterministic_combined_local_write",
+                    _ => "deterministic_local_write",
+                };
+                (effect, basis)
             }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Unknown => {
                 if !self.semantic_authorization_enabled {
@@ -368,7 +386,8 @@ impl RiskPipelineAssessment {
                     return (DenyUncertain, "semantic_assessment_incomplete");
                 }
                 let request = self.deterministic.semantic_request.as_ref().unwrap();
-                let compatible_read = request.read_only_hint != Some(false)
+                let compatible_read = self.deterministic.required_capability.is_none()
+                    && request.read_only_hint != Some(false)
                     && request.mcp_shape.as_ref().is_none_or(|shape| {
                         shape.operation_intent != McpOperationIntent::Write
                             && shape.selector_intent != Some(McpOperationIntent::Write)
@@ -387,7 +406,7 @@ impl RiskPipelineAssessment {
                     && vector.irreversible.get() <= 0.05
                     && vector.external_or_account_effect.get() <= 0.05
                 {
-                    (LocalWrite, "semantic_local_write")
+                    (self.semantic_local_effect(), "semantic_local_write")
                 } else {
                     (DenyUncertain, "semantic_threshold_not_met")
                 }
@@ -402,10 +421,17 @@ impl RiskPipelineAssessment {
             .as_ref()
             .is_some_and(|request| {
                 if request.tool_family == "shell" {
-                    !request.shell_shape.is_empty()
+                    request.shell_ast_shape.as_ref().is_some_and(|shape| {
+                        shape.status == ParseStatus::Parsed
+                            && shape.executable_nodes > 0
+                            && !shape.effect_candidates.is_empty()
+                            && shape.foreign_code_units
+                                == shape.foreign_code_units_with_effect_evidence
+                            && !request.shell_shape.is_empty()
+                    }) || (!request.shell_shape.is_empty()
                         && request.shell_shape.iter().all(|segment| {
                             segment.operation.is_some() && !segment.delegates_unknown_effect
-                        })
+                        }))
                 } else {
                     request.tool_name != "unknown"
                         && request
@@ -486,6 +512,7 @@ impl ResolvedEffect {
             Self::ReadOnly => "read_only",
             Self::LocalWrite => "local_write",
             Self::GitLocalWrite => "git_local_write",
+            Self::LocalWriteAndGitLocalWrite => "local_write_and_git_local_write",
             Self::DenyKnownRisk => "deny_known_risk",
             Self::DenyUncertain => "deny_uncertain",
         }
@@ -496,6 +523,7 @@ impl ResolvedEffect {
             Self::ReadOnly => "Read",
             Self::LocalWrite => "Write",
             Self::GitLocalWrite => "GitLocalWrite",
+            Self::LocalWriteAndGitLocalWrite => "Write+GitLocalWrite",
             Self::DenyKnownRisk => "separate_approved_execution_path",
             Self::DenyUncertain => "complete_structural_evidence_or_separate_approval",
         }
@@ -1246,24 +1274,39 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
     }
-    if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast");
-    }
-    if classes.as_slice() == [OpClass::GitLocalWrite] {
-        return assessment_with_capability(
-            RiskBand::Moderate,
-            ExposureBand::Local,
-            "shell_ast",
-            "GitLocalWrite",
-        );
-    }
-    if classes.iter().any(|class| {
+    let has_git_local_write = classes.contains(&OpClass::GitLocalWrite);
+    let has_local_write = classes.iter().any(|class| {
         matches!(
             class,
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite
         )
-    }) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell_ast");
+    });
+    let required_capability = match (has_local_write, has_git_local_write) {
+        (true, true) => Some("Write+GitLocalWrite"),
+        (true, false) => Some("Write"),
+        (false, true) => Some("GitLocalWrite"),
+        (false, false) => None,
+    };
+    if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
+        return required_capability.map_or_else(
+            || assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast"),
+            |capability| {
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell_ast",
+                    capability,
+                )
+            },
+        );
+    }
+    if let Some(capability) = required_capability {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell_ast",
+            capability,
+        );
     }
     if classes.iter().all(|class| {
         matches!(
@@ -3745,6 +3788,126 @@ mod tests {
         assert_eq!(git_add.source, "shell_ast");
         assert_eq!(git_add.risk, RiskBand::Moderate);
         assert_eq!(git_add.exposure, ExposureBand::Unknown);
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_aggregates_compound_local_effects_without_exact_class_matches() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("implement"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+
+        assert_eq!(
+            resolved(
+                "git rev-parse HEAD && git worktree add -b fix/structural .agent-worktrees/structural HEAD"
+            ),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            resolved(
+                "printf receipt > receipt.txt && statewright-git-closeout --message test -- docs/receipt.md"
+            ),
+            ResolvedEffect::LocalWriteAndGitLocalWrite
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn parsed_delegated_units_reach_system_one_without_erasing_known_write_floor() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let vector = |read_only, may_write| SemanticRiskVector {
+            read_only: Probability::new(read_only).unwrap(),
+            may_write: Probability::new(may_write).unwrap(),
+            reversible: Probability::new(0.95).unwrap(),
+            destructive: Probability::new(0.01).unwrap(),
+            irreversible: Probability::new(0.01).unwrap(),
+            external_or_account_effect: Probability::new(0.01).unwrap(),
+        };
+        let pipeline = |command: &str, semantic_vector| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("implement"),
+            );
+            assert_eq!(deterministic.source, "shell_ast");
+            if command.starts_with("mkdir ") {
+                assert_eq!(deterministic.required_capability, Some("Write"));
+            }
+            let semantic = SemanticAssessmentReceipt {
+                tool: "exec_command".into(),
+                status: SemanticAssessorStatus::Assessed,
+                vector: Some(semantic_vector),
+                state_intent: Some("implement".into()),
+            };
+            pipeline_from_parts(deterministic, semantic, true)
+        };
+
+        assert_eq!(
+            pipeline(
+                "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                vector(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline("python3 -c 'print(1)'", vector(0.97, 0.02)).resolve_effect(),
+            ResolvedEffect::ReadOnly
+        );
+        assert_eq!(
+            pipeline(
+                "python3 -c 'private_framework.execute()'",
+                vector(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline(
+                "mkdir -p output && python3 -c 'print(1)'",
+                vector(0.97, 0.02),
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline(
+                "mkdir -p output && python3 -c 'print(1)'",
+                vector(0.02, 0.97),
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline(
+                "statewright-git-closeout --message test -- docs/receipt.md && python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                vector(0.02, 0.97),
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWriteAndGitLocalWrite
+        );
+
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
     }

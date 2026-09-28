@@ -380,7 +380,7 @@ pub fn semantic_effect_risk_denial_details(
                 "assessed_moderate_local",
             ))
         }
-        ResolvedEffect::LocalWrite
+        ResolvedEffect::LocalWrite | ResolvedEffect::LocalWriteAndGitLocalWrite
             if classifier_risk_tolerance(session) == ClassifierRiskTolerance::LowLocal =>
         {
             Some(SemanticEffectDenial::new(
@@ -389,7 +389,7 @@ pub fn semantic_effect_risk_denial_details(
                 "moderate_local_or_assessed_moderate_local",
             ))
         }
-        ResolvedEffect::LocalWrite
+        ResolvedEffect::LocalWrite | ResolvedEffect::LocalWriteAndGitLocalWrite
             if basis.starts_with("semantic_")
                 && classifier_risk_tolerance(session)
                     != ClassifierRiskTolerance::AssessedModerateLocal =>
@@ -402,9 +402,10 @@ pub fn semantic_effect_risk_denial_details(
                 "assessed_moderate_local",
             ))
         }
-        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite | ResolvedEffect::GitLocalWrite => {
-            None
-        }
+        ResolvedEffect::ReadOnly
+        | ResolvedEffect::LocalWrite
+        | ResolvedEffect::GitLocalWrite
+        | ResolvedEffect::LocalWriteAndGitLocalWrite => None,
     }
 }
 
@@ -443,6 +444,12 @@ pub fn semantic_effect_capability_denial_details(
                 .any(|entry| entry.eq_ignore_ascii_case(capability))
         })
     };
+    let has_capability_allowlist = execution_session
+        .definition
+        .states
+        .get(&execution_session.current_state)
+        .and_then(|state| state.allowed_tools.as_ref())
+        .is_some();
     match pipeline.resolve_effect() {
         ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(SemanticEffectDenial::new(
             format!(
@@ -452,7 +459,10 @@ pub fn semantic_effect_capability_denial_details(
             "workflow_capability_read_denied",
             "Read",
         )),
-        ResolvedEffect::LocalWrite if explicitly_denied("Write") => {
+        ResolvedEffect::LocalWrite
+            if explicitly_denied("Write")
+                || (has_capability_allowlist && !explicitly_allowed("Write")) =>
+        {
             Some(SemanticEffectDenial::new(
                 format!(
                     "Local write effect is explicitly blocked in state '{}'.",
@@ -474,9 +484,25 @@ pub fn semantic_effect_capability_denial_details(
                 "GitLocalWrite",
             ))
         }
+        ResolvedEffect::LocalWriteAndGitLocalWrite
+            if explicitly_denied("Write")
+                || explicitly_denied("GitLocalWrite")
+                || (has_capability_allowlist && !explicitly_allowed("Write"))
+                || !explicitly_allowed("GitLocalWrite") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Combined local file and bounded Git effects are not authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_combined_local_write_not_allowed",
+                "Write+GitLocalWrite",
+            ))
+        }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
         | ResolvedEffect::GitLocalWrite
+        | ResolvedEffect::LocalWriteAndGitLocalWrite
         | ResolvedEffect::DenyKnownRisk
         | ResolvedEffect::DenyUncertain => None,
     }
@@ -668,6 +694,29 @@ mod tests {
                 &semantic_pipeline("cp source-file local-file", None)
             )
             .is_some()
+        );
+
+        let restricted_definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "restricted-denylist", "initial": "inspect",
+            "context": {"tool_policy_mode":"denylist_heuristic_v1"},
+            "states": {
+                "inspect": {
+                    "allowed_tools": ["Read", "Bash"],
+                    "classifier_policy": {"risk_tolerance": "assessed_moderate_local"},
+                    "on": {"DONE":"done"}
+                },
+                "done": {"type":"final"}
+            }
+        }))
+        .unwrap();
+        let restricted = GatewaySession::new("restricted-denylist".into(), restricted_definition);
+        assert!(
+            semantic_effect_capability_denial(
+                &restricted,
+                &semantic_pipeline("cp source-file local-file", None)
+            )
+            .is_some(),
+            "an allowlist without Write must not admit a resolved local write"
         );
 
         let legacy = session_at("unrestricted");

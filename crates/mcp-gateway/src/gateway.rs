@@ -995,20 +995,22 @@ impl Gateway {
                     );
                 }
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
-                let pre_warning =
-                    match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
-                        PreCallDecision::Block(reason) => {
-                            return JsonRpcResponse::success(
-                                id,
-                                serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                    reason,
-                                ))
+                let pre_warning = match interceptors::pre_call_check_with_pipeline(
+                    &session,
+                    &params.name,
+                    &params.arguments,
+                    Some(&pipeline),
+                ) {
+                    PreCallDecision::Block(reason) => {
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
                                 .unwrap(),
-                            );
-                        }
-                        PreCallDecision::Warn(msg) => Some(msg),
-                        PreCallDecision::Allow => None,
-                    };
+                        );
+                    }
+                    PreCallDecision::Warn(msg) => Some(msg),
+                    PreCallDecision::Allow => None,
+                };
 
                 // Forward to upstream
                 self.session_manager.increment_iteration(&self.session_id);

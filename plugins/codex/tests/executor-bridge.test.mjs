@@ -6,8 +6,27 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { formatGuardDenial } from "../scripts/executor-hook.mjs";
 
 const codexRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("formats classifier denials for display without discarding machine evidence", () => {
+  const denial = formatGuardDenial({
+    reason: "Classifier receipt includes internal scoring.",
+    risk_assessment: {
+      final_denial_basis: "semantic_threshold_not_met",
+      required_authority: "complete_structural_evidence_or_separate_approval",
+      semantic_vector: { may_write: 0.86, external_or_account_effect: 0.56 },
+    },
+  });
+
+  assert.match(denial.display, /^Statewright guard: denied/);
+  assert.match(denial.display, /bounded native operation/);
+  assert.match(denial.display, /heredoc or inline interpreter/);
+  assert.doesNotMatch(denial.display, /0\.86|internal scoring/);
+  assert.match(denial.machine, /"may_write":0\.86/);
+  assert.doesNotMatch(denial.machine, /internal scoring/);
+});
 
 async function startBridge() {
   const requests = [];
@@ -305,13 +324,13 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
       tool_input: {command: "private-input-sentinel"},
     }, environment);
     assert.equal(classifierDenied.status, 0, classifierDenied.stderr);
-    const classifierReason = JSON.parse(classifierDenied.stdout).hookSpecificOutput.permissionDecisionReason;
-    assert.match(classifierReason, /basis=classifier_policy_low_local/);
-    assert.match(classifierReason, /deterministic=Moderate\/Local via shell_ast/);
-    assert.match(classifierReason, /System One=Assessed p\(read=0\.04, write=0\.96/);
-    assert.match(classifierReason, /required=moderate_local_or_assessed_moderate_local/);
-    assert.match(classifierReason, /equivalent retry=false/);
-    assert.doesNotMatch(classifierReason, /private-(command|input)-sentinel/);
+    const classifierOutput = JSON.parse(classifierDenied.stdout).hookSpecificOutput;
+    assert.match(classifierOutput.permissionDecisionReason, /^Statewright guard: denied/);
+    assert.match(classifierOutput.permissionDecisionReason, /workflow risk band is too narrow/);
+    assert.doesNotMatch(classifierOutput.permissionDecisionReason, /basis=|p\(read=|private-(command|input)-sentinel/);
+    assert.match(classifierOutput.additionalContext, /"final_denial_basis":"classifier_policy_low_local"/);
+    assert.match(classifierOutput.additionalContext, /"may_write":0\.96/);
+    assert.doesNotMatch(classifierOutput.additionalContext, /private-(command|input)-sentinel/);
 
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,

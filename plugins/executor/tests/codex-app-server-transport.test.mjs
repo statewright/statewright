@@ -15,7 +15,7 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
@@ -487,6 +487,7 @@ test("App Server routing overrides the native next turn and requires a settings 
     actualModel: "gpt-5.6-sol",
     actualProvider: "openai",
     actualEffort: "high",
+    actualServiceTier: null,
     confirmed: true,
   });
   assert.equal(settingsConfirmRoute(receipt, {
@@ -498,6 +499,153 @@ test("App Server routing overrides the native next turn and requires a settings 
   }, { session_id: "thread-1", model: "gpt-5.6-sol" }), {
     message: { method: "turn/start", params: { threadId: "different-thread" } }, receipt: null,
   });
+});
+
+test("App Server routing captures and restores the pre-workflow model, effort, and service tier", () => {
+  const origin = captureWorkflowOrigin({
+    method: "turn/start",
+    params: {
+      threadId: "thread-return",
+      model: "gpt-6-astra",
+      effort: "high",
+      serviceTier: "priority",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-6-astra", reasoning_effort: "high" },
+      },
+    },
+  }, { provider: "openai" });
+  assert.deepEqual(origin, {
+    model: "openai-codex/gpt-6-astra",
+    effort: "high",
+    service_tier: "priority",
+  });
+  const restored = restoreWorkflowOrigin({
+    session_id: "thread-return",
+    run_id: "run-return",
+    state: "complete",
+    restore_original: true,
+  }, { ...origin, run_id: "run-return" });
+  const { message, receipt } = applyRouteToTurnStart({
+    method: "turn/start",
+    params: { threadId: "thread-return", model: "gpt-5.6-terra", effort: "medium", serviceTier: "default" },
+  }, restored);
+  assert.equal(message.params.model, "gpt-6-astra");
+  assert.equal(message.params.effort, "high");
+  assert.equal(message.params.serviceTier, "priority");
+  assert.equal(receipt.route.restored_original, true);
+  assert.equal(receipt.effectiveServiceTier, "priority");
+  assert.equal(settingsConfirmRoute(receipt, {
+    method: "thread/settings/updated",
+    params: { threadId: "thread-return", threadSettings: {
+      model: "gpt-6-astra", modelProvider: "openai", effort: "high", serviceTier: "priority",
+    } },
+  }).confirmed, true);
+  assert.equal(restoreWorkflowOrigin({ restore_original: true, run_id: "foreign" }, {
+    ...origin, run_id: "run-return",
+  }), null);
+});
+
+test("App Server proxy restores the captured route after the authoritative workflow becomes terminal", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let upstreamSocket;
+  const connected = new Promise((resolveConnection) => upstream.once("connection", (socket) => {
+    upstreamSocket = socket;
+    resolveConnection();
+  }));
+  let state = {
+    run_id: "run-return",
+    state: "intake",
+    model: "openai-codex/gpt-5.6-terra",
+    thinking_level: "medium",
+    is_final: false,
+  };
+  const pending = [{
+    session_id: "thread-return",
+    run_id: "run-return",
+    state: "intake",
+    model: "openai-codex/gpt-5.6-terra",
+    effort: "medium",
+    service_tier: "default",
+  }];
+  const injected = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    approvalService: {
+      getState: async () => state,
+      restore: async () => null,
+    },
+    takePendingRoute: async () => {
+      const route = pending.shift();
+      return route ? { route, ack: async () => {} } : null;
+    },
+    onRouteInjected: async (receipt) => injected.push(receipt),
+  });
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    const nextForwardedTurn = async () => {
+      for (;;) {
+        const request = JSON.parse(String(await once(upstreamSocket, "message")));
+        if (request.method !== "thread/read") return request;
+        upstreamSocket.send(JSON.stringify({ id: request.id, result: {
+          thread: { id: "thread-return", status: { type: "idle" } },
+        } }));
+      }
+    };
+    const initialThread = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 1, method: "thread/start", params: {} }));
+    assert.equal((await initialThread).method, "thread/start");
+    upstreamSocket.send(JSON.stringify({ id: 1, result: {
+      thread: { id: "thread-return" }, modelProvider: "openai", model: "gpt-6-astra",
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+
+    client.send(JSON.stringify({ id: 2, method: "turn/start", params: {
+      threadId: "thread-return", input: [], model: "gpt-6-astra", effort: "high", serviceTier: "priority",
+    } }));
+    const routed = await nextForwardedTurn();
+    assert.equal(routed.params.model, "gpt-5.6-terra");
+    assert.equal(routed.params.effort, "medium");
+    assert.equal(routed.params.serviceTier, "default");
+    upstreamSocket.send(JSON.stringify({ id: 2, result: { turn: { id: "workflow-turn" } } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+
+    state = { ...state, state: "complete", is_final: true };
+    pending.push({
+      session_id: "thread-return",
+      run_id: "run-return",
+      state: "complete",
+      model: "",
+      effort: "",
+      restore_original: true,
+    });
+    client.send(JSON.stringify({ id: 3, method: "turn/start", params: {
+      threadId: "thread-return", input: [], model: "gpt-5.6-terra", effort: "medium", serviceTier: "default",
+    } }));
+    const restored = await nextForwardedTurn();
+    assert.equal(restored.params.model, "gpt-6-astra");
+    assert.equal(restored.params.effort, "high");
+    assert.equal(restored.params.serviceTier, "priority");
+    assert.equal(injected.length, 2);
+    assert.equal(injected[0].route.restored_original, undefined);
+    assert.equal(injected[1].route.restored_original, true);
+    upstreamSocket.send(JSON.stringify({ id: 3, result: { turn: { id: "restored-turn" } } }));
+    upstreamSocket.send(JSON.stringify({ method: "turn/started", params: {
+      threadId: "thread-return", turn: { id: "restored-turn", status: "inProgress", items: [] },
+    } }));
+    upstreamSocket.send(JSON.stringify({ method: "turn/completed", params: {
+      threadId: "thread-return", turn: { id: "restored-turn", status: "completed", items: [] },
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
 });
 
 test("App Server routing synchronizes Desktop collaboration mode without crossing threads", () => {

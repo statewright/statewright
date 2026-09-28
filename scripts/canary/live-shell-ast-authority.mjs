@@ -115,6 +115,14 @@ const cases = [
     exposure: 'Local'
   },
   {
+    name: 'compound_rg_bare_sort',
+    command: "rg --files | sort; rg -n 'M1' README.md docs/plan.md",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Low',
+    exposure: 'Local'
+  },
+  {
     name: 'compound_read',
     command: 'if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi',
     decision: 'allow',

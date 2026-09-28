@@ -851,6 +851,15 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
     {
         return Some("Read");
     }
+    // A bare `sort` consumes only stdin and emits to stdout. Do not admit
+    // operands or flags here: `-o` writes a named file, `-T` can select a
+    // temporary write location, and implementation-specific flags may invoke
+    // helpers. Keeping this proof to the exact utility spelling and zero
+    // arguments lets a pipeline such as `rg --files | sort` remain read-only
+    // without granting a broad exemption to sort's option surface.
+    if invoked == "sort" && tokens.len() == 1 {
+        return Some("Read");
+    }
     // `test` and `[` are shell predicates. With expansions, redirections, and
     // composition already rejected by `simple_command_tokens`, they can only
     // inspect strings, shell state, or filesystem metadata. Require the exact
@@ -2471,6 +2480,31 @@ mod tests {
             "printf label > marker.txt",
             "echo label >> marker.txt",
             "echo `touch marker`",
+        ] {
+            assert_eq!(
+                readonly_capabilities(unsafe_command),
+                None,
+                "{unsafe_command}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_sort_is_a_bounded_stdout_filter() {
+        assert_eq!(readonly_capabilities("sort"), Some(vec!["Read"]));
+        assert_eq!(
+            readonly_capabilities("rg --files | sort; rg -n 'M1' README.md docs/plan.md"),
+            Some(vec!["Grep", "Read"]),
+        );
+
+        for unsafe_command in [
+            "sort -o output.txt",
+            "sort --output=output.txt",
+            "sort -T /tmp/sort-work",
+            "sort input.txt",
+            "/tmp/sort",
+            "sort > output.txt",
+            "sort $(touch marker)",
         ] {
             assert_eq!(
                 readonly_capabilities(unsafe_command),

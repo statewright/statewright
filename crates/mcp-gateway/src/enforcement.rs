@@ -383,6 +383,9 @@ pub fn semantic_effect_risk_denial_details(
         ResolvedEffect::LocalWrite
         | ResolvedEffect::BoundedLocalExecution
         | ResolvedEffect::LocalWriteAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        | ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
             if classifier_risk_tolerance(session) == ClassifierRiskTolerance::LowLocal =>
         {
             Some(SemanticEffectDenial::new(
@@ -391,7 +394,10 @@ pub fn semantic_effect_risk_denial_details(
                 "moderate_local_or_assessed_moderate_local",
             ))
         }
-        ResolvedEffect::LocalWrite | ResolvedEffect::LocalWriteAndGitLocalWrite
+        ResolvedEffect::LocalWrite
+        | ResolvedEffect::LocalWriteAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
             if basis.starts_with("semantic_")
                 && classifier_risk_tolerance(session)
                     != ClassifierRiskTolerance::AssessedModerateLocal =>
@@ -408,7 +414,10 @@ pub fn semantic_effect_risk_denial_details(
         | ResolvedEffect::LocalWrite
         | ResolvedEffect::BoundedLocalExecution
         | ResolvedEffect::GitLocalWrite
-        | ResolvedEffect::LocalWriteAndGitLocalWrite => None,
+        | ResolvedEffect::LocalWriteAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        | ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => None,
     }
 }
 
@@ -515,11 +524,61 @@ pub fn semantic_effect_capability_denial_details(
                 "Write+GitLocalWrite",
             ))
         }
+        ResolvedEffect::LocalWriteAndBoundedLocalExecution
+            if explicitly_denied("Write")
+                || explicitly_denied("BoundedLocalExecution")
+                || (has_capability_allowlist && !explicitly_allowed("Write"))
+                || !explicitly_allowed("BoundedLocalExecution") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Combined local file and bounded execution effects are not authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_write_and_bounded_execution_not_allowed",
+                "Write+BoundedLocalExecution",
+            ))
+        }
+        ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+            if explicitly_denied("BoundedLocalExecution")
+                || explicitly_denied("GitLocalWrite")
+                || !explicitly_allowed("BoundedLocalExecution")
+                || !explicitly_allowed("GitLocalWrite") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Combined bounded execution and local Git effects are not authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_bounded_execution_and_git_not_allowed",
+                "BoundedLocalExecution+GitLocalWrite",
+            ))
+        }
+        ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+            if explicitly_denied("Write")
+                || explicitly_denied("BoundedLocalExecution")
+                || explicitly_denied("GitLocalWrite")
+                || (has_capability_allowlist && !explicitly_allowed("Write"))
+                || !explicitly_allowed("BoundedLocalExecution")
+                || !explicitly_allowed("GitLocalWrite") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Combined local file, bounded execution, and local Git effects are not authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_combined_local_execution_not_allowed",
+                "Write+BoundedLocalExecution+GitLocalWrite",
+            ))
+        }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
         | ResolvedEffect::BoundedLocalExecution
         | ResolvedEffect::GitLocalWrite
         | ResolvedEffect::LocalWriteAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        | ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+        | ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
         | ResolvedEffect::DenyKnownRisk
         | ResolvedEffect::DenyUncertain => None,
     }
@@ -741,6 +800,84 @@ mod tests {
             semantic_effect_risk_denial(
                 &legacy,
                 &semantic_pipeline("git push origin main", Some(read_vector())),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn combined_local_effects_require_every_capability_in_the_union() {
+        let session = |allowed_tools: &[&str]| {
+            let definition: MachineDefinition = serde_json::from_value(json!({
+                "id": "capability-union",
+                "initial": "validate",
+                "context": {"tool_policy_mode":"denylist_heuristic_v1"},
+                "states": {
+                    "validate": {
+                        "allowed_tools": allowed_tools,
+                        "classifier_policy": {"risk_tolerance":"moderate_local"},
+                        "on": {"DONE":"done"}
+                    },
+                    "done": {"type":"final"}
+                }
+            }))
+            .unwrap();
+            GatewaySession::new("capability-union".into(), definition)
+        };
+
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let validation = semantic_pipeline("npm test", None);
+        let validation_and_write = semantic_pipeline("npm test && mkdir output", None);
+        let all_three = semantic_pipeline(
+            "npm test && mkdir output && statewright-git-closeout --message test -- docs/receipt.md",
+            None,
+        );
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
+
+        assert_eq!(
+            validation.resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            validation_and_write.resolve_effect(),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        );
+        assert_eq!(
+            all_three.resolve_effect(),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+        );
+
+        assert!(
+            semantic_effect_capability_denial(
+                &session(&["Read", "Bash", "BoundedLocalExecution"]),
+                &validation,
+            )
+            .is_none()
+        );
+        assert!(
+            semantic_effect_capability_denial(
+                &session(&["Read", "Bash", "BoundedLocalExecution"]),
+                &validation_and_write,
+            )
+            .is_some()
+        );
+        assert!(
+            semantic_effect_capability_denial(
+                &session(&["Read", "Bash", "Write", "BoundedLocalExecution"]),
+                &validation_and_write,
+            )
+            .is_none()
+        );
+        assert!(
+            semantic_effect_capability_denial(
+                &session(&[
+                    "Read",
+                    "Bash",
+                    "Write",
+                    "BoundedLocalExecution",
+                    "GitLocalWrite",
+                ]),
+                &all_three,
             )
             .is_none()
         );

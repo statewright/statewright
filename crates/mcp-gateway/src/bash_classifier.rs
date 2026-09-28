@@ -1343,13 +1343,11 @@ fn classify_segment(segment: &str) -> OpClass {
             OpClass::SafeOutput
         }
 
-        // These are intentionally not generic interpreter/build-tool
-        // permissions. Every accepted argv is literal and bounded, and the
-        // resulting effect still requires explicit workflow capability.
-        "node" if invoked == "node" && bounded_node_local_execution(segment) => {
-            OpClass::BoundedLocalExecution
-        }
-        "cargo" if invoked == "cargo" && bounded_cargo_local_execution(segment) => {
+        // Runner-specific grammars normalize to one execution intent. This is
+        // intentionally not generic interpreter/build-tool permission: every
+        // accepted argv is literal and bounded, and the normalized intent
+        // still requires explicit workflow capability.
+        _ if invoked == base_cmd && local_execution_intent(segment, base_cmd).is_some() => {
             OpClass::BoundedLocalExecution
         }
 
@@ -1372,6 +1370,24 @@ fn bounded_version_probe(segment: &str, executable: &str) -> bool {
             if actual == executable
                 && matches!(flag.as_str(), "--version" | "-V" | "-v")
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalExecutionIntent {
+    Validation,
+}
+
+/// Normalize runner-specific argv into a policy-level intent. Adding a new
+/// runner extends this adapter boundary; authorization remains centralized on
+/// `BoundedLocalExecution` rather than growing executable-specific bypasses.
+fn local_execution_intent(segment: &str, executable: &str) -> Option<LocalExecutionIntent> {
+    let validation = match executable {
+        "node" => bounded_node_local_execution(segment),
+        "cargo" => bounded_cargo_local_execution(segment),
+        "npm" | "pnpm" => bounded_package_test_local_execution(segment, executable),
+        _ => false,
+    };
+    validation.then_some(LocalExecutionIntent::Validation)
 }
 
 fn bounded_node_local_execution(segment: &str) -> bool {
@@ -1426,6 +1442,22 @@ fn bounded_cargo_local_execution(segment: &str) -> bool {
         }
     }
     true
+}
+
+/// Admit only the package manager's conventional test-script entry point.
+/// The script itself is repository code and therefore still requires the
+/// explicit `BoundedLocalExecution` capability. Keeping the argv grammar
+/// exact prevents alternate project roots, arbitrary lifecycle scripts, and
+/// test-runner arguments from borrowing that authority.
+fn bounded_package_test_local_execution(segment: &str, executable: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    match tokens.as_slice() {
+        [actual, operation] => actual == executable && operation == "test",
+        [actual, run, script] => actual == executable && run == "run" && script == "test",
+        _ => false,
+    }
 }
 
 fn bounded_label(value: &str) -> bool {
@@ -2270,9 +2302,30 @@ mod tests {
     }
 
     #[test]
-    fn npm_test_is_passthrough() {
-        let classes = classify("npm test");
-        assert!(classes.contains(&OpClass::Passthrough));
+    fn package_test_requires_bounded_local_execution() {
+        for command in ["npm test", "npm run test", "pnpm test", "pnpm run test"] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+        for command in [
+            "npm run build",
+            "npm test -- --watch",
+            "npm --prefix ../outside test",
+            "TEST_MODE=1 npm test",
+            "/tmp/npm test",
+            "npm test && curl https://example.invalid",
+            "npm test > receipt.txt",
+            "pnpm test --filter workspace",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
     }
 
     #[test]

@@ -195,6 +195,33 @@ const cases = [
     exposure: 'Local'
   },
   {
+    name: 'package_test_validation',
+    command: 'npm test',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'bounded_local_execution'
+  },
+  {
+    name: 'package_test_with_read',
+    command: 'npm test && git status --short',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'bounded_local_execution'
+  },
+  {
+    name: 'package_test_with_write',
+    command: 'npm test && mkdir output',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'local_write_and_bounded_local_execution'
+  },
+  {
     name: 'python_inline_output',
     command: "python3 -c 'print(1)'",
     decision: 'allow',
@@ -283,7 +310,7 @@ try {
         meta: { classifier_policy: { risk_tolerance: 'assessed_moderate_local' } },
         states: {
           implement: {
-            disallowed_tools: [],
+            allowed_tools: ['Read', 'Bash', 'Write', 'BoundedLocalExecution', 'GitLocalWrite'],
             on: { RESTRICT: 'read_only', DONE: 'done' }
           },
           read_only: {
@@ -358,6 +385,9 @@ try {
     assert(risk.semantic_status === 'Assessed', `${entry.name}: expected semantic status Assessed, got ${risk.semantic_status}`)
     assert(typeof risk.resolution_basis === 'string', `${entry.name}: missing resolution_basis`)
     assert(typeof risk.required_authority === 'string', `${entry.name}: missing required_authority`)
+    if (entry.effect) {
+      assert(risk.resolved_effect === entry.effect, `${entry.name}: expected effect ${entry.effect}, got ${risk.resolved_effect}`)
+    }
     if (entry.decision === 'deny') {
       assert(typeof risk.final_denial_basis === 'string', `${entry.name}: missing final_denial_basis`)
     }
@@ -405,6 +435,18 @@ try {
     data: { rationale: 'Verify resolved effects against a state without Write authority.' }
   })
   for (const entry of [
+    {
+      name: 'restricted_package_test',
+      command: 'npm test',
+      decision: 'deny',
+      effect: 'bounded_local_execution'
+    },
+    {
+      name: 'restricted_package_test_with_write',
+      command: 'npm test && mkdir output',
+      decision: 'deny',
+      effect: 'local_write_and_bounded_local_execution'
+    },
     {
       name: 'restricted_python_output',
       command: "python3 -c 'print(1)'",

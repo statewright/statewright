@@ -41,6 +41,17 @@ fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[Strin
         ResolvedEffect::LocalWriteAndGitLocalWrite => {
             has(&["Write", "write_file"]) && has(&["GitLocalWrite"])
         }
+        ResolvedEffect::LocalWriteAndBoundedLocalExecution => {
+            has(&["Write", "write_file"]) && has(&["BoundedLocalExecution"])
+        }
+        ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite => {
+            has(&["BoundedLocalExecution"]) && has(&["GitLocalWrite"])
+        }
+        ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+            has(&["Write", "write_file"])
+                && has(&["BoundedLocalExecution"])
+                && has(&["GitLocalWrite"])
+        }
         ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => false,
     }
 }

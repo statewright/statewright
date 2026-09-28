@@ -150,6 +150,15 @@ fn mcp_operation(tool_name: &str) -> &str {
         .unwrap_or(tool_name)
 }
 
+fn is_agent_delegation_tool(tool_name: &str) -> bool {
+    let compact: String = mcp_operation(tool_name)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    compact == "agent" || compact == "spawnagent" || compact.ends_with("collaborationspawnagent")
+}
+
 fn mcp_operation_intent(operation: &str) -> McpOperationIntent {
     use McpOperationIntent::*;
     let lower = operation.to_ascii_lowercase();
@@ -1098,6 +1107,14 @@ fn risk_rank(risk: RiskBand) -> u8 {
 
 pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment {
     let operation_intent = mcp_operation_intent(mcp_operation(tool_name));
+    // A child agent receives a separate tool surface and can exercise authority
+    // that is not bounded by the current invocation. Keep delegation distinct
+    // from an opaque MCP call so provider shims can prefer inline recovery or
+    // route a real model/role change through a Statewright-managed fork. A
+    // one-shot approval must never grant an unbounded raw child tool surface.
+    if is_agent_delegation_tool(tool_name) {
+        return assessment(RiskBand::High, ExposureBand::Unknown, "unmanaged_agent_delegation");
+    }
     if let Some(tool) = tool {
         // Negative evidence takes precedence over an optimistic read hint.
         if tool.annotations.as_ref().and_then(|a| a.destructive_hint) == Some(true) {
@@ -1304,6 +1321,25 @@ mod tests {
         assert_eq!(assess_mcp(Some(&reader), "opaque").risk, RiskBand::Low);
         assert_eq!(assess_mcp(None, "mcp__opaque__thing").exposure, ExposureBand::Unknown);
         assert_eq!(assess_mcp(None, "mcp__mail__send_email"), assessment(RiskBand::High, ExposureBand::Account, "mcp_name"));
+    }
+
+    #[test]
+    fn agent_delegation_is_known_transitive_authority() {
+        for tool_name in [
+            "mcp__collaboration__spawn_agent",
+            "mcp__agents__spawn_agent",
+            "mcp__statewright_helpers__spawn_agent",
+            "mcp__statewright_helpers__SPAWN_AGENT",
+            "collaborationspawn_agent",
+            "functions.collaboration.spawn_agent",
+            "Agent",
+        ] {
+            assert_eq!(
+                assess_mcp(None, tool_name),
+                assessment(RiskBand::High, ExposureBand::Unknown, "unmanaged_agent_delegation")
+            );
+        }
+        assert_eq!(assess_mcp(None, "statewright_run_agent").source, "mcp_unknown");
     }
 
     #[test]

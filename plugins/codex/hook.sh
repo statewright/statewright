@@ -549,10 +549,25 @@ case "$ENDPOINT" in
 
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
-    # Always allow system/internal/MCP tools
-    case "$TOOL_NAME" in
-      *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+    DELEGATION_OPERATION="$TOOL_NAME"
+    case "$DELEGATION_OPERATION" in
+      mcp__*__*)
+        DELEGATION_OPERATION=${DELEGATION_OPERATION#mcp__}
+        DELEGATION_OPERATION=${DELEGATION_OPERATION#*__}
+        ;;
     esac
+    DELEGATION_KEY=$(printf '%s' "$DELEGATION_OPERATION" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    RAW_DELEGATION=false
+    case "$DELEGATION_KEY" in
+      agent|spawnagent|*collaborationspawnagent) RAW_DELEGATION=true ;;
+    esac
+
+    # Always allow system/internal/MCP tools
+    if [ "$RAW_DELEGATION" != "true" ]; then
+      case "$TOOL_NAME" in
+        *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      esac
+    fi
 
     if [ -f "$GATEWAY_UNAVAILABLE_FILE" ]; then
       jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway state is unavailable; the active workflow fails closed."}}'
@@ -575,6 +590,43 @@ case "$ENDPOINT" in
     STATEWRIGHT_ALLOWED_TOOLS="$ALLOWED"
     STATEWRIGHT_DISALLOWED_TOOLS="$DISALLOWED"
     STATEWRIGHT_TOOL_POLICY_MODE="$POLICY_MODE"
+
+    # A provider-native child receives a fresh tool surface, so it cannot be
+    # authorized as an ordinary tool call or by classifier approval. Ask the
+    # provider-neutral gateway whether this should stay inline or bind to a
+    # workflow-declared fork/subworkflow, then deny the raw spawn either way.
+    if [ "$RAW_DELEGATION" = "true" ]; then
+      ADAPTER_RESULT=$(adapter_pre_tool_call "$TOOL_NAME")
+      if ! printf '%s' "$ADAPTER_RESULT" | jq -e '
+        type == "object"
+        and (.decision == "deny" or .decision == "block")
+        and .risk_assessment.deterministic_source == "unmanaged_agent_delegation"
+        and .delegation.schema == "statewright/managed-delegation/v1"
+      ' >/dev/null 2>&1; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright could not bind this raw delegated agent to the current workflow; continue inline."}}'
+        exit 0
+      fi
+      DELEGATION_RECOMMENDATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.delegation.recommendation // "continue_inline"')
+      MANAGED_EVENTS=$(printf '%s' "$ADAPTER_RESULT" | jq -r ".delegation.managed_transition_candidates // [] | map(.event + \" (\" + .kind + \")\") | join(\", \")")
+      if [ "$DELEGATION_RECOMMENDATION" = "statewright_managed_fork" ]; then
+        if [ -n "$MANAGED_EVENTS" ]; then
+          ADAPTER_DISPLAY="Statewright guard: denied · this delegated task requests a different model or reasoning route. Candidate workflow-managed child transitions: ${MANAGED_EVENTS}. Use one only when its declared child route matches the request; the child remains attached to the parent workflow evidence."
+        else
+          ADAPTER_DISPLAY="Statewright guard: denied · this delegated task requests a different model or reasoning route, but the current state declares no managed fork or subworkflow transition. Continue inline or transition to a state that declares one."
+        fi
+      else
+        ADAPTER_DISPLAY="Statewright guard: denied · continue inline by default so evidence stays attached to the current workflow. A raw delegated agent would receive a separate, unbounded tool surface."
+      fi
+      ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '{
+        managed_delegation: .delegation,
+        classifier_receipt: (.risk_assessment | walk(
+          if type == "object" then del(.command, .raw_command, .tool_input, .input, .arguments) else . end
+        ))
+      }')
+      jq -n --arg reason "$ADAPTER_DISPLAY" --arg receipt "$ADAPTER_RECEIPT" \
+        '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason,"additionalContext":("[statewright] Managed delegation receipt: " + $receipt)}}'
+      exit 0
+    fi
 
     # Existing workflows that omitted allowed_tools intentionally had no
     # standalone Codex restriction. Preserve that legacy contract; only the
@@ -617,9 +669,13 @@ case "$ENDPOINT" in
       # Statewright supervisor event rather than a JSON/probability dump.
       ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
       [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
+      UNMANAGED_DELEGATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r \
+        '.risk_assessment.deterministic_source == "unmanaged_agent_delegation"' 2>/dev/null || true)
       RUN_ID=$(printf '%s' "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
-      APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
-        --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" --arg state "$CURRENT" '
+      APPROVAL_REQUEST=""
+      if [ "$UNMANAGED_DELEGATION" != "true" ]; then
+        APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
+          --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" --arg state "$CURRENT" '
           .risk_assessment? as $risk
           | if ($risk | type) != "object" then empty else {
               schema: "statewright/classifier-approval-request/v1",
@@ -633,7 +689,8 @@ case "$ENDPOINT" in
                 required_authority: $risk.required_authority
               }
             } end
-        ' 2>/dev/null || true)
+          ' 2>/dev/null || true)
+      fi
       APPROVAL_RESULT=""
       if [ -n "$APPROVAL_REQUEST" ] && command -v node >/dev/null 2>&1; then
         APPROVAL_RESULT=$(printf '%s' "$APPROVAL_REQUEST" \
@@ -644,7 +701,10 @@ case "$ENDPOINT" in
         jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"[statewright] Human approval granted for this exact invocation once."}}'
         exit 0
       fi
-      ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
+      if [ "$UNMANAGED_DELEGATION" = "true" ]; then
+        ADAPTER_DISPLAY="Statewright guard: denied · a raw delegated agent would receive a separate, unbounded tool surface. Continue inline by default so evidence stays attached to the current workflow. If the task requires a model change or an isolated execution boundary, use a Statewright-managed fork attached to this workflow."
+      else
+        ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
         def pct($value): (((($value // 0) * 100) | round | tostring) + "%");
         .risk_assessment? as $risk
         | if ($risk | type) != "object" then empty else
@@ -670,15 +730,16 @@ case "$ENDPOINT" in
                 + ", external " + pct($risk.semantic_vector.external_or_account_effect) + "."
               else $message end
           end
-      ' 2>/dev/null || true)
+        ' 2>/dev/null || true)
+      fi
       if [ -z "$ADAPTER_DISPLAY" ]; then
         ADAPTER_DISPLAY="$ADAPTER_REASON"
       fi
-      if [ "$APPROVAL_ACTION" = "rework" ]; then
+      if [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "rework" ]; then
         REWORK_ATTEMPTS=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.attempts // 0' 2>/dev/null || echo 0)
         REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
         ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}; after this budget, the same classified intent will be sent for native human approval."
-      elif [ "$APPROVAL_ACTION" = "deny" ]; then
+      elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "deny" ]; then
         ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval was not granted."
       fi
       ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '

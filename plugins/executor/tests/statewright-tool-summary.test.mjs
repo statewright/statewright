@@ -74,6 +74,48 @@ test("capitalized native MCP event names are summarized", () => {
   assert.equal(statewrightToolSummary(raw.params.item), "intake → localize · transitioned");
 });
 
+test("fork summaries attach bounded child status and join target to the workflow UI", () => {
+  const raw = completion("statewright_transition", {
+    forked: true,
+    current_branch: "architecture",
+    join: "all",
+    on_complete: "implement",
+    branches: {
+      architecture: {session_key: "private-session-a", status: "running"},
+      review: {session_key: "private-session-b", status: "pending"},
+    },
+  });
+  assert.equal(statewrightToolSummary(raw.params.item),
+    "fork → implement · forked · architecture: running, review: pending");
+  assert.doesNotMatch(statewrightToolSummary(raw.params.item), /private-session/);
+
+  const loaded = completion("statewright_load_workflow", {
+    loaded: "agentic-engineering-v2",
+    branch: "architecture",
+    initial_state: "design",
+  });
+  assert.equal(statewrightToolSummary(loaded.params.item),
+    "agentic-engineering-v2 · branch architecture · design · loaded");
+
+  const bounded = completion("statewright_transition", {
+    forked: true,
+    on_complete: "target-" + "t".repeat(80),
+    branches: {
+      ["a".repeat(80)]: {status: "running-" + "x".repeat(80), session_key: "private-session"},
+    },
+  });
+  const boundedSummary = statewrightToolSummary(bounded.params.item);
+  assert.ok(boundedSummary.length < 180, boundedSummary);
+  assert.doesNotMatch(boundedSummary, /private-session/);
+
+  const boundedLoad = completion("statewright_load_workflow", {
+    loaded: "agentic-engineering-v2",
+    branch: "branch-" + "b".repeat(80),
+    initial_state: "design",
+  });
+  assert.ok(statewrightToolSummary(boundedLoad.params.item).length < 100);
+});
+
 test("transition starts become a bounded supervisor status without invocation JSON", () => {
   const raw = { method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: {
     id: "transition-1", type: "mcpToolCall", server: "statewright", tool: "statewright_transition",

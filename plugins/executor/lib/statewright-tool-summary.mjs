@@ -38,14 +38,27 @@ function transitionUsage(value) {
   return parts.length ? ` · ${parts.join(" · ")}` : "";
 }
 
+function forkBranches(value) {
+  if (!value?.branches || typeof value.branches !== "object" || Array.isArray(value.branches)) return "";
+  const entries = Object.entries(value.branches).slice(0, 4).map(([name, branch]) => {
+    const branchName = clean(name).slice(0, 48);
+    const status = clean(branch?.status).slice(0, 32) || "unknown";
+    return branchName ? `${branchName}: ${status}` : "";
+  }).filter(Boolean);
+  const remainder = Math.max(0, Object.keys(value.branches).length - entries.length);
+  return entries.length ? ` · ${entries.join(", ")}${remainder ? `, +${remainder} more` : ""}` : "";
+}
+
 function transitionLine(value) {
   const from = clean(value?.from);
   const to = clean(value?.to);
-  const movement = from && to ? `${from} → ${to}` : to || from || "transition";
+  const forkTarget = clean(value?.on_complete).slice(0, 48);
+  const movement = value?.forked === true ? `fork${forkTarget ? ` → ${forkTarget}` : ""}`
+    : from && to ? `${from} → ${to}` : to || from || "transition";
   let status = "completed";
   if (value?.status === "pending_approval" || value?.requires_approval === true) status = "approval pending";
-  else if (value?.branch_completed) status = `branch ${clean(value.branch_completed)} completed`;
-  else if (value?.forked === true) status = "forked";
+  else if (value?.branch_completed) status = `branch ${clean(value.branch_completed).slice(0, 48)} completed`;
+  else if (value?.forked === true) status = `forked${forkBranches(value)}`;
   else if (value?.joined === true) status = "joined";
   else if (value?.forced === true) status = "forced";
   else if (value?.transitioned === true) status = "transitioned";
@@ -75,8 +88,9 @@ export function statewrightToolSummary(item) {
   if (item.tool === "statewright_load_workflow") {
     const state = value?.state_snapshot ?? value;
     const name = clean(value?.loaded ?? value?.workflow ?? state?.workflow);
+    const branch = clean(value?.branch).slice(0, 48);
     const line = stateLine(state) ?? clean(value?.initial_state);
-    return [name, line, "loaded"].filter(Boolean).join(" · ");
+    return [name, branch ? `branch ${branch}` : null, line, "loaded"].filter(Boolean).join(" · ");
   }
   if (["statewright_deactivate", "statewright_pause"].includes(item.tool)) {
     return item.tool.endsWith("pause") ? "workflow paused" : "workflow deactivated";

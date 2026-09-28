@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use statewright_engine::MachineDefinition;
+use statewright_engine::{MachineDefinition, TransitionDef};
 
 use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
@@ -45,6 +45,56 @@ fn is_exploratory_read_only_state(session: &crate::session::GatewaySession) -> b
         .get(&session.current_state)
         .and_then(|state| state.intent.as_deref())
         == Some("exploratory_read_only")
+}
+
+fn normalized_route_model(model: &str) -> &str {
+    model.rsplit_once('/').map(|(_, name)| name).unwrap_or(model)
+}
+
+fn route_model_changed(current: &str, requested: &str) -> bool {
+    if current.contains('/') && requested.contains('/') {
+        current != requested
+    } else {
+        normalized_route_model(current) != normalized_route_model(requested)
+    }
+}
+
+/// Provider-neutral delegation policy returned to host shims. A raw child
+/// tool call is never executable authority: ordinary work remains inline,
+/// while an explicit route change must bind to a declared workflow fork or
+/// invoked subworkflow so evidence and tool policy stay attached to the run.
+fn managed_delegation_policy(
+    session: &crate::session::GatewaySession,
+    tool_input: &serde_json::Value,
+) -> serde_json::Value {
+    let state = session.definition.states.get(&session.current_state);
+    let current_model = state.and_then(|definition| definition.model.as_deref());
+    let current_effort = state.and_then(|definition| definition.thinking_level.as_deref());
+    let requested_model = tool_input.get("model").and_then(serde_json::Value::as_str)
+        .map(str::trim).filter(|value| !value.is_empty());
+    let requested_effort = tool_input.get("reasoning_effort")
+        .or_else(|| tool_input.get("reasoningEffort"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim).filter(|value| !value.is_empty());
+    let model_change = requested_model.is_some_and(|requested| {
+        current_model.is_none_or(|current| route_model_changed(current, requested))
+    });
+    let effort_change = requested_effort.is_some_and(|requested| current_effort != Some(requested));
+    let route_change_requested = model_change || effort_change;
+    let managed_events: Vec<_> = state.into_iter().flat_map(|definition| definition.on.iter())
+        .filter_map(|(event, transition)| match transition {
+            TransitionDef::Fork { .. } => Some(json!({"event": event, "kind": "fork"})),
+            TransitionDef::Invoke { .. } => Some(json!({"event": event, "kind": "subworkflow"})),
+            _ => None,
+        }).collect();
+    json!({
+        "schema": "statewright/managed-delegation/v1",
+        "raw_delegation_allowed": false,
+        "recommendation": if route_change_requested { "statewright_managed_fork" } else { "continue_inline" },
+        "route_change_requested": route_change_requested,
+        "evidence_owner": "parent_workflow",
+        "managed_transition_candidates": managed_events,
+    })
 }
 
 /// Core MCP gateway that dispatches messages.
@@ -1239,6 +1289,16 @@ impl Gateway {
                     pending.event,
                     pending.message.clone().unwrap_or_else(|| "Review before proceeding".into())
                 ),
+            });
+        }
+        if pipeline.deterministic.source == "unmanaged_agent_delegation" {
+            let delegation = managed_delegation_policy(&session, tool_input);
+            return json!({
+                "decision": "deny",
+                "reason": "Raw agent delegation is not an execution boundary. Continue inline by default so evidence stays attached to the parent workflow; when a model or reasoning route change is required, use a declared Statewright-managed fork or subworkflow.",
+                "state": session.current_state,
+                "delegation": delegation,
+                "risk_assessment": pipeline.visible_json(),
             });
         }
         if let Some(reason) = enforcement::unsupported_shell_dialect_reason(tool_name, tool_input) {
@@ -3435,6 +3495,53 @@ mod tests {
         )
     }
 
+    fn delegation_gateway() -> Gateway {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "delegation",
+            "initial": "design",
+            "states": {
+                "design": {
+                    "model": "openai-codex/gpt-6-astra",
+                    "thinking_level": "high",
+                    "allowed_tools": ["collaborationspawn_agent"],
+                    "on": {
+                        "FORK_REVIEW": {"fork": {
+                            "branches": {"review": {"initial": "review", "terminal": "branch_done"}},
+                            "join": "all", "on_complete": "implement", "on_fail": "failed"
+                        }},
+                        "RUN_SPECIALIST": {"invoke": "specialist", "on_complete": "implement", "on_fail": "failed"}
+                    }
+                },
+                "review": {"on": {"DONE": "branch_done"}},
+                "branch_done": {"type": "final"},
+                "implement": {"type": "final"},
+                "failed": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("delegation-session".into(), definition.clone());
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                name: "collaborationspawn_agent".into(),
+                annotations: None,
+                description: None,
+                input_schema: json!({}),
+            },
+            crate::protocol::ToolCallResult::text("raw child must not run"),
+        )]);
+        let mut workflows = HashMap::new();
+        workflows.insert("delegation".into(), definition);
+        Gateway::new(
+            manager,
+            upstream,
+            "delegation-session".into(),
+            workflows,
+            Some("delegation".into()),
+            String::new(),
+            None,
+        )
+    }
+
     fn exploratory_gateway() -> Gateway {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id": "explore",
@@ -5148,6 +5255,45 @@ mod tests {
         let admitted = gw.adapter_pre_tool("read_file", &json!({ "path": "x" })).await;
         assert_eq!(admitted["decision"], "allow");
         assert!(admitted.get("approval_pending").is_none());
+    }
+
+    #[tokio::test]
+    async fn adapter_pre_tool_returns_provider_neutral_managed_delegation_policy() {
+        let mut gateway = delegation_gateway();
+
+        let inline = gateway.adapter_pre_tool("collaborationspawn_agent", &json!({
+            "task_name": "review", "message": "inspect the plan"
+        })).await;
+        assert_eq!(inline["decision"], "deny");
+        assert_eq!(inline["risk_assessment"]["deterministic_source"], "unmanaged_agent_delegation");
+        assert_eq!(inline["delegation"]["schema"], "statewright/managed-delegation/v1");
+        assert_eq!(inline["delegation"]["recommendation"], "continue_inline");
+        assert_eq!(inline["delegation"]["raw_delegation_allowed"], false);
+        assert_eq!(inline["delegation"]["evidence_owner"], "parent_workflow");
+        assert_eq!(inline["delegation"]["managed_transition_candidates"], json!([
+            {"event": "FORK_REVIEW", "kind": "fork"},
+            {"event": "RUN_SPECIALIST", "kind": "subworkflow"}
+        ]));
+
+        let routed = gateway.adapter_pre_tool("collaborationspawn_agent", &json!({
+            "task_name": "review", "message": "inspect the plan",
+            "model": "gpt-5.6-terra", "reasoning_effort": "medium"
+        })).await;
+        assert_eq!(routed["decision"], "deny");
+        assert_eq!(routed["delegation"]["recommendation"], "statewright_managed_fork");
+        assert_eq!(routed["delegation"]["route_change_requested"], true);
+
+        let provider_change = gateway.adapter_pre_tool("collaborationspawn_agent", &json!({
+            "model": "other-provider/gpt-6-astra", "reasoning_effort": "high"
+        })).await;
+        assert_eq!(provider_change["delegation"]["recommendation"], "statewright_managed_fork");
+        assert_eq!(provider_change["delegation"]["route_change_requested"], true);
+
+        let same_route = gateway.adapter_pre_tool("collaborationspawn_agent", &json!({
+            "model": "gpt-6-astra", "reasoning_effort": "high"
+        })).await;
+        assert_eq!(same_route["delegation"]["recommendation"], "continue_inline");
+        assert_eq!(same_route["delegation"]["route_change_requested"], false);
     }
 
     #[tokio::test]

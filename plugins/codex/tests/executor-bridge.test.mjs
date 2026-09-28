@@ -16,15 +16,25 @@ test("formats classifier denials for display without discarding machine evidence
     risk_assessment: {
       final_denial_basis: "semantic_threshold_not_met",
       required_authority: "complete_structural_evidence_or_separate_approval",
+      semantic_status: "Assessed",
       semantic_vector: { may_write: 0.86, external_or_account_effect: 0.56 },
+    },
+    classifier_rework: {
+      schema: "statewright/classifier-rework/v1",
+      attempts: 1,
+      max_reworks: 2,
+      action: "rework",
     },
   });
 
   assert.match(denial.display, /^Statewright guard: denied/);
   assert.match(denial.display, /bounded native operation/);
   assert.match(denial.display, /heredoc or inline interpreter/);
+  assert.match(denial.display, /Rework attempt 1\/2/);
+  assert.match(denial.display, /System One signals: read-only 0%, write 86%, destructive 0%, external 56%/);
   assert.doesNotMatch(denial.display, /0\.86|internal scoring/);
   assert.match(denial.machine, /"may_write":0\.86/);
+  assert.match(denial.machine, /"action":"rework"/);
   assert.doesNotMatch(denial.machine, /internal scoring/);
 });
 

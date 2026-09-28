@@ -29,7 +29,7 @@ SW_API_KEY=${SW_API_KEY:-sw-canary-key}
 SW_PB_APPROVAL_SECRET=${SW_PB_APPROVAL_SECRET:-sw-canary-approval-secret}
 # The pi host is launched with --no-extensions and no --provider, so the
 # canary pins it to the local Ollama-backed provider explicitly.
-SW_FALLBACK_MODEL=${SW_FALLBACK_MODEL:-ollama-ninfer-qwen38/qwen3.8-27b}
+SW_FALLBACK_MODEL=${SW_FALLBACK_MODEL:-casa/qwen3.8-27b}
 SW_TIMEOUT=${SW_TIMEOUT:-900}
 SW_REPO=${SW_REPO:-}
 

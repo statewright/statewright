@@ -37,3 +37,5 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 tokio-stream = "0.1"
 tower = "0.5"
 http-body-util = "0.1"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"

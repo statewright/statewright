@@ -13,6 +13,7 @@ import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
+import { GIT_CLOSEOUT_MODULE_PATH } from "./git-closeout.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -547,9 +548,13 @@ async function nextRouteRequest(controlDir, consumed) {
     .filter((name) => name === "route.json" || name.endsWith(".route.json"))
     .sort();
   for (const name of entries) {
-    if (consumed.has(name)) continue;
-    const request = JSON.parse(await readFile(join(controlDir, name), "utf8"));
-    consumed.add(name);
+    const contents = await readFile(join(controlDir, name), "utf8");
+    // Native hooks atomically overwrite current.route.json at each state
+    // boundary. Deduplicating only by filename permanently denies every
+    // route after the first one, so remember the exact receipt instead.
+    if (consumed.get(name) === contents) continue;
+    const request = JSON.parse(contents);
+    consumed.set(name, contents);
     return request;
   }
   return null;
@@ -573,7 +578,7 @@ export async function runManagedClient({ host, command, args, environment = proc
   const launchPrefixArgs = launch.prefixArgs;
   const oneShotCodexExec = codexOneShotInvocation(host, args);
   const controlDir = await mkdtemp(join(tmpdir(), `statewright-${host}-route-`));
-  const consumed = new Set();
+  const consumed = new Map();
   const consumedApprovals = new Set();
   const preparedApprovals = new Set();
   const approvalRetryAfter = new Map();
@@ -951,7 +956,30 @@ export async function installManagedClientShim({ host, launcherPath, home = home
     : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(launcherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
   await writeFile(shimPath, contents, { mode: windowsPlatform(platform) ? undefined : 0o755 });
   if (!windowsPlatform(platform)) await chmod(shimPath, 0o755);
+  await installGitCloseoutShim({ home, platform });
   return { shimDirectory, shimPath, realBinary: binary };
+}
+
+export async function installGitCloseoutShim({ home = homedir(), platform = process.platform } = {}) {
+  const shimDirectory = join(home, ".statewright", "bin");
+  await mkdir(shimDirectory, { recursive: true });
+  const shimPath = join(
+    shimDirectory,
+    windowsPlatform(platform) ? "statewright-git-closeout.cmd" : "statewright-git-closeout",
+  );
+  const contents = windowsPlatform(platform)
+    ? `@echo off\r\n"${process.execPath}" "${GIT_CLOSEOUT_MODULE_PATH}" %*\r\n`
+    : `#!/usr/bin/env sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(GIT_CLOSEOUT_MODULE_PATH)} "$@"\n`;
+  const temporary = `${shimPath}.statewright-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, contents, { mode: windowsPlatform(platform) ? undefined : 0o555 });
+    if (!windowsPlatform(platform)) await chmod(temporary, 0o555);
+    await rename(temporary, shimPath);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+  return shimPath;
 }
 
 function shellProfile(shell, home, platform = process.platform) {
@@ -1027,6 +1055,13 @@ export async function uninstallManagedClients({ home = homedir(), shell = proces
     const path = join(home, ".statewright", "bin", windowsPlatform(platform) ? `${host}.cmd` : host);
     try { await unlink(path); removed.push(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   }
+  const closeout = join(
+    home,
+    ".statewright",
+    "bin",
+    windowsPlatform(platform) ? "statewright-git-closeout.cmd" : "statewright-git-closeout",
+  );
+  try { await unlink(closeout); removed.push(closeout); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const profile = shellProfile(shell, home, platform);
   let profileRemoved = false;
   if (profile) {

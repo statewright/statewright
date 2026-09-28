@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -731,6 +731,25 @@ test("managed supervisor only restarts its own child after a route request", asy
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("managed supervisor consumes successive current.route.json receipts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-current-route-"));
+  const fake = join(root, "fake-codex.mjs");
+  const calls = join(root, "calls.log");
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\nwriteFileSync(join(control, "codex-root-session.json"), JSON.stringify({version:1,session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID}));\nconst first = join(control, "first-route");\nconst second = join(control, "second-route");\nif (!existsSync(first)) { writeFileSync(first, ""); writeFileSync(join(control, "current.route.json"), JSON.stringify({session_id:"session-current",root_session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID,run_id:"run-current",state:"localize",model:"openai-codex/gpt-5.6-terra",effort:"medium"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\nelse if (!existsSync(second)) { writeFileSync(second, ""); writeFileSync(join(control, "current.route.json"), JSON.stringify({session_id:"session-current",root_session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID,run_id:"run-current",state:"decision",model:"openai-codex/gpt-5.6-sol",effort:"high"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\n`);
+    await chmod(fake, 0o755);
+    assert.equal(await runManagedClient({
+      host: "codex", command: fake, args: ["--full-auto"],
+      environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+      home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
+    }), 0);
+    const callLines = (await readFile(calls, "utf8")).trim().split("\n");
+    assert.equal(callLines.length, 3);
+    assert.match(callLines[1], /-m gpt-5\.6-terra .*model_reasoning_effort="medium".*resume session-current/);
+    assert.match(callLines[2], /-m gpt-5\.6-sol .*model_reasoning_effort="high".*resume session-current/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("an unavailable Codex ladder stops the detached child before supervision exits", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-managed-unavailable-ladder-"));
   const fake = join(root, "fake-codex.mjs");
@@ -961,6 +980,9 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     await writeFile(launcher, "");
     const first = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(first.installed.length, 1);
+    const closeoutShim = join(home, ".statewright", "bin", "statewright-git-closeout");
+    assert.match(await readFile(closeoutShim, "utf8"), /git-closeout\.mjs/);
+    assert.equal((await stat(closeoutShim)).mode & 0o777, 0o555);
     assert.equal(await managedClientEnabled("codex", home), true);
     assert.equal(await managedClientEnabled("claude", home), false);
     const profile = await readFile(join(home, ".zshrc"), "utf8");
@@ -968,7 +990,7 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     const second = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(second.profile, null);
     const removed = await uninstallManagedClients({ home, shell: "/bin/zsh" });
-    assert.equal(removed.removed.length, 1);
+    assert.equal(removed.removed.length, 2);
     assert.equal(removed.profile, join(home, ".zshrc"));
     assert.doesNotMatch(await readFile(join(home, ".zshrc"), "utf8"), /statewright managed clients/);
     assert.equal(await managedClientEnabled("codex", home), false);
@@ -996,10 +1018,11 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
       const shimPath = join(home, ".statewright", "bin", `${host}.cmd`);
       assert.match(await readFile(shimPath, "utf8"), /statewright-managed-client|launcher\.mjs/i);
     }
+    assert.match(await readFile(join(home, ".statewright", "bin", "statewright-git-closeout.cmd"), "utf8"), /git-closeout\.mjs/);
     const profilePath = join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
     assert.match(await readFile(profilePath, "utf8"), /statewright managed clients/);
     const removed = await uninstallManagedClients({ home, platform: "win32" });
-    assert.equal(removed.removed.length, 2);
+    assert.equal(removed.removed.length, 3);
     assert.equal(removed.profile, profilePath);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

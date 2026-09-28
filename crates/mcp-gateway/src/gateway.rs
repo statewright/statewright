@@ -23,13 +23,16 @@ fn exploratory_policy_tool(tool: &ToolInfo) -> Option<&'static str> {
     }
     match tool.name.to_ascii_lowercase().as_str() {
         "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some("Bash"),
-        "read" | "read_file" | "grep" | "search_files" | "glob" | "find"
-        | "find_files" | "ls" | "list_directory" => Some("Read"),
+        "read" | "read_file" | "grep" | "search_files" | "glob" | "find" | "find_files" | "ls"
+        | "list_directory" => Some("Read"),
         _ if tool
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.read_only_hint)
-            == Some(true) => Some("Read"),
+            == Some(true) =>
+        {
+            Some("Read")
+        }
         _ => None,
     }
 }
@@ -108,9 +111,8 @@ impl Gateway {
                 workflow_name
             ));
         }
-        serde_json::from_value(value).map_err(|error| {
-            format!("Stored workflow '{}' is invalid: {}", workflow_name, error)
-        })
+        serde_json::from_value(value)
+            .map_err(|error| format!("Stored workflow '{}' is invalid: {}", workflow_name, error))
     }
 
     fn execution_definition(
@@ -240,8 +242,14 @@ impl Gateway {
     pub(crate) async fn persist_approval_checkpoint(&self) -> Result<(), &'static str> {
         #[cfg(feature = "metering")]
         if let Some(pool) = &self.db_pool {
-            let run_id = self.current_run_id.as_deref().ok_or("Approval has no durable run")?;
-            let session = self.session_manager.get(&self.session_id).ok_or("Workflow unavailable")?;
+            let run_id = self
+                .current_run_id
+                .as_deref()
+                .ok_or("Approval has no durable run")?;
+            let session = self
+                .session_manager
+                .get(&self.session_id)
+                .ok_or("Workflow unavailable")?;
             let saved = sqlx::query(
                 "UPDATE workflow_runs SET final_state = $1, context_snapshot = $2, updated = $3 \
                  WHERE id = $4 AND owner = $5 AND session_id = $6 AND status = 'running'",
@@ -273,7 +281,10 @@ impl Gateway {
         }
         #[cfg(feature = "metering")]
         {
-            let pool = self.db_pool.as_ref().ok_or("Approval recovery requires durable storage")?;
+            let pool = self
+                .db_pool
+                .as_ref()
+                .ok_or("Approval recovery requires durable storage")?;
             let row = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<serde_json::Value>)>(
                 "SELECT workflow_name, project_id, final_state, context_snapshot FROM workflow_runs \
                  WHERE id = $1 AND owner = $2 AND session_id = $3 AND status = 'running'",
@@ -293,7 +304,10 @@ impl Gateway {
                 &state,
             )
             .map_err(|_| "Invalid approval checkpoint")?;
-            if restored.pending_approval.as_ref().map(|pending| pending.approval_id.as_str())
+            if restored
+                .pending_approval
+                .as_ref()
+                .map(|pending| pending.approval_id.as_str())
                 != Some(approval_id)
                 || statewright_engine::validate_definition(&restored.definition).is_err()
             {
@@ -561,7 +575,10 @@ impl Gateway {
             // if the receipt was applied but the checkpoint save failed. Key
             // its audit entry by approval ID within the owned run so replay
             // cannot double-count the same human decision.
-            let approval_id = data.get("approval_id").and_then(|value| value.as_str()).map(str::to_owned);
+            let approval_id = data
+                .get("approval_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
             let owner = self.owner_id.clone();
             let session_id = self.transport_session_id.clone();
             let transition = serde_json::json!({"from": from, "to": audit_to, "event": event, "timestamp": now, "data": data});
@@ -763,28 +780,28 @@ impl Gateway {
                 }
             } else {
                 match &allowed {
-                Some(allowed_list) => {
-                    if allowed_list.contains(&upstream_tool.name)
-                        && !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                    Some(allowed_list) => {
+                        if allowed_list.contains(&upstream_tool.name)
+                            && !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                                &session.definition,
+                                &session.current_state,
+                                &upstream_tool.name,
+                            )
+                        {
+                            tools.push(upstream_tool.clone());
+                        }
+                    }
+                    None => {
+                        // No allow-list is unrestricted only after the explicit
+                        // deny list has been applied.
+                        if !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
                             &session.definition,
                             &session.current_state,
                             &upstream_tool.name,
-                        )
-                    {
-                        tools.push(upstream_tool.clone());
+                        ) {
+                            tools.push(upstream_tool.clone());
+                        }
                     }
-                }
-                None => {
-                    // No allow-list is unrestricted only after the explicit
-                    // deny list has been applied.
-                    if !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
-                        &session.definition,
-                        &session.current_state,
-                        &upstream_tool.name,
-                    ) {
-                        tools.push(upstream_tool.clone());
-                    }
-                }
                 }
             }
         }
@@ -854,8 +871,12 @@ impl Gateway {
         let upstream_tool = match self.upstream.tool_info(&params.name) {
             Ok(info) => info,
             Err(_) if self.active_workflow.is_none() => None,
-            Err(reason) => return JsonRpcResponse::success(id,
-                serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap()),
+            Err(reason) => {
+                return JsonRpcResponse::success(
+                    id,
+                    serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                );
+            }
         };
         let intent = self
             .session_manager
@@ -899,7 +920,8 @@ impl Gateway {
             &params.name,
             &params.arguments,
             intent.as_deref(),
-        ).await;
+        )
+        .await;
         if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
             return JsonRpcResponse::success(
                 id,
@@ -963,27 +985,32 @@ impl Gateway {
 
         match enforcement::enforce_tool_call(&session, &policy_tool_name) {
             EnforcementDecision::Allow => {
-                if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+                if let Some(reason) =
+                    enforcement::semantic_effect_capability_denial(&session, &pipeline)
+                {
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
+                            .unwrap(),
                     );
                 }
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
-                let pre_warning =
-                    match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
-                        PreCallDecision::Block(reason) => {
-                            return JsonRpcResponse::success(
-                                id,
-                                serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                    reason,
-                                ))
+                let pre_warning = match interceptors::pre_call_check_with_pipeline(
+                    &session,
+                    &params.name,
+                    &params.arguments,
+                    Some(&pipeline),
+                ) {
+                    PreCallDecision::Block(reason) => {
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
                                 .unwrap(),
-                            );
-                        }
-                        PreCallDecision::Warn(msg) => Some(msg),
-                        PreCallDecision::Allow => None,
-                    };
+                        );
+                    }
+                    PreCallDecision::Warn(msg) => Some(msg),
+                    PreCallDecision::Allow => None,
+                };
 
                 // Forward to upstream
                 self.session_manager.increment_iteration(&self.session_id);
@@ -1110,13 +1137,13 @@ impl Gateway {
             EnforcementDecision::ImplicitTransition { event, new_state } => {
                 let mut execution_session = session.clone();
                 execution_session.current_state = new_state.clone();
-                if let Some(reason) = enforcement::semantic_effect_capability_denial(
-                    &execution_session,
-                    &pipeline,
-                ) {
+                if let Some(reason) =
+                    enforcement::semantic_effect_capability_denial(&execution_session, &pipeline)
+                {
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
+                            .unwrap(),
                     );
                 }
                 // Apply the transition
@@ -1155,10 +1182,13 @@ impl Gateway {
                 }
             }
             EnforcementDecision::CheckpointReached { iteration, max } => {
-                if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+                if let Some(reason) =
+                    enforcement::semantic_effect_capability_denial(&session, &pipeline)
+                {
                     return JsonRpcResponse::success(
                         id,
-                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap(),
+                        serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
+                            .unwrap(),
                     );
                 }
                 // Allow the tool but signal checkpoint in the result
@@ -1212,17 +1242,28 @@ impl Gateway {
             Ok(info) => info,
             Err(reason) => return json!({"decision":"deny", "reason":reason}),
         };
-        let pipeline = risk_assessment::assess_native_pipeline_visible(registered_tool, tool_name, tool_input, intent).await;
+        let pipeline = risk_assessment::assess_native_pipeline_visible(
+            registered_tool,
+            tool_name,
+            tool_input,
+            intent,
+        )
+        .await;
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
-            None => return json!({
-                "decision": "deny",
-                "reason": "workflow session disappeared while semantic risk was assessed",
-                "risk_assessment": pipeline.visible_json(),
-            }),
+            None => {
+                return json!({
+                    "decision": "deny",
+                    "reason": "workflow session disappeared while semantic risk was assessed",
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_session_unavailable",
+                        "active_workflow_session",
+                    ),
+                });
+            }
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
-        // including tools the state whitelist would admit — until an
+        // including tools the state allowlist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
         // the gate through the state projection; they never decide it.
         if let Some(pending) = &session.pending_approval {
@@ -1231,7 +1272,10 @@ impl Gateway {
                 "approval_pending": true,
                 "approval_id": pending.approval_id,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "approval_pending",
+                    "human_approval",
+                ),
                 "reason": format!(
                     "APPROVAL PENDING (id: {}): the workflow is parked at state '{}' awaiting a human decision on event '{}' ({}). All tool calls are blocked until an authorized reviewer approves or rejects the pending approval; do not attempt further tool calls or transitions.",
                     pending.approval_id,
@@ -1247,36 +1291,70 @@ impl Gateway {
                 "reason": reason,
                 "available_tools": statewright_agent::tool_enforcer::get_allowed_tools(&session.definition, &session.current_state).unwrap_or_default(),
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "unsupported_shell_dialect",
+                    "supported_bash_dialect",
+                ),
             });
         }
-        if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+        if let Some(denial) = enforcement::semantic_effect_risk_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
         let original_denied = statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
-            &session.definition, &session.current_state, tool_name,
+            &session.definition,
+            &session.current_state,
+            tool_name,
         );
-        let policy_tool_name = if is_exploratory_read_only_state(&session) && registered_tool.is_some() && !original_denied {
+        let policy_tool_name = if is_exploratory_read_only_state(&session)
+            && registered_tool.is_some()
+            && !original_denied
+        {
             match registered_tool.and_then(exploratory_policy_tool) {
-                Some("Read") if pipeline.resolve_effect() != risk_assessment::ResolvedEffect::ReadOnly => return json!({
-                    "decision":"deny", "state":session.current_state,
-                    "reason":"MCP invocation has unresolved or mutating effects in this exploratory state.",
-                    "risk_assessment":pipeline.visible_json(),
-                }),
+                Some("Read")
+                    if pipeline.resolve_effect() != risk_assessment::ResolvedEffect::ReadOnly =>
+                {
+                    return json!({
+                        "decision":"deny", "state":session.current_state,
+                        "reason":"MCP invocation has unresolved or mutating effects in this exploratory state.",
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_effect_unresolved",
+                            "registered_read_only_effect",
+                        ),
+                    });
+                }
                 Some(policy) => policy.to_string(),
-                None => return json!({
-                    "decision":"deny", "state":session.current_state,
-                    "reason":"MCP tool is not registered as read-only in this exploratory state.",
-                    "risk_assessment":pipeline.visible_json(),
-                }),
+                None => {
+                    return json!({
+                        "decision":"deny", "state":session.current_state,
+                        "reason":"MCP tool is not registered as read-only in this exploratory state.",
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_registration_missing",
+                            "registered_read_only_tool",
+                        ),
+                    });
+                }
             }
         } else {
-            enforcement::resolve_adapter_tool_name(&session, tool_name, tool_input)
+            enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+                &session,
+                tool_name,
+                tool_input,
+                Some(&pipeline),
+                if registered_tool.is_some() {
+                    enforcement::AdapterToolOrigin::RegisteredUpstream
+                } else {
+                    enforcement::AdapterToolOrigin::NativeUnregistered
+                },
+            )
         };
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
             &session,
@@ -1292,21 +1370,27 @@ impl Gateway {
                     "reason": reason,
                     "available_tools": available_tools,
                     "state": session.current_state,
-                    "risk_assessment": pipeline.visible_json(),
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_tool_policy",
+                        "declared_tool_capability",
+                    ),
                 });
             }
             EnforcementDecision::ImplicitTransition { event, new_state } => {
                 let mut execution_session = session.clone();
                 execution_session.current_state = new_state.clone();
-                if let Some(reason) = enforcement::semantic_effect_capability_denial(
+                if let Some(denial) = enforcement::semantic_effect_capability_denial_details(
                     &execution_session,
                     &pipeline,
                 ) {
                     return json!({
                         "decision": "deny",
-                        "reason": reason,
+                        "reason": denial.reason,
                         "state": session.current_state,
-                        "risk_assessment": pipeline.visible_json(),
+                        "risk_assessment": pipeline.visible_json_for_denial(
+                            denial.basis,
+                            denial.required_authority,
+                        ),
                     });
                 }
                 let old_state = session.current_state.clone();
@@ -1334,7 +1418,10 @@ impl Gateway {
                         return json!({
                             "decision": "deny",
                             "reason": "workflow session disappeared during implicit transition",
-                            "risk_assessment": pipeline.visible_json(),
+                            "risk_assessment": pipeline.visible_json_for_denial(
+                                "workflow_session_unavailable",
+                                "active_workflow_session",
+                            ),
                         });
                     }
                 }
@@ -1348,22 +1435,35 @@ impl Gateway {
             }
         };
 
-        if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+        if let Some(denial) =
+            enforcement::semantic_effect_capability_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
 
-        let interceptor = interceptors::pre_call_check(&session, tool_name, tool_input);
+        let interceptor = interceptors::pre_call_check_with_pipeline(
+            &session,
+            tool_name,
+            tool_input,
+            Some(&pipeline),
+        );
         match interceptor {
             PreCallDecision::Block(reason) => json!({
                 "decision": "deny",
                 "reason": reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "interceptor_policy",
+                    "interceptor_clearance",
+                ),
             }),
             PreCallDecision::Warn(warning) => json!({
                 "decision": "allow",
@@ -1397,8 +1497,14 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"active": false, "error": "No active session"}),
         };
-        let policy_tool_name =
-            enforcement::resolve_adapter_tool_name(&before, tool_name, tool_input);
+        let origin = if self.upstream.tool_info(tool_name).ok().flatten().is_some() {
+            enforcement::AdapterToolOrigin::RegisteredUpstream
+        } else {
+            enforcement::AdapterToolOrigin::NativeUnregistered
+        };
+        let policy_tool_name = enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+            &before, tool_name, tool_input, None, origin,
+        );
         let previous_state = before.current_state.clone();
         self.session_manager.increment_iteration(&self.session_id);
 
@@ -1902,7 +2008,8 @@ impl Gateway {
                                 .set_pending_approval(&self.session_id, pending);
 
                             if let Err(error) = self.persist_approval_checkpoint().await {
-                                self.session_manager.clear_pending_approval(&self.session_id);
+                                self.session_manager
+                                    .clear_pending_approval(&self.session_id);
                                 return JsonRpcResponse::error(id, -32600, error);
                             }
 
@@ -2501,10 +2608,21 @@ impl Gateway {
                 let expected_run = match arguments.get("run_id") {
                     None => None,
                     Some(serde_json::Value::String(value))
-                        if resume && !value.trim().is_empty() && value.len() <= 1024
-                            && !value.chars().any(char::is_control) && arguments.get("branch").is_none() => Some(value.as_str()),
-                    Some(_) => return JsonRpcResponse::error(id, -32602,
-                        "run_id must be a nonempty exact resume selector with resume=true and no branch"),
+                        if resume
+                            && !value.trim().is_empty()
+                            && value.len() <= 1024
+                            && !value.chars().any(char::is_control)
+                            && arguments.get("branch").is_none() =>
+                    {
+                        Some(value.as_str())
+                    }
+                    Some(_) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32602,
+                            "run_id must be a nonempty exact resume selector with resume=true and no branch",
+                        );
+                    }
                 };
 
                 // Transport identity is established by the remote MCP layer
@@ -2766,7 +2884,9 @@ impl Gateway {
                 let current_state = if adr_path.is_some() {
                     "record"
                 } else {
-                    resumed_state.as_deref().unwrap_or(&execution_definition.initial)
+                    resumed_state
+                        .as_deref()
+                        .unwrap_or(&execution_definition.initial)
                 };
                 let context_budget =
                     self.session_manager
@@ -3333,9 +3453,13 @@ mod tests {
         assert_eq!(exploratory_policy_tool(&bash), Some("Bash"));
 
         let falsely_named_reader = ToolInfo {
-            name: "grep".into(), annotations: Some(crate::protocol::ToolAnnotations {
-                read_only_hint: Some(false), ..Default::default()
-            }), description: None, input_schema: json!({}),
+            name: "grep".into(),
+            annotations: Some(crate::protocol::ToolAnnotations {
+                read_only_hint: Some(false),
+                ..Default::default()
+            }),
+            description: None,
+            input_schema: json!({}),
         };
         assert_eq!(exploratory_policy_tool(&falsely_named_reader), None);
     }
@@ -3375,20 +3499,19 @@ mod tests {
             "guards": {}
         });
 
-        let selected = Gateway::authoritative_workflow_definition(
-            "test",
-            stale_catalog,
-            Some(durable),
-        )
-        .unwrap();
+        let selected =
+            Gateway::authoritative_workflow_definition("test", stale_catalog, Some(durable))
+                .unwrap();
         assert_eq!(selected.initial, "commit");
         assert_eq!(selected.states.len(), 1);
-        assert!(Gateway::authoritative_workflow_definition(
-            "test",
-            test_definition(),
-            Some(json!({"id": "test"})),
-        )
-        .is_err());
+        assert!(
+            Gateway::authoritative_workflow_definition(
+                "test",
+                test_definition(),
+                Some(json!({"id": "test"})),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3401,10 +3524,7 @@ mod tests {
             "guards": {}
         }))
         .unwrap();
-        let paused = crate::session::GatewaySession::new(
-            "test-session".into(),
-            test_definition(),
-        );
+        let paused = crate::session::GatewaySession::new("test-session".into(), test_definition());
 
         let effective = Gateway::execution_definition(fresh_definition, Some(&paused));
         assert_eq!(effective.initial, "planning");
@@ -3508,7 +3628,8 @@ mod tests {
                 },
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let manager = SessionManager::new();
         manager.create("alias-deny-session".into(), definition.clone());
         let mut workflows = HashMap::new();
@@ -3579,22 +3700,57 @@ mod tests {
                 "inspect": {"disallowed_tools": ["blocked_tool"], "on": {"DONE": "done"}},
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let manager = SessionManager::new();
         manager.create("blocklist-session".into(), definition.clone());
         let upstream = UpstreamManager::mock(vec![
-            (ToolInfo { name: "blocked_tool".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("no")),
-            (ToolInfo { name: "visible_tool".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("yes")),
+            (
+                ToolInfo {
+                    name: "blocked_tool".into(),
+                    annotations: None,
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("no"),
+            ),
+            (
+                ToolInfo {
+                    name: "visible_tool".into(),
+                    annotations: None,
+                    description: None,
+                    input_schema: json!({}),
+                },
+                crate::protocol::ToolCallResult::text("yes"),
+            ),
         ]);
         let mut workflows = HashMap::new();
         workflows.insert("blocklist-discovery".into(), definition);
-        let mut gateway = Gateway::new(manager, upstream, "blocklist-session".into(), workflows, Some("blocklist-discovery".into()), String::new(), None);
-        let response = gateway.handle_message(JsonRpcRequest {
-            jsonrpc: "2.0".into(), method: "tools/list".into(), params: Some(json!({})), id: Some(json!(1)),
-        }).await.unwrap();
+        let mut gateway = Gateway::new(
+            manager,
+            upstream,
+            "blocklist-session".into(),
+            workflows,
+            Some("blocklist-discovery".into()),
+            String::new(),
+            None,
+        );
+        let response = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/list".into(),
+                params: Some(json!({})),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
         let result = response.result.unwrap();
-        let names = result["tools"].as_array().unwrap().iter()
-            .filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
+        let names = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
         assert!(names.contains(&"visible_tool"));
         assert!(!names.contains(&"blocked_tool"));
     }
@@ -3614,15 +3770,50 @@ mod tests {
             let manager = SessionManager::new();
             manager.create(format!("{name}-session"), definition.clone());
             let upstream = UpstreamManager::mock(vec![
-                (ToolInfo { name: "Read".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("read")),
-                (ToolInfo { name: "Write".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("write")),
-                (ToolInfo { name: "other".into(), annotations: None, description: None, input_schema: json!({}) }, crate::protocol::ToolCallResult::text("other")),
+                (
+                    ToolInfo {
+                        name: "Read".into(),
+                        annotations: None,
+                        description: None,
+                        input_schema: json!({}),
+                    },
+                    crate::protocol::ToolCallResult::text("read"),
+                ),
+                (
+                    ToolInfo {
+                        name: "Write".into(),
+                        annotations: None,
+                        description: None,
+                        input_schema: json!({}),
+                    },
+                    crate::protocol::ToolCallResult::text("write"),
+                ),
+                (
+                    ToolInfo {
+                        name: "other".into(),
+                        annotations: None,
+                        description: None,
+                        input_schema: json!({}),
+                    },
+                    crate::protocol::ToolCallResult::text("other"),
+                ),
             ]);
             let mut workflows = HashMap::new();
             workflows.insert(name.into(), definition);
-            let gateway = Gateway::new(manager, upstream, format!("{name}-session"), workflows, Some(name.into()), String::new(), None);
+            let gateway = Gateway::new(
+                manager,
+                upstream,
+                format!("{name}-session"),
+                workflows,
+                Some(name.into()),
+                String::new(),
+                None,
+            );
             let result = gateway.handle_tools_list(Some(json!(1))).result.unwrap();
-            let mut names = result["tools"].as_array().unwrap().iter()
+            let mut names = result["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
                 .filter_map(|tool| tool["name"].as_str())
                 .filter(|tool| matches!(*tool, "Read" | "Write" | "other"))
                 .collect::<Vec<_>>();
@@ -3673,7 +3864,10 @@ mod tests {
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].tool, "registered_reader");
-        assert_eq!(receipts[0].state_intent.as_deref(), Some("exploratory_read_only"));
+        assert_eq!(
+            receipts[0].state_intent.as_deref(),
+            Some("exploratory_read_only")
+        );
 
         crate::risk_assessment::set_test_shadow_enabled(Some(false));
 
@@ -3696,12 +3890,15 @@ mod tests {
                 method: "tools/call".into(),
                 params: Some(json!({"name": "Bash", "arguments": {"command": "rg policy crates"}})),
                 id: Some(json!(4)),
-        })
-        .await
-        .unwrap();
+            })
+            .await
+            .unwrap();
         assert_eq!(shell.result.unwrap()["isError"], false);
 
-        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
+        for command in [
+            "git --no-pager branch -- new-name",
+            "git --no-pager tag -- new-name",
+        ] {
             let denied = gw
                 .handle_message(JsonRpcRequest {
                     jsonrpc: "2.0".into(),
@@ -3711,9 +3908,16 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(denied.result.unwrap()["isError"], true, "must reject {command}");
             assert_eq!(
-                gw.session_manager.get("explore-session").unwrap().current_state,
+                denied.result.unwrap()["isError"],
+                true,
+                "must reject {command}"
+            );
+            assert_eq!(
+                gw.session_manager
+                    .get("explore-session")
+                    .unwrap()
+                    .current_state,
                 "inspect",
                 "denial must not transition for {command}"
             );
@@ -3729,9 +3933,7 @@ mod tests {
             .await
             .unwrap();
         let blocked_result = blocked.result.unwrap();
-        let blocked_text = blocked_result["content"][0]["text"]
-            .as_str()
-            .unwrap();
+        let blocked_text = blocked_result["content"][0]["text"].as_str().unwrap();
         assert!(blocked_text.contains("not registered as read-only"));
     }
 
@@ -3783,12 +3985,14 @@ mod tests {
                     })
                 );
             }
-            assert!(tools
-                .iter()
-                .find(|t| t["name"] == "statewright_transition")
-                .unwrap()
-                .get("annotations")
-                .is_none());
+            assert!(
+                tools
+                    .iter()
+                    .find(|t| t["name"] == "statewright_transition")
+                    .unwrap()
+                    .get("annotations")
+                    .is_none()
+            );
         }
     }
 
@@ -3817,7 +4021,11 @@ mod tests {
         assert_eq!(allowed["decision"], "allow");
         assert_eq!(allowed["policy_tool_name"], "read_file");
         assert_eq!(allowed["risk_assessment"]["deterministic_risk"], "Low");
-        assert!(!allowed["risk_assessment"].to_string().contains("src/lib.rs"));
+        assert!(
+            !allowed["risk_assessment"]
+                .to_string()
+                .contains("src/lib.rs")
+        );
         let receipts = crate::risk_assessment::take_test_shadow_receipts();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].tool, "Read");
@@ -3841,6 +4049,55 @@ mod tests {
         let readonly_shell = tool_result_json(readonly_shell);
         assert_eq!(readonly_shell["decision"], "allow");
         assert_eq!(readonly_shell["policy_tool_name"], "read_file");
+
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let compound_read = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {
+                            "cmd": "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"
+                        }
+                    }
+                })),
+                id: Some(json!(22)),
+            })
+            .await
+            .unwrap();
+        let compound_read = tool_result_json(compound_read);
+        assert_eq!(compound_read["decision"], "allow", "{compound_read}");
+        assert_eq!(compound_read["policy_tool_name"], "read_file");
+        assert_eq!(
+            compound_read["risk_assessment"]["deterministic_source"],
+            "shell_ast"
+        );
+
+        let hidden_write = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({
+                    "name": "statewright_adapter_pre_tool",
+                    "arguments": {
+                        "tool_name": "exec_command",
+                        "tool_input": {"cmd": "git rev-parse HEAD || git push origin HEAD"}
+                    }
+                })),
+                id: Some(json!(23)),
+            })
+            .await
+            .unwrap();
+        let hidden_write = tool_result_json(hidden_write);
+        assert_eq!(hidden_write["decision"], "deny");
+        assert_eq!(
+            hidden_write["risk_assessment"]["deterministic_source"],
+            "shell_ast"
+        );
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
 
         let zsh = gateway
             .handle_message(JsonRpcRequest {
@@ -3917,22 +4174,39 @@ mod tests {
     #[tokio::test]
     async fn adapter_risk_uses_exact_registered_mcp_metadata() {
         let mut gateway = exploratory_gateway();
-        let reader = gateway.adapter_pre_tool("registered_reader", &json!({})).await;
+        let reader = gateway
+            .adapter_pre_tool("registered_reader", &json!({}))
+            .await;
         assert_eq!(reader["risk_assessment"]["deterministic_risk"], "Low");
-        assert_eq!(reader["risk_assessment"]["deterministic_source"], "mcp_annotation");
+        assert_eq!(
+            reader["risk_assessment"]["deterministic_source"],
+            "mcp_annotation"
+        );
         assert_eq!(reader["decision"], "allow");
-        let unknown = gateway.adapter_pre_tool("opaque_mutator", &json!({
-            "annotations":{"readOnlyHint":true}
-        })).await;
+        let unknown = gateway
+            .adapter_pre_tool(
+                "opaque_mutator",
+                &json!({
+                    "annotations":{"readOnlyHint":true}
+                }),
+            )
+            .await;
         assert_eq!(unknown["risk_assessment"]["deterministic_risk"], "Moderate");
         assert_eq!(unknown["decision"], "deny");
-        let deletion = gateway.adapter_pre_tool("registered_reader", &json!({"action":"delete"})).await;
+        let deletion = gateway
+            .adapter_pre_tool("registered_reader", &json!({"action":"delete"}))
+            .await;
         assert_eq!(deletion["decision"], "deny");
         assert_eq!(deletion["risk_assessment"]["deterministic_risk"], "High");
-        let direct = gateway.handle_message(JsonRpcRequest {
-            jsonrpc:"2.0".into(), method:"tools/call".into(), id:Some(json!(2)),
-            params:Some(json!({"name":"registered_reader","arguments":{"action":"delete"}})),
-        }).await.unwrap();
+        let direct = gateway
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(2)),
+                params: Some(json!({"name":"registered_reader","arguments":{"action":"delete"}})),
+            })
+            .await
+            .unwrap();
         assert_eq!(direct.result.unwrap()["isError"], true);
     }
 
@@ -3944,39 +4218,67 @@ mod tests {
             ("Read", "grep", "deny"),
         ] {
             let mut gateway = alias_deny_gateway(denied);
-            let response = gateway.handle_message(JsonRpcRequest {
-                jsonrpc: "2.0".into(),
-                method: "tools/call".into(),
-                params: Some(json!({
-                    "name": "statewright_adapter_pre_tool",
-                    "arguments": {"tool_name": native, "tool_input": {"path": "README.md"}}
-                })),
-                id: Some(json!(1)),
-            }).await.unwrap();
-            assert_eq!(tool_result_json(response)["decision"], expected, "{denied}/{native}");
-            assert_eq!(gateway.session_manager.get("alias-deny-session").unwrap().current_state, "inspect");
+            let response = gateway
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    params: Some(json!({
+                        "name": "statewright_adapter_pre_tool",
+                        "arguments": {"tool_name": native, "tool_input": {"path": "README.md"}}
+                    })),
+                    id: Some(json!(1)),
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                tool_result_json(response)["decision"],
+                expected,
+                "{denied}/{native}"
+            );
+            assert_eq!(
+                gateway
+                    .session_manager
+                    .get("alias-deny-session")
+                    .unwrap()
+                    .current_state,
+                "inspect"
+            );
         }
     }
 
     #[tokio::test]
     async fn adapter_rpc_rejects_exploratory_git_ref_creation_without_transition() {
         let mut gateway = exploratory_gateway();
-        for command in ["git --no-pager branch -- new-name", "git --no-pager tag -- new-name"] {
-            let response = gateway.handle_message(JsonRpcRequest {
-                jsonrpc: "2.0".into(),
-                method: "tools/call".into(),
-                params: Some(json!({
-                    "name": "statewright_adapter_pre_tool",
-                    "arguments": {
-                        "tool_name": "exec_command",
-                        "tool_input": {"cmd": command}
-                    }
-                })),
-                id: Some(json!(7)),
-            }).await.unwrap();
-            assert_eq!(tool_result_json(response)["decision"], "deny", "must reject {command}");
+        for command in [
+            "git --no-pager branch -- new-name",
+            "git --no-pager tag -- new-name",
+        ] {
+            let response = gateway
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    params: Some(json!({
+                        "name": "statewright_adapter_pre_tool",
+                        "arguments": {
+                            "tool_name": "exec_command",
+                            "tool_input": {"cmd": command}
+                        }
+                    })),
+                    id: Some(json!(7)),
+                })
+                .await
+                .unwrap();
             assert_eq!(
-                gateway.session_manager.get("explore-session").unwrap().current_state,
+                tool_result_json(response)["decision"],
+                "deny",
+                "must reject {command}"
+            );
+            assert_eq!(
+                gateway
+                    .session_manager
+                    .get("explore-session")
+                    .unwrap()
+                    .current_state,
                 "inspect",
                 "denial must not transition for {command}"
             );
@@ -3987,18 +4289,21 @@ mod tests {
     async fn adapter_rpc_allows_deterministic_git_introspection_without_semantic_confidence() {
         let mut gateway = exploratory_gateway();
         for command in ["git rev-parse HEAD", "git branch --all --no-color"] {
-            let response = gateway.handle_message(JsonRpcRequest {
-                jsonrpc: "2.0".into(),
-                method: "tools/call".into(),
-                params: Some(json!({
-                    "name": "statewright_adapter_pre_tool",
-                    "arguments": {
-                        "tool_name": "exec_command",
-                        "tool_input": {"cmd": command}
-                    }
-                })),
-                id: Some(json!(8)),
-            }).await.unwrap();
+            let response = gateway
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    params: Some(json!({
+                        "name": "statewright_adapter_pre_tool",
+                        "arguments": {
+                            "tool_name": "exec_command",
+                            "tool_input": {"cmd": command}
+                        }
+                    })),
+                    id: Some(json!(8)),
+                })
+                .await
+                .unwrap();
             let result = tool_result_json(response);
             assert_eq!(result["decision"], "allow", "must admit {command}");
             assert_eq!(result["risk_assessment"]["deterministic_risk"], "Low");
@@ -4106,11 +4411,13 @@ mod tests {
                 result["state_snapshot"]["allowed_tools"],
                 json!(["read_file", "grep"])
             );
-            assert!(result["state_snapshot"]["transitions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|transition| transition["event"] == "READY"));
+            assert!(
+                result["state_snapshot"]["transitions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|transition| transition["event"] == "READY")
+            );
         }
 
         assert_eq!(gw.session_id(), "test-session");
@@ -4153,7 +4460,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(tool_result_json(status)["available_workflows"], json!(["test"]));
+        assert_eq!(
+            tool_result_json(status)["available_workflows"],
+            json!(["test"])
+        );
 
         let before = gateway
             .session_manager
@@ -4408,7 +4718,10 @@ mod tests {
         };
         let response = gw.handle_message(req).await.unwrap();
         assert_eq!(response.error.unwrap().code, -32600);
-        assert_eq!(gw.session_manager.get("test-session").unwrap().checkpoint(), before);
+        assert_eq!(
+            gw.session_manager.get("test-session").unwrap().checkpoint(),
+            before
+        );
     }
 
     #[tokio::test]
@@ -4486,15 +4799,18 @@ mod tests {
         );
         assert!(gw.approval_projection("other", "apr_one").is_err());
         assert!(gw.approval_projection("run1", "apr_other").is_err());
-        assert_eq!(gw.approval_projection("run1", "apr_one").unwrap()["pending"]["reviewer"],
-            json!({"email":"release@example.com"}));
+        assert_eq!(
+            gw.approval_projection("run1", "apr_one").unwrap()["pending"]["reviewer"],
+            json!({"email":"release@example.com"})
+        );
         let receipt = json!({"approval_id": "apr_one", "run_id": "run1", "from_state": "working",
             "to_state": "deployed", "status": "approved", "context_snapshot": {"approved": true}});
         let mut foreign = receipt.clone();
         foreign["to_state"] = json!("completed");
-        assert!(gw
-            .apply_approval_receipt("run1", "apr_one", &foreign)
-            .is_err());
+        assert!(
+            gw.apply_approval_receipt("run1", "apr_one", &foreign)
+                .is_err()
+        );
         assert_eq!(
             gw.session_manager
                 .get("approval-session")
@@ -4592,7 +4908,10 @@ mod tests {
             .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
             .await
             .unwrap();
-        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO workflow_runs (id, owner, workflow_name, status, session_id, project_id) VALUES ('run-1', 'owner-a', 'approval-test', 'running', 'approval-session', 'project-a')")
@@ -4602,44 +4921,100 @@ mod tests {
         original.owner_id = "owner-a".into();
         original.project_id = Some("project-a".into());
         original.seed_native_usage_run("run-1", "working");
-        let response = original.handle_message(JsonRpcRequest {
-            jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(1)),
-            params: Some(json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}})),
-        }).await.unwrap();
+        let response = original
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(1)),
+                params: Some(
+                    json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}}),
+                ),
+            })
+            .await
+            .unwrap();
         assert!(response.error.is_none());
-        let checkpoint: serde_json::Value = sqlx::query_scalar(
-            "SELECT context_snapshot FROM workflow_runs WHERE id = 'run-1'",
-        ).fetch_one(&pool).await.unwrap();
-        let approval_id = checkpoint["session"]["pending_approval"]["approval_id"].as_str().unwrap();
+        let checkpoint: serde_json::Value =
+            sqlx::query_scalar("SELECT context_snapshot FROM workflow_runs WHERE id = 'run-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let approval_id = checkpoint["session"]["pending_approval"]["approval_id"]
+            .as_str()
+            .unwrap();
         assert_eq!(checkpoint["session"]["current_state"], "working");
 
         let mut replacement = approval_gateway();
         replacement.active_workflow = None;
         replacement.owner_id = "owner-a".into();
         replacement.db_pool = Some(pool.clone());
-        assert!(replacement.recover_pending_approval("run-1", "wrong-ticket").await.is_err());
+        assert!(
+            replacement
+                .recover_pending_approval("run-1", "wrong-ticket")
+                .await
+                .is_err()
+        );
         assert!(replacement.current_run_id.is_none());
         replacement.owner_id = "owner-b".into();
-        assert!(replacement.recover_pending_approval("run-1", approval_id).await.is_err());
+        assert!(
+            replacement
+                .recover_pending_approval("run-1", approval_id)
+                .await
+                .is_err()
+        );
         replacement.owner_id = "owner-a".into();
-        replacement.recover_pending_approval("run-1", approval_id).await.unwrap();
+        replacement
+            .recover_pending_approval("run-1", approval_id)
+            .await
+            .unwrap();
         assert_eq!(replacement.current_run_id.as_deref(), Some("run-1"));
-        assert_eq!(replacement.active_workflow.as_deref(), Some("approval-test"));
+        assert_eq!(
+            replacement.active_workflow.as_deref(),
+            Some("approval-test")
+        );
         assert_eq!(replacement.project_id.as_deref(), Some("project-a"));
-        assert_eq!(replacement.session_manager.get("approval-session").unwrap().checkpoint(), checkpoint);
-        assert!(replacement.recover_pending_approval("run-1", approval_id).await.is_err(),
-            "an already-active gateway must not overwrite its session");
+        assert_eq!(
+            replacement
+                .session_manager
+                .get("approval-session")
+                .unwrap()
+                .checkpoint(),
+            checkpoint
+        );
+        assert!(
+            replacement
+                .recover_pending_approval("run-1", approval_id)
+                .await
+                .is_err(),
+            "an already-active gateway must not overwrite its session"
+        );
 
         let mut unsaved = approval_gateway();
         unsaved.owner_id = "owner-a".into();
         unsaved.db_pool = Some(pool.clone());
         unsaved.seed_native_usage_run("missing-run", "working");
-        let response = unsaved.handle_message(JsonRpcRequest {
-            jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(2)),
-            params: Some(json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}})),
-        }).await.unwrap();
-        assert!(response.error.is_some(), "an unsaved approval must not reach the TUI");
-        assert!(unsaved.session_manager.get("approval-session").unwrap().pending_approval.is_none());
+        let response = unsaved
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(2)),
+                params: Some(
+                    json!({"name": "statewright_transition", "arguments": {"event": "DEPLOY"}}),
+                ),
+            })
+            .await
+            .unwrap();
+        assert!(
+            response.error.is_some(),
+            "an unsaved approval must not reach the TUI"
+        );
+        assert!(
+            unsaved
+                .session_manager
+                .get("approval-session")
+                .unwrap()
+                .pending_approval
+                .is_none()
+        );
         pool.close().await;
     }
 
@@ -4652,7 +5027,10 @@ mod tests {
             .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
             .await
             .unwrap();
-        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, session_id text, transitions json, transition_count integer, updated text)")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO workflow_runs (id, owner, session_id, transitions, transition_count) VALUES ('run-1', 'owner-a', 'approval-session', '[]', 0)")
@@ -4661,20 +5039,36 @@ mod tests {
         gateway.db_pool = Some(pool.clone());
         gateway.owner_id = "owner-a".into();
         gateway.seed_native_usage_run("run-1", "working");
-        gateway.record_external_transition("working", "deployed", "DEPLOY",
-            &json!({"approval_id": "apr_replayed"}));
+        gateway.record_external_transition(
+            "working",
+            "deployed",
+            "DEPLOY",
+            &json!({"approval_id": "apr_replayed"}),
+        );
         for _ in 0..100 {
-            let count: i32 = sqlx::query_scalar("SELECT transition_count FROM workflow_runs WHERE id = 'run-1'")
-                .fetch_one(&pool).await.unwrap();
-            if count > 0 { break; }
+            let count: i32 =
+                sqlx::query_scalar("SELECT transition_count FROM workflow_runs WHERE id = 'run-1'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            if count > 0 {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        gateway.record_external_transition("working", "deployed", "DEPLOY",
-            &json!({"approval_id": "apr_replayed"}));
+        gateway.record_external_transition(
+            "working",
+            "deployed",
+            "DEPLOY",
+            &json!({"approval_id": "apr_replayed"}),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(75)).await;
         let (count, transitions): (i32, serde_json::Value) = sqlx::query_as(
-            "SELECT transition_count, transitions FROM workflow_runs WHERE id = 'run-1'")
-            .fetch_one(&pool).await.unwrap();
+            "SELECT transition_count, transitions FROM workflow_runs WHERE id = 'run-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(count, 1);
         assert_eq!(transitions.as_array().unwrap().len(), 1);
         pool.close().await;
@@ -4709,43 +5103,45 @@ mod tests {
             serde_json::to_value(&restored.pending_approval).unwrap(),
             serde_json::to_value(&session.pending_approval).unwrap()
         );
-        assert!(crate::session::GatewaySession::from_checkpoint(
-            checkpoint.clone(),
-            "foreign",
-            "working"
-        )
-        .is_err());
-        assert!(crate::session::GatewaySession::from_checkpoint(
-            checkpoint.clone(),
-            "approval-session",
-            "completed"
-        )
-        .is_err());
-        assert!(crate::session::GatewaySession::from_checkpoint(
-            json!({}),
-            "approval-session",
-            "working"
-        )
-        .is_err());
+        assert!(
+            crate::session::GatewaySession::from_checkpoint(
+                checkpoint.clone(),
+                "foreign",
+                "working"
+            )
+            .is_err()
+        );
+        assert!(
+            crate::session::GatewaySession::from_checkpoint(
+                checkpoint.clone(),
+                "approval-session",
+                "completed"
+            )
+            .is_err()
+        );
+        assert!(
+            crate::session::GatewaySession::from_checkpoint(
+                json!({}),
+                "approval-session",
+                "working"
+            )
+            .is_err()
+        );
         let mut invalid = checkpoint;
         invalid["session"]["pending_approval"]["from_state"] = json!("foreign");
-        assert!(crate::session::GatewaySession::from_checkpoint(
-            invalid,
-            "approval-session",
-            "working"
-        )
-        .is_err());
+        assert!(
+            crate::session::GatewaySession::from_checkpoint(invalid, "approval-session", "working")
+                .is_err()
+        );
         let mut missing = session.checkpoint();
         missing["session"]
             .as_object_mut()
             .unwrap()
             .remove("pending_approval");
-        assert!(crate::session::GatewaySession::from_checkpoint(
-            missing,
-            "approval-session",
-            "working"
-        )
-        .is_err());
+        assert!(
+            crate::session::GatewaySession::from_checkpoint(missing, "approval-session", "working")
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -4889,18 +5285,29 @@ mod tests {
             "states": { "planning": { "type": "final" } },
             "x_preserved_extension": { "routing": ["terra", "sol"] }
         });
-        let other_definition = json!({"id": "other", "initial": "done", "states": { "done": { "type": "final" } }});
-        sqlx::query("INSERT INTO workflows (owner, name, definition) VALUES ($1, $2, $3), ($4, $5, $6)")
-            .bind("owner-a").bind("test").bind(&raw_definition)
-            .bind("owner-b").bind("test").bind(&other_definition)
-            .execute(&pool)
-            .await
-            .unwrap();
+        let other_definition =
+            json!({"id": "other", "initial": "done", "states": { "done": { "type": "final" } }});
+        sqlx::query(
+            "INSERT INTO workflows (owner, name, definition) VALUES ($1, $2, $3), ($4, $5, $6)",
+        )
+        .bind("owner-a")
+        .bind("test")
+        .bind(&raw_definition)
+        .bind("owner-b")
+        .bind("test")
+        .bind(&other_definition)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let mut gateway = test_gateway();
         gateway.owner_id = "owner-a".into();
         gateway.db_pool = Some(pool.clone());
-        let before_checkpoint = gateway.session_manager.get("test-session").unwrap().checkpoint();
+        let before_checkpoint = gateway
+            .session_manager
+            .get("test-session")
+            .unwrap()
+            .checkpoint();
         let before_session_id = gateway.session_id.clone();
         let before_active = gateway.active_workflow.clone();
 
@@ -4919,7 +5326,14 @@ mod tests {
         let response = tool_result_json(response);
         assert_eq!(response["name"], "test");
         assert_eq!(response["definition"], raw_definition);
-        assert_eq!(gateway.session_manager.get("test-session").unwrap().checkpoint(), before_checkpoint);
+        assert_eq!(
+            gateway
+                .session_manager
+                .get("test-session")
+                .unwrap()
+                .checkpoint(),
+            before_checkpoint
+        );
         assert_eq!(gateway.session_id, before_session_id);
         assert_eq!(gateway.active_workflow, before_active);
 
@@ -4941,7 +5355,13 @@ mod tests {
         let response = tool_result_json(response);
         assert_eq!(response["states"], json!(["planning"]));
         assert_eq!(
-            gateway.session_manager.get("test-session").unwrap().definition.states.len(),
+            gateway
+                .session_manager
+                .get("test-session")
+                .unwrap()
+                .definition
+                .states
+                .len(),
             1
         );
         pool.close().await;
@@ -4978,14 +5398,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selected, "owned-older");
-        assert!(gw
-            .paused_run("approval-test", "", Some("absent"))
-            .await
-            .is_err());
-        assert!(gw
-            .paused_run("approval-test", "foreign-project", Some("owned-older"))
-            .await
-            .is_err());
+        assert!(
+            gw.paused_run("approval-test", "", Some("absent"))
+                .await
+                .is_err()
+        );
+        assert!(
+            gw.paused_run("approval-test", "foreign-project", Some("owned-older"))
+                .await
+                .is_err()
+        );
         let paused: i64 =
             sqlx::query_scalar("SELECT count(*) FROM workflow_runs WHERE status='paused'")
                 .fetch_one(&pool)
@@ -5110,7 +5532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
+    async fn adapter_pre_tool_denies_allowlisted_tools_while_approval_pending() {
         let mut gw = approval_gateway();
         gw.session_manager.set_pending_approval(
             "approval-session",
@@ -5124,9 +5546,11 @@ mod tests {
             },
         );
 
-        // A tool the state whitelist admits is still denied while the gate
-        // is parked: the approval gate outranks the state whitelist.
-        let result = gw.adapter_pre_tool("read_file", &json!({ "path": "x" })).await;
+        // A tool the state allowlist admits is still denied while the gate
+        // is parked: the approval gate outranks the state allowlist.
+        let result = gw
+            .adapter_pre_tool("read_file", &json!({ "path": "x" }))
+            .await;
         assert_eq!(result["decision"], "deny");
         assert_eq!(result["approval_pending"], true);
         assert_eq!(result["approval_id"], "apr_gate");
@@ -5142,10 +5566,14 @@ mod tests {
 
         // An authorized reviewer resolves the gate; tool traffic is
         // admitted again under the normal state rules.
-        let cleared = gw.session_manager.clear_pending_approval("approval-session");
+        let cleared = gw
+            .session_manager
+            .clear_pending_approval("approval-session");
         assert!(cleared.is_some());
         assert_eq!(cleared.unwrap().approval_id, "apr_gate");
-        let admitted = gw.adapter_pre_tool("read_file", &json!({ "path": "x" })).await;
+        let admitted = gw
+            .adapter_pre_tool("read_file", &json!({ "path": "x" }))
+            .await;
         assert_eq!(admitted["decision"], "allow");
         assert!(admitted.get("approval_pending").is_none());
     }
@@ -5729,10 +6157,12 @@ mod tests {
     #[tokio::test]
     async fn adapter_implicit_transition_advances_usage_epoch() {
         let mut gw = implicit_transition_gateway();
-        let result = gw.adapter_pre_tool(
-            "Edit",
-            &json!({"file_path": "src/main.rs", "old_string": "a", "new_string": "b"}),
-        ).await;
+        let result = gw
+            .adapter_pre_tool(
+                "Edit",
+                &json!({"file_path": "src/main.rs", "old_string": "a", "new_string": "b"}),
+            )
+            .await;
 
         assert_eq!(result["decision"], "allow");
         let state = gw.current_state_snapshot(false).unwrap();
@@ -5807,10 +6237,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_cannot_bypass_blacklist_write_capability() {
+    async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",
-            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},
             "states": {
                 "inspect": {
                     "allowed_tools":["Edit"], "disallowed_tools":["Write"],
@@ -5818,21 +6248,14 @@ mod tests {
                 },
                 "done":{"type":"final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let manager = SessionManager::new();
         manager.create("checkpoint-policy-session".into(), definition.clone());
         manager.increment_iteration("checkpoint-policy-session");
         let mut workflows = HashMap::new();
         workflows.insert("checkpoint-policy".into(), definition);
-        let upstream = UpstreamManager::mock(vec![(
-            ToolInfo {
-                annotations: None,
-                name: "Edit".into(),
-                description: None,
-                input_schema: json!({"type":"object"}),
-            },
-            crate::protocol::ToolCallResult::text("must not execute"),
-        )]);
+        let upstream = UpstreamManager::mock(vec![]);
         let mut gateway = Gateway::new(
             manager,
             upstream,
@@ -5842,17 +6265,97 @@ mod tests {
             String::new(),
             None,
         );
-        let result = gateway.adapter_pre_tool(
-            "Edit",
-            &json!({"file_path":"src/main.rs","old_string":"a","new_string":"b"}),
-        ).await;
+        let result = gateway
+            .adapter_pre_tool(
+                "Edit",
+                &json!({"file_path":"src/main.rs","old_string":"a","new_string":"b"}),
+            )
+            .await;
         assert_eq!(result["decision"], "deny");
-        assert!(result["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked")));
-        let session = gateway.session_manager.get("checkpoint-policy-session").unwrap();
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked"))
+        );
+        assert_eq!(result["risk_assessment"]["equivalent_retry_allowed"], false);
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_capability_write_denied"
+        );
+        assert_eq!(result["risk_assessment"]["required_authority"], "Write");
+        let session = gateway
+            .session_manager
+            .get("checkpoint-policy-session")
+            .unwrap();
         assert_eq!(session.current_state, "inspect");
         assert_eq!(session.iteration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn registered_write_alias_cannot_inherit_native_allowlist_authority() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id":"registered-collision", "initial":"inspect",
+            "states": {
+                "inspect": {"allowed_tools":["Write"], "on":{"DONE":"done"}},
+                "done":{"type":"final"}
+            }
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("registered-collision-session".into(), definition.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("registered-collision".into(), definition);
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                annotations: serde_json::from_value(json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": true,
+                    "openWorldHint": true
+                }))
+                .unwrap(),
+                name: "apply_patch".into(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+            },
+            crate::protocol::ToolCallResult::text("must not execute"),
+        )]);
+        let mut gateway = Gateway::new(
+            manager,
+            upstream,
+            "registered-collision-session".into(),
+            workflows,
+            Some("registered-collision".into()),
+            String::new(),
+            None,
+        );
+
+        let result = gateway
+            .adapter_pre_tool("apply_patch", &json!({"patch":"redacted"}))
+            .await;
+
+        assert_eq!(result["decision"], "deny");
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("not available"))
+        );
+        assert_eq!(
+            result["risk_assessment"]["deterministic_source"],
+            "mcp_annotation"
+        );
+        assert_eq!(result["risk_assessment"]["deterministic_risk"], "Critical");
+        assert_ne!(
+            result["risk_assessment"]["deterministic_source"],
+            "native_write"
+        );
+        assert_eq!(
+            result["risk_assessment"]["required_authority"],
+            "declared_tool_capability"
+        );
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_tool_policy"
+        );
     }
 
     #[tokio::test]

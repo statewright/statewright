@@ -40,7 +40,7 @@ on an unintegrated branch; it was not proof of installed behavior.
   Unknown MCP mutations require the existing probability/uncertainty pathway;
   they do not silently become local writes.
 - Exploratory phases check invocation effects as well as metadata, even when
-  blacklist mode is absent. Explicit denials and pending approvals still apply.
+  denylist mode is absent. Explicit denials and pending approvals still apply.
 
 ## Scope and limitations
 

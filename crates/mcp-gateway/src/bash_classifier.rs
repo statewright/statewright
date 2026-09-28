@@ -27,6 +27,8 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
+    /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
+    GitLocalWrite,
     /// A known command whose only direct effect is bounded stdout output.
     SafeOutput,
     /// Shell syntax was recognized but could not be safely normalized.
@@ -54,20 +56,47 @@ pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape
     let mut shapes = Vec::new();
     for segment in split_segments(command).into_iter().take(8) {
         let tokens = simple_command_tokens(segment.trim())?;
-        if tokens.is_empty() { continue; }
+        if tokens.is_empty() {
+            continue;
+        }
         let mut index = 0;
-        while tokens.get(index).is_some_and(|token| token.contains('=') && !token.starts_with('=')) { index += 1; }
-        if tokens.get(index).is_some_and(|token| token.rsplit('/').next() == Some("command")) { index += 1; }
-        if tokens.get(index).is_some_and(|token| token.rsplit('/').next() == Some("env")) {
+        while tokens
+            .get(index)
+            .is_some_and(|token| token.contains('=') && !token.starts_with('='))
+        {
             index += 1;
-            while tokens.get(index).is_some_and(|token| token.starts_with('-') || token.contains('=')) { index += 1; }
+        }
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.rsplit('/').next() == Some("command"))
+        {
+            index += 1;
+        }
+        if tokens
+            .get(index)
+            .is_some_and(|token| token.rsplit('/').next() == Some("env"))
+        {
+            index += 1;
+            while tokens
+                .get(index)
+                .is_some_and(|token| token.starts_with('-') || token.contains('='))
+            {
+                index += 1;
+            }
         }
         let executable = tokens.get(index)?.rsplit('/').next()?.to_ascii_lowercase();
-        if !semantic_label(&executable) { return None; }
+        if !semantic_label(&executable) {
+            return None;
+        }
         index += 1;
         let operation = semantic_operation(&executable, &tokens[index..]);
-        let delegates_unknown_effect = semantic_delegates_unknown_effect(&executable, operation.as_deref());
-        shapes.push(SemanticCommandShape { executable, operation, delegates_unknown_effect });
+        let delegates_unknown_effect =
+            semantic_delegates_unknown_effect(&executable, operation.as_deref());
+        shapes.push(SemanticCommandShape {
+            executable,
+            operation,
+            delegates_unknown_effect,
+        });
     }
     (!shapes.is_empty()).then_some(shapes)
 }
@@ -77,7 +106,9 @@ pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape
 /// boundaries avoid treating `TOKEN_SUFFIX` as a reference to `TOKEN`.
 pub fn references_environment_variable(command: &str, name: &str) -> bool {
     if name.is_empty()
-        || !name.chars().all(|character| character.is_ascii_alphanumeric() || character == '_')
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
         return false;
     }
@@ -91,12 +122,16 @@ pub fn references_environment_variable(command: &str, name: &str) -> bool {
             if bytes.get(start) == Some(&b'{') {
                 let variable_start = start + 1;
                 if bytes.get(variable_start..variable_start + name_bytes.len()) == Some(name_bytes)
-                    && bytes.get(variable_start + name_bytes.len()).is_some_and(|byte| !is_name(*byte))
+                    && bytes
+                        .get(variable_start + name_bytes.len())
+                        .is_some_and(|byte| !is_name(*byte))
                 {
                     return true;
                 }
             } else if bytes.get(start..start + name_bytes.len()) == Some(name_bytes)
-                && bytes.get(start + name_bytes.len()).is_none_or(|byte| !is_name(*byte))
+                && bytes
+                    .get(start + name_bytes.len())
+                    .is_none_or(|byte| !is_name(*byte))
             {
                 return true;
             }
@@ -116,25 +151,118 @@ pub fn references_environment_variable(command: &str, name: &str) -> bool {
 }
 
 fn semantic_label(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 64
-        && value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
 fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
     if executable == "sed" && readonly_sed_args(tokens) {
         return Some("print".to_owned());
     }
-    let mut index = 0;
-    while tokens.get(index).is_some_and(|token| semantic_global_flag(executable, token)) { index += 1; }
+    let index = if executable == "git" {
+        git_subcommand_index(tokens, 0)?
+    } else {
+        0
+    };
     let candidate = tokens.get(index)?;
     let recognized = match executable {
-        "cargo" => matches!(candidate.as_str(), "build" | "check" | "clippy" | "doc" | "fetch" | "fix" | "install" | "metadata" | "publish" | "remove" | "run" | "test" | "uninstall" | "update"),
-        "docker" | "podman" => matches!(candidate.as_str(), "build" | "compose" | "create" | "exec" | "images" | "inspect" | "logs" | "ps" | "pull" | "push" | "rm" | "run" | "start" | "stop"),
-        "git" => matches!(candidate.as_str(), "add" | "branch" | "clean" | "clone" | "commit" | "diff" | "fetch" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "merge-base" | "pull" | "push" | "reset" | "restore" | "rev-parse" | "show" | "show-ref" | "status" | "tag" | "worktree"),
-        "kubectl" => matches!(candidate.as_str(), "apply" | "create" | "delete" | "describe" | "exec" | "get" | "logs" | "patch" | "rollout" | "scale"),
-        "npm" | "pnpm" => matches!(candidate.as_str(), "build" | "install" | "lint" | "publish" | "run" | "test" | "uninstall" | "update"),
-        "systemctl" => matches!(candidate.as_str(), "disable" | "enable" | "is-active" | "restart" | "start" | "status" | "stop"),
-        "tmux" => matches!(candidate.as_str(), "capture-pane" | "display-message" | "has-session" | "kill-pane" | "kill-session" | "list-panes" | "list-sessions" | "new-session" | "send-keys" | "show-options"),
+        "cargo" => matches!(
+            candidate.as_str(),
+            "build"
+                | "check"
+                | "clippy"
+                | "doc"
+                | "fetch"
+                | "fix"
+                | "install"
+                | "metadata"
+                | "publish"
+                | "remove"
+                | "run"
+                | "test"
+                | "uninstall"
+                | "update"
+        ),
+        "docker" | "podman" => matches!(
+            candidate.as_str(),
+            "build"
+                | "compose"
+                | "create"
+                | "exec"
+                | "images"
+                | "inspect"
+                | "logs"
+                | "ps"
+                | "pull"
+                | "push"
+                | "rm"
+                | "run"
+                | "start"
+                | "stop"
+        ),
+        "git" => matches!(
+            candidate.as_str(),
+            "add"
+                | "branch"
+                | "clean"
+                | "clone"
+                | "commit"
+                | "diff"
+                | "fetch"
+                | "init"
+                | "log"
+                | "ls-files"
+                | "ls-remote"
+                | "ls-tree"
+                | "merge-base"
+                | "pull"
+                | "push"
+                | "reset"
+                | "restore"
+                | "rev-parse"
+                | "show"
+                | "show-ref"
+                | "status"
+                | "tag"
+                | "worktree"
+        ),
+        "kubectl" => matches!(
+            candidate.as_str(),
+            "apply"
+                | "create"
+                | "delete"
+                | "describe"
+                | "exec"
+                | "get"
+                | "logs"
+                | "patch"
+                | "rollout"
+                | "scale"
+        ),
+        "npm" | "pnpm" => matches!(
+            candidate.as_str(),
+            "build" | "install" | "lint" | "publish" | "run" | "test" | "uninstall" | "update"
+        ),
+        "systemctl" => matches!(
+            candidate.as_str(),
+            "disable" | "enable" | "is-active" | "restart" | "start" | "status" | "stop"
+        ),
+        "tmux" => matches!(
+            candidate.as_str(),
+            "capture-pane"
+                | "display-message"
+                | "has-session"
+                | "kill-pane"
+                | "kill-session"
+                | "list-panes"
+                | "list-sessions"
+                | "new-session"
+                | "send-keys"
+                | "show-options"
+        ),
         _ => false,
     };
     recognized.then(|| candidate.to_ascii_lowercase())
@@ -143,14 +271,15 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
 fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) -> bool {
     match (executable, operation) {
         ("task" | "cargo" | "docker" | "podman" | "kubectl" | "npm" | "pnpm", _) => true,
+        (
+            "bash" | "sh" | "dash" | "ksh" | "zsh" | "python" | "python3" | "node" | "ruby"
+            | "perl" | "eval" | "xargs",
+            _,
+        ) => true,
         ("tmux", Some("new-session" | "send-keys")) => true,
-        _ => false,
-    }
-}
-
-fn semantic_global_flag(executable: &str, token: &str) -> bool {
-    match executable {
-        "git" => matches!(token, "--bare" | "--no-pager" | "--no-optional-locks"),
+        // Git staging can invoke repository-configured clean/filter-process
+        // helpers. Generic `git add` therefore remains delegated/unknown.
+        ("git", Some("add")) => true,
         _ => false,
     }
 }
@@ -162,6 +291,7 @@ impl OpClass {
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
+            OpClass::GitLocalWrite => &["GitLocalWrite"],
             OpClass::FileRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
             // calls as well as read-only shell searches.  Grep and Glob are
@@ -313,6 +443,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::FileWrite
             | OpClass::FileModify
             | OpClass::LocalWrite
+            | OpClass::GitLocalWrite
             | OpClass::Destructive
             | OpClass::Network
             | OpClass::GitWrite => return None,
@@ -362,10 +493,9 @@ fn strip_readonly_stderr_sink(command: &str) -> Option<String> {
             let end = index + SINK.len();
             let next_is_boundary = command.get(end..).is_some_and(|tail| {
                 tail.is_empty()
-                    || tail
-                        .chars()
-                        .next()
-                        .is_some_and(|value| value.is_whitespace() || matches!(value, ';' | '|' | '&'))
+                    || tail.chars().next().is_some_and(|value| {
+                        value.is_whitespace() || matches!(value, ';' | '|' | '&')
+                    })
             });
             if next_is_boundary {
                 normalized.push(' ');
@@ -393,36 +523,47 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
     // The end-of-options marker is meaningful to Git: operands after it can
     // create a branch/tag, so retain the complete argv rather than slicing it
     // away before the command grammar inspects it.
-    let subcommand_index = args.iter().position(|arg| !arg.starts_with('-'))?;
+    let subcommand_index = git_subcommand_index(args, 0)?;
     let subcommand = args.get(subcommand_index)?.as_str();
-    let global_options = &args[..subcommand_index];
     let command_args = &args[subcommand_index + 1..];
     let unsafe_flag = |arg: &String| {
-        matches!(arg.as_str(), "-c" | "--config-env" | "--exec-path" | "--ext-diff" | "--no-index" | "--output" | "-o" | "--textconv")
-            || arg.starts_with("-c")
+        matches!(
+            arg.as_str(),
+            "-c" | "--config-env"
+                | "--exec-path"
+                | "--ext-diff"
+                | "--no-index"
+                | "--output"
+                | "-o"
+                | "--textconv"
+        ) || arg.starts_with("-c")
             || arg.starts_with("--config-env=")
             || arg.starts_with("--exec-path=")
             || arg.starts_with("--output=")
     };
-    if args.iter().any(unsafe_flag)
-        || !global_options.iter().all(|arg| matches!(arg.as_str(), "--no-pager" | "--no-optional-locks"))
-    {
+    if args.iter().any(unsafe_flag) {
         return None;
     }
-    let no_pager = global_options.iter().any(|arg| arg == "--no-pager");
+    let no_pager = args[..subcommand_index]
+        .iter()
+        .any(|arg| arg == "--no-pager");
     match subcommand {
         // These built-in Git plumbing/introspection commands do not invoke
         // configurable diff, text-conversion, signing, or pager helpers. The
         // shell parser above has already rejected expansion, redirection, and
         // unsafe global options, so they are deterministic local reads.
-        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" => Some("Read"),
+        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" | "status" => Some("Read"),
         // Branch listing is also a bounded read. Keep creation/deletion forms
         // out by reusing the complete argv classifier instead of matching the
         // subcommand name alone.
-        "branch" if matches!(
-            classify_git(&tokens.iter().map(String::as_str).collect::<Vec<_>>()),
-            OpClass::GitRead
-        ) => Some("Read"),
+        "branch"
+            if matches!(
+                classify_git(&tokens.iter().map(String::as_str).collect::<Vec<_>>()),
+                OpClass::GitRead
+            ) =>
+        {
+            Some("Read")
+        }
         "diff" if no_pager => {
             let boundary = command_args
                 .iter()
@@ -435,9 +576,9 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
             // proof that Git cannot start a configured helper.
             (options.iter().any(|arg| arg == "--no-ext-diff")
                 && options.iter().any(|arg| arg == "--no-textconv")
-                && options.iter().all(|arg| {
-                    matches!(arg.as_str(), "--no-ext-diff" | "--no-textconv")
-                }))
+                && options
+                    .iter()
+                    .all(|arg| matches!(arg.as_str(), "--no-ext-diff" | "--no-textconv")))
             .then_some("Read")
         }
         "branch" | "tag" if no_pager => {
@@ -454,10 +595,12 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
             };
             if command_args.is_empty() {
                 Some("Read")
-            } else if matches!(before_boundary.first().map(String::as_str), Some("--list" | "-l"))
-                && before_boundary[1..]
-                    .iter()
-                    .all(|arg| !arg.starts_with('-') && !arg.is_empty())
+            } else if matches!(
+                before_boundary.first().map(String::as_str),
+                Some("--list" | "-l")
+            ) && before_boundary[1..]
+                .iter()
+                .all(|arg| !arg.starts_with('-') && !arg.is_empty())
                 && (!has_boundary || after_boundary.iter().all(|arg| !arg.is_empty()))
             {
                 Some("Read")
@@ -481,7 +624,9 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
         return false;
     };
     if allowed_tokens.first().is_some_and(|token| token == "task")
-        && allowed_tokens.last().is_some_and(|token| token.ends_with(":*"))
+        && allowed_tokens
+            .last()
+            .is_some_and(|token| token.ends_with(":*"))
     {
         if command_tokens.len() < allowed_tokens.len() {
             return false;
@@ -494,9 +639,9 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
         let task_name = &command_tokens[namespace_index];
         let suffix = task_name.strip_prefix(namespace).unwrap_or_default();
         return !suffix.is_empty()
-            && suffix
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, ':' | '_' | '-'));
+            && suffix.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, ':' | '_' | '-')
+            });
     }
     !allowed_tokens.is_empty()
         && command_tokens.len() >= allowed_tokens.len()
@@ -505,7 +650,7 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
 
 // --- Internal helpers ---
 
-fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
+pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut chars = command.chars().peekable();
@@ -667,8 +812,9 @@ fn git_command_tokens(command: &str) -> Option<Vec<String>> {
                 // action token before execution (for example `p{u..u}sh` or
                 // `rem*`). Preserve that as opaque instead of classifying the
                 // pre-expansion spelling. Quoted/escaped literals remain safe.
-                ';' | '|' | '&' | '\n' | '\r' | '`' | '$'
-                | '{' | '}' | '*' | '?' | '[' | ']' => return None,
+                ';' | '|' | '&' | '\n' | '\r' | '`' | '$' | '{' | '}' | '*' | '?' | '[' | ']' => {
+                    return None;
+                }
                 _ => current.push(ch),
             },
         }
@@ -770,8 +916,22 @@ fn readonly_test_predicate(args: &[String]) -> bool {
         [operator, operand]
             if matches!(
                 operator.as_str(),
-                "-b" | "-c" | "-d" | "-e" | "-f" | "-h" | "-L" | "-n" | "-p"
-                    | "-r" | "-S" | "-s" | "-t" | "-v" | "-w" | "-x" | "-z"
+                "-b" | "-c"
+                    | "-d"
+                    | "-e"
+                    | "-f"
+                    | "-h"
+                    | "-L"
+                    | "-n"
+                    | "-p"
+                    | "-r"
+                    | "-S"
+                    | "-s"
+                    | "-t"
+                    | "-v"
+                    | "-w"
+                    | "-x"
+                    | "-z"
             ) =>
         {
             operator != "-v" || is_shell_identifier(operand)
@@ -779,9 +939,21 @@ fn readonly_test_predicate(args: &[String]) -> bool {
         [_, operator, _]
             if matches!(
                 operator.as_str(),
-                "=" | "==" | "!=" | "-ef" | "-eq" | "-ge" | "-gt" | "-le" | "-lt"
-                    | "-ne" | "-nt" | "-ot"
-            ) => true,
+                "=" | "=="
+                    | "!="
+                    | "-ef"
+                    | "-eq"
+                    | "-ge"
+                    | "-gt"
+                    | "-le"
+                    | "-lt"
+                    | "-ne"
+                    | "-nt"
+                    | "-ot"
+            ) =>
+        {
+            true
+        }
         _ => false,
     }
 }
@@ -807,13 +979,21 @@ fn classify_tmux(segment: &str) -> OpClass {
     let args = &tokens[2..];
     let has_shell_format = args.iter().any(|argument| argument.contains("#("));
     match operation {
-        "capture-pane" if args.iter().any(|argument| argument == "-p")
-            && !args.iter().any(|argument| argument == "-b" || argument.starts_with("-b="))
-            && !has_shell_format => OpClass::FileRead,
-        "display-message" if args.iter().any(|argument| argument == "-p")
-            && !has_shell_format => OpClass::FileRead,
-        "has-session" | "list-panes" | "list-sessions" | "show-options"
-            if !has_shell_format => OpClass::FileRead,
+        "capture-pane"
+            if args.iter().any(|argument| argument == "-p")
+                && !args
+                    .iter()
+                    .any(|argument| argument == "-b" || argument.starts_with("-b="))
+                && !has_shell_format =>
+        {
+            OpClass::FileRead
+        }
+        "display-message" if args.iter().any(|argument| argument == "-p") && !has_shell_format => {
+            OpClass::FileRead
+        }
+        "has-session" | "list-panes" | "list-sessions" | "show-options" if !has_shell_format => {
+            OpClass::FileRead
+        }
         "capture-pane" | "display-message" => OpClass::LocalWrite,
         "kill-pane" | "kill-session" => OpClass::Destructive,
         _ => OpClass::Passthrough,
@@ -833,10 +1013,12 @@ fn is_bounded_tmux_goal_dispatch(command: &str) -> bool {
     executable.rsplit('/').next() == Some("tmux")
         && operation == "send-keys"
         && target_flag == "-t"
-        && target.strip_prefix('%').is_some_and(|pane| {
-            !pane.is_empty() && pane.bytes().all(|byte| byte.is_ascii_digit())
-        })
-        && goal.strip_prefix("/goal ").is_some_and(|body| !body.trim().is_empty())
+        && target
+            .strip_prefix('%')
+            .is_some_and(|pane| !pane.is_empty() && pane.bytes().all(|byte| byte.is_ascii_digit()))
+        && goal
+            .strip_prefix("/goal ")
+            .is_some_and(|body| !body.trim().is_empty())
         && matches!(submit.as_str(), "Enter" | "C-m")
 }
 
@@ -872,10 +1054,13 @@ fn readonly_checksum_args(executable: &str, args: &[String]) -> bool {
     } else {
         args
     };
-    !args.is_empty() && args.iter().all(|arg| {
-        arg.starts_with(|ch: char| ch.is_ascii_alphanumeric() || "_./".contains(ch))
-            && arg.chars().all(|ch| ch.is_ascii_alphanumeric() || "_./:@%+=, -".contains(ch))
-    })
+    !args.is_empty()
+        && args.iter().all(|arg| {
+            arg.starts_with(|ch: char| ch.is_ascii_alphanumeric() || "_./".contains(ch))
+                && arg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "_./:@%+=, -".contains(ch))
+        })
 }
 
 /// Admit only sed's bounded print-only viewer form. Arbitrary sed programs can
@@ -934,9 +1119,7 @@ fn readonly_sed_print_program(program: &str) -> bool {
         return false;
     }
     let valid_address = |address: &str| {
-        address == "$"
-            || (!address.is_empty()
-                && address.bytes().all(|byte| byte.is_ascii_digit()))
+        address == "$" || (!address.is_empty() && address.bytes().all(|byte| byte.is_ascii_digit()))
     };
     valid_address(first) && second.is_none_or(valid_address)
 }
@@ -1103,6 +1286,9 @@ fn classify_segment(segment: &str) -> OpClass {
         "tee" => OpClass::FileWrite,
         "cp" | "mv" | "install" | "rsync" => OpClass::FileWrite,
         "dd" => OpClass::FileWrite,
+        // Creating a directory is a bounded local mutation. It is not
+        // destructive and does not delegate execution to another program.
+        "mkdir" => OpClass::LocalWrite,
 
         // Destructive
         "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
@@ -1128,6 +1314,10 @@ fn classify_segment(segment: &str) -> OpClass {
         }
         "git" => OpClass::Passthrough,
 
+        "statewright-git-closeout" if invoked == "statewright-git-closeout" => {
+            classify_statewright_git_closeout(segment)
+        }
+
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
         "tmux" => classify_tmux(segment),
@@ -1144,7 +1334,18 @@ fn find_has_action(segment: &str) -> bool {
         return true;
     };
     tokens.iter().skip(1).any(|token| {
-        matches!(token.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fls" | "-fprint" | "-fprint0" | "-fprintf")
+        matches!(
+            token.as_str(),
+            "-delete"
+                | "-exec"
+                | "-execdir"
+                | "-ok"
+                | "-okdir"
+                | "-fls"
+                | "-fprint"
+                | "-fprint0"
+                | "-fprintf"
+        )
     })
 }
 
@@ -1171,26 +1372,18 @@ fn fd_has_execution(segment: &str) -> bool {
 
 /// Classify a git command by its subcommand.
 fn classify_git(tokens: &[&str]) -> OpClass {
-    // Admit only global switches that do not consume a following operand or
-    // configure executable helpers. Treat `-C`, `-c`, `--config-env`, and all
-    // other global forms as opaque rather than mistaking their values for the
-    // subcommand.
-    let mut subcommand_index = 1;
-    while matches!(
-        tokens.get(subcommand_index).copied(),
-        Some("--no-pager" | "--no-optional-locks")
-    ) {
-        subcommand_index += 1;
-    }
-    let subcmd = tokens.get(subcommand_index).copied().filter(|token| !token.starts_with('-'));
+    let Some(subcommand_index) = git_subcommand_index(tokens, 1) else {
+        return OpClass::Passthrough;
+    };
+    let subcmd = tokens.get(subcommand_index).copied();
 
     match subcmd {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
         | Some("reflog") | Some("rev-parse") | Some("ls-files") | Some("ls-tree")
         | Some("merge-base") | Some("show-ref") => OpClass::GitRead,
 
-        Some("branch") => git_ref_listing_only(tokens, "branch"),
-        Some("tag") => git_ref_listing_only(tokens, "tag"),
+        Some("branch") => git_ref_listing_only(tokens, subcommand_index),
+        Some("tag") => git_ref_listing_only(tokens, subcommand_index),
         Some("stash") => {
             if tokens.iter().any(|token| matches!(*token, "list" | "show")) {
                 OpClass::GitRead
@@ -1198,7 +1391,9 @@ fn classify_git(tokens: &[&str]) -> OpClass {
                 OpClass::GitWrite
             }
         }
-        Some("worktree") => classify_git_worktree(tokens),
+        Some("worktree") => classify_git_worktree(tokens, subcommand_index),
+
+        Some("init") => classify_git_init(tokens, subcommand_index),
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -1214,19 +1409,134 @@ fn classify_git(tokens: &[&str]) -> OpClass {
 
         Some("clean") => OpClass::Destructive,
         Some("clone") | Some("fetch") | Some("pull") => OpClass::Network,
-        Some("add") => OpClass::Passthrough, // staging is local, not a write
+        Some("add") => OpClass::Passthrough,
         _ => OpClass::Passthrough,
     }
+}
+
+/// Return the literal Git subcommand after a deliberately finite set of safe
+/// global options. `-C <path>` selects a local working directory; its operand
+/// must never be mistaken for the verb. Unknown, missing, or option-shaped
+/// operands remain unclassified.
+fn git_subcommand_index<T: AsRef<str>>(tokens: &[T], mut index: usize) -> Option<usize> {
+    loop {
+        let argument = tokens.get(index)?.as_ref();
+        match argument {
+            "--no-pager" | "--no-optional-locks" => index += 1,
+            "-c" => {
+                let config = tokens.get(index + 1)?.as_ref();
+                if !matches!(
+                    config,
+                    "core.hooksPath=/dev/null" | "core.fsmonitor=false" | "commit.gpgSign=false"
+                ) {
+                    return None;
+                }
+                index += 2;
+            }
+            "-C" => {
+                let path = tokens.get(index + 1)?.as_ref();
+                if path.is_empty() || path.starts_with('-') {
+                    return None;
+                }
+                index += 2;
+            }
+            _ if argument.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+}
+
+/// `git init` is a bounded local write when it names at most one literal
+/// directory and uses only presentation or initial-branch options. Options
+/// that redirect repository metadata, import templates, or alter repository
+/// storage semantics remain opaque rather than inheriting this authority.
+fn classify_git_init(tokens: &[&str], subcommand_index: usize) -> OpClass {
+    let args = &tokens[subcommand_index + 1..];
+    let mut index = 0;
+    let mut directory_seen = false;
+    let mut branch_seen = false;
+
+    while let Some(argument) = args.get(index).copied() {
+        match argument {
+            "-q" | "--quiet" => index += 1,
+            "-b" | "--initial-branch" if !branch_seen => {
+                let Some(branch) = args.get(index + 1).copied() else {
+                    return OpClass::Passthrough;
+                };
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 2;
+            }
+            _ if argument.starts_with("--initial-branch=") && !branch_seen => {
+                let branch = argument.trim_start_matches("--initial-branch=");
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 1;
+            }
+            _ if !argument.is_empty() && !argument.starts_with('-') && !directory_seen => {
+                directory_seen = true;
+                index += 1;
+            }
+            _ => return OpClass::Passthrough,
+        }
+    }
+
+    OpClass::LocalWrite
+}
+
+fn literal_git_path(path: &str) -> bool {
+    const MAX_PATH_BYTES: usize = 4096;
+    !path.is_empty()
+        && path.len() <= MAX_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && !path.starts_with(':')
+        && !path.starts_with('~')
+        && !path.contains('\\')
+        && !matches!(path, "." | ".." | "--")
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+        && !path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '*' | '?' | '[' | ']'))
+}
+
+fn classify_statewright_git_closeout(segment: &str) -> OpClass {
+    // GitLocalWrite relies on the managed client installing this command from
+    // the signed/validated plugin bundle. The local OS account and shim path
+    // are trusted control-plane inputs; the remote gateway cannot attest a
+    // deliberately replaced same-user executable from shell text alone.
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return OpClass::Passthrough;
+    };
+    if tokens.len() < 5
+        || tokens[0] != "statewright-git-closeout"
+        || tokens[1] != "--message"
+        || tokens[2].is_empty()
+        || tokens[2].len() > 160
+        || tokens[2].chars().any(char::is_control)
+        || tokens[3] != "--"
+        || tokens.len() > 36
+        || !tokens[4..].iter().all(|path| literal_git_path(path))
+    {
+        // The executable is the trusted closeout helper, but this invocation
+        // is outside its bounded grammar. Treat it as an ordinary local write
+        // so a commit-only state that grants GitLocalWrite cannot inherit it.
+        return OpClass::LocalWrite;
+    }
+    OpClass::GitLocalWrite
 }
 
 /// `git worktree` without an action, or with `list`, is observational. Bounded
 /// setup/maintenance actions mutate only local repository metadata or paths;
 /// removal is destructive. Unknown forms fail closed through the ordinary
 /// semantic fallback.
-fn classify_git_worktree(tokens: &[&str]) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == "worktree") else {
-        return OpClass::Passthrough;
-    };
+fn classify_git_worktree(tokens: &[&str], index: usize) -> OpClass {
     match tokens.get(index + 1).copied() {
         None | Some("list") => OpClass::GitRead,
         Some("add" | "lock" | "move" | "repair" | "unlock") => OpClass::LocalWrite,
@@ -1237,10 +1547,7 @@ fn classify_git_worktree(tokens: &[&str]) -> OpClass {
 
 /// Ref creation is mutating.  Keep the read classifier deliberately small:
 /// no positional ref means a listing, and explicit list/show flags are reads.
-fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == subcommand) else {
-        return OpClass::GitWrite;
-    };
+fn git_ref_listing_only(tokens: &[&str], index: usize) -> OpClass {
     let args = &tokens[index + 1..];
     // Mutation flags remain authoritative even when combined with --list.
     // Git accepts several of these in mixed forms, so an earlier listing flag
@@ -1269,12 +1576,20 @@ fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
         return OpClass::GitWrite;
     }
     if args.is_empty()
-        || args.iter().any(|token| matches!(*token, "-l" | "--list" | "--show-current"))
+        || args
+            .iter()
+            .any(|token| matches!(*token, "-l" | "--list" | "--show-current"))
         || args.iter().all(|token| {
             matches!(
                 *token,
-                "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose"
-                    | "--no-color" | "--no-column"
+                "-a" | "--all"
+                    | "-r"
+                    | "--remotes"
+                    | "-v"
+                    | "-vv"
+                    | "--verbose"
+                    | "--no-color"
+                    | "--no-column"
             ) || token.starts_with("--color=")
                 || token.starts_with("--sort=")
                 || token.starts_with("--format=")
@@ -1376,6 +1691,11 @@ mod tests {
     }
 
     #[test]
+    fn mkdir_is_a_bounded_local_write() {
+        assert_eq!(classify("mkdir -p docs/plans"), vec![OpClass::LocalWrite]);
+    }
+
+    #[test]
     fn grep_is_content_search() {
         let classes = classify("grep -r 'pattern' .");
         assert!(classes.contains(&OpClass::ContentSearch));
@@ -1434,7 +1754,11 @@ mod tests {
             "sed -n '1,360p' first.md && sed -n '1,360p' second.md",
         ] {
             assert!(classify(command).contains(&OpClass::FileRead), "{command}");
-            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+            assert_eq!(
+                readonly_capabilities(command),
+                Some(vec!["Read"]),
+                "{command}"
+            );
         }
     }
 
@@ -1454,7 +1778,10 @@ mod tests {
             "sed --in-place 's/x/y/' README.md",
             "sed --in-place=.bak 's/x/y/' README.md",
         ] {
-            assert!(classify(command).contains(&OpClass::FileModify), "{command}");
+            assert!(
+                classify(command).contains(&OpClass::FileModify),
+                "{command}"
+            );
             assert_eq!(readonly_capabilities(command), None, "{command}");
         }
     }
@@ -1510,7 +1837,11 @@ mod tests {
 
     #[test]
     fn git_worktree_effects_are_classified_by_action() {
-        for command in ["git worktree", "git worktree list", "git worktree list --porcelain"] {
+        for command in [
+            "git worktree",
+            "git worktree list",
+            "git worktree list --porcelain",
+        ] {
             assert!(classify(command).contains(&OpClass::GitRead), "{command}");
         }
         for command in [
@@ -1520,7 +1851,10 @@ mod tests {
             "git worktree repair /private/worktree",
             "git worktree unlock /private/worktree",
         ] {
-            assert!(classify(command).contains(&OpClass::LocalWrite), "{command}");
+            assert!(
+                classify(command).contains(&OpClass::LocalWrite),
+                "{command}"
+            );
         }
         assert!(classify("git worktree prune --expire now").contains(&OpClass::Destructive));
         assert!(classify("git worktree remove /private/worktree").contains(&OpClass::Destructive));
@@ -1554,7 +1888,10 @@ mod tests {
             "git worktree prune --expire now >receipt.txt",
             "git clean -fd >receipt.txt",
         ] {
-            assert!(classify(command).contains(&OpClass::Destructive), "{command}");
+            assert!(
+                classify(command).contains(&OpClass::Destructive),
+                "{command}"
+            );
         }
         assert!(classify("git push origin main >receipt.txt").contains(&OpClass::GitWrite));
         assert!(classify("git \"push\" origin main >receipt.txt").contains(&OpClass::GitWrite));
@@ -1563,7 +1900,10 @@ mod tests {
         assert!(classify("git rev-parse HEAD").contains(&OpClass::GitRead));
         assert!(classify("git branch --all --no-color").contains(&OpClass::GitRead));
         assert_eq!(classify("git worktree opaque"), vec![OpClass::Passthrough]);
-        assert_eq!(classify("/tmp/git worktree add /private/worktree main"), vec![OpClass::Passthrough]);
+        assert_eq!(
+            classify("/tmp/git worktree add /private/worktree main"),
+            vec![OpClass::Passthrough]
+        );
         for command in [
             "git -C worktree add /private/worktree main",
             "git -c worktree list",
@@ -1571,6 +1911,133 @@ mod tests {
             "git --config-env worktree list",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_global_working_directory_preserves_the_real_subcommand() {
+        assert_eq!(
+            classify("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            vec![OpClass::GitRead]
+        );
+        assert_eq!(
+            classify("git -C /private/repo init child"),
+            vec![OpClass::LocalWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo push origin main"),
+            vec![OpClass::GitWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo clean -fd"),
+            vec![OpClass::Destructive]
+        );
+        for command in [
+            "git -C",
+            "git -C -- status",
+            "git -c core.fsmonitor=/tmp/helper status",
+            "git --git-dir /private/repo/.git status",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_init_is_only_a_bounded_literal_local_write() {
+        for command in [
+            "git init",
+            "git init /Users/ben/dev/panoply",
+            "git init -b main /Users/ben/dev/panoply",
+            "git init --initial-branch main /Users/ben/dev/panoply",
+            "git init --initial-branch=main --quiet /Users/ben/dev/panoply",
+            "git -C /Users/ben/dev init panoply",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
+        }
+        for command in [
+            "git init --bare",
+            "git init first second",
+            "git init -template",
+            "git init -b",
+            "git init -b --quiet /Users/ben/dev/panoply",
+            "git init -b main -b trunk /Users/ben/dev/panoply",
+            "git init --template=/private/template /Users/ben/dev/panoply",
+            "git init --separate-git-dir /private/git /Users/ben/dev/panoply",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_add_remains_delegated_unknown() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json",
+            "git -C /Users/ben/dev/panoply add -- README.md docs/plan/001-plan.md",
+            "git add -- 'docs/a file.md'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+        for command in [
+            "git add",
+            "git add README.md",
+            "git add --",
+            "git add -A",
+            "git add --all",
+            "git add --patch README.md",
+            "git add --pathspec-from-file=paths.txt",
+            "git add -- .",
+            "git add -- docs",
+            "git add -- docs/",
+            "git add -- -leading-dash",
+            "git add -- ~/README.md",
+            "git add -- ':(top)README.md'",
+            "git add -- ':(glob)**/*.rs'",
+            "git add -- '*.rs'",
+            "git add -- 'src/[ab].rs'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn semantic_shape_never_hides_git_add_delegation() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md",
+            "git add -- docs",
+            "git add -- .",
+            "git add -- '*.rs'",
+            "git add README.md",
+        ] {
+            let shape = semantic_command_shapes(command).unwrap();
+            assert_eq!(shape[0].operation.as_deref(), Some("add"), "{command}");
+            assert!(shape[0].delegates_unknown_effect, "{command}");
+        }
+    }
+
+    #[test]
+    fn trusted_git_closeout_is_a_dedicated_bounded_capability() {
+        let command = "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json";
+        assert_eq!(classify(command), vec![OpClass::GitLocalWrite]);
+        assert_eq!(OpClass::GitLocalWrite.required_tools(), &["GitLocalWrite"]);
+    }
+
+    #[test]
+    fn git_closeout_rejects_scope_escape_and_ambiguous_forms() {
+        for command in [
+            "statewright-git-closeout",
+            "statewright-git-closeout --message test README.md",
+            "statewright-git-closeout --message '' -- README.md",
+            "statewright-git-closeout --message test -- /tmp/secret",
+            "statewright-git-closeout --message test -- ../secret",
+            "statewright-git-closeout --message test -- docs/../secret",
+            "statewright-git-closeout --message test -- docs//secret",
+            "statewright-git-closeout --message test -- 'docs/*.md'",
+            "/tmp/statewright-git-closeout --message test -- README.md",
+            "statewright-git-closeout --message test -- README.md && git push",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::GitLocalWrite], "{command}");
         }
     }
 
@@ -1867,21 +2334,34 @@ mod tests {
             "shasum -a 256 -- receipt.json ./second.json",
             "shasum -a 256 receipt.json | head -n 1",
         ] {
-            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+            assert_eq!(
+                readonly_capabilities(command),
+                Some(vec!["Read"]),
+                "{command}"
+            );
         }
         for command in [
-            "sha256sum", "sha256sum -", "sha256sum --",
-            "sha256sum --check receipt.sha256", "sha256sum -c receipt.sha256",
-            "sha256sum --binary receipt.json", "sha256sum receipt.json --help",
-            "shasum receipt.json", "shasum -a 512 receipt.json", "shasum -a 256",
+            "sha256sum",
+            "sha256sum -",
+            "sha256sum --",
+            "sha256sum --check receipt.sha256",
+            "sha256sum -c receipt.sha256",
+            "sha256sum --binary receipt.json",
+            "sha256sum receipt.json --help",
+            "shasum receipt.json",
+            "shasum -a 512 receipt.json",
+            "shasum -a 256",
             "shasum -a 256 --check receipt.sha256",
             "sha256sum receipt.json > receipt.sha256",
             "sha256sum receipt.json; touch marker",
             "sha256sum receipt.json & touch marker",
-            "sha256sum $(touch marker)", "sha256sum `touch marker`",
-            "sha256sum \"$RECEIPT\"", "sha256sum *.json",
+            "sha256sum $(touch marker)",
+            "sha256sum `touch marker`",
+            "sha256sum \"$RECEIPT\"",
+            "sha256sum *.json",
             "sha256sum \"unterminated",
-            "openssl dgst -sha256 receipt.json", "python3 -c 'print(1)'",
+            "openssl dgst -sha256 receipt.json",
+            "python3 -c 'print(1)'",
         ] {
             assert_eq!(readonly_capabilities(command), None, "{command}");
         }
@@ -1900,16 +2380,28 @@ mod tests {
         assert_eq!(readonly_capabilities("printf x > marker.txt"), None);
         assert_eq!(readonly_capabilities("python3 -c 'print(1)'"), None);
         assert_eq!(readonly_capabilities("rm marker.txt"), None);
-        assert_eq!(readonly_capabilities("awk 'BEGIN { system(\"touch marker\") }'"), None);
+        assert_eq!(
+            readonly_capabilities("awk 'BEGIN { system(\"touch marker\") }'"),
+            None
+        );
         assert_eq!(readonly_capabilities("git branch feature"), None);
         assert_eq!(readonly_capabilities("git tag v1"), None);
-        assert_eq!(readonly_capabilities("git rev-parse HEAD"), Some(vec!["Read"]));
+        assert_eq!(
+            readonly_capabilities("git rev-parse HEAD"),
+            Some(vec!["Read"])
+        );
         assert_eq!(
             readonly_capabilities("git branch --all --no-color"),
             Some(vec!["Read"]),
         );
-        assert_eq!(readonly_capabilities("rg --pre /bin/cat needle README.md"), None);
-        assert_eq!(readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"), None);
+        assert_eq!(
+            readonly_capabilities("rg --pre /bin/cat needle README.md"),
+            None
+        );
+        assert_eq!(
+            readonly_capabilities("ripgrep --pre=/bin/cat needle README.md"),
+            None
+        );
     }
 
     #[test]
@@ -1922,7 +2414,10 @@ mod tests {
             readonly_capabilities("[ -f README.md ]"),
             Some(vec!["Read"]),
         );
-        assert_eq!(readonly_capabilities("test -v SAFE_NAME"), Some(vec!["Read"]));
+        assert_eq!(
+            readonly_capabilities("test -v SAFE_NAME"),
+            Some(vec!["Read"])
+        );
         for command in [
             "test",
             "[ -f README.md",
@@ -1953,7 +2448,11 @@ mod tests {
             "rg --files 2>/dev/null && touch marker",
             "/tmp/sed -n '1,20p'",
         ] {
-            assert_eq!(readonly_capabilities(unsafe_command), None, "{unsafe_command}");
+            assert_eq!(
+                readonly_capabilities(unsafe_command),
+                None,
+                "{unsafe_command}"
+            );
         }
     }
 
@@ -1973,7 +2472,11 @@ mod tests {
             "echo label >> marker.txt",
             "echo `touch marker`",
         ] {
-            assert_eq!(readonly_capabilities(unsafe_command), None, "{unsafe_command}");
+            assert_eq!(
+                readonly_capabilities(unsafe_command),
+                None,
+                "{unsafe_command}"
+            );
         }
     }
 
@@ -2015,7 +2518,10 @@ mod tests {
             "tmux send-keys -t %36 '/goal work' Enter extra",
             "tmux send-keys -t %36 '/goal work' Enter; opaque-wrapper",
         ] {
-            assert!(!classify(command).contains(&OpClass::LocalWrite), "{command}");
+            assert!(
+                !classify(command).contains(&OpClass::LocalWrite),
+                "{command}"
+            );
         }
     }
 
@@ -2041,7 +2547,6 @@ mod tests {
             "git --no-pager diff --no-ext-diff -- --no-textconv",
             "/tmp/git --no-pager diff --no-ext-diff --no-textconv",
             "git -ccore.fsmonitor=/tmp/helper status",
-            "git status",
             "git --no-pager branch -- new-name",
             "git --no-pager tag -- new-name",
             "git --no-pager branch --list --delete",
@@ -2062,6 +2567,8 @@ mod tests {
             assert_eq!(readonly_capabilities(command), None, "{command}");
         }
         for command in [
+            "git status",
+            "git -C /Users/ben/dev/anytype-heart status --short --branch",
             "git --no-pager diff --no-ext-diff --no-textconv",
             "git --no-pager diff --no-ext-diff --no-textconv -- README.md",
             "git --no-pager branch --list",
@@ -2069,7 +2576,11 @@ mod tests {
             "git --no-pager branch --list -- feature*",
             "git --no-pager tag --list",
         ] {
-            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+            assert_eq!(
+                readonly_capabilities(command),
+                Some(vec!["Read"]),
+                "{command}"
+            );
         }
     }
 
@@ -2078,12 +2589,25 @@ mod tests {
         let shapes = semantic_command_shapes(
             "API_TOKEN=secret tmux capture-pane -p -t %33 -S -80 && git --no-pager status /private/repo",
         ).unwrap();
-        assert_eq!(shapes, vec![
-            SemanticCommandShape { executable: "tmux".into(), operation: Some("capture-pane".into()), delegates_unknown_effect: false },
-            SemanticCommandShape { executable: "git".into(), operation: Some("status".into()), delegates_unknown_effect: false },
-        ]);
+        assert_eq!(
+            shapes,
+            vec![
+                SemanticCommandShape {
+                    executable: "tmux".into(),
+                    operation: Some("capture-pane".into()),
+                    delegates_unknown_effect: false
+                },
+                SemanticCommandShape {
+                    executable: "git".into(),
+                    operation: Some("status".into()),
+                    delegates_unknown_effect: false
+                },
+            ]
+        );
         let rendered = serde_json::to_string(&shapes).unwrap();
-        for secret in ["secret", "%33", "-80", "/private/repo"] { assert!(!rendered.contains(secret)); }
+        for secret in ["secret", "%33", "-80", "/private/repo"] {
+            assert!(!rendered.contains(secret));
+        }
     }
 
     #[test]
@@ -2126,37 +2650,81 @@ mod tests {
 
     #[test]
     fn semantic_shape_never_promotes_option_values_to_operations() {
+        let git = semantic_command_shapes("git -C secretProject status").unwrap();
+        assert_eq!(git[0].operation.as_deref(), Some("status"));
+        assert!(
+            !serde_json::to_string(&git)
+                .unwrap()
+                .contains("secretProject")
+        );
+
         for (command, secret) in [
             ("tmux -L privateSocket capture-pane -p", "privateSocket"),
-            ("git -C secretProject status", "secretProject"),
-            ("git --git-dir --private-client-token status", "--private-client-token"),
+            (
+                "git --git-dir --private-client-token status",
+                "--private-client-token",
+            ),
             ("tmux -L --privateSocket capture-pane", "--privateSocket"),
         ] {
             let shape = semantic_command_shapes(command).unwrap();
             assert!(shape[0].operation.is_none(), "{command}");
-            assert!(!serde_json::to_string(&shape).unwrap().contains(secret), "{command}");
+            assert!(
+                !serde_json::to_string(&shape).unwrap().contains(secret),
+                "{command}"
+            );
         }
         let task = semantic_command_shapes("task private-client-token").unwrap();
         assert!(task[0].operation.is_none());
         assert!(task[0].delegates_unknown_effect);
-        assert!(!serde_json::to_string(&task).unwrap().contains("private-client-token"));
+        assert!(
+            !serde_json::to_string(&task)
+                .unwrap()
+                .contains("private-client-token")
+        );
 
-        for command in ["npm test", "pnpm lint", "cargo test", "docker exec container id", "kubectl exec pod -- id", "tmux new-session shell"] {
-            assert!(semantic_command_shapes(command).unwrap()[0].delegates_unknown_effect, "{command}");
+        for command in [
+            "npm test",
+            "pnpm lint",
+            "cargo test",
+            "docker exec container id",
+            "kubectl exec pod -- id",
+            "tmux new-session shell",
+        ] {
+            assert!(
+                semantic_command_shapes(command).unwrap()[0].delegates_unknown_effect,
+                "{command}"
+            );
         }
     }
 
     #[test]
     fn blocked_environment_references_use_exact_identifier_boundaries() {
         for command in [
-            "TOKEN=value command", "env TOKEN=value command", "echo $TOKEN",
-            "echo ${TOKEN}", "echo ${TOKEN:-fallback}", "echo x$TOKEN/path",
+            "TOKEN=value command",
+            "env TOKEN=value command",
+            "echo $TOKEN",
+            "echo ${TOKEN}",
+            "echo ${TOKEN:-fallback}",
+            "echo x$TOKEN/path",
         ] {
-            assert!(references_environment_variable(command, "TOKEN"), "{command}");
+            assert!(
+                references_environment_variable(command, "TOKEN"),
+                "{command}"
+            );
         }
-        for command in ["echo $TOKEN_SUFFIX", "TOKEN_SUFFIX=value command", "echo ordinary"] {
-            assert!(!references_environment_variable(command, "TOKEN"), "{command}");
+        for command in [
+            "echo $TOKEN_SUFFIX",
+            "TOKEN_SUFFIX=value command",
+            "echo ordinary",
+        ] {
+            assert!(
+                !references_environment_variable(command, "TOKEN"),
+                "{command}"
+            );
         }
-        assert!(!references_environment_variable("echo $TOKEN", "TOKEN-NOT-A-NAME"));
+        assert!(!references_environment_variable(
+            "echo $TOKEN",
+            "TOKEN-NOT-A-NAME"
+        ));
     }
 }

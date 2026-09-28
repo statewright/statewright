@@ -58,7 +58,7 @@ installed the lockfile-pinned development dependencies; no tracked files changed
 - Executor command from repository root: `node --test plugins/executor/tests/*.test.mjs`
   — 587 passed, 1 failed. The one failure is
   `public-repository-scrub.test.mjs`, listing two pre-existing private-host
-  strings and one pre-existing `ninfer` string. Running that single test against
+  strings and one pre-existing private local-model provider name. Running that single test against
   the clean base worktree at `138a8a5` produced the identical failure. Outcome:
   inherited non-pass, unrelated to this slice, not waived or described as pass.
 - `node plugins/codex/scripts/sync-desktop-runtime.mjs --check` — passed.

@@ -6,7 +6,7 @@ Accepted for bounded implementation on 2026-09-27.
 
 ## Context
 
-`blacklist_heuristic_v1` was intended to admit operations by effect while preserving explicit denials. The Codex hook instead classifies shell text with a growing local pattern list and rejects every `opaque` result. The gateway's semantic-risk pipeline exists, but is explicitly shadow-only: it can raise a deterministic risk floor for telemetry and cannot authorize a novel safe operation. Its remote request also omitted the executable and subcommand, so it lacked enough evidence to distinguish operations such as `tmux capture-pane` and `tmux send-keys`.
+`denylist_heuristic_v1` is intended to admit operations by effect while preserving explicit denials. The Codex hook instead classifies shell text with a growing local pattern list and rejects every `opaque` result. The gateway's semantic-risk pipeline exists, but is explicitly shadow-only: it can raise a deterministic risk floor for telemetry and cannot authorize a novel safe operation. Its remote request also omitted the executable and subcommand, so it lacked enough evidence to distinguish operations such as `tmux capture-pane` and `tmux send-keys`.
 
 This produced command-specific exceptions and repeated policy denials. It also split policy between standalone hooks and executor-owned gateway enforcement.
 
@@ -26,7 +26,7 @@ Effect resolution is not itself permission. A resolved local write must still pa
 
 Remote evaluation receives a bounded command shape: executable, a proven first operation word for a small known command family, and whether the command delegates an omitted effect. It never receives command text, flags, operands, paths, queries, payloads, option values, or credentials. A local open-weight evaluator may use richer inputs behind the same typed contract, but it must emit the same probability vector and is subject to the same code-owned thresholds.
 
-The authoritative path is enabled explicitly with `STATEWRIGHT_SYSTEM_ONE_FALLTHROUGH=true`. `STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND=typesafe_system_one` uses the TypeSafe System One endpoint and `jev-latest` by default, with credentials supplied through `TYPESAFE_API_KEY` or the provider-specific token variable. `openai_compatible` keeps the same typed contract for a local/open-weight endpoint and never inherits a TypeSafe credential. The older staging shadow flag always remains telemetry-only; authorization additionally requires explicit fallthrough enablement and a workflow selecting `blacklist_heuristic_v1`.
+The authoritative path is enabled explicitly with `STATEWRIGHT_SYSTEM_ONE_FALLTHROUGH=true`. `STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND=typesafe_system_one` uses the TypeSafe System One endpoint and `jev-latest` by default, with credentials supplied through `TYPESAFE_API_KEY` or the provider-specific token variable. `openai_compatible` keeps the same typed contract for a local/open-weight endpoint and never inherits a TypeSafe credential. The older staging shadow flag always remains telemetry-only; authorization additionally requires explicit fallthrough enablement and a workflow selecting `denylist_heuristic_v1`. The legacy policy value remains accepted as a deprecated input alias during migration.
 
 Standalone hooks and executor-owned adapters must consume the same gateway decision contract. Shell-specific pattern additions are not an accepted repair for opaque operations.
 
@@ -43,6 +43,6 @@ The semantic provider becomes availability-sensitive only for otherwise opaque o
 
 ## Rollout and rollback
 
-Roll out behind the explicit blacklist/heuristic policy mode. First validate the typed decision and redaction contract, then wire gateway enforcement, then replace standalone opaque denial with gateway delegation. Reinstall the plugin and managed launcher from one clean committed SHA before a live canary.
+Roll out behind the explicit denylist/heuristic policy mode. First validate the typed decision and redaction contract, then wire gateway enforcement, then replace standalone opaque denial with gateway delegation. Reinstall the plugin and managed launcher from one clean committed SHA before a live canary.
 
 Rollback by disabling semantic authorization and returning opaque operations to fail-closed denial. Do not restore command-specific exceptions.

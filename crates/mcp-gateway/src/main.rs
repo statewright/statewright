@@ -38,6 +38,14 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8090")]
     pb_url: String,
 
+    /// Canonical public origin for remote MCP discovery metadata
+    #[arg(long, default_value = "https://mcp.statewright.ai")]
+    public_url: String,
+
+    /// Canonical issuer origin for the OAuth authorization server
+    #[arg(long, default_value = "https://statewright.ai")]
+    authorization_server_url: String,
+
     /// Port file path for the hook server (default: /tmp/statewright-hook-port)
     #[arg(long, default_value = "/tmp/statewright-hook-port")]
     hook_port_file: PathBuf,
@@ -64,6 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pb_url: args.pb_url,
                 listen_addr: args.remote_addr,
                 database_url: std::env::var("DATABASE_URL").ok(),
+                public_url: args.public_url,
+                authorization_server_url: args.authorization_server_url,
             },
         )
         .await

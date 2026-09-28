@@ -1,5 +1,4 @@
 pub mod bash_classifier;
-pub mod risk_assessment;
 pub mod config;
 pub mod custom_tools;
 pub mod enforcement;
@@ -8,7 +7,10 @@ pub mod hooks;
 pub mod interceptors;
 pub mod protocol;
 pub mod remote;
+pub mod risk_assessment;
 pub mod session;
+pub mod shell_ast_shadow;
+pub mod tool_intent;
 pub mod upstream;
 pub mod usage;
 

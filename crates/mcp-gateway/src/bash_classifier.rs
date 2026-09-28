@@ -1382,18 +1382,7 @@ fn classify_git(tokens: &[&str]) -> OpClass {
         }
         Some("worktree") => classify_git_worktree(tokens, subcommand_index),
 
-        Some("init") => {
-            let args = &tokens[subcommand_index + 1..];
-            if args.len() <= 1
-                && args
-                    .iter()
-                    .all(|argument| !argument.is_empty() && !argument.starts_with('-'))
-            {
-                OpClass::LocalWrite
-            } else {
-                OpClass::Passthrough
-            }
-        }
+        Some("init") => classify_git_init(tokens, subcommand_index),
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -1434,6 +1423,48 @@ fn git_subcommand_index<T: AsRef<str>>(tokens: &[T], mut index: usize) -> Option
             _ => return Some(index),
         }
     }
+}
+
+/// `git init` is a bounded local write when it names at most one literal
+/// directory and uses only presentation or initial-branch options. Options
+/// that redirect repository metadata, import templates, or alter repository
+/// storage semantics remain opaque rather than inheriting this authority.
+fn classify_git_init(tokens: &[&str], subcommand_index: usize) -> OpClass {
+    let args = &tokens[subcommand_index + 1..];
+    let mut index = 0;
+    let mut directory_seen = false;
+    let mut branch_seen = false;
+
+    while let Some(argument) = args.get(index).copied() {
+        match argument {
+            "-q" | "--quiet" => index += 1,
+            "-b" | "--initial-branch" if !branch_seen => {
+                let Some(branch) = args.get(index + 1).copied() else {
+                    return OpClass::Passthrough;
+                };
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 2;
+            }
+            _ if argument.starts_with("--initial-branch=") && !branch_seen => {
+                let branch = argument.trim_start_matches("--initial-branch=");
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 1;
+            }
+            _ if !argument.is_empty() && !argument.starts_with('-') && !directory_seen => {
+                directory_seen = true;
+                index += 1;
+            }
+            _ => return OpClass::Passthrough,
+        }
+    }
+
+    OpClass::LocalWrite
 }
 
 /// `git worktree` without an action, or with `list`, is observational. Bounded
@@ -1851,6 +1882,9 @@ mod tests {
         for command in [
             "git init",
             "git init /Users/ben/dev/panoply",
+            "git init -b main /Users/ben/dev/panoply",
+            "git init --initial-branch main /Users/ben/dev/panoply",
+            "git init --initial-branch=main --quiet /Users/ben/dev/panoply",
             "git -C /Users/ben/dev init panoply",
         ] {
             assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
@@ -1859,6 +1893,11 @@ mod tests {
             "git init --bare",
             "git init first second",
             "git init -template",
+            "git init -b",
+            "git init -b --quiet /Users/ben/dev/panoply",
+            "git init -b main -b trunk /Users/ben/dev/panoply",
+            "git init --template=/private/template /Users/ben/dev/panoply",
+            "git init --separate-git-dir /private/git /Users/ben/dev/panoply",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
         }

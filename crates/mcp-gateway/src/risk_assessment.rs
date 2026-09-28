@@ -1943,6 +1943,10 @@ mod tests {
             assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
         );
         assert_eq!(
+            assess_shell("git init -b main /Users/ben/dev/panoply"),
+            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
             assess_shell("touch output.txt"),
             assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
         );

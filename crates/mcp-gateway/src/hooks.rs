@@ -593,6 +593,50 @@ mod tests {
         }))
     }
 
+    fn native_write_hook_state() -> Arc<RwLock<HookState>> {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "hook-native-write",
+            "initial": "implement",
+            "context": {"tool_policy_mode": "denylist_heuristic_v1"},
+            "states": {
+                "implement": {
+                    "allowed_tools": ["Read", "Write"],
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("native-write-session".into(), definition);
+        Arc::new(RwLock::new(HookState {
+            session_manager: manager,
+            session_id: "native-write-session".into(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn native_patch_freeform_payload_uses_write_authority_not_opaque_fallback() {
+        let response = handle_pre_tool(
+            State(native_write_hook_state()),
+            Json(PreToolRequest {
+                tool_name: "apply_patch".into(),
+                tool_input: json!({
+                    "command": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"
+                }),
+            }),
+        )
+        .await
+        .0;
+
+        assert_eq!(response.decision, "allow");
+        let risk = response.risk_assessment.unwrap();
+        assert_eq!(risk["deterministic_source"], "native_write");
+        assert_eq!(risk["deterministic_risk"], "Moderate");
+        assert_eq!(risk["deterministic_exposure"], "Local");
+        assert_eq!(risk["resolved_effect"], "local_write");
+    }
+
     #[tokio::test]
     async fn pre_tool_applies_allowed_command_policy_to_tool_input() {
         let blocked = handle_pre_tool(

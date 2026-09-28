@@ -160,13 +160,11 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
     if executable == "sed" && readonly_sed_args(tokens) {
         return Some("print".to_owned());
     }
-    let mut index = 0;
-    while tokens
-        .get(index)
-        .is_some_and(|token| semantic_global_flag(executable, token))
-    {
-        index += 1;
-    }
+    let index = if executable == "git" {
+        git_subcommand_index(tokens, 0)?
+    } else {
+        0
+    };
     let candidate = tokens.get(index)?;
     let recognized = match executable {
         "cargo" => matches!(
@@ -212,6 +210,7 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
                 | "commit"
                 | "diff"
                 | "fetch"
+                | "init"
                 | "log"
                 | "ls-files"
                 | "ls-remote"
@@ -276,13 +275,6 @@ fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) 
             _,
         ) => true,
         ("tmux", Some("new-session" | "send-keys")) => true,
-        _ => false,
-    }
-}
-
-fn semantic_global_flag(executable: &str, token: &str) -> bool {
-    match executable {
-        "git" => matches!(token, "--bare" | "--no-pager" | "--no-optional-locks"),
         _ => false,
     }
 }
@@ -524,9 +516,8 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
     // The end-of-options marker is meaningful to Git: operands after it can
     // create a branch/tag, so retain the complete argv rather than slicing it
     // away before the command grammar inspects it.
-    let subcommand_index = args.iter().position(|arg| !arg.starts_with('-'))?;
+    let subcommand_index = git_subcommand_index(args, 0)?;
     let subcommand = args.get(subcommand_index)?.as_str();
-    let global_options = &args[..subcommand_index];
     let command_args = &args[subcommand_index + 1..];
     let unsafe_flag = |arg: &String| {
         matches!(
@@ -543,20 +534,18 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
             || arg.starts_with("--exec-path=")
             || arg.starts_with("--output=")
     };
-    if args.iter().any(unsafe_flag)
-        || !global_options
-            .iter()
-            .all(|arg| matches!(arg.as_str(), "--no-pager" | "--no-optional-locks"))
-    {
+    if args.iter().any(unsafe_flag) {
         return None;
     }
-    let no_pager = global_options.iter().any(|arg| arg == "--no-pager");
+    let no_pager = args[..subcommand_index]
+        .iter()
+        .any(|arg| arg == "--no-pager");
     match subcommand {
         // These built-in Git plumbing/introspection commands do not invoke
         // configurable diff, text-conversion, signing, or pager helpers. The
         // shell parser above has already rejected expansion, redirection, and
         // unsafe global options, so they are deterministic local reads.
-        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" => Some("Read"),
+        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" | "status" => Some("Read"),
         // Branch listing is also a bounded read. Keep creation/deletion forms
         // out by reusing the complete argv classifier instead of matching the
         // subcommand name alone.
@@ -1372,29 +1361,18 @@ fn fd_has_execution(segment: &str) -> bool {
 
 /// Classify a git command by its subcommand.
 fn classify_git(tokens: &[&str]) -> OpClass {
-    // Admit only global switches that do not consume a following operand or
-    // configure executable helpers. Treat `-C`, `-c`, `--config-env`, and all
-    // other global forms as opaque rather than mistaking their values for the
-    // subcommand.
-    let mut subcommand_index = 1;
-    while matches!(
-        tokens.get(subcommand_index).copied(),
-        Some("--no-pager" | "--no-optional-locks")
-    ) {
-        subcommand_index += 1;
-    }
-    let subcmd = tokens
-        .get(subcommand_index)
-        .copied()
-        .filter(|token| !token.starts_with('-'));
+    let Some(subcommand_index) = git_subcommand_index(tokens, 1) else {
+        return OpClass::Passthrough;
+    };
+    let subcmd = tokens.get(subcommand_index).copied();
 
     match subcmd {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
         | Some("reflog") | Some("rev-parse") | Some("ls-files") | Some("ls-tree")
         | Some("merge-base") | Some("show-ref") => OpClass::GitRead,
 
-        Some("branch") => git_ref_listing_only(tokens, "branch"),
-        Some("tag") => git_ref_listing_only(tokens, "tag"),
+        Some("branch") => git_ref_listing_only(tokens, subcommand_index),
+        Some("tag") => git_ref_listing_only(tokens, subcommand_index),
         Some("stash") => {
             if tokens.iter().any(|token| matches!(*token, "list" | "show")) {
                 OpClass::GitRead
@@ -1402,7 +1380,20 @@ fn classify_git(tokens: &[&str]) -> OpClass {
                 OpClass::GitWrite
             }
         }
-        Some("worktree") => classify_git_worktree(tokens),
+        Some("worktree") => classify_git_worktree(tokens, subcommand_index),
+
+        Some("init") => {
+            let args = &tokens[subcommand_index + 1..];
+            if args.len() <= 1
+                && args
+                    .iter()
+                    .all(|argument| !argument.is_empty() && !argument.starts_with('-'))
+            {
+                OpClass::LocalWrite
+            } else {
+                OpClass::Passthrough
+            }
+        }
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -1423,14 +1414,33 @@ fn classify_git(tokens: &[&str]) -> OpClass {
     }
 }
 
+/// Return the literal Git subcommand after a deliberately finite set of safe
+/// global options. `-C <path>` selects a local working directory; its operand
+/// must never be mistaken for the verb. Unknown, missing, or option-shaped
+/// operands remain unclassified.
+fn git_subcommand_index<T: AsRef<str>>(tokens: &[T], mut index: usize) -> Option<usize> {
+    loop {
+        let argument = tokens.get(index)?.as_ref();
+        match argument {
+            "--no-pager" | "--no-optional-locks" => index += 1,
+            "-C" => {
+                let path = tokens.get(index + 1)?.as_ref();
+                if path.is_empty() || path.starts_with('-') {
+                    return None;
+                }
+                index += 2;
+            }
+            _ if argument.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+}
+
 /// `git worktree` without an action, or with `list`, is observational. Bounded
 /// setup/maintenance actions mutate only local repository metadata or paths;
 /// removal is destructive. Unknown forms fail closed through the ordinary
 /// semantic fallback.
-fn classify_git_worktree(tokens: &[&str]) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == "worktree") else {
-        return OpClass::Passthrough;
-    };
+fn classify_git_worktree(tokens: &[&str], index: usize) -> OpClass {
     match tokens.get(index + 1).copied() {
         None | Some("list") => OpClass::GitRead,
         Some("add" | "lock" | "move" | "repair" | "unlock") => OpClass::LocalWrite,
@@ -1441,10 +1451,7 @@ fn classify_git_worktree(tokens: &[&str]) -> OpClass {
 
 /// Ref creation is mutating.  Keep the read classifier deliberately small:
 /// no positional ref means a listing, and explicit list/show flags are reads.
-fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == subcommand) else {
-        return OpClass::GitWrite;
-    };
+fn git_ref_listing_only(tokens: &[&str], index: usize) -> OpClass {
     let args = &tokens[index + 1..];
     // Mutation flags remain authoritative even when combined with --list.
     // Git accepts several of these in mixed forms, so an earlier listing flag
@@ -1806,6 +1813,52 @@ mod tests {
             "git -c worktree list",
             "git --git-dir worktree list",
             "git --config-env worktree list",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_global_working_directory_preserves_the_real_subcommand() {
+        assert_eq!(
+            classify("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            vec![OpClass::GitRead]
+        );
+        assert_eq!(
+            classify("git -C /private/repo init child"),
+            vec![OpClass::LocalWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo push origin main"),
+            vec![OpClass::GitWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo clean -fd"),
+            vec![OpClass::Destructive]
+        );
+        for command in [
+            "git -C",
+            "git -C -- status",
+            "git -c core.fsmonitor=/tmp/helper status",
+            "git --git-dir /private/repo/.git status",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_init_is_only_a_bounded_literal_local_write() {
+        for command in [
+            "git init",
+            "git init /Users/ben/dev/panoply",
+            "git -C /Users/ben/dev init panoply",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
+        }
+        for command in [
+            "git init --bare",
+            "git init first second",
+            "git init -template",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
         }
@@ -2317,7 +2370,6 @@ mod tests {
             "git --no-pager diff --no-ext-diff -- --no-textconv",
             "/tmp/git --no-pager diff --no-ext-diff --no-textconv",
             "git -ccore.fsmonitor=/tmp/helper status",
-            "git status",
             "git --no-pager branch -- new-name",
             "git --no-pager tag -- new-name",
             "git --no-pager branch --list --delete",
@@ -2338,6 +2390,8 @@ mod tests {
             assert_eq!(readonly_capabilities(command), None, "{command}");
         }
         for command in [
+            "git status",
+            "git -C /Users/ben/dev/anytype-heart status --short --branch",
             "git --no-pager diff --no-ext-diff --no-textconv",
             "git --no-pager diff --no-ext-diff --no-textconv -- README.md",
             "git --no-pager branch --list",
@@ -2419,9 +2473,16 @@ mod tests {
 
     #[test]
     fn semantic_shape_never_promotes_option_values_to_operations() {
+        let git = semantic_command_shapes("git -C secretProject status").unwrap();
+        assert_eq!(git[0].operation.as_deref(), Some("status"));
+        assert!(
+            !serde_json::to_string(&git)
+                .unwrap()
+                .contains("secretProject")
+        );
+
         for (command, secret) in [
             ("tmux -L privateSocket capture-pane -p", "privateSocket"),
-            ("git -C secretProject status", "secretProject"),
             (
                 "git --git-dir --private-client-token status",
                 "--private-client-token",

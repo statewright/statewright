@@ -1371,14 +1371,15 @@ fn assess_invocation_with_origin(
                 .and_then(|value| value.as_str())
         })
         .flatten();
+    let known_native_write = !is_shell
+        && trusted_native_adapter
+        && tool.is_none()
+        && native_tool_family(tool_name) == Some(NativeToolFamily::Write);
     let mut result = if is_shell {
         shell_command
             .map(assess_shell)
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
-        let known_native_write = trusted_native_adapter
-            && tool.is_none()
-            && native_tool_family(tool_name) == Some(NativeToolFamily::Write);
         let base = if known_native_write {
             assessment(RiskBand::Moderate, ExposureBand::Local, "native_write")
         } else {
@@ -1386,7 +1387,7 @@ fn assess_invocation_with_origin(
         };
         let shape = mcp_shape(tool, tool_name, arguments);
         // Invocation-level effects can raise risk, never erase a known risk.
-        if matches!(base.risk, RiskBand::High | RiskBand::Critical) {
+        if known_native_write || matches!(base.risk, RiskBand::High | RiskBand::Critical) {
             base
         } else {
             match shape.selector_intent {
@@ -1934,6 +1935,14 @@ mod tests {
             assessment(RiskBand::Low, ExposureBand::Local, "shell")
         );
         assert_eq!(
+            assess_shell("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            assessment(RiskBand::Low, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
+            assess_shell("git init /Users/ben/dev/panoply"),
+            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
             assess_shell("touch output.txt"),
             assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
         );
@@ -2077,6 +2086,17 @@ mod tests {
             assert_eq!(assessed.source, "native_write", "{native}");
         }
 
+        let freeform_patch = assess_invocation_with_origin(
+            None,
+            "apply_patch",
+            &json!({"command":"*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"}),
+            Some("implement"),
+            true,
+        );
+        assert_eq!(freeform_patch.risk, RiskBand::Moderate);
+        assert_eq!(freeform_patch.exposure, ExposureBand::Local);
+        assert_eq!(freeform_patch.source, "native_write");
+
         let registered_collision = assess_invocation_with_origin(
             Some(&upstream_collision),
             "apply_patch",
@@ -2087,6 +2107,29 @@ mod tests {
         assert_eq!(registered_collision.risk, RiskBand::Critical);
         assert_eq!(registered_collision.exposure, ExposureBand::Account);
         assert_ne!(registered_collision.source, "native_write");
+    }
+
+    #[tokio::test]
+    async fn trusted_native_freeform_patch_pipeline_resolves_as_local_write() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        let pipeline = assess_pipeline_visible_with_runtime(
+            None,
+            "apply_patch",
+            &json!({"command":"*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"}),
+            Some("implement"),
+            true,
+            &config,
+            None,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(pipeline.deterministic.source, "native_write");
+        assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
+        assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
+        assert_eq!(pipeline.effective_risk, RiskBand::Moderate);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::LocalWrite);
     }
 
     #[test]

@@ -340,7 +340,10 @@ try {
       tool_input: { cmd: entry.command }
     })
     const risk = result.risk_assessment || {}
-    assert(result.decision === entry.decision, `${entry.name}: expected ${entry.decision}, got ${result.decision}`)
+    assert(
+      result.decision === entry.decision,
+      `${entry.name}: expected ${entry.decision}, got ${result.decision}; risk=${JSON.stringify(risk)}`
+    )
     assert(risk.deterministic_source === entry.source, `${entry.name}: expected source ${entry.source}, got ${risk.deterministic_source}`)
     assert(risk.deterministic_risk === entry.risk, `${entry.name}: expected risk ${entry.risk}, got ${risk.deterministic_risk}`)
     assert(risk.deterministic_exposure === entry.exposure, `${entry.name}: expected exposure ${entry.exposure}, got ${risk.deterministic_exposure}`)
@@ -418,7 +421,10 @@ try {
       tool_input: { cmd: entry.command }
     })
     const risk = result.risk_assessment || {}
-    assert(result.decision === entry.decision, `${entry.name}: expected ${entry.decision}, got ${result.decision}`)
+    assert(
+      result.decision === entry.decision,
+      `${entry.name}: expected ${entry.decision}, got ${result.decision}; risk=${JSON.stringify(risk)}`
+    )
     assert(risk.resolved_effect === entry.effect, `${entry.name}: expected effect ${entry.effect}, got ${risk.resolved_effect}`)
     restrictedResults.push({
       name: entry.name,

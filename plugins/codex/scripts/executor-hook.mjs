@@ -3,11 +3,13 @@
 const TIMEOUT_MS = 5_000;
 
 function stateContext(state) {
+  const executionPreference = "Execution preference: use one bounded native operation at a time; avoid heredocs, inline interpreters, and compound blobs unless structurally necessary and authorized.";
   if (state.isFinal) {
     return `[statewright] Workflow complete. Final state: ${state.state}.`;
   }
-  if (state.additionalContext) return state.additionalContext;
+  if (state.additionalContext) return `${state.additionalContext} ${executionPreference}`;
   const parts = [`[statewright] Workflow active. Phase: ${state.state}.`];
+  parts.push(executionPreference);
   if (state.instructions) parts.push(`Instructions: ${state.instructions}`);
   if (state.transitions?.length) {
     parts.push(`Transitions: ${state.transitions.map((item) => item.event).join(", ")}.`);
@@ -27,6 +29,52 @@ function toolResponse(input) {
 
 function isStatewrightTool(toolName) {
   return /(?:^|[_:/.-])statewright_(?:[a-z0-9_]+)$/i.test(toolName);
+}
+
+export function formatGuardDenial(result) {
+  const risk = result?.risk_assessment ?? result?.riskAssessment;
+  if (!risk || typeof risk !== "object") {
+    return {
+      display: result?.reason ?? "Blocked by Statewright.",
+      machine: result?.reason ?? "Blocked by Statewright.",
+    };
+  }
+
+  const basis = String(risk.final_denial_basis ?? risk.resolution_basis ?? "unknown");
+  const required = String(risk.required_authority ?? "approved execution path");
+  let display;
+  if ([
+    "semantic_threshold_not_met",
+    "incomplete_structural_evidence",
+    "semantic_vector_unavailable",
+    "semantic_assessment_incomplete",
+  ].includes(basis)) {
+    display = "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation instead of a heredoc or inline interpreter; use the approved execution path when code must run.";
+  } else if (basis === "deterministic_nonlocal_risk") {
+    display = "Statewright guard: denied · known non-local effect. Next: use the approved execution path.";
+  } else if (basis.startsWith("workflow_capability_")) {
+    display = `Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants ${required}.`;
+  } else if (basis.startsWith("classifier_policy_")) {
+    display = `Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with ${required}.`;
+  } else {
+    display = `Statewright guard: denied · classifier policy requires ${required}.`;
+  }
+  return {
+    display,
+    machine: JSON.stringify({
+      classifier_receipt: redactClassifierReceipt(risk),
+    }),
+  };
+}
+
+function redactClassifierReceipt(value) {
+  if (Array.isArray(value)) return value.map(redactClassifierReceipt);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !["command", "raw_command", "tool_input", "input", "arguments"].includes(key))
+      .map(([key, nested]) => [key, redactClassifierReceipt(nested)]),
+  );
 }
 
 export async function adapterCall(endpoint, body, options = {}) {
@@ -93,11 +141,13 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
         tool_input: input.tool_input ?? {},
       }, options);
       if (result.decision === "deny" || result.decision === "block") {
+        const denial = formatGuardDenial(result);
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: result.reason ?? "Blocked by Statewright.",
+            permissionDecisionReason: denial.display,
+            additionalContext: `[statewright] Machine classifier receipt: ${denial.machine}`,
           },
         };
       }

@@ -50,6 +50,39 @@ export function routeIdentity(model, environment = process.env) {
   return { provider: namespace === "openai-codex" ? "openai" : namespace, model: bareModel, config: {} };
 }
 
+function qualifiedRouteModel(model, provider) {
+  const value = String(model ?? "").trim();
+  if (!value || value.includes("/")) return value;
+  const namespace = provider === "openai" ? "openai-codex" : String(provider ?? "").trim();
+  return namespace ? `${namespace}/${value}` : value;
+}
+
+export function captureWorkflowOrigin(message, { provider = null, model = null } = {}) {
+  if (message?.method !== "turn/start") return null;
+  const params = message.params ?? {};
+  const collaboration = params.collaborationMode?.settings;
+  const selectedModel = collaboration?.model ?? params.model ?? model;
+  const qualifiedModel = qualifiedRouteModel(selectedModel, provider);
+  if (!qualifiedModel) return null;
+  return {
+    model: qualifiedModel,
+    effort: collaboration?.reasoning_effort ?? params.effort ?? null,
+    service_tier: params.serviceTier ?? "default",
+  };
+}
+
+export function restoreWorkflowOrigin(marker, origin) {
+  if (marker?.restore_original !== true || !origin?.model) return null;
+  if (marker.run_id && origin.run_id && marker.run_id !== origin.run_id) return null;
+  return {
+    ...marker,
+    model: origin.model,
+    effort: origin.effort ?? null,
+    service_tier: origin.service_tier ?? "default",
+    restored_original: true,
+  };
+}
+
 function sameRouteValue(actual, expected) {
   return String(actual ?? "").trim() === String(expected ?? "").trim();
 }
@@ -66,6 +99,8 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
   const identity = routeIdentity(selectedRoute.model, environment);
   const params = { ...(message.params ?? {}), model: identity.model };
   if (selectedRoute.effort) params.effort = selectedRoute.effort;
+  const selectedServiceTier = selectedRoute.service_tier ?? selectedRoute.serviceTier;
+  if (selectedServiceTier) params.serviceTier = selectedServiceTier;
   // Desktop's collaborationMode.settings takes precedence over the top-level
   // turn fields. Keep its unrelated mode/instructions intact, but make the
   // model selection atomic across both representations.
@@ -92,6 +127,7 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
       effectiveProvider: identity.provider,
       effectiveModel: identity.model,
       effectiveEffort: selectedRoute.effort ?? null,
+      effectiveServiceTier: selectedServiceTier ?? null,
       collaborationModeApplied,
       providerConfig: identity.config,
     },
@@ -106,6 +142,7 @@ export function settingsConfirmRoute(receipt, notification) {
   const actualModel = routeModel(settings.model);
   const actualProvider = String(settings.modelProvider ?? "").trim() || null;
   const actualEffort = settings.effort ?? null;
+  const actualServiceTier = settings.serviceTier ?? null;
   const collaborationSettings = settings.collaborationMode?.settings ?? null;
   const actualCollaborationModel = collaborationSettings ? routeModel(collaborationSettings.model) : null;
   const actualCollaborationEffort = collaborationSettings?.reasoning_effort ?? null;
@@ -118,10 +155,12 @@ export function settingsConfirmRoute(receipt, notification) {
     actualModel,
     actualProvider,
     actualEffort,
+    actualServiceTier,
     ...collaborationReceipt,
     confirmed: sameRouteValue(actualModel, receipt.effectiveModel)
       && (!receipt.effectiveProvider || sameRouteValue(actualProvider, receipt.effectiveProvider))
       && (!receipt.effectiveEffort || sameRouteValue(actualEffort, receipt.effectiveEffort))
+      && (!receipt.effectiveServiceTier || sameRouteValue(actualServiceTier, receipt.effectiveServiceTier))
       && (!receipt.collaborationModeApplied || (
         sameRouteValue(actualCollaborationModel, receipt.effectiveModel)
         && (!receipt.effectiveEffort || sameRouteValue(actualCollaborationEffort, receipt.effectiveEffort))
@@ -368,12 +407,18 @@ export async function startCodexAppServerRouteProxy({
       try {
         await checkOwner();
         const route = reservation.route ?? reservation;
-        const current = authoritative && authoritative.is_final !== true
+        const currentStateRoute = authoritative && authoritative.is_final !== true
           && route?.session_id === threadId
           && route.run_id === authoritative.run_id
           && route.state === authoritative.state
           && route.model === authoritative.model
           && route.effort === authoritative.thinking_level;
+        const terminalRestore = authoritative?.is_final === true
+          && route?.restore_original === true
+          && route.session_id === threadId
+          && route.run_id === authoritative.run_id
+          && route.state === authoritative.state;
+        const current = currentStateRoute || terminalRestore;
         if (current) return reservation;
         if (typeof reservation.ack !== "function") throw new Error("Stale Statewright route cannot be retired safely");
         await reservation.ack();
@@ -423,6 +468,7 @@ export async function startCodexAppServerRouteProxy({
     const activeThreads = new Map();
     const activeProviders = new Map();
     const activeModels = new Map();
+    const workflowOrigins = new Map();
     const operatorActivity = new Map();
     const explainedTurns = new Map();
     const turnOrigins = new Map();
@@ -766,7 +812,7 @@ export async function startCodexAppServerRouteProxy({
           releasePendingRoute = pendingRoute?.release ?? null;
           await checkReleaseOwner();
           const state = approvedRelease?.state;
-          const route = pendingRoute?.route ?? pendingRoute ?? (state && { session_id: threadId,
+          let route = pendingRoute?.route ?? pendingRoute ?? (state && { session_id: threadId,
             run_id: state.run_id, state: state.state, model: state.model, effort: state.thinking_level });
           if (state && (route?.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
               || !route.model || route.model !== state.model || route.effort !== state.thinking_level)) {
@@ -775,12 +821,32 @@ export async function startCodexAppServerRouteProxy({
             throw error;
           }
           if (state) await waitForApprovalIdle(threadId, checkReleaseOwner);
+          let capturedOrigin = null;
+          if (route?.restore_original === true) {
+            route = restoreWorkflowOrigin(route, workflowOrigins.get(threadId));
+            if (!route) throw new Error("Statewright terminal route cannot restore an unknown workflow origin");
+          } else if (route?.run_id && route?.model) {
+            const existingOrigin = workflowOrigins.get(threadId);
+            if (!existingOrigin || existingOrigin.run_id !== route.run_id) {
+              capturedOrigin = captureWorkflowOrigin(
+                message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
+                { provider: activeProviders.get(threadId), model: activeModels.get(threadId) },
+              );
+              if (capturedOrigin) {
+                capturedOrigin = { ...capturedOrigin, run_id: route.run_id };
+                workflowOrigins.set(threadId, capturedOrigin);
+              }
+            }
+          }
           const applied = applyRouteToTurnStart(message.method === "turn/start" ? message
             : { method: "turn/start", params: { threadId } }, route, process.env);
           if (applied.receipt) {
             presentation.prepare(threadId, requestId, {
               state: route.state, fromState: stateNames.get(threadId), runId: route.run_id,
               model: applied.receipt.effectiveModel, effort: applied.receipt.effectiveEffort,
+              serviceTier: applied.receipt.effectiveServiceTier,
+              returnRoute: capturedOrigin,
+              restoredOriginal: route.restored_original === true,
             });
             // Only a provider handoff is recoverable at request scope. A
             // generic upstream send failure still means the transport itself
@@ -815,6 +881,7 @@ export async function startCodexAppServerRouteProxy({
           receipts.set(routeReceipt.threadId, routeReceipt);
           await acknowledgeRoute?.();
           await onRouteInjected(routeReceipt);
+          if (routeReceipt.route?.restored_original === true) workflowOrigins.delete(routeReceipt.threadId);
         }
         releaseRouteLease?.();
       } catch (error) {

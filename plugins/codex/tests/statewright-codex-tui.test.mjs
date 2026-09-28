@@ -94,11 +94,12 @@ test("workflow load emits an atomic route restart request only for a supervised 
 test("transition refresh publishes the next managed route under a hostile inherited locale", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-hook-"));
   const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-"));
-  const authoritative = {
+  let authoritative = {
     workflow: "routing-test",
     state: "localize",
     model: "openai-codex/gpt-5.6-terra",
     thinking_level: "medium",
+    env_overrides: { STATEWRIGHT_CODEX_SERVICE_TIER: "priority" },
     run_id: "run-locale",
     transition_count: 2,
     state_epoch: 2,
@@ -146,7 +147,28 @@ test("transition refresh publishes the next managed route under a hostile inheri
     assert.equal(route.state, "localize");
     assert.equal(route.model, "openai-codex/gpt-5.6-terra");
     assert.equal(route.effort, "medium");
+    assert.equal(route.service_tier, "priority");
     assert.equal(route.turn_id, "turn-transition");
+    authoritative = {
+      ...authoritative,
+      state: "complete",
+      is_final: true,
+      transition_count: 3,
+      state_epoch: 3,
+    };
+    const completed = await invokeHook({
+      thread_id: "session-locale",
+      turn_id: "turn-complete",
+      tool_name: "mcp__statewright__statewright_transition",
+      tool_response: JSON.stringify({ transitioned: true, from: "localize", to: "complete" }),
+    }, environment);
+    assert.equal(completed.status, 0, completed.stderr);
+    const restore = JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8"));
+    assert.equal(restore.run_id, "run-locale");
+    assert.equal(restore.state, "complete");
+    assert.equal(restore.restore_original, true);
+    assert.equal(restore.model, "");
+    assert.equal(restore.effort, "");
   } finally {
     await new Promise((resolveClose) => server.close(resolveClose));
     await rm(home, { recursive: true, force: true });

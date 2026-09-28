@@ -386,8 +386,16 @@ impl RiskPipelineAssessment {
                     return (DenyUncertain, "semantic_assessment_incomplete");
                 }
                 let request = self.deterministic.semantic_request.as_ref().unwrap();
+                // MCP annotations describe the tool as a whole. For shell
+                // executors, an invocation-level AST can provide stronger,
+                // privacy-bounded evidence that this specific call is a read.
+                // Do not let a generic `readOnlyHint: false` veto that proof.
+                let ast_proves_read_compatibility = request
+                    .shell_ast_shape
+                    .as_ref()
+                    .is_some_and(shell_ast_shape_is_read_compatible);
                 let compatible_read = self.deterministic.required_capability.is_none()
-                    && request.read_only_hint != Some(false)
+                    && (request.read_only_hint != Some(false) || ast_proves_read_compatibility)
                     && request.mcp_shape.as_ref().is_none_or(|shape| {
                         shape.operation_intent != McpOperationIntent::Write
                             && shape.selector_intent != Some(McpOperationIntent::Write)
@@ -504,6 +512,26 @@ impl RiskPipelineAssessment {
     ) -> serde_json::Value {
         self.visible_json_for_decision(FinalDecisionContext::denied(basis, required_authority))
     }
+}
+
+fn shell_ast_shape_is_read_compatible(shape: &ShellAstSemanticShape) -> bool {
+    shape.status == ParseStatus::Parsed
+        && shape.executable_nodes > 0
+        && shape.foreign_code_units > 0
+        && shape.foreign_code_units == shape.foreign_code_units_with_effect_evidence
+        && !shape.effect_candidates.is_empty()
+        && shape.effect_candidates.iter().all(|effect| {
+            matches!(
+                *effect,
+                "file_read"
+                    | "content_search"
+                    | "file_search"
+                    | "git_read"
+                    | "safe_output"
+                    | "opaque"
+                    | "passthrough"
+            )
+        })
 }
 
 impl ResolvedEffect {
@@ -3906,6 +3934,72 @@ mod tests {
             )
             .resolve_effect(),
             ResolvedEffect::LocalWriteAndGitLocalWrite
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn invocation_ast_can_override_a_generic_shell_executor_non_read_hint() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let executor: ToolInfo = serde_json::from_value(json!({
+            "name": "exec_command",
+            "inputSchema": {},
+            "annotations": { "readOnlyHint": false }
+        }))
+        .unwrap();
+        let semantic = |read_only, may_write| SemanticAssessmentReceipt {
+            tool: "exec_command".into(),
+            status: SemanticAssessorStatus::Assessed,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(read_only).unwrap(),
+                may_write: Probability::new(may_write).unwrap(),
+                reversible: Probability::new(0.95).unwrap(),
+                destructive: Probability::new(0.01).unwrap(),
+                irreversible: Probability::new(0.01).unwrap(),
+                external_or_account_effect: Probability::new(0.01).unwrap(),
+            }),
+            state_intent: Some("implement".into()),
+        };
+        let pipeline = |command: &str, receipt| {
+            pipeline_from_parts(
+                assess_invocation(
+                    Some(&executor),
+                    "exec_command",
+                    &json!({"cmd": command}),
+                    Some("implement"),
+                ),
+                receipt,
+                true,
+            )
+        };
+
+        assert_eq!(
+            pipeline("python3 -c 'print(1)'", semantic(0.97, 0.02)).resolve_effect(),
+            ResolvedEffect::ReadOnly
+        );
+        assert_eq!(
+            pipeline(
+                "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                semantic(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline(
+                "python3 -c 'private_framework.execute()'",
+                semantic(0.97, 0.02)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline("systemctl status statewright", semantic(0.97, 0.02)).resolve_effect(),
+            ResolvedEffect::DenyUncertain
         );
 
         set_test_shell_ast_shadow_enabled(None);

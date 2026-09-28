@@ -191,8 +191,8 @@ const cases = [
     command: "python3 -c 'print(1)'",
     decision: 'allow',
     source: 'shell_ast',
-    risk: 'Moderate',
-    exposure: 'Unknown'
+    risk: 'Low',
+    exposure: 'Local'
   },
   {
     name: 'python_inline_write',
@@ -200,7 +200,7 @@ const cases = [
     decision: 'allow',
     source: 'shell_ast',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Local'
   },
   {
     name: 'python_inline_destructive',

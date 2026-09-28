@@ -4,6 +4,7 @@ import {
   statewrightToolSummary,
   summarizeStatewrightMcpResponse,
   summarizeStatewrightToolCompletion,
+  summarizeStatewrightToolStart,
 } from "../lib/statewright-tool-summary.mjs";
 
 const completion = (tool, value, extra = {}) => ({ method: "item/completed", params: { threadId: "thread-1", turnId: "turn-1",
@@ -71,4 +72,30 @@ test("capitalized native MCP event names are summarized", () => {
   const raw = completion("statewright_transition", { transitioned: true, from: "intake", to: "localize" });
   raw.params.item.type = "McpToolCall";
   assert.equal(statewrightToolSummary(raw.params.item), "intake → localize · transitioned");
+});
+
+test("transition starts become a bounded supervisor status without invocation JSON", () => {
+  const raw = { method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: {
+    id: "transition-1", type: "mcpToolCall", server: "statewright", tool: "statewright_transition",
+    arguments: { event: "IMPLEMENTED", data: { rationale: "private path / token must never reach the UI" } },
+  } } };
+  const summarized = summarizeStatewrightToolStart(raw);
+  assert.notEqual(summarized, raw);
+  assert.deepEqual(summarized.params.item, {
+    id: "transition-1", type: "agentMessage", phase: "commentary",
+    text: "Statewright supervisor: transition requested",
+  });
+  assert.match(JSON.stringify(raw), /private path/, "upstream notification is untouched");
+  assert.doesNotMatch(JSON.stringify(summarized), /IMPLEMENTED|rationale|private path|token/);
+});
+
+test("foreign and user-facing Statewright search starts are never rewritten", () => {
+  const foreign = { method: "item/started", params: { item: {
+    id: "foreign", type: "mcpToolCall", server: "foreign", tool: "statewright_transition", arguments: { event: "KEEP" },
+  } } };
+  const search = { method: "item/started", params: { item: {
+    id: "search", type: "mcpToolCall", server: "statewright", tool: "statewright_search_references", arguments: { query: "keep" },
+  } } };
+  assert.equal(summarizeStatewrightToolStart(foreign), foreign);
+  assert.equal(summarizeStatewrightToolStart(search), search);
 });

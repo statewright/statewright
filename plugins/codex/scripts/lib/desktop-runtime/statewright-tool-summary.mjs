@@ -139,3 +139,26 @@ export function summarizeStatewrightToolCompletion(message) {
       ...(item.result?.isError === true ? { isError: true } : {}) },
   } } };
 }
+
+// Native Codex renders an mcpToolCall when it receives item/started. At that
+// point the invocation has already been sent upstream, so its arguments are
+// presentation-only. Replace Statewright control-plane starts with a bounded
+// supervisor status rather than exposing events, rationales, paths, or other
+// tool arguments in the transcript.
+export function summarizeStatewrightToolStart(message) {
+  if (message?.method !== "item/started") return message;
+  const item = message.params?.item;
+  if (!['mcpToolCall', 'McpToolCall'].includes(item?.type)
+    || item.server !== 'statewright' || typeof item.tool !== 'string'
+    || ['statewright_search_docs', 'statewright_search_references'].includes(item.tool)) return message;
+  const tool = item.tool.replace(/^statewright_/, '');
+  const text = item.tool === 'statewright_transition'
+    ? 'transition requested'
+    : `${clean(tool)} requested`;
+  return { ...message, params: { ...message.params, item: {
+    id: item.id,
+    type: 'agentMessage',
+    phase: 'commentary',
+    text: `Statewright supervisor: ${text}`,
+  } } };
+}

@@ -386,16 +386,8 @@ impl RiskPipelineAssessment {
                     return (DenyUncertain, "semantic_assessment_incomplete");
                 }
                 let request = self.deterministic.semantic_request.as_ref().unwrap();
-                // MCP annotations describe the tool as a whole. For shell
-                // executors, an invocation-level AST can provide stronger,
-                // privacy-bounded evidence that this specific call is a read.
-                // Do not let a generic `readOnlyHint: false` veto that proof.
-                let ast_proves_read_compatibility = request
-                    .shell_ast_shape
-                    .as_ref()
-                    .is_some_and(shell_ast_shape_is_read_compatible);
                 let compatible_read = self.deterministic.required_capability.is_none()
-                    && (request.read_only_hint != Some(false) || ast_proves_read_compatibility)
+                    && request.read_only_hint != Some(false)
                     && request.mcp_shape.as_ref().is_none_or(|shape| {
                         shape.operation_intent != McpOperationIntent::Write
                             && shape.selector_intent != Some(McpOperationIntent::Write)
@@ -434,7 +426,7 @@ impl RiskPipelineAssessment {
                             && shape.executable_nodes > 0
                             && !shape.effect_candidates.is_empty()
                             && shape.foreign_code_units
-                                == shape.foreign_code_units_with_effect_evidence
+                                == shape.foreign_code_units_with_complete_effect_evidence
                             && !request.shell_shape.is_empty()
                     }) || (!request.shell_shape.is_empty()
                         && request.shell_shape.iter().all(|segment| {
@@ -512,26 +504,6 @@ impl RiskPipelineAssessment {
     ) -> serde_json::Value {
         self.visible_json_for_decision(FinalDecisionContext::denied(basis, required_authority))
     }
-}
-
-fn shell_ast_shape_is_read_compatible(shape: &ShellAstSemanticShape) -> bool {
-    shape.status == ParseStatus::Parsed
-        && shape.executable_nodes > 0
-        && shape.foreign_code_units > 0
-        && shape.foreign_code_units == shape.foreign_code_units_with_effect_evidence
-        && !shape.effect_candidates.is_empty()
-        && shape.effect_candidates.iter().all(|effect| {
-            matches!(
-                *effect,
-                "file_read"
-                    | "content_search"
-                    | "file_search"
-                    | "git_read"
-                    | "safe_output"
-                    | "opaque"
-                    | "passthrough"
-            )
-        })
 }
 
 impl ResolvedEffect {
@@ -1315,7 +1287,10 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         (false, true) => Some("GitLocalWrite"),
         (false, false) => None,
     };
-    if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
+    let opaque_is_covered_foreign_wrapper = foreign_wrapper_is_fully_classified(ast);
+    if (classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough))
+        && !opaque_is_covered_foreign_wrapper
+    {
         return required_capability.map_or_else(
             || assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast"),
             |capability| {
@@ -1344,11 +1319,20 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
                 | OpClass::FileSearch
                 | OpClass::GitRead
                 | OpClass::SafeOutput
-        )
+        ) || (opaque_is_covered_foreign_wrapper
+            && matches!(class, OpClass::Opaque | OpClass::Passthrough))
     }) {
         return assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast")
+}
+
+fn foreign_wrapper_is_fully_classified(ast: &AstShadowAssessment) -> bool {
+    ast.status == ParseStatus::Parsed
+        && ast.foreign_code_units > 0
+        && ast.executable_nodes == ast.foreign_code_units
+        && ast.foreign_code_units == ast.foreign_code_units_with_complete_effect_evidence
+        && ast.opaque_heredocs == 0
 }
 
 fn exposure_rank(exposure: ExposureBand) -> u8 {
@@ -1394,7 +1378,13 @@ fn apply_shell_ast_authority(
     let mut structured = assess_shell_ast(ast);
     structured.state_intent = legacy.state_intent.clone();
     structured.semantic_request = Some(ast_request.clone());
-    if ast_authority_wins(&legacy, &structured, ast.status) {
+    let complete_foreign_local_effect = legacy.risk == RiskBand::Moderate
+        && legacy.exposure == ExposureBand::Unknown
+        && structured.risk == RiskBand::Moderate
+        && structured.exposure == ExposureBand::Local
+        && structured.required_capability.is_some()
+        && foreign_wrapper_is_fully_classified(ast);
+    if ast_authority_wins(&legacy, &structured, ast.status) || complete_foreign_local_effect {
         structured
     } else {
         // Preserve comparison telemetry when an incomplete or weaker AST
@@ -3977,10 +3967,15 @@ mod tests {
             )
         };
 
+        let bounded_output = pipeline("python3 -c 'print(1)'", semantic(0.18, 0.82));
         assert_eq!(
-            pipeline("python3 -c 'print(1)'", semantic(0.97, 0.02)).resolve_effect(),
-            ResolvedEffect::ReadOnly
+            bounded_output.deterministic.risk,
+            RiskBand::Low,
+            "{:?}",
+            bounded_output.deterministic
         );
+        assert_eq!(bounded_output.deterministic.exposure, ExposureBand::Local);
+        assert_eq!(bounded_output.resolve_effect(), ResolvedEffect::ReadOnly);
         assert_eq!(
             pipeline(
                 "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
@@ -4001,6 +3996,23 @@ mod tests {
             pipeline("systemctl status statewright", semantic(0.97, 0.02)).resolve_effect(),
             ResolvedEffect::DenyUncertain
         );
+        for command in [
+            "python3 -c 'print(1); private_framework.execute()'",
+            "python3 -c 'print(1)' && systemctl status statewright",
+        ] {
+            let unresolved = pipeline(command, semantic(0.97, 0.02));
+            assert_eq!(
+                unresolved.deterministic.risk,
+                RiskBand::Moderate,
+                "{command}"
+            );
+            assert_eq!(
+                unresolved.deterministic.exposure,
+                ExposureBand::Unknown,
+                "{command}"
+            );
+            assert_eq!(unresolved.resolve_effect(), ResolvedEffect::DenyUncertain);
+        }
 
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);

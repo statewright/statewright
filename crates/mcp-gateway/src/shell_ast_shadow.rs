@@ -39,7 +39,7 @@ pub struct ShellAstSemanticShape {
     pub external_heredocs: usize,
     pub opaque_heredocs: usize,
     pub foreign_code_units: usize,
-    pub foreign_code_units_with_effect_evidence: usize,
+    pub foreign_code_units_with_complete_effect_evidence: usize,
     pub effect_candidates: Vec<&'static str>,
     pub commands: Vec<bash_classifier::SemanticCommandShape>,
 }
@@ -60,7 +60,7 @@ pub struct AstShadowAssessment {
     pub external_heredocs: usize,
     pub opaque_heredocs: usize,
     pub foreign_code_units: usize,
-    pub foreign_code_units_with_effect_evidence: usize,
+    pub foreign_code_units_with_complete_effect_evidence: usize,
     pub classes: Vec<OpClass>,
     pub semantic_shapes: Vec<bash_classifier::SemanticCommandShape>,
 }
@@ -82,7 +82,7 @@ impl AstShadowAssessment {
             external_heredocs: 0,
             opaque_heredocs: 0,
             foreign_code_units: 0,
-            foreign_code_units_with_effect_evidence: 0,
+            foreign_code_units_with_complete_effect_evidence: 0,
             classes: vec![OpClass::Opaque],
             semantic_shapes: Vec::new(),
         }
@@ -131,9 +131,9 @@ impl AstShadowAssessment {
         self.foreign_code_units = self
             .foreign_code_units
             .saturating_add(nested.foreign_code_units);
-        self.foreign_code_units_with_effect_evidence = self
-            .foreign_code_units_with_effect_evidence
-            .saturating_add(nested.foreign_code_units_with_effect_evidence);
+        self.foreign_code_units_with_complete_effect_evidence = self
+            .foreign_code_units_with_complete_effect_evidence
+            .saturating_add(nested.foreign_code_units_with_complete_effect_evidence);
         for class in nested.classes {
             self.push_class(class);
         }
@@ -160,7 +160,8 @@ impl AstShadowAssessment {
             external_heredocs: self.external_heredocs,
             opaque_heredocs: self.opaque_heredocs,
             foreign_code_units: self.foreign_code_units,
-            foreign_code_units_with_effect_evidence: self.foreign_code_units_with_effect_evidence,
+            foreign_code_units_with_complete_effect_evidence: self
+                .foreign_code_units_with_complete_effect_evidence,
             effect_candidates: self.classes.iter().map(effect_label).collect(),
             commands: self.semantic_shapes.clone(),
         }
@@ -226,7 +227,7 @@ fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAsse
         external_heredocs: 0,
         opaque_heredocs: 0,
         foreign_code_units: 0,
-        foreign_code_units_with_effect_evidence: 0,
+        foreign_code_units_with_complete_effect_evidence: 0,
         classes: Vec::new(),
         semantic_shapes: Vec::new(),
     };
@@ -657,11 +658,121 @@ fn classify_foreign_code_body(body: &str, assessment: &mut AstShadowAssessment) 
     }
 
     if !evidence.is_empty() {
-        assessment.foreign_code_units_with_effect_evidence += 1;
+        // This counter is an authorization coverage signal, not merely an
+        // indication that one interesting token was found. A body such as
+        // `print(1); private_framework.execute()` has safe-output evidence but
+        // is not fully explained and must remain an unresolved delegation.
+        if foreign_code_body_is_fully_classified(&normalized) {
+            assessment.foreign_code_units_with_complete_effect_evidence += 1;
+        }
         for class in evidence {
             assessment.push_class(class);
         }
     }
+}
+
+fn foreign_code_body_is_fully_classified(body: &str) -> bool {
+    let body = body.trim().trim_end_matches(';').trim();
+    is_literal_call(body, "print(")
+        || is_literal_call(body, "console.log(")
+        || body
+            .strip_prefix("puts ")
+            .is_some_and(is_literal_only_expression)
+        || body
+            .strip_prefix("print ")
+            .is_some_and(is_literal_only_expression)
+        || is_literal_open_method(body, "write", true)
+        || is_literal_open_method(body, "read", false)
+        || body
+            .strip_prefix("import shutil;")
+            .map(str::trim)
+            .is_some_and(|call| is_literal_call(call, "shutil.rmtree("))
+}
+
+fn is_literal_call(body: &str, prefix: &str) -> bool {
+    body.strip_prefix(prefix)
+        .and_then(|arguments| arguments.strip_suffix(')'))
+        .is_some_and(is_literal_only_expression)
+}
+
+fn is_literal_open_method(body: &str, method: &str, require_write_mode: bool) -> bool {
+    let Some(rest) = body.strip_prefix("open(") else {
+        return false;
+    };
+    let separator = format!(").{method}(");
+    let Some((open_arguments, method_arguments)) = rest.split_once(&separator) else {
+        return false;
+    };
+    let Some(method_arguments) = method_arguments.strip_suffix(')') else {
+        return false;
+    };
+    if !is_literal_only_expression(open_arguments)
+        || (!method_arguments.is_empty() && !is_literal_only_expression(method_arguments))
+    {
+        return false;
+    }
+    if require_write_mode {
+        ["'w'", "\"w\"", "'a'", "\"a\"", "'x'", "\"x\""]
+            .iter()
+            .any(|mode| open_arguments.contains(mode))
+    } else {
+        !["'w'", "\"w\"", "'a'", "\"a\"", "'x'", "\"x\""]
+            .iter()
+            .any(|mode| open_arguments.contains(mode))
+    }
+}
+
+/// Accept only literals and separators. Calls, indexing, interpolation, and
+/// identifiers other than literal keywords remain unresolved.
+fn is_literal_only_expression(expression: &str) -> bool {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return false;
+    }
+    let mut quote = None;
+    let mut escaped = false;
+    let mut word = String::new();
+    for character in expression.chars() {
+        if let Some(active_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => {
+                if !literal_keyword(&word) {
+                    return false;
+                }
+                word.clear();
+                quote = Some(character);
+            }
+            character if character.is_ascii_alphabetic() || character == '_' => {
+                word.push(character)
+            }
+            character if character.is_ascii_digit() => {
+                if !word.is_empty() {
+                    return false;
+                }
+            }
+            character if character.is_ascii_whitespace() || ",.+-".contains(character) => {
+                if !literal_keyword(&word) {
+                    return false;
+                }
+                word.clear();
+            }
+            _ => return false,
+        }
+    }
+    quote.is_none() && !escaped && literal_keyword(&word)
+}
+
+fn literal_keyword(word: &str) -> bool {
+    word.is_empty() || matches!(word, "true" | "false" | "none" | "null" | "nil")
 }
 
 fn classify_file_redirect(redirect: Node<'_>, source: &[u8], assessment: &mut AstShadowAssessment) {
@@ -799,7 +910,7 @@ mod tests {
         let python = assess("python3 <<'PY'\nopen('artifact', 'w').write('x')\nPY");
         assert_eq!(python.foreign_code_heredocs, 1);
         assert_eq!(python.foreign_code_units, 1);
-        assert_eq!(python.foreign_code_units_with_effect_evidence, 1);
+        assert_eq!(python.foreign_code_units_with_complete_effect_evidence, 1);
         assert!(python.classes.contains(&OpClass::Opaque));
         assert!(python.classes.contains(&OpClass::FileWrite));
 
@@ -814,15 +925,25 @@ mod tests {
         let write = assess("python3 -c 'open(\"artifact\", \"w\").write(\"x\")'");
         let destructive = assess("python3 -c 'import shutil; shutil.rmtree(\"artifact\")'");
         let unresolved = assess("python3 -c 'private_framework.execute()'");
+        let partial = assess("python3 -c 'print(1); private_framework.execute()'");
 
         assert!(benign.classes.contains(&OpClass::SafeOutput));
         assert!(write.classes.contains(&OpClass::FileWrite));
         assert!(destructive.classes.contains(&OpClass::Destructive));
-        assert_eq!(benign.foreign_code_units_with_effect_evidence, 1);
-        assert_eq!(write.foreign_code_units_with_effect_evidence, 1);
-        assert_eq!(destructive.foreign_code_units_with_effect_evidence, 1);
+        assert_eq!(benign.foreign_code_units_with_complete_effect_evidence, 1);
+        assert_eq!(write.foreign_code_units_with_complete_effect_evidence, 1);
+        assert_eq!(
+            destructive.foreign_code_units_with_complete_effect_evidence,
+            1
+        );
         assert_eq!(unresolved.foreign_code_units, 1);
-        assert_eq!(unresolved.foreign_code_units_with_effect_evidence, 0);
+        assert_eq!(
+            unresolved.foreign_code_units_with_complete_effect_evidence,
+            0
+        );
+        assert!(partial.classes.contains(&OpClass::SafeOutput));
+        assert_eq!(partial.foreign_code_units, 1);
+        assert_eq!(partial.foreign_code_units_with_complete_effect_evidence, 0);
 
         let benign_shape = serde_json::to_string(&benign.semantic_shape()).unwrap();
         let destructive_shape = serde_json::to_string(&destructive.semantic_shape()).unwrap();

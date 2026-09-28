@@ -59,10 +59,22 @@ export function formatGuardDenial(result) {
   } else {
     display = `Statewright guard: denied · classifier policy requires ${required}.`;
   }
+  const vector = risk.semantic_vector;
+  if (risk.semantic_status === "Assessed" && vector && typeof vector === "object") {
+    const percent = value => `${Math.round((Number.isFinite(value) ? value : 0) * 100)}%`;
+    display += ` System One signals: read-only ${percent(vector.read_only)}, write ${percent(vector.may_write)}, destructive ${percent(vector.destructive)}, external ${percent(vector.external_or_account_effect)}.`;
+  }
+  const rework = result?.classifier_rework ?? result?.classifierRework;
+  if (rework?.action === "rework") {
+    display += ` Rework attempt ${rework.attempts}/${rework.max_reworks}; after this budget, the same classified intent must be sent for human approval.`;
+  } else if (rework?.action === "approval_required") {
+    display += " Rework budget exhausted; this exact classified intent now requires native human approval.";
+  }
   return {
     display,
     machine: JSON.stringify({
       classifier_receipt: redactClassifierReceipt(risk),
+      ...(rework ? { classifier_rework: redactClassifierReceipt(rework) } : {}),
     }),
   };
 }

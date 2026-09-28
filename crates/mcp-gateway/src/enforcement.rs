@@ -380,7 +380,9 @@ pub fn semantic_effect_risk_denial_details(
                 "assessed_moderate_local",
             ))
         }
-        ResolvedEffect::LocalWrite | ResolvedEffect::LocalWriteAndGitLocalWrite
+        ResolvedEffect::LocalWrite
+        | ResolvedEffect::BoundedLocalExecution
+        | ResolvedEffect::LocalWriteAndGitLocalWrite
             if classifier_risk_tolerance(session) == ClassifierRiskTolerance::LowLocal =>
         {
             Some(SemanticEffectDenial::new(
@@ -404,6 +406,7 @@ pub fn semantic_effect_risk_denial_details(
         }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
+        | ResolvedEffect::BoundedLocalExecution
         | ResolvedEffect::GitLocalWrite
         | ResolvedEffect::LocalWriteAndGitLocalWrite => None,
     }
@@ -472,6 +475,19 @@ pub fn semantic_effect_capability_denial_details(
                 "Write",
             ))
         }
+        ResolvedEffect::BoundedLocalExecution
+            if explicitly_denied("BoundedLocalExecution")
+                || !explicitly_allowed("BoundedLocalExecution") =>
+        {
+            Some(SemanticEffectDenial::new(
+                format!(
+                    "Bounded local execution is not explicitly authorized in state '{}'.",
+                    execution_session.current_state
+                ),
+                "workflow_capability_bounded_local_execution_not_allowed",
+                "BoundedLocalExecution",
+            ))
+        }
         ResolvedEffect::GitLocalWrite
             if explicitly_denied("GitLocalWrite") || !explicitly_allowed("GitLocalWrite") =>
         {
@@ -501,6 +517,7 @@ pub fn semantic_effect_capability_denial_details(
         }
         ResolvedEffect::ReadOnly
         | ResolvedEffect::LocalWrite
+        | ResolvedEffect::BoundedLocalExecution
         | ResolvedEffect::GitLocalWrite
         | ResolvedEffect::LocalWriteAndGitLocalWrite
         | ResolvedEffect::DenyKnownRisk

@@ -73,6 +73,7 @@ pub struct SemanticRiskVector {
 pub enum ResolvedEffect {
     ReadOnly,
     LocalWrite,
+    BoundedLocalExecution,
     GitLocalWrite,
     LocalWriteAndGitLocalWrite,
     DenyKnownRisk,
@@ -326,8 +327,33 @@ impl<'a> FinalDecisionContext<'a> {
 }
 
 impl RiskPipelineAssessment {
+    fn intent_fingerprint(&self) -> String {
+        // Fingerprint only the already-redacted semantic request.  Provider
+        // shims use this identity to recognize a repeated intent without
+        // retaining command text, paths, arguments, or payload values.
+        let bytes = self
+            .deterministic
+            .semantic_request
+            .as_ref()
+            .and_then(|request| serde_json::to_vec(request).ok())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}|{}|{}",
+                    self.semantic.tool,
+                    self.deterministic.source,
+                    self.deterministic.required_capability.unwrap_or("none")
+                )
+                .into_bytes()
+            });
+        format!(
+            "intent_v1_{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).as_simple()
+        )
+    }
+
     fn deterministic_local_effect(&self) -> ResolvedEffect {
         match self.deterministic.required_capability {
+            Some("BoundedLocalExecution") => ResolvedEffect::BoundedLocalExecution,
             Some("GitLocalWrite") => ResolvedEffect::GitLocalWrite,
             Some("Write+GitLocalWrite") => ResolvedEffect::LocalWriteAndGitLocalWrite,
             _ => ResolvedEffect::LocalWrite,
@@ -366,6 +392,7 @@ impl RiskPipelineAssessment {
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => {
                 let effect = self.deterministic_local_effect();
                 let basis = match effect {
+                    BoundedLocalExecution => "deterministic_bounded_local_execution",
                     GitLocalWrite => "deterministic_git_local_write",
                     LocalWriteAndGitLocalWrite => "deterministic_combined_local_write",
                     _ => "deterministic_local_write",
@@ -480,6 +507,8 @@ impl RiskPipelineAssessment {
             })
         });
         serde_json::json!({
+            "intent_fingerprint": self.intent_fingerprint(),
+            "invocation_fingerprint": self.deterministic.invocation_fingerprint,
             "deterministic_risk": format!("{:?}", self.deterministic.risk),
             "deterministic_exposure": format!("{:?}", self.deterministic.exposure),
             "deterministic_source": self.deterministic.source,
@@ -511,6 +540,7 @@ impl ResolvedEffect {
         match self {
             Self::ReadOnly => "read_only",
             Self::LocalWrite => "local_write",
+            Self::BoundedLocalExecution => "bounded_local_execution",
             Self::GitLocalWrite => "git_local_write",
             Self::LocalWriteAndGitLocalWrite => "local_write_and_git_local_write",
             Self::DenyKnownRisk => "deny_known_risk",
@@ -522,6 +552,7 @@ impl ResolvedEffect {
         match self {
             Self::ReadOnly => "Read",
             Self::LocalWrite => "Write",
+            Self::BoundedLocalExecution => "BoundedLocalExecution",
             Self::GitLocalWrite => "GitLocalWrite",
             Self::LocalWriteAndGitLocalWrite => "Write+GitLocalWrite",
             Self::DenyKnownRisk => "separate_approved_execution_path",
@@ -933,6 +964,7 @@ pub struct ShadowAssessment {
     /// Workflow intent is context for calibration only; it never changes the
     /// deterministic authorization decision in this shadow-only milestone.
     pub state_intent: Option<String>,
+    invocation_fingerprint: Option<String>,
     required_capability: Option<&'static str>,
     semantic_request: Option<SemanticAssessmentRequest>,
     ast_semantic_request: Option<SemanticAssessmentRequest>,
@@ -1216,6 +1248,14 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
             "GitLocalWrite",
         );
     }
+    if classes.as_slice() == [OpClass::BoundedLocalExecution] {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell",
+            "BoundedLocalExecution",
+        );
+    }
     if classes.contains(&OpClass::LocalWrite) {
         return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
     }
@@ -1275,6 +1315,14 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
     }
     let has_git_local_write = classes.contains(&OpClass::GitLocalWrite);
+    if classes.as_slice() == [OpClass::BoundedLocalExecution] {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell_ast",
+            "BoundedLocalExecution",
+        );
+    }
     let has_local_write = classes.iter().any(|class| {
         matches!(
             class,
@@ -1377,6 +1425,7 @@ fn apply_shell_ast_authority(
 ) -> ShadowAssessment {
     let mut structured = assess_shell_ast(ast);
     structured.state_intent = legacy.state_intent.clone();
+    structured.invocation_fingerprint = legacy.invocation_fingerprint.clone();
     structured.semantic_request = Some(ast_request.clone());
     let complete_foreign_local_effect = legacy.risk == RiskBand::Moderate
         && legacy.exposure == ExposureBand::Unknown
@@ -1493,6 +1542,7 @@ fn assess_invocation_with_origin(
             }
         }
     };
+    result.invocation_fingerprint = Some(invocation_fingerprint(tool_name, arguments));
     result.state_intent = state_intent.map(str::to_owned);
     let semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
     result.semantic_request = Some(semantic_request.clone());
@@ -1824,10 +1874,24 @@ fn assessment(risk: RiskBand, exposure: ExposureBand, source: &'static str) -> S
         exposure,
         source,
         state_intent: None,
+        invocation_fingerprint: None,
         required_capability: None,
         semantic_request: None,
         ast_semantic_request: None,
     }
+}
+
+fn invocation_fingerprint(tool_name: &str, arguments: &serde_json::Value) -> String {
+    // The random process namespace makes the exact invocation identity opaque
+    // outside this gateway lifetime. Approval is therefore one-shot and
+    // cannot survive a gateway restart without a fresh classifier decision.
+    static NAMESPACE: OnceLock<uuid::Uuid> = OnceLock::new();
+    let namespace = NAMESPACE.get_or_init(uuid::Uuid::new_v4);
+    let bytes = serde_json::to_vec(&(tool_name, arguments)).unwrap_or_default();
+    format!(
+        "invocation_v1_{}",
+        uuid::Uuid::new_v5(namespace, &bytes).as_simple()
+    )
 }
 
 fn assessment_with_capability(
@@ -3558,6 +3622,11 @@ mod tests {
             "complete_structural_evidence_or_separate_approval"
         );
         assert_eq!(visible["equivalent_retry_allowed"], false);
+        assert!(
+            visible["intent_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("intent_v1_"))
+        );
         assert!(!visible.to_string().contains("secret-helper"));
 
         for command in [
@@ -3846,6 +3915,78 @@ mod tests {
 
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_resolves_version_probes_and_bounded_validation() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+
+        assert_eq!(resolved("node --version"), ResolvedEffect::ReadOnly);
+        assert_eq!(
+            resolved("cargo test --offline -p statewright-mcp-gateway"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("cargo test -p statewright-mcp-gateway"),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            resolved("node --test ../outside.test.mjs"),
+            ResolvedEffect::DenyUncertain
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn intent_fingerprint_is_stable_for_equivalent_redacted_shapes() {
+        let visible = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .visible_json()
+        };
+
+        let left = visible("cargo test --offline -p private-package-one");
+        let left_again = visible("cargo test --offline -p private-package-one");
+        let right = visible("cargo test --offline -p private-package-two");
+        assert_eq!(left["intent_fingerprint"], right["intent_fingerprint"]);
+        assert_eq!(
+            left["invocation_fingerprint"],
+            left_again["invocation_fingerprint"]
+        );
+        assert_ne!(
+            left["invocation_fingerprint"],
+            right["invocation_fingerprint"]
+        );
+        assert!(!left.to_string().contains("private-package"));
     }
 
     #[test]

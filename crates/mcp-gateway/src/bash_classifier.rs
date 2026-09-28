@@ -27,6 +27,11 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
+    /// A narrowly parsed local validation command. The command may execute
+    /// repository code, but its launcher grammar forbids network-enabling,
+    /// installation, redirection, substitution, and path-escape forms.
+    /// Requires explicit BoundedLocalExecution workflow authority.
+    BoundedLocalExecution,
     /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
     GitLocalWrite,
     /// A known command whose only direct effect is bounded stdout output.
@@ -291,6 +296,7 @@ impl OpClass {
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
+            OpClass::BoundedLocalExecution => &["BoundedLocalExecution"],
             OpClass::GitLocalWrite => &["GitLocalWrite"],
             OpClass::FileRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
@@ -443,6 +449,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::FileWrite
             | OpClass::FileModify
             | OpClass::LocalWrite
+            | OpClass::BoundedLocalExecution
             | OpClass::GitLocalWrite
             | OpClass::Destructive
             | OpClass::Network
@@ -1327,6 +1334,25 @@ fn classify_segment(segment: &str) -> OpClass {
             classify_statewright_git_closeout(segment)
         }
 
+        // Exact metadata probes are output-only. Keep this grammar separate
+        // from general interpreter/build execution so extra argv, path-
+        // qualified lookalikes, and shell syntax remain unclassified.
+        "node" | "cargo" | "rustc" | "npm" | "pnpm" | "pytest"
+            if invoked == base_cmd && bounded_version_probe(segment, base_cmd) =>
+        {
+            OpClass::SafeOutput
+        }
+
+        // These are intentionally not generic interpreter/build-tool
+        // permissions. Every accepted argv is literal and bounded, and the
+        // resulting effect still requires explicit workflow capability.
+        "node" if invoked == "node" && bounded_node_local_execution(segment) => {
+            OpClass::BoundedLocalExecution
+        }
+        "cargo" if invoked == "cargo" && bounded_cargo_local_execution(segment) => {
+            OpClass::BoundedLocalExecution
+        }
+
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
         "tmux" => classify_tmux(segment),
@@ -1334,6 +1360,98 @@ fn classify_segment(segment: &str) -> OpClass {
         // Everything else
         _ => OpClass::Passthrough,
     }
+}
+
+fn bounded_version_probe(segment: &str, executable: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    matches!(
+        tokens.as_slice(),
+        [actual, flag]
+            if actual == executable
+                && matches!(flag.as_str(), "--version" | "-V" | "-v")
+    )
+}
+
+fn bounded_node_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    let args = tokens.get(1..).unwrap_or_default();
+    match args {
+        [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => paths
+            .iter()
+            .all(|path| bounded_relative_path(path, ".test.mjs")),
+        [flag, path] if flag == "--check" => bounded_relative_path(path, ".mjs"),
+        _ => false,
+    }
+}
+
+fn bounded_cargo_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    let args = tokens.get(1..).unwrap_or_default();
+    if args.first().map(String::as_str) != Some("test")
+        || !args.iter().any(|arg| arg == "--offline")
+    {
+        return false;
+    }
+
+    let mut index = 1;
+    let mut positional_filters = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--offline" | "--locked" | "--lib" | "--quiet" | "--no-fail-fast" => {
+                index += 1;
+            }
+            "-p" | "--package" => {
+                let Some(package) = args.get(index + 1) else {
+                    return false;
+                };
+                if !bounded_label(package) {
+                    return false;
+                }
+                index += 2;
+            }
+            value if !value.starts_with('-') && bounded_test_filter(value) => {
+                positional_filters += 1;
+                if positional_filters > 1 {
+                    return false;
+                }
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn bounded_label(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn bounded_test_filter(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':')
+        })
+}
+
+fn bounded_relative_path(path: &str, suffix: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+        && path.ends_with(suffix)
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+        })
 }
 
 /// Detect write/execute actions after shell quoting and escapes have been
@@ -2090,6 +2208,59 @@ mod tests {
     fn cargo_test_is_passthrough() {
         let classes = classify("cargo test");
         assert!(classes.contains(&OpClass::Passthrough));
+    }
+
+    #[test]
+    fn exact_version_probes_are_output_only() {
+        for command in [
+            "node --version",
+            "cargo --version",
+            "rustc -V",
+            "npm -v",
+            "pnpm --version",
+            "pytest --version",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+        for command in [
+            "/tmp/node --version",
+            "node --version extra",
+            "node --version > version.txt",
+            "node -e 'process.exit(0)'",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+    }
+
+    #[test]
+    fn bounded_local_execution_requires_a_small_literal_grammar() {
+        for command in [
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
+            "cargo test --offline -p statewright-mcp-gateway",
+            "cargo test --offline -p statewright-mcp-gateway allowed_commands_admit_only_ast_proven_read_only_composition",
+        ] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+        for command in [
+            "node arbitrary-script.mjs",
+            "node --test ../outside.test.mjs",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs && curl https://example.invalid",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
+            "cargo test -p statewright-mcp-gateway",
+            "cargo test --offline --manifest-path ../outside/Cargo.toml",
+            "cargo test --offline -p statewright-mcp-gateway -- --nocapture",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
     }
 
     #[test]

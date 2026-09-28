@@ -617,16 +617,44 @@ case "$ENDPOINT" in
       # Statewright supervisor event rather than a JSON/probability dump.
       ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
       [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
+      RUN_ID=$(printf '%s' "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+      APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
+        --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" --arg state "$CURRENT" '
+          .risk_assessment? as $risk
+          | if ($risk | type) != "object" then empty else {
+              schema: "statewright/classifier-approval-request/v1",
+              thread_id: $thread_id,
+              run_id: $run_id,
+              state: $state,
+              classifier_receipt: {
+                intent_fingerprint: $risk.intent_fingerprint,
+                invocation_fingerprint: $risk.invocation_fingerprint,
+                final_denial_basis: ($risk.final_denial_basis // $risk.resolution_basis),
+                required_authority: $risk.required_authority
+              }
+            } end
+        ' 2>/dev/null || true)
+      APPROVAL_RESULT=""
+      if [ -n "$APPROVAL_REQUEST" ] && command -v node >/dev/null 2>&1; then
+        APPROVAL_RESULT=$(printf '%s' "$APPROVAL_REQUEST" \
+          | node "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null || true)
+      fi
+      APPROVAL_ACTION=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.action // empty' 2>/dev/null || true)
+      if [ "$APPROVAL_ACTION" = "allow_once" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"[statewright] Human approval granted for this exact invocation once."}}'
+        exit 0
+      fi
       ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
+        def pct($value): (((($value // 0) * 100) | round | tostring) + "%");
         .risk_assessment? as $risk
         | if ($risk | type) != "object" then empty else
             (($risk.final_denial_basis // $risk.resolution_basis // "unknown") | tostring) as $basis
             | (($risk.required_authority // "approved execution path") | tostring) as $required
-            | if $basis == "semantic_threshold_not_met"
+            | (if $basis == "semantic_threshold_not_met"
               or $basis == "incomplete_structural_evidence"
               or $basis == "semantic_vector_unavailable"
               or $basis == "semantic_assessment_incomplete"
-              then "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation (for example rg, git diff, or a project task) instead of a heredoc or inline interpreter; use the approved execution path when code must run."
+              then "Statewright guard: denied · System One could not prove a safe local effect. Next: prefer one bounded native operation (for example rg, git diff, or a project task) instead of a heredoc or inline interpreter; use the approved execution path when code must run."
               elif $basis == "deterministic_nonlocal_risk"
               then "Statewright guard: denied · known non-local effect. Next: use the approved execution path."
               elif ($basis | startswith("workflow_capability_"))
@@ -634,9 +662,25 @@ case "$ENDPOINT" in
               elif ($basis | startswith("classifier_policy_"))
               then "Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with " + $required + "."
               else "Statewright guard: denied · classifier policy requires " + $required + "."
-              end
+              end) as $message
+            | if $risk.semantic_status == "Assessed" and (($risk.semantic_vector? | type) == "object")
+              then $message + " System One signals: read-only " + pct($risk.semantic_vector.read_only)
+                + ", write " + pct($risk.semantic_vector.may_write)
+                + ", destructive " + pct($risk.semantic_vector.destructive)
+                + ", external " + pct($risk.semantic_vector.external_or_account_effect) + "."
+              else $message end
           end
       ' 2>/dev/null || true)
+      if [ -z "$ADAPTER_DISPLAY" ]; then
+        ADAPTER_DISPLAY="$ADAPTER_REASON"
+      fi
+      if [ "$APPROVAL_ACTION" = "rework" ]; then
+        REWORK_ATTEMPTS=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.attempts // 0' 2>/dev/null || echo 0)
+        REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}; after this budget, the same classified intent will be sent for native human approval."
+      elif [ "$APPROVAL_ACTION" = "deny" ]; then
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval was not granted."
+      fi
       ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '
         .risk_assessment? as $risk
         | if ($risk | type) != "object" then empty else
@@ -652,8 +696,9 @@ case "$ENDPOINT" in
             }
           end
       ' 2>/dev/null || true)
-      if [ -z "$ADAPTER_DISPLAY" ]; then
-        ADAPTER_DISPLAY="$ADAPTER_REASON"
+      if [ -n "$ADAPTER_RECEIPT" ] && printf '%s' "$APPROVAL_RESULT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        ADAPTER_RECEIPT=$(jq -cn --argjson receipt "$ADAPTER_RECEIPT" --argjson approval "$APPROVAL_RESULT" \
+          '$receipt + {classifier_approval: $approval}')
       fi
       if [ -n "$ADAPTER_RECEIPT" ]; then
         jq -n --arg reason "$ADAPTER_DISPLAY" --arg receipt "$ADAPTER_RECEIPT" \

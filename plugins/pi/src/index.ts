@@ -18,6 +18,7 @@ const PLUGIN_NAME = "pi"
 const PLUGIN_VERSION = "0.3.0"
 import { createErrorReporter } from "./error-reporting.mjs"
 import { createPiApprovalHold } from "./approval-hold.mjs"
+import { formatClassifierRework } from "./classifier-rework-gate.mjs"
 import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION })
@@ -3198,9 +3199,12 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
             approvalHold.observe({ state: stateCache.state, pending_approval: { approval_id: decision.approval_id } })
             return approvalHold.blockTool(_ctx)
           }
+          const classifierRework = formatClassifierRework(decision.classifier_rework)
+          if (classifierRework) _ctx.ui.notify(`[statewright] ${classifierRework}`, "warn")
           return {
             block: true,
-            reason: String(decision.reason ?? "Blocked by Statewright"),
+            reason: [String(decision.reason ?? "Blocked by Statewright"), classifierRework]
+              .filter(Boolean).join(" "),
           }
         }
         return

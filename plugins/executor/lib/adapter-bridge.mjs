@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
+import { ClassifierReworkGate } from "./classifier-rework-gate.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 4 * 1024;
@@ -101,6 +102,7 @@ export class AdapterBridge {
       id: options.executorId,
       delivery: Boolean(options.deliveryActive),
     };
+    this.classifierReworkGate = options.classifierReworkGate ?? new ClassifierReworkGate();
     this.token = options.token ?? randomUUID();
     this.server = null;
     this.url = null;
@@ -263,10 +265,21 @@ export class AdapterBridge {
             throw new Error("Native request is awaiting approval; tool traffic denied");
           }
           this.assertNativeDispatch();
-          const result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
+          let result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
           }));
+          const classifierScope = {
+            runId: result?.run_id ?? null,
+            state: result?.state ?? null,
+            hostSessionId: this.executor.id ?? this.host,
+          };
+          const riskAssessment = result?.risk_assessment ?? result?.riskAssessment;
+          const denied = result?.decision === "deny" || result?.decision === "block";
+          const classifierRework = denied
+            ? this.classifierReworkGate.observeDenial({ receipt: riskAssessment, scope: classifierScope })
+            : (this.classifierReworkGate.observeSuccess({ receipt: riskAssessment, scope: classifierScope }), null);
+          if (classifierRework) result = { ...result, classifier_rework: classifierRework };
           await this.sessionOwner?.assertOwner();
           await this.assertOwnedState();
           if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
@@ -276,6 +289,8 @@ export class AdapterBridge {
             policy_tool_name: result?.policy_tool_name ?? null,
             decision: result?.decision ?? null,
             state: result?.state ?? null,
+            classifier_rework_attempts: classifierRework?.attempts ?? null,
+            classifier_rework_action: classifierRework?.action ?? null,
           });
           this.assertNativeDispatch();
           json(response, 200, result);

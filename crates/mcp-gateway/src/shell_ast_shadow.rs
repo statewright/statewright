@@ -180,6 +180,7 @@ fn effect_label(class: &OpClass) -> &'static str {
         OpClass::GitWrite => "git_write",
         OpClass::GitRead => "git_read",
         OpClass::LocalWrite => "local_write",
+        OpClass::BoundedLocalExecution => "bounded_local_execution",
         OpClass::GitLocalWrite => "git_local_write",
         OpClass::SafeOutput => "safe_output",
         OpClass::Opaque => "opaque",

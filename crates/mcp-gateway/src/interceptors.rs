@@ -36,6 +36,7 @@ fn pipeline_effect_has_capability(effect: ResolvedEffect, allowed_tools: &[Strin
     match effect {
         ResolvedEffect::ReadOnly => has(&["Read", "read_file"]),
         ResolvedEffect::LocalWrite => has(&["Write", "write_file"]),
+        ResolvedEffect::BoundedLocalExecution => has(&["BoundedLocalExecution"]),
         ResolvedEffect::GitLocalWrite => has(&["GitLocalWrite"]),
         ResolvedEffect::LocalWriteAndGitLocalWrite => {
             has(&["Write", "write_file"]) && has(&["GitLocalWrite"])

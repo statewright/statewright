@@ -39,6 +39,17 @@ test("classifier approval helper forwards only bounded redacted identity", async
   assert.equal(observed.options.headers.Authorization, "Bearer local-secret");
   assert.deepEqual(observed.body, redactedApprovalRequest(input));
   assert.doesNotMatch(JSON.stringify(observed.body), /private sentinel|secret|raw_command|arguments/);
+
+  const routed = await requestClassifierApproval(input, {
+    environment: {STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes")},
+    fetch: async () => new Response(JSON.stringify({
+      schema: "statewright/classifier-approval/v1",
+      action: "rework",
+      attempts: 1,
+      max_reworks: 2,
+    }), {status: 200}),
+  });
+  assert.equal(routed.action, "rework");
 });
 
 test("classifier approval helper fails closed on absent identities and mismatched allow", async () => {

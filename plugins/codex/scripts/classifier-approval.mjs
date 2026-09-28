@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_INPUT_BYTES = 32 * 1024;
@@ -43,6 +43,10 @@ function runDirectory(environment) {
   if (printable(environment.LOCAL_MODELS_RUN_DIR, 4096)) return environment.LOCAL_MODELS_RUN_DIR;
   if (printable(environment.CODEX_HOME, 4096) && /(?:^|\/)codex-home\/?$/.test(environment.CODEX_HOME)) {
     return dirname(environment.CODEX_HOME);
+  }
+  if (printable(environment.STATEWRIGHT_ROUTE_CONTROL_DIR, 4096)
+      && basename(environment.STATEWRIGHT_ROUTE_CONTROL_DIR) === "routes") {
+    return dirname(environment.STATEWRIGHT_ROUTE_CONTROL_DIR);
   }
   throw new Error("local_models_runtime_unavailable");
 }

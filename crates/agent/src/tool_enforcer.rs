@@ -35,14 +35,14 @@ fn classify_tool_intent(tool: &str) -> ToolIntent {
     let has = |verbs: &[&str]| words.iter().any(|word| verbs.contains(word));
 
     if has(&[
-        "create", "update", "delete", "remove", "write", "edit", "patch", "send",
-        "publish", "deploy", "apply", "commit", "push", "move", "rename", "upload",
-        "archive", "trash", "execute",
+        "create", "update", "delete", "remove", "write", "edit", "patch", "send", "publish",
+        "deploy", "apply", "commit", "push", "move", "rename", "upload", "archive", "trash",
+        "execute",
     ]) {
         ToolIntent::Mutating
     } else if has(&[
-        "read", "get", "list", "search", "find", "query", "inspect", "status",
-        "describe", "fetch", "lookup",
+        "read", "get", "list", "search", "find", "query", "inspect", "status", "describe", "fetch",
+        "lookup",
     ]) {
         ToolIntent::ReadOnly
     } else {
@@ -51,7 +51,9 @@ fn classify_tool_intent(tool: &str) -> ToolIntent {
 }
 
 fn is_explicitly_disallowed(tool: &str, disallowed: &[String]) -> bool {
-    disallowed.iter().any(|blocked| blocked.eq_ignore_ascii_case(tool))
+    disallowed
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(tool))
 }
 
 /// Explicit denials always take precedence over inferred capabilities.  Gateway
@@ -98,7 +100,9 @@ pub fn enforce_tools(
                 matches!(classify_tool_intent(tool), ToolIntent::ReadOnly)
             } else {
                 match &state.allowed_tools {
-                    Some(permitted) => permitted.iter().any(|entry| entry.eq_ignore_ascii_case(tool)),
+                    Some(permitted) => permitted
+                        .iter()
+                        .any(|entry| entry.eq_ignore_ascii_case(tool)),
                     None => true,
                 }
             }
@@ -274,7 +278,10 @@ mod tests {
                 "done": {"type": "final"}
             }
         })).unwrap();
-        assert_eq!(get_allowed_tools(&def, "inspect"), Some(vec!["Read".into()]));
+        assert_eq!(
+            get_allowed_tools(&def, "inspect"),
+            Some(vec!["Read".into()])
+        );
     }
 
     #[test]
@@ -294,11 +301,15 @@ mod tests {
                 "inspect": {"disallowed_tools": ["Write", "Delete"], "on": {"DONE": "done"}},
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let requested = vec!["mcp__docs__list".into(), "Write".into(), "Delete".into()];
         let result = enforce_tools(&def, "inspect", &requested);
         assert_eq!(result.allowed, vec!["mcp__docs__list".to_string()]);
-        assert_eq!(result.blocked, vec!["Write".to_string(), "Delete".to_string()]);
+        assert_eq!(
+            result.blocked,
+            vec!["Write".to_string(), "Delete".to_string()]
+        );
     }
 
     #[test]
@@ -308,7 +319,8 @@ mod tests {
                 "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let requested = vec![
             "mcp__statewright__statewright_list_workflows".into(),
             "mcp__gmail__read_email".into(),
@@ -317,15 +329,21 @@ mod tests {
             "mcp__opaque__perform_thing".into(),
         ];
         let result = enforce_tools(&def, "inspect", &requested);
-        assert_eq!(result.allowed, vec![
-            "mcp__statewright__statewright_list_workflows".to_string(),
-            "mcp__gmail__read_email".to_string(),
-            "Bash".to_string(),
-        ]);
-        assert_eq!(result.blocked, vec![
-            "mcp__gmail__send_email".to_string(),
-            "mcp__opaque__perform_thing".to_string(),
-        ]);
+        assert_eq!(
+            result.allowed,
+            vec![
+                "mcp__statewright__statewright_list_workflows".to_string(),
+                "mcp__gmail__read_email".to_string(),
+                "Bash".to_string(),
+            ]
+        );
+        assert_eq!(
+            result.blocked,
+            vec![
+                "mcp__gmail__send_email".to_string(),
+                "mcp__opaque__perform_thing".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -27,6 +27,13 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
+    /// A narrowly parsed local validation command. The command may execute
+    /// repository code, but its launcher grammar forbids network-enabling,
+    /// installation, redirection, substitution, and path-escape forms.
+    /// Requires explicit BoundedLocalExecution workflow authority.
+    BoundedLocalExecution,
+    /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
+    GitLocalWrite,
     /// A known command whose only direct effect is bounded stdout output.
     SafeOutput,
     /// Shell syntax was recognized but could not be safely normalized.
@@ -160,13 +167,11 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
     if executable == "sed" && readonly_sed_args(tokens) {
         return Some("print".to_owned());
     }
-    let mut index = 0;
-    while tokens
-        .get(index)
-        .is_some_and(|token| semantic_global_flag(executable, token))
-    {
-        index += 1;
-    }
+    let index = if executable == "git" {
+        git_subcommand_index(tokens, 0)?
+    } else {
+        0
+    };
     let candidate = tokens.get(index)?;
     let recognized = match executable {
         "cargo" => matches!(
@@ -212,6 +217,7 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
                 | "commit"
                 | "diff"
                 | "fetch"
+                | "init"
                 | "log"
                 | "ls-files"
                 | "ls-remote"
@@ -276,13 +282,9 @@ fn semantic_delegates_unknown_effect(executable: &str, operation: Option<&str>) 
             _,
         ) => true,
         ("tmux", Some("new-session" | "send-keys")) => true,
-        _ => false,
-    }
-}
-
-fn semantic_global_flag(executable: &str, token: &str) -> bool {
-    match executable {
-        "git" => matches!(token, "--bare" | "--no-pager" | "--no-optional-locks"),
+        // Git staging can invoke repository-configured clean/filter-process
+        // helpers. Generic `git add` therefore remains delegated/unknown.
+        ("git", Some("add")) => true,
         _ => false,
     }
 }
@@ -294,6 +296,8 @@ impl OpClass {
     pub fn required_tools(&self) -> &'static [&'static str] {
         match self {
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
+            OpClass::BoundedLocalExecution => &["BoundedLocalExecution"],
+            OpClass::GitLocalWrite => &["GitLocalWrite"],
             OpClass::FileRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
             // calls as well as read-only shell searches.  Grep and Glob are
@@ -445,6 +449,8 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             OpClass::FileWrite
             | OpClass::FileModify
             | OpClass::LocalWrite
+            | OpClass::BoundedLocalExecution
+            | OpClass::GitLocalWrite
             | OpClass::Destructive
             | OpClass::Network
             | OpClass::GitWrite => return None,
@@ -524,9 +530,8 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
     // The end-of-options marker is meaningful to Git: operands after it can
     // create a branch/tag, so retain the complete argv rather than slicing it
     // away before the command grammar inspects it.
-    let subcommand_index = args.iter().position(|arg| !arg.starts_with('-'))?;
+    let subcommand_index = git_subcommand_index(args, 0)?;
     let subcommand = args.get(subcommand_index)?.as_str();
-    let global_options = &args[..subcommand_index];
     let command_args = &args[subcommand_index + 1..];
     let unsafe_flag = |arg: &String| {
         matches!(
@@ -543,20 +548,18 @@ fn readonly_git_capability(tokens: &[String]) -> Option<&'static str> {
             || arg.starts_with("--exec-path=")
             || arg.starts_with("--output=")
     };
-    if args.iter().any(unsafe_flag)
-        || !global_options
-            .iter()
-            .all(|arg| matches!(arg.as_str(), "--no-pager" | "--no-optional-locks"))
-    {
+    if args.iter().any(unsafe_flag) {
         return None;
     }
-    let no_pager = global_options.iter().any(|arg| arg == "--no-pager");
+    let no_pager = args[..subcommand_index]
+        .iter()
+        .any(|arg| arg == "--no-pager");
     match subcommand {
         // These built-in Git plumbing/introspection commands do not invoke
         // configurable diff, text-conversion, signing, or pager helpers. The
         // shell parser above has already rejected expansion, redirection, and
         // unsafe global options, so they are deterministic local reads.
-        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" => Some("Read"),
+        "rev-parse" | "ls-files" | "ls-tree" | "merge-base" | "show-ref" | "status" => Some("Read"),
         // Branch listing is also a bounded read. Keep creation/deletion forms
         // out by reusing the complete argv classifier instead of matching the
         // subcommand name alone.
@@ -1299,6 +1302,9 @@ fn classify_segment(segment: &str) -> OpClass {
         "tee" => OpClass::FileWrite,
         "cp" | "mv" | "install" | "rsync" => OpClass::FileWrite,
         "dd" => OpClass::FileWrite,
+        // Creating a directory is a bounded local mutation. It is not
+        // destructive and does not delegate execution to another program.
+        "mkdir" => OpClass::LocalWrite,
 
         // Destructive
         "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
@@ -1324,6 +1330,27 @@ fn classify_segment(segment: &str) -> OpClass {
         }
         "git" => OpClass::Passthrough,
 
+        "statewright-git-closeout" if invoked == "statewright-git-closeout" => {
+            classify_statewright_git_closeout(segment)
+        }
+
+        // Exact metadata probes are output-only. Keep this grammar separate
+        // from general interpreter/build execution so extra argv, path-
+        // qualified lookalikes, and shell syntax remain unclassified.
+        "node" | "cargo" | "rustc" | "npm" | "pnpm" | "pytest"
+            if invoked == base_cmd && bounded_version_probe(segment, base_cmd) =>
+        {
+            OpClass::SafeOutput
+        }
+
+        // Runner-specific grammars normalize to one execution intent. This is
+        // intentionally not generic interpreter/build-tool permission: every
+        // accepted argv is literal and bounded, and the normalized intent
+        // still requires explicit workflow capability.
+        _ if invoked == base_cmd && local_execution_intent(segment, base_cmd).is_some() => {
+            OpClass::BoundedLocalExecution
+        }
+
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
         "tmux" => classify_tmux(segment),
@@ -1331,6 +1358,132 @@ fn classify_segment(segment: &str) -> OpClass {
         // Everything else
         _ => OpClass::Passthrough,
     }
+}
+
+fn bounded_version_probe(segment: &str, executable: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    matches!(
+        tokens.as_slice(),
+        [actual, flag]
+            if actual == executable
+                && matches!(flag.as_str(), "--version" | "-V" | "-v")
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalExecutionIntent {
+    Validation,
+}
+
+/// Normalize runner-specific argv into a policy-level intent. Adding a new
+/// runner extends this adapter boundary; authorization remains centralized on
+/// `BoundedLocalExecution` rather than growing executable-specific bypasses.
+fn local_execution_intent(segment: &str, executable: &str) -> Option<LocalExecutionIntent> {
+    let validation = match executable {
+        "node" => bounded_node_local_execution(segment),
+        "cargo" => bounded_cargo_local_execution(segment),
+        "npm" | "pnpm" => bounded_package_test_local_execution(segment, executable),
+        _ => false,
+    };
+    validation.then_some(LocalExecutionIntent::Validation)
+}
+
+fn bounded_node_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    let args = tokens.get(1..).unwrap_or_default();
+    match args {
+        [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => paths
+            .iter()
+            .all(|path| bounded_relative_path(path, ".test.mjs")),
+        [flag, path] if flag == "--check" => bounded_relative_path(path, ".mjs"),
+        _ => false,
+    }
+}
+
+fn bounded_cargo_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    let args = tokens.get(1..).unwrap_or_default();
+    if args.first().map(String::as_str) != Some("test")
+        || !args.iter().any(|arg| arg == "--offline")
+    {
+        return false;
+    }
+
+    let mut index = 1;
+    let mut positional_filters = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--offline" | "--locked" | "--lib" | "--quiet" | "--no-fail-fast" => {
+                index += 1;
+            }
+            "-p" | "--package" => {
+                let Some(package) = args.get(index + 1) else {
+                    return false;
+                };
+                if !bounded_label(package) {
+                    return false;
+                }
+                index += 2;
+            }
+            value if !value.starts_with('-') && bounded_test_filter(value) => {
+                positional_filters += 1;
+                if positional_filters > 1 {
+                    return false;
+                }
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Admit only the package manager's conventional test-script entry point.
+/// The script itself is repository code and therefore still requires the
+/// explicit `BoundedLocalExecution` capability. Keeping the argv grammar
+/// exact prevents alternate project roots, arbitrary lifecycle scripts, and
+/// test-runner arguments from borrowing that authority.
+fn bounded_package_test_local_execution(segment: &str, executable: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    match tokens.as_slice() {
+        [actual, operation] => actual == executable && operation == "test",
+        [actual, run, script] => actual == executable && run == "run" && script == "test",
+        _ => false,
+    }
+}
+
+fn bounded_label(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn bounded_test_filter(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':')
+        })
+}
+
+fn bounded_relative_path(path: &str, suffix: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path
+            .split('/')
+            .any(|segment| matches!(segment, "" | "." | ".."))
+        && path.ends_with(suffix)
+        && path.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+        })
 }
 
 /// Detect write/execute actions after shell quoting and escapes have been
@@ -1378,29 +1531,18 @@ fn fd_has_execution(segment: &str) -> bool {
 
 /// Classify a git command by its subcommand.
 fn classify_git(tokens: &[&str]) -> OpClass {
-    // Admit only global switches that do not consume a following operand or
-    // configure executable helpers. Treat `-C`, `-c`, `--config-env`, and all
-    // other global forms as opaque rather than mistaking their values for the
-    // subcommand.
-    let mut subcommand_index = 1;
-    while matches!(
-        tokens.get(subcommand_index).copied(),
-        Some("--no-pager" | "--no-optional-locks")
-    ) {
-        subcommand_index += 1;
-    }
-    let subcmd = tokens
-        .get(subcommand_index)
-        .copied()
-        .filter(|token| !token.starts_with('-'));
+    let Some(subcommand_index) = git_subcommand_index(tokens, 1) else {
+        return OpClass::Passthrough;
+    };
+    let subcmd = tokens.get(subcommand_index).copied();
 
     match subcmd {
         Some("log") | Some("status") | Some("diff") | Some("blame") | Some("show")
         | Some("reflog") | Some("rev-parse") | Some("ls-files") | Some("ls-tree")
         | Some("merge-base") | Some("show-ref") => OpClass::GitRead,
 
-        Some("branch") => git_ref_listing_only(tokens, "branch"),
-        Some("tag") => git_ref_listing_only(tokens, "tag"),
+        Some("branch") => git_ref_listing_only(tokens, subcommand_index),
+        Some("tag") => git_ref_listing_only(tokens, subcommand_index),
         Some("stash") => {
             if tokens.iter().any(|token| matches!(*token, "list" | "show")) {
                 OpClass::GitRead
@@ -1408,7 +1550,9 @@ fn classify_git(tokens: &[&str]) -> OpClass {
                 OpClass::GitWrite
             }
         }
-        Some("worktree") => classify_git_worktree(tokens),
+        Some("worktree") => classify_git_worktree(tokens, subcommand_index),
+
+        Some("init") => classify_git_init(tokens, subcommand_index),
 
         Some("commit") | Some("push") | Some("reset") | Some("rebase") | Some("merge")
         | Some("cherry-pick") | Some("revert") | Some("am") => OpClass::GitWrite,
@@ -1424,19 +1568,134 @@ fn classify_git(tokens: &[&str]) -> OpClass {
 
         Some("clean") => OpClass::Destructive,
         Some("clone") | Some("fetch") | Some("pull") => OpClass::Network,
-        Some("add") => OpClass::Passthrough, // staging is local, not a write
+        Some("add") => OpClass::Passthrough,
         _ => OpClass::Passthrough,
     }
+}
+
+/// Return the literal Git subcommand after a deliberately finite set of safe
+/// global options. `-C <path>` selects a local working directory; its operand
+/// must never be mistaken for the verb. Unknown, missing, or option-shaped
+/// operands remain unclassified.
+fn git_subcommand_index<T: AsRef<str>>(tokens: &[T], mut index: usize) -> Option<usize> {
+    loop {
+        let argument = tokens.get(index)?.as_ref();
+        match argument {
+            "--no-pager" | "--no-optional-locks" => index += 1,
+            "-c" => {
+                let config = tokens.get(index + 1)?.as_ref();
+                if !matches!(
+                    config,
+                    "core.hooksPath=/dev/null" | "core.fsmonitor=false" | "commit.gpgSign=false"
+                ) {
+                    return None;
+                }
+                index += 2;
+            }
+            "-C" => {
+                let path = tokens.get(index + 1)?.as_ref();
+                if path.is_empty() || path.starts_with('-') {
+                    return None;
+                }
+                index += 2;
+            }
+            _ if argument.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+}
+
+/// `git init` is a bounded local write when it names at most one literal
+/// directory and uses only presentation or initial-branch options. Options
+/// that redirect repository metadata, import templates, or alter repository
+/// storage semantics remain opaque rather than inheriting this authority.
+fn classify_git_init(tokens: &[&str], subcommand_index: usize) -> OpClass {
+    let args = &tokens[subcommand_index + 1..];
+    let mut index = 0;
+    let mut directory_seen = false;
+    let mut branch_seen = false;
+
+    while let Some(argument) = args.get(index).copied() {
+        match argument {
+            "-q" | "--quiet" => index += 1,
+            "-b" | "--initial-branch" if !branch_seen => {
+                let Some(branch) = args.get(index + 1).copied() else {
+                    return OpClass::Passthrough;
+                };
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 2;
+            }
+            _ if argument.starts_with("--initial-branch=") && !branch_seen => {
+                let branch = argument.trim_start_matches("--initial-branch=");
+                if branch.is_empty() || branch.starts_with('-') {
+                    return OpClass::Passthrough;
+                }
+                branch_seen = true;
+                index += 1;
+            }
+            _ if !argument.is_empty() && !argument.starts_with('-') && !directory_seen => {
+                directory_seen = true;
+                index += 1;
+            }
+            _ => return OpClass::Passthrough,
+        }
+    }
+
+    OpClass::LocalWrite
+}
+
+fn literal_git_path(path: &str) -> bool {
+    const MAX_PATH_BYTES: usize = 4096;
+    !path.is_empty()
+        && path.len() <= MAX_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && !path.starts_with(':')
+        && !path.starts_with('~')
+        && !path.contains('\\')
+        && !matches!(path, "." | ".." | "--")
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+        && !path
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '*' | '?' | '[' | ']'))
+}
+
+fn classify_statewright_git_closeout(segment: &str) -> OpClass {
+    // GitLocalWrite relies on the managed client installing this command from
+    // the signed/validated plugin bundle. The local OS account and shim path
+    // are trusted control-plane inputs; the remote gateway cannot attest a
+    // deliberately replaced same-user executable from shell text alone.
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return OpClass::Passthrough;
+    };
+    if tokens.len() < 5
+        || tokens[0] != "statewright-git-closeout"
+        || tokens[1] != "--message"
+        || tokens[2].is_empty()
+        || tokens[2].len() > 160
+        || tokens[2].chars().any(char::is_control)
+        || tokens[3] != "--"
+        || tokens.len() > 36
+        || !tokens[4..].iter().all(|path| literal_git_path(path))
+    {
+        // The executable is the trusted closeout helper, but this invocation
+        // is outside its bounded grammar. Treat it as an ordinary local write
+        // so a commit-only state that grants GitLocalWrite cannot inherit it.
+        return OpClass::LocalWrite;
+    }
+    OpClass::GitLocalWrite
 }
 
 /// `git worktree` without an action, or with `list`, is observational. Bounded
 /// setup/maintenance actions mutate only local repository metadata or paths;
 /// removal is destructive. Unknown forms fail closed through the ordinary
 /// semantic fallback.
-fn classify_git_worktree(tokens: &[&str]) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == "worktree") else {
-        return OpClass::Passthrough;
-    };
+fn classify_git_worktree(tokens: &[&str], index: usize) -> OpClass {
     match tokens.get(index + 1).copied() {
         None | Some("list") => OpClass::GitRead,
         Some("add" | "lock" | "move" | "repair" | "unlock") => OpClass::LocalWrite,
@@ -1447,10 +1706,7 @@ fn classify_git_worktree(tokens: &[&str]) -> OpClass {
 
 /// Ref creation is mutating.  Keep the read classifier deliberately small:
 /// no positional ref means a listing, and explicit list/show flags are reads.
-fn git_ref_listing_only(tokens: &[&str], subcommand: &str) -> OpClass {
-    let Some(index) = tokens.iter().position(|token| *token == subcommand) else {
-        return OpClass::GitWrite;
-    };
+fn git_ref_listing_only(tokens: &[&str], index: usize) -> OpClass {
     let args = &tokens[index + 1..];
     // Mutation flags remain authoritative even when combined with --list.
     // Git accepts several of these in mixed forms, so an earlier listing flag
@@ -1591,6 +1847,11 @@ mod tests {
     fn append_redirect_is_file_write() {
         let classes = classify("echo 'hello' >> output.txt");
         assert!(classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn mkdir_is_a_bounded_local_write() {
+        assert_eq!(classify("mkdir -p docs/plans"), vec![OpClass::LocalWrite]);
     }
 
     #[test]
@@ -1813,6 +2074,133 @@ mod tests {
     }
 
     #[test]
+    fn git_global_working_directory_preserves_the_real_subcommand() {
+        assert_eq!(
+            classify("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            vec![OpClass::GitRead]
+        );
+        assert_eq!(
+            classify("git -C /private/repo init child"),
+            vec![OpClass::LocalWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo push origin main"),
+            vec![OpClass::GitWrite]
+        );
+        assert_eq!(
+            classify("git -C /private/repo clean -fd"),
+            vec![OpClass::Destructive]
+        );
+        for command in [
+            "git -C",
+            "git -C -- status",
+            "git -c core.fsmonitor=/tmp/helper status",
+            "git --git-dir /private/repo/.git status",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_init_is_only_a_bounded_literal_local_write() {
+        for command in [
+            "git init",
+            "git init /Users/ben/dev/panoply",
+            "git init -b main /Users/ben/dev/panoply",
+            "git init --initial-branch main /Users/ben/dev/panoply",
+            "git init --initial-branch=main --quiet /Users/ben/dev/panoply",
+            "git -C /Users/ben/dev init panoply",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
+        }
+        for command in [
+            "git init --bare",
+            "git init first second",
+            "git init -template",
+            "git init -b",
+            "git init -b --quiet /Users/ben/dev/panoply",
+            "git init -b main -b trunk /Users/ben/dev/panoply",
+            "git init --template=/private/template /Users/ben/dev/panoply",
+            "git init --separate-git-dir /private/git /Users/ben/dev/panoply",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn git_add_remains_delegated_unknown() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json",
+            "git -C /Users/ben/dev/panoply add -- README.md docs/plan/001-plan.md",
+            "git add -- 'docs/a file.md'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+        for command in [
+            "git add",
+            "git add README.md",
+            "git add --",
+            "git add -A",
+            "git add --all",
+            "git add --patch README.md",
+            "git add --pathspec-from-file=paths.txt",
+            "git add -- .",
+            "git add -- docs",
+            "git add -- docs/",
+            "git add -- -leading-dash",
+            "git add -- ~/README.md",
+            "git add -- ':(top)README.md'",
+            "git add -- ':(glob)**/*.rs'",
+            "git add -- '*.rs'",
+            "git add -- 'src/[ab].rs'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
+        }
+    }
+
+    #[test]
+    fn semantic_shape_never_hides_git_add_delegation() {
+        for command in [
+            "git add -- README.md",
+            "git add -- docs/research/001-anytype.md",
+            "git add -- docs",
+            "git add -- .",
+            "git add -- '*.rs'",
+            "git add README.md",
+        ] {
+            let shape = semantic_command_shapes(command).unwrap();
+            assert_eq!(shape[0].operation.as_deref(), Some("add"), "{command}");
+            assert!(shape[0].delegates_unknown_effect, "{command}");
+        }
+    }
+
+    #[test]
+    fn trusted_git_closeout_is_a_dedicated_bounded_capability() {
+        let command = "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json";
+        assert_eq!(classify(command), vec![OpClass::GitLocalWrite]);
+        assert_eq!(OpClass::GitLocalWrite.required_tools(), &["GitLocalWrite"]);
+    }
+
+    #[test]
+    fn git_closeout_rejects_scope_escape_and_ambiguous_forms() {
+        for command in [
+            "statewright-git-closeout",
+            "statewright-git-closeout --message test README.md",
+            "statewright-git-closeout --message '' -- README.md",
+            "statewright-git-closeout --message test -- /tmp/secret",
+            "statewright-git-closeout --message test -- ../secret",
+            "statewright-git-closeout --message test -- docs/../secret",
+            "statewright-git-closeout --message test -- docs//secret",
+            "statewright-git-closeout --message test -- 'docs/*.md'",
+            "/tmp/statewright-git-closeout --message test -- README.md",
+            "statewright-git-closeout --message test -- README.md && git push",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::GitLocalWrite], "{command}");
+        }
+    }
+
+    #[test]
     fn git_commit_is_git_write() {
         let classes = classify("git commit -m 'fix bug'");
         assert!(classes.contains(&OpClass::GitWrite));
@@ -1855,15 +2243,89 @@ mod tests {
     }
 
     #[test]
+    fn exact_version_probes_are_output_only() {
+        for command in [
+            "node --version",
+            "cargo --version",
+            "rustc -V",
+            "npm -v",
+            "pnpm --version",
+            "pytest --version",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+        for command in [
+            "/tmp/node --version",
+            "node --version extra",
+            "node --version > version.txt",
+            "node -e 'process.exit(0)'",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+    }
+
+    #[test]
+    fn bounded_local_execution_requires_a_small_literal_grammar() {
+        for command in [
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
+            "cargo test --offline -p statewright-mcp-gateway",
+            "cargo test --offline -p statewright-mcp-gateway allowed_commands_admit_only_ast_proven_read_only_composition",
+        ] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+        for command in [
+            "node arbitrary-script.mjs",
+            "node --test ../outside.test.mjs",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs && curl https://example.invalid",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
+            "cargo test -p statewright-mcp-gateway",
+            "cargo test --offline --manifest-path ../outside/Cargo.toml",
+            "cargo test --offline -p statewright-mcp-gateway -- --nocapture",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn pytest_is_passthrough() {
         let classes = classify("pytest -x tests/");
         assert!(classes.contains(&OpClass::Passthrough));
     }
 
     #[test]
-    fn npm_test_is_passthrough() {
-        let classes = classify("npm test");
-        assert!(classes.contains(&OpClass::Passthrough));
+    fn package_test_requires_bounded_local_execution() {
+        for command in ["npm test", "npm run test", "pnpm test", "pnpm run test"] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+        for command in [
+            "npm run build",
+            "npm test -- --watch",
+            "npm --prefix ../outside test",
+            "TEST_MODE=1 npm test",
+            "/tmp/npm test",
+            "npm test && curl https://example.invalid",
+            "npm test > receipt.txt",
+            "pnpm test --filter workspace",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
     }
 
     #[test]
@@ -2343,7 +2805,6 @@ mod tests {
             "git --no-pager diff --no-ext-diff -- --no-textconv",
             "/tmp/git --no-pager diff --no-ext-diff --no-textconv",
             "git -ccore.fsmonitor=/tmp/helper status",
-            "git status",
             "git --no-pager branch -- new-name",
             "git --no-pager tag -- new-name",
             "git --no-pager branch --list --delete",
@@ -2364,6 +2825,8 @@ mod tests {
             assert_eq!(readonly_capabilities(command), None, "{command}");
         }
         for command in [
+            "git status",
+            "git -C /Users/ben/dev/anytype-heart status --short --branch",
             "git --no-pager diff --no-ext-diff --no-textconv",
             "git --no-pager diff --no-ext-diff --no-textconv -- README.md",
             "git --no-pager branch --list",
@@ -2445,9 +2908,16 @@ mod tests {
 
     #[test]
     fn semantic_shape_never_promotes_option_values_to_operations() {
+        let git = semantic_command_shapes("git -C secretProject status").unwrap();
+        assert_eq!(git[0].operation.as_deref(), Some("status"));
+        assert!(
+            !serde_json::to_string(&git)
+                .unwrap()
+                .contains("secretProject")
+        );
+
         for (command, secret) in [
             ("tmux -L privateSocket capture-pane -p", "privateSocket"),
-            ("git -C secretProject status", "secretProject"),
             (
                 "git --git-dir --private-client-token status",
                 "--private-client-token",

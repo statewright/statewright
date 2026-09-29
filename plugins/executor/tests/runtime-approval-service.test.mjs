@@ -25,7 +25,7 @@ async function fixture(t, options = {}) {
     response: value => { response = value; } };
 }
 
-test("private read endpoint uses exact identity whitelist and host client header", async t => {
+test("private read endpoint uses exact identity allowlist and host client header", async t => {
   const f = await fixture(t);
   const result = await f.service.read({ ...ticket, client_id: "untrusted", decision: "approved", message: "ignore", arbitrary: true });
   assert.equal(result.status, "pending");

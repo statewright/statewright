@@ -18,6 +18,7 @@ const PLUGIN_NAME = "pi"
 const PLUGIN_VERSION = "0.3.0"
 import { createErrorReporter } from "./error-reporting.mjs"
 import { createPiApprovalHold } from "./approval-hold.mjs"
+import { formatClassifierRework } from "./classifier-rework-gate.mjs"
 import { dispatchPiProjectEffect, fetchPiProject, isPiProjectManaged } from "./project-effects.mjs"
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION })
@@ -480,8 +481,11 @@ function canonicalToolName(name: string): string {
   return normalized
 }
 
-function isBlacklistHeuristicMode(state: StateCache): boolean {
-  return state.toolPolicyMode === "blacklist_heuristic_v1"
+const DENYLIST_HEURISTIC_POLICY_MODE = "denylist_heuristic_v1"
+const LEGACY_DENYLIST_HEURISTIC_POLICY_MODE = "blacklist_heuristic_v1"
+
+function isDenylistHeuristicMode(state: StateCache): boolean {
+  return state.toolPolicyMode === DENYLIST_HEURISTIC_POLICY_MODE || state.toolPolicyMode === LEGACY_DENYLIST_HEURISTIC_POLICY_MODE
 }
 
 function toolExplicitlyBlocked(state: StateCache, toolName: string): boolean {
@@ -494,15 +498,15 @@ function toolExplicitlyBlocked(state: StateCache, toolName: string): boolean {
 
 function stateAllowsLocalWrite(state: StateCache): boolean {
   // An explicit denial is a hard boundary in both the legacy allowlist and
-  // blacklist-heuristic modes. A simultaneous legacy grant must not override
+  // denylist-heuristic modes. A simultaneous legacy grant must not override
   // it when this helper is reached through a Bash fallback.
   if (state.disallowedTools.some((entry) => canonicalToolName(entry) === "write")) return false
-  if (isBlacklistHeuristicMode(state)) return !state.disallowedTools.some((entry) => canonicalToolName(entry) === "write")
+  if (isDenylistHeuristicMode(state)) return !state.disallowedTools.some((entry) => canonicalToolName(entry) === "write")
   return state.allowedTools.length === 0 || state.allowedTools.some((entry) => canonicalToolName(entry) === "write")
 }
 
 function legacyReadFallbackAllowed(state: StateCache, command: string): boolean {
-  if (isBlacklistHeuristicMode(state) || state.allowedTools.length === 0) return false
+  if (isDenylistHeuristicMode(state) || state.allowedTools.length === 0) return false
   if (!state.allowedTools.some((entry) => canonicalToolName(entry) === "read")) return false
   // Probe the same effect classifier as a Read-only phase. A command that
   // needs Write will fail this probe, while deterministic reads retain the
@@ -513,7 +517,7 @@ function legacyReadFallbackAllowed(state: StateCache, command: string): boolean 
 
 function bashCommandAllowed(state: StateCache, command: string): boolean {
   if (evaluateCommandTier(command, state) !== "allow") return false
-  if (isBlacklistHeuristicMode(state) || state.allowedTools.length === 0) return true
+  if (isDenylistHeuristicMode(state) || state.allowedTools.length === 0) return true
   return state.allowedTools.some((entry) => canonicalToolName(entry) === "bash") || legacyReadFallbackAllowed(state, command)
 }
 
@@ -2763,7 +2767,7 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
 
     // --- Native tool restrictions ---
     try {
-      if (state.allowedTools.length > 0 && !isBlacklistHeuristicMode(state)) {
+      if (state.allowedTools.length > 0 && !isDenylistHeuristicMode(state)) {
         if (!originalTools) {
           originalTools = pi.getActiveTools()
           swLog(`tools] saved original tools: ${originalTools.join(", ")}`)
@@ -3195,9 +3199,12 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
             approvalHold.observe({ state: stateCache.state, pending_approval: { approval_id: decision.approval_id } })
             return approvalHold.blockTool(_ctx)
           }
+          const classifierRework = formatClassifierRework(decision.classifier_rework)
+          if (classifierRework) _ctx.ui.notify(`[statewright] ${classifierRework}`, "warn")
           return {
             block: true,
-            reason: String(decision.reason ?? "Blocked by Statewright"),
+            reason: [String(decision.reason ?? "Blocked by Statewright"), classifierRework]
+              .filter(Boolean).join(" "),
           }
         }
         return
@@ -3224,12 +3231,12 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
       return { block: true, reason: `Tool '${event.toolName}' is explicitly blocked in the '${stateCache.state}' phase.` }
     }
 
-    if (isBlacklistHeuristicMode(stateCache) && !isKnownNativeTool(event.toolName)) {
+    if (isDenylistHeuristicMode(stateCache) && !isKnownNativeTool(event.toolName)) {
       return { block: true, reason: `Tool '${event.toolName}' has opaque mutation semantics in the '${stateCache.state}' phase.` }
     }
 
     // Bash effects are enforced in both policy modes. New-mode admission uses
-    // blacklist semantics; legacy states retain their existing visible tools.
+    // denylist semantics; legacy states retain their existing visible tools.
     if (canonicalToolName(event.toolName) === "bash") {
       const cmd = (event.input?.command ?? event.input?.cmd ?? "") as string
       if (bashCommandAllowed(stateCache, cmd)) return
@@ -3238,14 +3245,14 @@ export default async function statewrightExtension(pi: ExtensionAPI, ownership?:
 
     // The compatibility change is opt-in. Existing workflows keep their
     // provider-visible allowlist semantics until explicitly migrated.
-    if (!isBlacklistHeuristicMode(stateCache) && stateCache.allowedTools.length > 0) {
+    if (!isDenylistHeuristicMode(stateCache) && stateCache.allowedTools.length > 0) {
       const isAllowed = stateCache.allowedTools.some((tool) => toolNamesMatch(tool, event.toolName))
       if (!isAllowed) {
         return { block: true, reason: `Tool '${event.toolName}' is not available in the '${stateCache.state}' phase.` }
       }
     }
 
-    // Default allow after blacklist and Bash discernment. Inactivity timer is NOT reset here —
+    // Default allow after denylist and Bash discernment. Inactivity timer is NOT reset here —
     // it only resets on state transitions (via applyModelRouting).
     // A model calling tools without transitioning is still stuck.
   })

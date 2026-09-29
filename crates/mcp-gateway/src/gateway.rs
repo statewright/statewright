@@ -1056,20 +1056,22 @@ impl Gateway {
                     );
                 }
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
-                let pre_warning =
-                    match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
-                        PreCallDecision::Block(reason) => {
-                            return JsonRpcResponse::success(
-                                id,
-                                serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                    reason,
-                                ))
+                let pre_warning = match interceptors::pre_call_check_with_pipeline(
+                    &session,
+                    &params.name,
+                    &params.arguments,
+                    Some(&pipeline),
+                ) {
+                    PreCallDecision::Block(reason) => {
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
                                 .unwrap(),
-                            );
-                        }
-                        PreCallDecision::Warn(msg) => Some(msg),
-                        PreCallDecision::Allow => None,
-                    };
+                        );
+                    }
+                    PreCallDecision::Warn(msg) => Some(msg),
+                    PreCallDecision::Allow => None,
+                };
 
                 // Forward to upstream
                 self.session_manager.increment_iteration(&self.session_id);
@@ -1314,12 +1316,15 @@ impl Gateway {
                 return json!({
                     "decision": "deny",
                     "reason": "workflow session disappeared while semantic risk was assessed",
-                    "risk_assessment": pipeline.visible_json(),
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_session_unavailable",
+                        "active_workflow_session",
+                    ),
                 });
             }
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
-        // including tools the state whitelist would admit — until an
+        // including tools the state allowlist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
         // the gate through the state projection; they never decide it.
         if let Some(pending) = &session.pending_approval {
@@ -1328,7 +1333,10 @@ impl Gateway {
                 "approval_pending": true,
                 "approval_id": pending.approval_id,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "approval_pending",
+                    "human_approval",
+                ),
                 "reason": format!(
                     "APPROVAL PENDING (id: {}): the workflow is parked at state '{}' awaiting a human decision on event '{}' ({}). All tool calls are blocked until an authorized reviewer approves or rejects the pending approval; do not attempt further tool calls or transitions.",
                     pending.approval_id,
@@ -1354,15 +1362,22 @@ impl Gateway {
                 "reason": reason,
                 "available_tools": statewright_agent::tool_enforcer::get_allowed_tools(&session.definition, &session.current_state).unwrap_or_default(),
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "unsupported_shell_dialect",
+                    "supported_bash_dialect",
+                ),
             });
         }
-        if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+        if let Some(denial) = enforcement::semantic_effect_risk_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
         let original_denied = statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
@@ -1381,7 +1396,10 @@ impl Gateway {
                     return json!({
                         "decision":"deny", "state":session.current_state,
                         "reason":"MCP invocation has unresolved or mutating effects in this exploratory state.",
-                        "risk_assessment":pipeline.visible_json(),
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_effect_unresolved",
+                            "registered_read_only_effect",
+                        ),
                     });
                 }
                 Some(policy) => policy.to_string(),
@@ -1389,16 +1407,24 @@ impl Gateway {
                     return json!({
                         "decision":"deny", "state":session.current_state,
                         "reason":"MCP tool is not registered as read-only in this exploratory state.",
-                        "risk_assessment":pipeline.visible_json(),
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_registration_missing",
+                            "registered_read_only_tool",
+                        ),
                     });
                 }
             }
         } else {
-            enforcement::resolve_adapter_tool_name_with_pipeline(
+            enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
                 &session,
                 tool_name,
                 tool_input,
                 Some(&pipeline),
+                if registered_tool.is_some() {
+                    enforcement::AdapterToolOrigin::RegisteredUpstream
+                } else {
+                    enforcement::AdapterToolOrigin::NativeUnregistered
+                },
             )
         };
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
@@ -1415,20 +1441,27 @@ impl Gateway {
                     "reason": reason,
                     "available_tools": available_tools,
                     "state": session.current_state,
-                    "risk_assessment": pipeline.visible_json(),
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_tool_policy",
+                        "declared_tool_capability",
+                    ),
                 });
             }
             EnforcementDecision::ImplicitTransition { event, new_state } => {
                 let mut execution_session = session.clone();
                 execution_session.current_state = new_state.clone();
-                if let Some(reason) =
-                    enforcement::semantic_effect_capability_denial(&execution_session, &pipeline)
-                {
+                if let Some(denial) = enforcement::semantic_effect_capability_denial_details(
+                    &execution_session,
+                    &pipeline,
+                ) {
                     return json!({
                         "decision": "deny",
-                        "reason": reason,
+                        "reason": denial.reason,
                         "state": session.current_state,
-                        "risk_assessment": pipeline.visible_json(),
+                        "risk_assessment": pipeline.visible_json_for_denial(
+                            denial.basis,
+                            denial.required_authority,
+                        ),
                     });
                 }
                 let old_state = session.current_state.clone();
@@ -1456,7 +1489,10 @@ impl Gateway {
                         return json!({
                             "decision": "deny",
                             "reason": "workflow session disappeared during implicit transition",
-                            "risk_assessment": pipeline.visible_json(),
+                            "risk_assessment": pipeline.visible_json_for_denial(
+                                "workflow_session_unavailable",
+                                "active_workflow_session",
+                            ),
                         });
                     }
                 }
@@ -1470,12 +1506,17 @@ impl Gateway {
             }
         };
 
-        if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+        if let Some(denial) =
+            enforcement::semantic_effect_capability_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
 
@@ -1490,7 +1531,10 @@ impl Gateway {
                 "decision": "deny",
                 "reason": reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "interceptor_policy",
+                    "interceptor_clearance",
+                ),
             }),
             PreCallDecision::Warn(warning) => json!({
                 "decision": "allow",
@@ -1524,8 +1568,14 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"active": false, "error": "No active session"}),
         };
-        let policy_tool_name =
-            enforcement::resolve_adapter_tool_name(&before, tool_name, tool_input);
+        let origin = if self.upstream.tool_info(tool_name).ok().flatten().is_some() {
+            enforcement::AdapterToolOrigin::RegisteredUpstream
+        } else {
+            enforcement::AdapterToolOrigin::NativeUnregistered
+        };
+        let policy_tool_name = enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+            &before, tool_name, tool_input, None, origin,
+        );
         let previous_state = before.current_state.clone();
         self.session_manager.increment_iteration(&self.session_id);
 
@@ -5600,7 +5650,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
+    async fn adapter_pre_tool_denies_allowlisted_tools_while_approval_pending() {
         let mut gw = approval_gateway();
         gw.session_manager.set_pending_approval(
             "approval-session",
@@ -5614,8 +5664,8 @@ mod tests {
             },
         );
 
-        // A tool the state whitelist admits is still denied while the gate
-        // is parked: the approval gate outranks the state whitelist.
+        // A tool the state allowlist admits is still denied while the gate
+        // is parked: the approval gate outranks the state allowlist.
         let result = gw
             .adapter_pre_tool("read_file", &json!({ "path": "x" }))
             .await;
@@ -6385,10 +6435,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_cannot_bypass_blacklist_write_capability() {
+    async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",
-            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},
             "states": {
                 "inspect": {
                     "allowed_tools":["Edit"], "disallowed_tools":["Write"],
@@ -6403,15 +6453,7 @@ mod tests {
         manager.increment_iteration("checkpoint-policy-session");
         let mut workflows = HashMap::new();
         workflows.insert("checkpoint-policy".into(), definition);
-        let upstream = UpstreamManager::mock(vec![(
-            ToolInfo {
-                annotations: None,
-                name: "Edit".into(),
-                description: None,
-                input_schema: json!({"type":"object"}),
-            },
-            crate::protocol::ToolCallResult::text("must not execute"),
-        )]);
+        let upstream = UpstreamManager::mock(vec![]);
         let mut gateway = Gateway::new(
             manager,
             upstream,
@@ -6433,12 +6475,85 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked"))
         );
+        assert_eq!(result["risk_assessment"]["equivalent_retry_allowed"], false);
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_capability_write_denied"
+        );
+        assert_eq!(result["risk_assessment"]["required_authority"], "Write");
         let session = gateway
             .session_manager
             .get("checkpoint-policy-session")
             .unwrap();
         assert_eq!(session.current_state, "inspect");
         assert_eq!(session.iteration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn registered_write_alias_cannot_inherit_native_allowlist_authority() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id":"registered-collision", "initial":"inspect",
+            "states": {
+                "inspect": {"allowed_tools":["Write"], "on":{"DONE":"done"}},
+                "done":{"type":"final"}
+            }
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("registered-collision-session".into(), definition.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("registered-collision".into(), definition);
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                annotations: serde_json::from_value(json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": true,
+                    "openWorldHint": true
+                }))
+                .unwrap(),
+                name: "apply_patch".into(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+            },
+            crate::protocol::ToolCallResult::text("must not execute"),
+        )]);
+        let mut gateway = Gateway::new(
+            manager,
+            upstream,
+            "registered-collision-session".into(),
+            workflows,
+            Some("registered-collision".into()),
+            String::new(),
+            None,
+        );
+
+        let result = gateway
+            .adapter_pre_tool("apply_patch", &json!({"patch":"redacted"}))
+            .await;
+
+        assert_eq!(result["decision"], "deny");
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("not available"))
+        );
+        assert_eq!(
+            result["risk_assessment"]["deterministic_source"],
+            "mcp_annotation"
+        );
+        assert_eq!(result["risk_assessment"]["deterministic_risk"], "Critical");
+        assert_ne!(
+            result["risk_assessment"]["deterministic_source"],
+            "native_write"
+        );
+        assert_eq!(
+            result["risk_assessment"]["required_authority"],
+            "declared_tool_capability"
+        );
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_tool_policy"
+        );
     }
 
     #[tokio::test]

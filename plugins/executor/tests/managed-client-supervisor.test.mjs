@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -980,6 +980,9 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     await writeFile(launcher, "");
     const first = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(first.installed.length, 1);
+    const closeoutShim = join(home, ".statewright", "bin", "statewright-git-closeout");
+    assert.match(await readFile(closeoutShim, "utf8"), /git-closeout\.mjs/);
+    assert.equal((await stat(closeoutShim)).mode & 0o777, 0o555);
     assert.equal(await managedClientEnabled("codex", home), true);
     assert.equal(await managedClientEnabled("claude", home), false);
     const profile = await readFile(join(home, ".zshrc"), "utf8");
@@ -987,7 +990,7 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     const second = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(second.profile, null);
     const removed = await uninstallManagedClients({ home, shell: "/bin/zsh" });
-    assert.equal(removed.removed.length, 1);
+    assert.equal(removed.removed.length, 2);
     assert.equal(removed.profile, join(home, ".zshrc"));
     assert.doesNotMatch(await readFile(join(home, ".zshrc"), "utf8"), /statewright managed clients/);
     assert.equal(await managedClientEnabled("codex", home), false);
@@ -1015,10 +1018,11 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
       const shimPath = join(home, ".statewright", "bin", `${host}.cmd`);
       assert.match(await readFile(shimPath, "utf8"), /statewright-managed-client|launcher\.mjs/i);
     }
+    assert.match(await readFile(join(home, ".statewright", "bin", "statewright-git-closeout.cmd"), "utf8"), /git-closeout\.mjs/);
     const profilePath = join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
     assert.match(await readFile(profilePath, "utf8"), /statewright managed clients/);
     const removed = await uninstallManagedClients({ home, platform: "win32" });
-    assert.equal(removed.removed.length, 2);
+    assert.equal(removed.removed.length, 3);
     assert.equal(removed.profile, profilePath);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

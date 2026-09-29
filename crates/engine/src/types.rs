@@ -49,6 +49,11 @@ pub struct StateDef {
     /// requiring a brittle enumeration of every read-only MCP tool.
     #[serde(default)]
     pub intent: Option<String>,
+    /// State-specific classifier tolerance. This can narrow or explicitly
+    /// select bounded local semantic resolution, but cannot authorize known
+    /// destructive, external, irreversible, or account effects.
+    #[serde(default)]
+    pub classifier_policy: Option<ClassifierPolicy>,
     #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
@@ -93,6 +98,35 @@ pub struct StateDef {
     /// Model escalation ladder for direct_execution states.
     #[serde(default)]
     pub model_ladder: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClassifierPolicy {
+    #[serde(default)]
+    pub risk_tolerance: ClassifierRiskTolerance,
+}
+
+impl Default for ClassifierPolicy {
+    fn default() -> Self {
+        Self {
+            risk_tolerance: ClassifierRiskTolerance::AssessedModerateLocal,
+        }
+    }
+}
+
+/// Maximum local effect accepted after the global classifier and provider
+/// gates run. No value admits known high/critical or non-local effects.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierRiskTolerance {
+    /// Only structurally proven local reads are admitted.
+    LowLocal,
+    /// Structurally proven reads and deterministic local writes are admitted.
+    ModerateLocal,
+    /// System One may resolve an otherwise unknown operation to a bounded
+    /// read or reversible local write using the code-owned thresholds.
+    #[default]
+    AssessedModerateLocal,
 }
 
 /// A transition triggered by an event.
@@ -363,6 +397,10 @@ pub struct MachineMeta {
     /// Optional guarded promotion policy enforced by capable adapters.
     #[serde(default)]
     pub promotion: Option<PromotionPolicy>,
+    /// Workflow default classifier tolerance. Individual states may override
+    /// it with `classifier_policy`.
+    #[serde(default)]
+    pub classifier_policy: Option<ClassifierPolicy>,
     /// Catch-all for forward compatibility with new meta fields.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
@@ -600,6 +638,38 @@ mod tests {
         assert_eq!(
             def.states["implementing"].model.as_deref(),
             Some("claude-haiku-4-5-20251001")
+        );
+    }
+
+    #[test]
+    fn classifier_policy_deserializes_at_workflow_and_state_scope() {
+        let def: MachineDefinition = serde_json::from_value(json!({
+            "id": "classifier-policy-test",
+            "initial": "inspect",
+            "meta": {
+                "classifier_policy": {"risk_tolerance": "low_local"}
+            },
+            "states": {
+                "inspect": {
+                    "classifier_policy": {"risk_tolerance": "moderate_local"},
+                    "on": {"DONE": "done"}
+                },
+                "done": {"type": "final"}
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            def.meta.unwrap().classifier_policy.unwrap().risk_tolerance,
+            ClassifierRiskTolerance::LowLocal
+        );
+        assert_eq!(
+            def.states["inspect"]
+                .classifier_policy
+                .as_ref()
+                .unwrap()
+                .risk_tolerance,
+            ClassifierRiskTolerance::ModerateLocal
         );
     }
 

@@ -12,7 +12,7 @@ reviewer cannot release; canary."
      pending", gateway.rs:1384).
    - **P1 adds**: `adapter_pre_tool` denies ALL tool traffic with
      `approval_pending: true` + approval id (previously only transitions were
-     gated; tool traffic sailed through the normal whitelist).
+     gated; tool traffic sailed through the normal allowlist).
    - `statewright_get_state` (JSON-RPC and `adapter state`) exposes the
      projection so hosts can observe; it is the resolver long-poll target.
 2. Decisions enter only through the authenticated gateway surface

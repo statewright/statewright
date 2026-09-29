@@ -141,6 +141,8 @@ test("bridge authenticates adapters and preserves one executor identity", async 
           policy_tool_name: "Read",
           decision: "allow",
           state: "implementing",
+          classifier_rework_attempts: null,
+          classifier_rework_action: null,
         },
       },
       {
@@ -183,6 +185,44 @@ test("bridge authenticates adapters and preserves one executor identity", async 
     });
     assert.equal(proxied.status, 0, proxied.stderr);
     assert.equal(JSON.parse(proxied.stdout).result.tools[0].name, "statewright_transition");
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("bridge counts repeated classifier intent without retaining tool payloads", async () => {
+  const telemetry = [];
+  const client = {
+    async call(name) {
+      if (name === "statewright_get_state") return { run_id: "run", state: "implement" };
+      return {
+        decision: "deny",
+        run_id: "run",
+        state: "implement",
+        risk_assessment: {
+          intent_fingerprint: "intent_v1_redacted",
+          final_denial_basis: "incomplete_structural_evidence",
+        },
+      };
+    },
+  };
+  const bridge = await new AdapterBridge(client, {
+    executorId: "executor",
+    token: "test-token",
+    host: "codex",
+    telemetry: async (event, fields) => telemetry.push({ event, fields }),
+  }).start();
+
+  try {
+    const call = async (secret) => (await fetch(`${bridge.url}/hooks/pre-tool`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ tool_name: "Bash", tool_input: { cmd: secret } }),
+    })).json();
+    assert.equal((await call("private-one")).classifier_rework.attempts, 1);
+    assert.equal((await call("private-two")).classifier_rework.attempts, 2);
+    assert.equal((await call("private-three")).classifier_rework.action, "approval_required");
+    assert.equal(JSON.stringify(telemetry).includes("private-"), false);
   } finally {
     await bridge.close();
   }

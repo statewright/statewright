@@ -38,6 +38,50 @@ test("formats classifier denials for display without discarding machine evidence
   assert.doesNotMatch(denial.machine, /internal scoring/);
 });
 
+test("agent delegation denial directs inline work and suppresses approval retry guidance", () => {
+  const denial = formatGuardDenial({
+    risk_assessment: {
+      deterministic_source: "unmanaged_agent_delegation",
+      final_denial_basis: "effective_known_risk",
+      required_authority: "separate_approved_execution_path",
+    },
+    delegation: {
+      schema: "statewright/managed-delegation/v1",
+      recommendation: "continue_inline",
+      raw_delegation_allowed: false,
+      managed_transition_candidates: [],
+    },
+    classifier_rework: {
+      attempts: 2,
+      max_reworks: 2,
+      action: "approval_required",
+    },
+  });
+  assert.match(denial.display, /continue inline by default so evidence stays attached/);
+  assert.match(denial.display, /separate, unbounded tool surface/);
+  assert.doesNotMatch(denial.display, /approval|Rework attempt/i);
+  assert.match(denial.machine, /"deterministic_source":"unmanaged_agent_delegation"/);
+  assert.match(denial.machine, /"recommendation":"continue_inline"/);
+});
+
+test("agent delegation denial names declared managed child transitions for route changes", () => {
+  const denial = formatGuardDenial({
+    risk_assessment: { deterministic_source: "unmanaged_agent_delegation" },
+    delegation: {
+      schema: "statewright/managed-delegation/v1",
+      recommendation: "statewright_managed_fork",
+      route_change_requested: true,
+      managed_transition_candidates: [
+        {event: "FORK_REVIEW", kind: "fork"},
+        {event: "RUN_SPECIALIST", kind: "subworkflow"},
+      ],
+    },
+  });
+  assert.match(denial.display, /different model or reasoning route/);
+  assert.match(denial.display, /FORK_REVIEW \(fork\), RUN_SPECIALIST \(subworkflow\)/);
+  assert.match(denial.display, /attached to the parent workflow evidence/);
+});
+
 async function startBridge() {
   const requests = [];
   const server = createServer(async (request, response) => {
@@ -127,6 +171,34 @@ async function startNativeGateway() {
           required_authority: "moderate_local_or_assessed_moderate_local",
           equivalent_retry_allowed: false,
           command: "private-command-sentinel",
+        },
+      };
+    } else if ([
+      "collaborationspawn_agent",
+      "mcp__agents__spawn_agent",
+      "mcp__statewright_helpers__spawn_agent",
+      "mcp__statewright_helpers__SPAWN_AGENT",
+      "Agent",
+    ].includes(toolName)) {
+      decision = {
+        decision: "deny",
+        reason: "Raw agent delegation is not an approved execution boundary.",
+        risk_assessment: {
+          deterministic_risk: "High",
+          deterministic_exposure: "Unknown",
+          deterministic_source: "unmanaged_agent_delegation",
+          resolution_basis: "deterministic_high_unknown",
+          final_denial_basis: "effective_known_risk",
+          required_authority: "statewright_managed_fork",
+          equivalent_retry_allowed: false,
+        },
+        delegation: {
+          schema: "statewright/managed-delegation/v1",
+          raw_delegation_allowed: false,
+          recommendation: "continue_inline",
+          route_change_requested: false,
+          evidence_owner: "parent_workflow",
+          managed_transition_candidates: [],
         },
       };
     } else if (toolName === "stale_fixture") {
@@ -342,6 +414,35 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     assert.match(classifierOutput.additionalContext, /"may_write":0\.96/);
     assert.doesNotMatch(classifierOutput.additionalContext, /private-(command|input)-sentinel/);
 
+    const delegationDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id,
+      tool_name: "collaborationspawn_agent",
+      tool_input: {task_name: "architecture", message: "private-delegation-prompt"},
+    }, environment);
+    assert.equal(delegationDenied.status, 0, delegationDenied.stderr);
+    const delegationOutput = JSON.parse(delegationDenied.stdout).hookSpecificOutput;
+    assert.match(delegationOutput.permissionDecisionReason, /continue inline by default/);
+    assert.doesNotMatch(delegationOutput.permissionDecisionReason, /approval|Rework attempt/i);
+    assert.match(delegationOutput.additionalContext, /"recommendation":"continue_inline"/);
+    assert.match(delegationOutput.additionalContext, /"deterministic_source":"unmanaged_agent_delegation"/);
+    assert.doesNotMatch(delegationOutput.additionalContext, /private-delegation-prompt/);
+
+    for (const tool_name of [
+      "mcp__agents__spawn_agent",
+      "mcp__statewright_helpers__spawn_agent",
+      "mcp__statewright_helpers__SPAWN_AGENT",
+      "Agent",
+    ]) {
+      const aliasDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name, tool_input: {message: "private-alias-prompt"},
+      }, environment);
+      assert.equal(aliasDenied.status, 0, aliasDenied.stderr);
+      const aliasOutput = JSON.parse(aliasDenied.stdout).hookSpecificOutput;
+      assert.equal(aliasOutput.permissionDecision, "deny", tool_name);
+      assert.match(aliasOutput.permissionDecisionReason, /continue inline by default/, tool_name);
+      assert.doesNotMatch(aliasOutput.additionalContext, /private-alias-prompt/, tool_name);
+    }
+
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "stale_fixture",
@@ -511,6 +612,21 @@ test("legacy state without an allowlist remains unenforced", async () => {
     }, environment);
     assert.equal(pre.status, 0, pre.stderr);
     assert.equal(pre.stdout, "");
+    for (const tool_name of [
+      "Agent",
+      "mcp__agents__spawn_agent",
+      "mcp__statewright_helpers__spawn_agent",
+      "mcp__statewright_helpers__SPAWN_AGENT",
+    ]) {
+      const delegated = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name, tool_input: {message: "private-legacy-prompt"},
+      }, environment);
+      assert.equal(delegated.status, 0, delegated.stderr);
+      const output = JSON.parse(delegated.stdout).hookSpecificOutput;
+      assert.equal(output.permissionDecision, "deny", tool_name);
+      assert.match(output.permissionDecisionReason, /could not bind this raw delegated agent/, tool_name);
+      assert.doesNotMatch(delegated.stdout, /private-legacy-prompt/, tool_name);
+    }
   } finally {
     await rm(home, {recursive: true, force: true});
   }

@@ -42,8 +42,22 @@ export function formatGuardDenial(result) {
 
   const basis = String(risk.final_denial_basis ?? risk.resolution_basis ?? "unknown");
   const required = String(risk.required_authority ?? "approved execution path");
+  const delegationDenied = risk.deterministic_source === "unmanaged_agent_delegation";
+  const delegation = result?.delegation;
   let display;
-  if ([
+  if (delegationDenied) {
+    const managedEvents = Array.isArray(delegation?.managed_transition_candidates)
+      ? delegation.managed_transition_candidates
+        .map(item => item?.event && `${item.event} (${item.kind ?? "managed"})`).filter(Boolean).join(", ")
+      : "";
+    if (delegation?.recommendation === "statewright_managed_fork") {
+      display = managedEvents
+        ? `Statewright guard: denied · this delegated task requests a different model or reasoning route. Candidate workflow-managed child transitions: ${managedEvents}. Use one only when its declared child route matches the request; the child remains attached to the parent workflow evidence.`
+        : "Statewright guard: denied · this delegated task requests a different model or reasoning route, but the current state declares no managed fork or subworkflow transition. Continue inline or transition to a state that declares one.";
+    } else {
+      display = "Statewright guard: denied · continue inline by default so evidence stays attached to the current workflow. A raw delegated agent would receive a separate, unbounded tool surface.";
+    }
+  } else if ([
     "semantic_threshold_not_met",
     "incomplete_structural_evidence",
     "semantic_vector_unavailable",
@@ -65,15 +79,16 @@ export function formatGuardDenial(result) {
     display += ` System One signals: read-only ${percent(vector.read_only)}, write ${percent(vector.may_write)}, destructive ${percent(vector.destructive)}, external ${percent(vector.external_or_account_effect)}.`;
   }
   const rework = result?.classifier_rework ?? result?.classifierRework;
-  if (rework?.action === "rework") {
+  if (!delegationDenied && rework?.action === "rework") {
     display += ` Rework attempt ${rework.attempts}/${rework.max_reworks}; after this budget, the same classified intent must be sent for human approval.`;
-  } else if (rework?.action === "approval_required") {
+  } else if (!delegationDenied && rework?.action === "approval_required") {
     display += " Rework budget exhausted; this exact classified intent now requires native human approval.";
   }
   return {
     display,
     machine: JSON.stringify({
       classifier_receipt: redactClassifierReceipt(risk),
+      ...(delegation ? { managed_delegation: redactClassifierReceipt(delegation) } : {}),
       ...(rework ? { classifier_rework: redactClassifierReceipt(rework) } : {}),
     }),
   };

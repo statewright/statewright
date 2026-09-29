@@ -731,6 +731,25 @@ test("managed supervisor only restarts its own child after a route request", asy
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("managed supervisor consumes successive current.route.json receipts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-managed-current-route-"));
+  const fake = join(root, "fake-codex.mjs");
+  const calls = join(root, "calls.log");
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nconst control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\nwriteFileSync(join(control, "codex-root-session.json"), JSON.stringify({version:1,session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID}));\nconst first = join(control, "first-route");\nconst second = join(control, "second-route");\nif (!existsSync(first)) { writeFileSync(first, ""); writeFileSync(join(control, "current.route.json"), JSON.stringify({session_id:"session-current",root_session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID,run_id:"run-current",state:"localize",model:"openai-codex/gpt-5.6-terra",effort:"medium"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\nelse if (!existsSync(second)) { writeFileSync(second, ""); writeFileSync(join(control, "current.route.json"), JSON.stringify({session_id:"session-current",root_session_id:"session-current",client_id:process.env.STATEWRIGHT_CLIENT_ID,run_id:"run-current",state:"decision",model:"openai-codex/gpt-5.6-sol",effort:"high"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\n`);
+    await chmod(fake, 0o755);
+    assert.equal(await runManagedClient({
+      host: "codex", command: fake, args: ["--full-auto"],
+      environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+      home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
+    }), 0);
+    const callLines = (await readFile(calls, "utf8")).trim().split("\n");
+    assert.equal(callLines.length, 3);
+    assert.match(callLines[1], /-m gpt-5\.6-terra .*model_reasoning_effort="medium".*resume session-current/);
+    assert.match(callLines[2], /-m gpt-5\.6-sol .*model_reasoning_effort="high".*resume session-current/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("an unavailable Codex ladder stops the detached child before supervision exits", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-managed-unavailable-ladder-"));
   const fake = join(root, "fake-codex.mjs");

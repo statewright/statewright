@@ -1,7 +1,11 @@
 use statewright_agent::tool_enforcer;
 use statewright_engine::resolve_transition;
 
-use crate::{bash_classifier, risk_assessment::{ResolvedEffect, RiskPipelineAssessment}, session::GatewaySession};
+use crate::{
+    bash_classifier,
+    risk_assessment::{ResolvedEffect, RiskPipelineAssessment},
+    session::GatewaySession,
+};
 
 const UNTRUSTED_EXPLORATORY_ADAPTER: &str = "__statewright_untrusted_exploratory_adapter__";
 
@@ -24,10 +28,17 @@ pub enum EnforcementDecision {
 
 fn adapter_tool_family(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
-        "read" | "read_file" | "grep" | "search_files" | "glob" | "find"
-        | "find_files" | "ls" | "list_directory" => Some("read"),
-        "edit" | "edit_file" | "apply_patch" | "patch_file" | "multiedit"
-        | "write" | "write_file" | "create_file" | "create_or_update_file" => Some("write"),
+        "read" | "read_file" | "grep" | "search_files" | "glob" | "find" | "find_files" | "ls"
+        | "list_directory" => Some("read"),
+        "edit"
+        | "edit_file"
+        | "apply_patch"
+        | "patch_file"
+        | "multiedit"
+        | "write"
+        | "write_file"
+        | "create_file"
+        | "create_or_update_file" => Some("write"),
         "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some("command"),
         "run_test" => Some("test"),
         "webfetch" | "fetch" | "http_request" => Some("fetch"),
@@ -56,8 +67,12 @@ pub fn unsupported_shell_dialect_reason(
         .and_then(|value| value.as_str())
         .and_then(|shell| shell.split_whitespace().next())
         .and_then(|shell| shell.rsplit('/').next());
-    if requested_tool.eq_ignore_ascii_case("zsh") || requested_shell.is_some_and(|shell| shell.eq_ignore_ascii_case("zsh")) {
-        Some("Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy.")
+    if requested_tool.eq_ignore_ascii_case("zsh")
+        || requested_shell.is_some_and(|shell| shell.eq_ignore_ascii_case("zsh"))
+    {
+        Some(
+            "Zsh is not enabled for guarded shell execution. Use Bash so Statewright can apply its shell policy.",
+        )
     } else {
         None
     }
@@ -68,6 +83,18 @@ fn allowed_name_for_family(session: &GatewaySession, family: &str) -> Option<Str
         .unwrap_or_default()
         .into_iter()
         .find(|candidate| adapter_tool_family(candidate) == Some(family))
+}
+
+fn allowed_general_read_name(session: &GatewaySession) -> Option<String> {
+    tool_enforcer::get_allowed_tools(&session.definition, &session.current_state)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|candidate| {
+            matches!(
+                candidate.to_ascii_lowercase().as_str(),
+                "read" | "read_file"
+            )
+        })
 }
 
 fn readonly_shell_policy_name(
@@ -95,6 +122,19 @@ pub fn resolve_adapter_tool_name(
     session: &GatewaySession,
     requested: &str,
     tool_input: &serde_json::Value,
+) -> String {
+    resolve_adapter_tool_name_with_pipeline(session, requested, tool_input, None)
+}
+
+/// Resolve a native adapter tool after the risk pipeline has classified its
+/// effect. A structurally proven read-only shell call can use the workflow's
+/// provider-neutral read capability even when the legacy token classifier
+/// cannot reduce compound Bash syntax to individual read commands.
+pub fn resolve_adapter_tool_name_with_pipeline(
+    session: &GatewaySession,
+    requested: &str,
+    tool_input: &serde_json::Value,
+    pipeline: Option<&RiskPipelineAssessment>,
 ) -> String {
     // Preserve the original identity before adapter aliases collapse it to a
     // provider-neutral family. This makes an explicit `grep` denial effective
@@ -131,6 +171,13 @@ pub fn resolve_adapter_tool_name(
         return requested.to_string();
     };
     if family == "command" {
+        if pipeline
+            .is_some_and(|assessment| assessment.resolve_effect() == ResolvedEffect::ReadOnly)
+        {
+            if let Some(policy_name) = allowed_general_read_name(session) {
+                return policy_name;
+            }
+        }
         if let Some(policy_name) = readonly_shell_policy_name(session, tool_input) {
             return policy_name;
         }
@@ -224,7 +271,10 @@ pub fn enforce_tool_call(session: &GatewaySession, tool_name: &str) -> Enforceme
 }
 
 fn uses_semantic_effect_policy(session: &GatewaySession) -> bool {
-    session.context.get("tool_policy_mode").and_then(|value| value.as_str())
+    session
+        .context
+        .get("tool_policy_mode")
+        .and_then(|value| value.as_str())
         == Some("blacklist_heuristic_v1")
 }
 
@@ -273,8 +323,10 @@ pub fn semantic_effect_capability_denial(
             "Local write effect is explicitly blocked in state '{}'.",
             execution_session.current_state
         )),
-        ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite
-        | ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain => None,
+        ResolvedEffect::ReadOnly
+        | ResolvedEffect::LocalWrite
+        | ResolvedEffect::DenyKnownRisk
+        | ResolvedEffect::DenyUncertain => None,
     }
 }
 
@@ -332,23 +384,32 @@ mod tests {
                 "inspect": {"disallowed_tools": disallowed, "on": {"DONE":"done"}},
                 "done": {"type":"final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         GatewaySession::new("blacklist".into(), definition)
     }
 
-    fn semantic_pipeline(command: &str, vector: Option<crate::risk_assessment::SemanticRiskVector>)
-        -> crate::risk_assessment::RiskPipelineAssessment
-    {
+    fn semantic_pipeline(
+        command: &str,
+        vector: Option<crate::risk_assessment::SemanticRiskVector>,
+    ) -> crate::risk_assessment::RiskPipelineAssessment {
         use crate::risk_assessment::{SemanticAssessmentReceipt, SemanticAssessorStatus};
         let deterministic = crate::risk_assessment::assess_invocation(
-            None, "exec_command", &json!({"cmd":command}), Some("inspect")
+            None,
+            "exec_command",
+            &json!({"cmd":command}),
+            Some("inspect"),
         );
         let effective_risk = deterministic.risk;
         RiskPipelineAssessment {
             deterministic,
             semantic: SemanticAssessmentReceipt {
                 tool: "exec_command".into(),
-                status: if vector.is_some() { SemanticAssessorStatus::Assessed } else { SemanticAssessorStatus::Unavailable },
+                status: if vector.is_some() {
+                    SemanticAssessorStatus::Assessed
+                } else {
+                    SemanticAssessorStatus::Unavailable
+                },
                 vector,
                 state_intent: Some("inspect".into()),
             },
@@ -370,36 +431,70 @@ mod tests {
             external_or_account_effect: Probability::new(0.01).unwrap(),
         };
         let open = blacklist_session(&[]);
-        assert!(semantic_effect_risk_denial(&open, &semantic_pipeline("rg policy src", None)).is_none());
-        assert!(semantic_effect_capability_denial(&open, &semantic_pipeline("rg policy src", None)).is_none());
-        assert!(semantic_effect_capability_denial(&open, &semantic_pipeline("cp source-file local-file", None)).is_none());
-        assert!(semantic_effect_risk_denial(
-            &open,
-            &semantic_pipeline("tmux capture-pane -p -t private-pane", Some(read_vector())),
-        ).is_none());
-        assert!(semantic_effect_risk_denial(
-            &open,
-            &semantic_pipeline("tmux new-session shell", None),
-        ).unwrap().contains("uncertain"));
-        assert!(semantic_effect_risk_denial(
-            &open,
-            &semantic_pipeline("git push origin main", Some(read_vector())),
-        ).unwrap().contains("known"));
+        assert!(
+            semantic_effect_risk_denial(&open, &semantic_pipeline("rg policy src", None)).is_none()
+        );
+        assert!(
+            semantic_effect_capability_denial(&open, &semantic_pipeline("rg policy src", None))
+                .is_none()
+        );
+        assert!(
+            semantic_effect_capability_denial(
+                &open,
+                &semantic_pipeline("cp source-file local-file", None)
+            )
+            .is_none()
+        );
+        assert!(
+            semantic_effect_risk_denial(
+                &open,
+                &semantic_pipeline("tmux capture-pane -p -t private-pane", Some(read_vector())),
+            )
+            .is_none()
+        );
+        assert!(
+            semantic_effect_risk_denial(&open, &semantic_pipeline("tmux new-session shell", None),)
+                .unwrap()
+                .contains("uncertain")
+        );
+        assert!(
+            semantic_effect_risk_denial(
+                &open,
+                &semantic_pipeline("git push origin main", Some(read_vector())),
+            )
+            .unwrap()
+            .contains("known")
+        );
 
         let no_read = blacklist_session(&["Read"]);
-        assert!(semantic_effect_capability_denial(&no_read, &semantic_pipeline("rg policy src", None)).is_some());
-        assert!(semantic_effect_capability_denial(
-            &no_read,
-            &semantic_pipeline("tmux capture-pane -p -t %36", None),
-        ).is_some());
+        assert!(
+            semantic_effect_capability_denial(&no_read, &semantic_pipeline("rg policy src", None))
+                .is_some()
+        );
+        assert!(
+            semantic_effect_capability_denial(
+                &no_read,
+                &semantic_pipeline("tmux capture-pane -p -t %36", None),
+            )
+            .is_some()
+        );
         let no_write = blacklist_session(&["Write"]);
-        assert!(semantic_effect_capability_denial(&no_write, &semantic_pipeline("cp source-file local-file", None)).is_some());
+        assert!(
+            semantic_effect_capability_denial(
+                &no_write,
+                &semantic_pipeline("cp source-file local-file", None)
+            )
+            .is_some()
+        );
 
         let legacy = session_at("unrestricted");
-        assert!(semantic_effect_risk_denial(
-            &legacy,
-            &semantic_pipeline("git push origin main", Some(read_vector())),
-        ).is_none());
+        assert!(
+            semantic_effect_risk_denial(
+                &legacy,
+                &semantic_pipeline("git push origin main", Some(read_vector())),
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -433,13 +528,23 @@ mod tests {
                 "inspect": {"intent": "exploratory_read_only", "on": {"DONE": "done"}},
                 "done": {"type": "final"}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let session = GatewaySession::new("explore".into(), definition);
-        assert_eq!(resolve_adapter_tool_name(&session, "grep", &json!({})), "Read");
-        assert_eq!(resolve_adapter_tool_name(&session, "terminal", &json!({"cmd":"touch x"})), "Bash");
+        assert_eq!(
+            resolve_adapter_tool_name(&session, "grep", &json!({})),
+            "Read"
+        );
+        assert_eq!(
+            resolve_adapter_tool_name(&session, "terminal", &json!({"cmd":"touch x"})),
+            "Bash"
+        );
         let opaque = resolve_adapter_tool_name(&session, "mcp__db__query", &json!({}));
         assert!(opaque.starts_with(UNTRUSTED_EXPLORATORY_ADAPTER));
-        assert!(matches!(enforce_tool_call(&session, &opaque), EnforcementDecision::Block { .. }));
+        assert!(matches!(
+            enforce_tool_call(&session, &opaque),
+            EnforcementDecision::Block { .. }
+        ));
     }
 
     #[test]
@@ -537,9 +642,13 @@ mod tests {
     fn checksum_shell_uses_read_equivalence_without_general_shell_access() {
         let session = session_at("planning");
         for command in ["sha256sum receipt.json", "shasum -a 256 receipt.json"] {
-            let resolved = resolve_adapter_tool_name(&session, "exec_command", &json!({"cmd": command}));
+            let resolved =
+                resolve_adapter_tool_name(&session, "exec_command", &json!({"cmd": command}));
             assert_eq!(resolved, "read_file");
-            assert!(matches!(enforce_tool_call(&session, &resolved), EnforcementDecision::Allow));
+            assert!(matches!(
+                enforce_tool_call(&session, &resolved),
+                EnforcementDecision::Allow
+            ));
         }
         for command in [
             "openssl dgst -sha256 receipt.json",
@@ -552,7 +661,11 @@ mod tests {
             );
         }
         assert_eq!(
-            resolve_adapter_tool_name(&session_at("completed"), "exec_command", &json!({"cmd": "sha256sum receipt.json"})),
+            resolve_adapter_tool_name(
+                &session_at("completed"),
+                "exec_command",
+                &json!({"cmd": "sha256sum receipt.json"})
+            ),
             "exec_command",
         );
     }
@@ -573,11 +686,7 @@ mod tests {
             "deploy"
         );
         assert_eq!(
-            resolve_adapter_tool_name(
-                &session,
-                "exec_command",
-                &json!({"cmd": "cat README.md"}),
-            ),
+            resolve_adapter_tool_name(&session, "exec_command", &json!({"cmd": "cat README.md"}),),
             "read_file",
         );
         assert_eq!(
@@ -601,6 +710,52 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_read_pipeline_maps_compound_shell_to_read_capability() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "pipeline-map",
+            "initial": "planning",
+            "context": {"tool_policy_mode": "blacklist_heuristic_v1"},
+            "states": {
+                "planning": {
+                    "allowed_tools": ["Read", "Grep", "Glob"],
+                    "disallowed_tools": ["Write"],
+                    "on": {"DONE": "completed"}
+                },
+                "completed": {"type": "final"}
+            }
+        }))
+        .unwrap();
+        let session = GatewaySession::new("pipeline-map".into(), definition);
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let read = semantic_pipeline(
+            "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi",
+            None,
+        );
+        let write = semantic_pipeline("git rev-parse HEAD || git push origin HEAD", None);
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
+
+        assert_eq!(read.resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(
+            resolve_adapter_tool_name_with_pipeline(
+                &session,
+                "exec_command",
+                &json!({"cmd":"if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -20; fi"}),
+                Some(&read),
+            ),
+            "Read",
+        );
+        assert_eq!(
+            resolve_adapter_tool_name_with_pipeline(
+                &session,
+                "exec_command",
+                &json!({"cmd":"git rev-parse HEAD || git push origin HEAD"}),
+                Some(&write),
+            ),
+            "exec_command",
+        );
+    }
+
+    #[test]
     fn normalized_capabilities_admit_native_read_and_write_tools() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id": "normalized",
@@ -618,17 +773,36 @@ mod tests {
         let session = GatewaySession::new("normalized".into(), definition);
 
         for native in ["Read", "grep", "Glob", "find_files", "ls"] {
-            assert_eq!(resolve_adapter_tool_name(&session, native, &json!({})), "Read");
+            assert_eq!(
+                resolve_adapter_tool_name(&session, native, &json!({})),
+                "Read"
+            );
         }
-        for native in ["Edit", "apply_patch", "patch_file", "MultiEdit", "write_file", "create_or_update_file"] {
-            assert_eq!(resolve_adapter_tool_name(&session, native, &json!({})), "Write");
+        for native in [
+            "Edit",
+            "apply_patch",
+            "patch_file",
+            "MultiEdit",
+            "write_file",
+            "create_or_update_file",
+        ] {
+            assert_eq!(
+                resolve_adapter_tool_name(&session, native, &json!({})),
+                "Write"
+            );
         }
         match enforce_tool_call(&session, "Zsh") {
             EnforcementDecision::Block { reason, .. } => assert!(reason.contains("Use Bash")),
             other => panic!("Zsh must be explicitly blocked, got {other:?}"),
         }
-        assert!(unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/zsh"})).is_some());
-        assert!(unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/bash"})).is_none());
+        assert!(
+            unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/zsh"}))
+                .is_some()
+        );
+        assert!(
+            unsupported_shell_dialect_reason("exec_command", &json!({"shell": "/bin/bash"}))
+                .is_none()
+        );
         assert!(unsupported_shell_dialect_reason("Read", &json!({"shell": "/bin/zsh"})).is_none());
     }
 }

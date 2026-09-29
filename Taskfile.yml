@@ -42,6 +42,8 @@ tasks:
       - node plugins/codex/scripts/sync-executor-core.mjs --check
       - node plugins/claude-code/scripts/sync-managed-client.mjs --check
       - node --check plugins/executor/tests/unix-plugin-live-gateway-canary.mjs
+      - node plugins/executor/tests/unix-managed-client-route-canary.mjs
+      - node --test plugins/codex/tests/statewright-codex-tui.test.mjs
       - node --check plugins/executor/tests/windows-managed-client-canary.mjs
       - node --check plugins/executor/tests/windows-managed-client-route-canary.mjs
       - node --check plugins/executor/tests/windows-managed-client-live-gateway-canary.mjs

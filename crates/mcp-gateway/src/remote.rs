@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::extract::{OriginalUri, Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -28,6 +28,10 @@ pub struct RemoteState {
     session_managers: RwLock<HashMap<String, SessionManager>>,
     /// PocketBase URL for workflow loading.
     pb_url: String,
+    /// Canonical public origin of this protected resource.
+    public_url: String,
+    /// Canonical issuer identifier for the OAuth authorization server.
+    authorization_server_url: String,
     /// Database pool for run recording and step metering.
     db_pool: crate::DbPool,
     /// Approval callback secret (from APPROVAL_CALLBACK_SECRET env var at startup).
@@ -54,6 +58,7 @@ impl RemoteState {
 struct RemoteSession {
     gateway: Gateway,
     tx: mpsc::Sender<String>,
+    resource: String,
 }
 
 #[derive(Deserialize)]
@@ -103,10 +108,40 @@ pub struct RemoteConfig {
     pub pb_url: String,
     pub listen_addr: String,
     pub database_url: Option<String>,
+    pub public_url: String,
+    pub authorization_server_url: String,
+}
+
+fn normalize_public_origin(value: &str, name: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(value).map_err(|e| format!("Invalid {name}: {e}"))?;
+    let loopback_http = parsed.scheme() == "http"
+        && parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+    if (parsed.scheme() != "https" && !loopback_http)
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(format!(
+            "Invalid {name}: expected an HTTPS origin (or loopback HTTP) without credentials, path, query, or fragment"
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
 }
 
 /// Start the remote MCP transport server (HTTP+SSE).
 pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::SocketAddr, String> {
+    let public_url = normalize_public_origin(&config.public_url, "public URL")?;
+    let authorization_server_url =
+        normalize_public_origin(&config.authorization_server_url, "authorization server URL")?;
+
     // Connect to Postgres for step metering if DATABASE_URL provided
     #[cfg(feature = "metering")]
     let db_pool: crate::DbPool = if let Some(ref db_url) = config.database_url {
@@ -142,6 +177,8 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
         sessions: RwLock::new(HashMap::new()),
         session_managers: RwLock::new(HashMap::new()),
         pb_url: config.pb_url,
+        public_url,
+        authorization_server_url,
         db_pool,
         approval_secret,
     });
@@ -165,6 +202,56 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
     Ok(addr)
 }
 
+fn resource_url(state: &RemoteState, path: &str) -> String {
+    if path == "/mcp" {
+        format!("{}/mcp", state.public_url)
+    } else {
+        state.public_url.clone()
+    }
+}
+
+fn resource_metadata_url(state: &RemoteState, path: &str) -> String {
+    if path == "/mcp" {
+        format!(
+            "{}/.well-known/oauth-protected-resource/mcp",
+            state.public_url
+        )
+    } else {
+        format!("{}/.well-known/oauth-protected-resource", state.public_url)
+    }
+}
+
+fn unauthorized_response(state: &RemoteState, path: &str, message: &'static str) -> Response {
+    let challenge = format!(
+        "Bearer resource_metadata=\"{}\", scope=\"mcp\"",
+        resource_metadata_url(state, path)
+    );
+    let mut response = (StatusCode::UNAUTHORIZED, message).into_response();
+    if let Ok(value) = HeaderValue::from_str(&challenge) {
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
+    }
+    response
+}
+
+async fn handle_protected_resource_metadata(
+    State(state): State<Arc<RemoteState>>,
+    OriginalUri(uri): OriginalUri,
+) -> impl IntoResponse {
+    let path = if uri.path().ends_with("/mcp") {
+        "/mcp"
+    } else {
+        "/"
+    };
+    Json(serde_json::json!({
+        "resource": resource_url(&state, path),
+        "authorization_servers": [state.authorization_server_url],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"]
+    }))
+}
+
 /// GET /sse — Establish SSE connection, authenticate via API key, load workflows.
 async fn handle_sse(
     State(state): State<Arc<RemoteState>>,
@@ -180,8 +267,9 @@ async fn handle_sse(
         .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Fetch workflows from PocketBase
-    let result = fetch_workflows(&state.pb_url, &api_key)
+    // Fetch workflows from PocketBase using the exact protected resource.
+    let resource = state.public_url.clone();
+    let result = fetch_workflows(&state.pb_url, &api_key, &resource)
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Failed to fetch workflows");
@@ -234,7 +322,11 @@ async fn handle_sse(
     // Store the session
     state.sessions.write().await.insert(
         session_id.clone(),
-        Arc::new(Mutex::new(RemoteSession { gateway, tx })),
+        Arc::new(Mutex::new(RemoteSession {
+            gateway,
+            tx,
+            resource,
+        })),
     );
 
     tracing::info!(session_id = session_id, "SSE session established");
@@ -255,17 +347,35 @@ struct MessageQuery {
 /// Returns JSON-RPC response directly in the HTTP response body.
 async fn handle_streamable_http(
     State(state): State<Arc<RemoteState>>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    let resource_path = if uri.path() == "/mcp" { "/mcp" } else { "/" };
+    let resource = resource_url(&state, resource_path);
     let api_key = match headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
     {
-        Some(k) => k,
-        None => return (StatusCode::UNAUTHORIZED, "Authorization header required").into_response(),
+        Some(k) if !k.is_empty() => k,
+        _ => {
+            return unauthorized_response(&state, resource_path, "Authorization header required");
+        }
     };
+
+    // Validate on every request so expiry, revocation, scope, and exact OAuth
+    // resource binding take effect even when a session is already cached.
+    let validated = match fetch_workflows(&state.pb_url, &api_key, &resource).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to validate API key");
+            return unauthorized_response(&state, resource_path, "Invalid API key or no workflows");
+        }
+    };
+    if validated.workflows.is_empty() {
+        return (StatusCode::NOT_FOUND, "No workflows found").into_response();
+    }
 
     // Deterministic base key from API key
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
@@ -290,18 +400,7 @@ async fn handle_streamable_http(
 
     // If we need a new session, do the expensive fetch_workflows OUTSIDE any lock
     let new_session = if needs_create {
-        let result = match fetch_workflows(&state.pb_url, &api_key).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to fetch workflows");
-                return (StatusCode::UNAUTHORIZED, "Invalid API key or no workflows")
-                    .into_response();
-            }
-        };
-
-        if result.workflows.is_empty() {
-            return (StatusCode::NOT_FOUND, "No workflows found").into_response();
-        }
+        let result = validated;
 
         let session_id = session_key.clone();
         let default_def = match result.workflows.get(&result.default) {
@@ -338,7 +437,11 @@ async fn handle_streamable_http(
         gateway.set_api_key_fingerprint(&api_key);
 
         let (tx, _rx) = mpsc::channel::<String>(1);
-        Some(Arc::new(Mutex::new(RemoteSession { gateway, tx })))
+        Some(Arc::new(Mutex::new(RemoteSession {
+            gateway,
+            tx,
+            resource,
+        })))
     } else {
         None
     };
@@ -390,14 +493,27 @@ async fn handle_message(
         _ => return (StatusCode::UNAUTHORIZED, "Authorization required").into_response(),
     };
 
-    // Verify the API key owns this session by checking the owner_id matches
+    // Revalidate against PocketBase so expiry, revocation, scope, and exact
+    // resource binding also apply to legacy SSE messages.
     let session = match state.sessions.read().await.get(&query.session_id).cloned() {
         Some(s) => s,
         None => return (StatusCode::NOT_FOUND, "Session not found").into_response(),
     };
-    let mut session = session.lock().await;
+    let resource = {
+        let session = session.lock().await;
+        // Validate ownership before using the session's bound resource.
+        if !session.gateway.verify_owner_key(&api_key) {
+            return (StatusCode::FORBIDDEN, "Session belongs to another user").into_response();
+        }
+        session.resource.clone()
+    };
+    if let Err(error) = fetch_workflows(&state.pb_url, &api_key, &resource).await {
+        tracing::warn!(%error, "Failed to revalidate SSE API key");
+        state.sessions.write().await.remove(&query.session_id);
+        return unauthorized_response(&state, "/", "Invalid API key or no workflows");
+    }
 
-    // Validate ownership: hash the provided key and check it resolves to the same owner
+    let mut session = session.lock().await;
     if !session.gateway.verify_owner_key(&api_key) {
         return (StatusCode::FORBIDDEN, "Session belongs to another user").into_response();
     }
@@ -427,13 +543,18 @@ struct FetchResult {
     plan_limit: Option<u64>,
 }
 
-async fn fetch_workflows(pb_url: &str, api_key: &str) -> Result<FetchResult, String> {
+async fn fetch_workflows(
+    pb_url: &str,
+    api_key: &str,
+    resource: &str,
+) -> Result<FetchResult, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/gateway/workflows", pb_url);
 
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
+        .header("X-Statewright-OAuth-Resource", resource)
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
@@ -491,7 +612,15 @@ struct ApprovalCallback {
 /// Build the router (extracted for testing).
 pub fn build_router(state: Arc<RemoteState>) -> Router {
     Router::new()
-        .route("/mcp", post(handle_streamable_http.clone()))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(handle_protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(handle_protected_resource_metadata),
+        )
+        .route("/mcp", post(handle_streamable_http))
         .route("/", post(handle_streamable_http))
         .route("/sse", get(handle_sse))
         .route("/message", post(handle_message))
@@ -545,14 +674,17 @@ async fn handle_runtime_approval(
     };
     let root = streamable_session_key(&fingerprint, Some(client), None);
     let prefix = format!("{root}_");
-    let under_own_branch = body
-        .run_session_id
-        .starts_with(&prefix)
+    let under_own_branch = body.run_session_id.starts_with(&prefix)
         && body.run_session_id[root.len() + 1..].starts_with("br_");
     if body.run_session_id != root && !under_own_branch {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let mut session = state.sessions.read().await.get(&body.run_session_id).cloned();
+    let mut session = state
+        .sessions
+        .read()
+        .await
+        .get(&body.run_session_id)
+        .cloned();
     if session.is_none() {
         // The gateway process may have been replaced while a human decision
         // was parked. A durable checkpoint is the only authority for reviving
@@ -560,7 +692,8 @@ async fn handle_runtime_approval(
         if state.db_pool.is_none() {
             return StatusCode::NOT_FOUND.into_response();
         }
-        let workflows = match fetch_workflows(&state.pb_url, key).await {
+        let resource = resource_url(&state, "/mcp");
+        let workflows = match fetch_workflows(&state.pb_url, key, &resource).await {
             Ok(value) if !value.workflows.is_empty() => value,
             _ => return StatusCode::NOT_FOUND.into_response(),
         };
@@ -576,16 +709,30 @@ async fn handle_runtime_approval(
         );
         gateway.set_api_key_fingerprint(key);
         let (tx, _rx) = mpsc::channel::<String>(1);
-        let candidate = Arc::new(Mutex::new(RemoteSession { gateway, tx }));
+        let candidate = Arc::new(Mutex::new(RemoteSession {
+            gateway,
+            tx,
+            resource,
+        }));
         let mut sessions = state.sessions.write().await;
-        session = Some(sessions.entry(body.run_session_id.clone()).or_insert(candidate).clone());
+        session = Some(
+            sessions
+                .entry(body.run_session_id.clone())
+                .or_insert(candidate)
+                .clone(),
+        );
     }
     let session = session.expect("approval session was restored or already present");
     let mut session = session.lock().await;
     if !session.gateway.verify_owner_key(key) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if session.gateway.ensure_pending_approval(&body.run_id, &body.approval_id).await.is_err() {
+    if session
+        .gateway
+        .ensure_pending_approval(&body.run_id, &body.approval_id)
+        .await
+        .is_err()
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
     let mut projection = match session
@@ -623,7 +770,9 @@ async fn handle_runtime_approval(
     {
         return StatusCode::CONFLICT.into_response();
     }
-    if receipt["status"] != "pending" && session.gateway.persist_approval_checkpoint().await.is_err() {
+    if receipt["status"] != "pending"
+        && session.gateway.persist_approval_checkpoint().await.is_err()
+    {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     Json(receipt).into_response()
@@ -847,6 +996,8 @@ mod tests {
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
             db_pool: None,
             approval_secret: String::new(),
         })
@@ -857,9 +1008,72 @@ mod tests {
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
             db_pool: None,
             approval_secret: secret.into(),
         })
+    }
+
+    async fn test_state_with_revalidating_pb(
+        expected_resource: &'static str,
+    ) -> (Arc<RemoteState>, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = Router::new().route(
+            "/api/gateway/workflows",
+            get(move |headers: HeaderMap| {
+                let observed = observed.clone();
+                async move {
+                    if headers
+                        .get("x-statewright-oauth-resource")
+                        .and_then(|value| value.to_str().ok())
+                        != Some(expected_resource)
+                    {
+                        return (StatusCode::BAD_REQUEST, Json(json!({"error": "resource"})));
+                    }
+                    if observed.fetch_add(1, Ordering::SeqCst) > 0 {
+                        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "revoked"})));
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(json!({
+                            "default": "test",
+                            "owner_id": "owner1",
+                            "plan_limit": 5000,
+                            "workflows": {
+                                "test": {
+                                    "id": "test",
+                                    "initial": "working",
+                                    "context": {},
+                                    "states": {
+                                        "working": {"on": {"DONE": "completed"}},
+                                        "completed": {"type": "final"}
+                                    }
+                                }
+                            }
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let state = Arc::new(RemoteState {
+            sessions: RwLock::new(HashMap::new()),
+            session_managers: RwLock::new(HashMap::new()),
+            pb_url: format!("http://{addr}"),
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
+            db_pool: None,
+            approval_secret: String::new(),
+        });
+        (state, calls)
     }
 
     #[tokio::test]
@@ -887,13 +1101,13 @@ mod tests {
                 async move { Json(response) }
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let pb_url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let result = fetch_workflows(&pb_url, "test-key").await.unwrap();
+        let result = fetch_workflows(&pb_url, "test-key", "https://mcp.statewright.example/mcp")
+            .await
+            .unwrap();
         assert_eq!(result.default, "enabled");
         assert_eq!(result.workflows.keys().collect::<Vec<_>>(), vec!["enabled"]);
         server.abort();
@@ -934,7 +1148,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<String>(1);
         state.sessions.write().await.insert(
             session_id.into(),
-            Arc::new(Mutex::new(RemoteSession { gateway, tx })),
+            Arc::new(Mutex::new(RemoteSession {
+                gateway,
+                tx,
+                resource: "https://mcp.statewright.example/mcp".into(),
+            })),
         );
 
         state
@@ -1097,6 +1315,64 @@ mod tests {
 
     // --- Streamable HTTP auth ---
 
+    #[test]
+    fn discovery_origins_are_normalized_and_invalid_values_fail_closed() {
+        assert_eq!(
+            normalize_public_origin("https://MCP.Statewright.Example:443/", "public URL").unwrap(),
+            "https://mcp.statewright.example"
+        );
+        assert_eq!(
+            normalize_public_origin("http://127.0.0.1:3001/", "public URL").unwrap(),
+            "http://127.0.0.1:3001"
+        );
+        for value in [
+            "http://mcp.statewright.example",
+            "https://user@mcp.statewright.example",
+            "https://mcp.statewright.example/path",
+            "https://mcp.statewright.example?tenant=other",
+            "not a URL",
+        ] {
+            assert!(
+                normalize_public_origin(value, "public URL").is_err(),
+                "unexpected valid origin: {value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_resource_metadata_uses_configured_origins_not_host_header() {
+        for (path, expected_resource) in [
+            (
+                "/.well-known/oauth-protected-resource",
+                "https://mcp.statewright.example",
+            ),
+            (
+                "/.well-known/oauth-protected-resource/mcp",
+                "https://mcp.statewright.example/mcp",
+            ),
+        ] {
+            let response = build_router(test_state())
+                .oneshot(
+                    Request::get(path)
+                        .header("host", "attacker.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let metadata: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(metadata["resource"], expected_resource);
+            assert_eq!(
+                metadata["authorization_servers"],
+                json!(["https://statewright.example"])
+            );
+            assert_eq!(metadata["scopes_supported"], json!(["mcp"]));
+            assert_eq!(metadata["bearer_methods_supported"], json!(["header"]));
+        }
+    }
+
     #[tokio::test]
     async fn streamable_http_unauthorized_without_header() {
         let app = build_router(test_state());
@@ -1112,6 +1388,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Bearer resource_metadata=\"https://mcp.statewright.example/.well-known/oauth-protected-resource/mcp\", scope=\"mcp\""
+        );
+    }
+
+    #[tokio::test]
+    async fn streamable_http_forwards_exact_resource_and_revalidates_cached_sessions() {
+        use std::sync::atomic::Ordering;
+
+        let (state, calls) =
+            test_state_with_revalidating_pb("https://mcp.statewright.example/mcp").await;
+        let app = build_router(state);
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sw_live_oauth_token")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let revoked = app
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sw_live_oauth_token")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(revoked.headers().contains_key(header::WWW_AUTHENTICATE));
     }
 
     // --- Legacy SSE auth ---
@@ -1335,20 +1654,13 @@ mod tests {
         // branch session key, not the client root key. The usage route must
         // accept the pane's own key (exact fingerprint match) and reject
         // foreign keys, or every branch pane's usage stream 403s.
-        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"canary-key")
-            .to_string();
+        let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"canary-key").to_string();
         let root = streamable_session_key(&fingerprint, Some("canary-client"), None);
         let branch = format!("{root}_br_exec_pane");
         let branch_key = "sw_test_branch_key";
         let state = test_state_with_session(&branch, branch_key).await;
         {
-            let remote_session = state
-                .sessions
-                .read()
-                .await
-                .get(&branch)
-                .cloned()
-                .unwrap();
+            let remote_session = state.sessions.read().await.get(&branch).cloned().unwrap();
             remote_session
                 .lock()
                 .await
@@ -1389,10 +1701,7 @@ mod tests {
 
         // The pane presenting its own branch key is accepted.
         assert_eq!(
-            send(report.clone(), branch_key)
-                .await
-                .unwrap()
-                .status(),
+            send(report.clone(), branch_key).await.unwrap().status(),
             StatusCode::NO_CONTENT
         );
 
@@ -1498,7 +1807,10 @@ mod tests {
             .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
             .await
             .unwrap();
-        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("CREATE TEMP TABLE workflow_runs (id text PRIMARY KEY, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)")
             .execute(&pool).await.unwrap();
 
@@ -1511,47 +1823,93 @@ mod tests {
         })).unwrap();
         let manager = SessionManager::new();
         manager.create(root.clone(), definition.clone());
-        manager.set_pending_approval(&root, crate::session::PendingApproval {
-            approval_id: "apr_recover".into(), event: "DEPLOY".into(),
-            from_state: "working".into(), to_state: "deployed".into(),
-            new_context: json!({}), message: None,
-        });
+        manager.set_pending_approval(
+            &root,
+            crate::session::PendingApproval {
+                approval_id: "apr_recover".into(),
+                event: "DEPLOY".into(),
+                from_state: "working".into(),
+                to_state: "deployed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
         let checkpoint = manager.get(&root).unwrap().checkpoint();
         sqlx::query("INSERT INTO workflow_runs (id, owner, workflow_name, status, session_id, project_id, final_state, context_snapshot) VALUES ('run-1', 'owner-a', 'test', 'running', $1, 'project-a', 'working', $2)")
             .bind(&root).bind(&checkpoint).execute(&pool).await.unwrap();
 
-        let response = json!({"default": "test", "owner_id": "owner-a", "workflows": {"test": definition}});
-        let pb = axum::Router::new().route("/api/gateway/workflows", get(move || {
-            let response = response.clone();
-            async move { Json(response) }
-        }));
+        let response =
+            json!({"default": "test", "owner_id": "owner-a", "workflows": {"test": definition}});
+        let pb = axum::Router::new().route(
+            "/api/gateway/workflows",
+            get(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let pb_url = format!("http://{}", listener.local_addr().unwrap());
-        let pb_server = tokio::spawn(async move { axum::serve(listener, pb).await.unwrap(); });
+        let pb_server = tokio::spawn(async move {
+            axum::serve(listener, pb).await.unwrap();
+        });
         let state = Arc::new(RemoteState {
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
-            pb_url, db_pool: Some(pool.clone()), approval_secret: String::new(),
+            pb_url,
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
+            db_pool: Some(pool.clone()),
+            approval_secret: String::new(),
         });
-        let request = |client: &'static str, approval: &'static str| Request::post("/api/runtime-approval")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer key")
-            .header(CLIENT_ID_HEADER, client)
-            .body(Body::from(json!({"run_id": "run-1", "run_session_id": root,
-                "approval_id": approval}).to_string())).unwrap();
+        let request = |client: &'static str, approval: &'static str| {
+            Request::post("/api/runtime-approval")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer key")
+                .header(CLIENT_ID_HEADER, client)
+                .body(Body::from(
+                    json!({"run_id": "run-1", "run_session_id": root,
+                "approval_id": approval})
+                    .to_string(),
+                ))
+                .unwrap()
+        };
 
-        assert_eq!(build_router(state.clone()).oneshot(request("foreign-client", "apr_recover"))
-            .await.unwrap().status(), StatusCode::FORBIDDEN);
-        assert_eq!(build_router(state.clone()).oneshot(request("own-client", "wrong-ticket"))
-            .await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            build_router(state.clone())
+                .oneshot(request("foreign-client", "apr_recover"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            build_router(state.clone())
+                .oneshot(request("own-client", "wrong-ticket"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
         // No approval secret was configured for this fixture. Reaching 503
         // means the gateway recovered and projected the exact owned ticket;
         // no decision was submitted to PocketBase.
-        assert_eq!(build_router(state.clone()).oneshot(request("own-client", "apr_recover"))
-            .await.unwrap().status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            build_router(state.clone())
+                .oneshot(request("own-client", "apr_recover"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         let stored = state.sessions.read().await.get(&root).cloned().unwrap();
         let stored = stored.lock().await;
-        assert_eq!(stored.gateway.approval_projection("run-1", "apr_recover").unwrap()["pending"]["to_state"], "deployed");
+        assert_eq!(
+            stored
+                .gateway
+                .approval_projection("run-1", "apr_recover")
+                .unwrap()["pending"]["to_state"],
+            "deployed"
+        );
         drop(stored);
         pb_server.abort();
         pool.close().await;

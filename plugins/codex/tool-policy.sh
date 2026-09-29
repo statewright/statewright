@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Provider compatibility policy. Legacy workflows use an allowlist. Only an
-# explicit opt-in workflow policy may use blacklist/heuristic admission.
+# explicit opt-in workflow policy may use denylist/heuristic admission.
 
 STATEWRIGHT_TOOL_MODE=""
 STATEWRIGHT_ALLOWED_TOOLS=""
 STATEWRIGHT_DISALLOWED_TOOLS=""
 STATEWRIGHT_TOOL_POLICY_MODE=""
 
-statewright_blacklist_mode() {
-  [ "$STATEWRIGHT_TOOL_POLICY_MODE" = "blacklist_heuristic_v1" ]
+statewright_policy_mode_is_denylist() {
+  [ "$1" = "denylist_heuristic_v1" ] || [ "$1" = "blacklist_heuristic_v1" ]
+}
+
+statewright_denylist_mode() {
+  statewright_policy_mode_is_denylist "$STATEWRIGHT_TOOL_POLICY_MODE"
 }
 
 statewright_list_has_normalized() {
@@ -33,7 +37,7 @@ statewright_list_has_exact() {
 
 statewright_has_capability() {
   local capability="$1"
-  if statewright_blacklist_mode; then
+  if statewright_denylist_mode; then
     ! statewright_list_has_normalized "$capability" "$STATEWRIGHT_DISALLOWED_TOOLS"
   else
     statewright_list_has_normalized "$capability" "$STATEWRIGHT_ALLOWED_TOOLS"
@@ -463,7 +467,7 @@ statewright_tool_allowed() {
     statewright_uses_unsupported_shell "$tool_name" "$hook_input" && return 1
     command=$(statewright_input_command "$hook_input")
     [ -n "$command" ] || return 1
-    if statewright_blacklist_mode; then
+    if statewright_denylist_mode; then
       STATEWRIGHT_TOOL_MODE="bash"
       return 0
     fi
@@ -519,7 +523,7 @@ statewright_tool_allowed() {
   # Legacy phases can authorize a provider operation explicitly. This is
   # permission from the workflow, not an inference that its effect is safe.
   # Built-in shell/edit checks above must not be bypassed by this rule.
-  if ! statewright_blacklist_mode && statewright_list_has_exact "$tool_name" "$STATEWRIGHT_ALLOWED_TOOLS"; then
+  if ! statewright_denylist_mode && statewright_list_has_exact "$tool_name" "$STATEWRIGHT_ALLOWED_TOOLS"; then
     STATEWRIGHT_TOOL_MODE="explicit"
     return 0
   fi

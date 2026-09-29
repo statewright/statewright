@@ -297,7 +297,7 @@ final outcome.
 ## Hook events
 
 - **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive
-- **PreToolUse**: enforces allowed_tools per state, bash discernment, command whitelisting
+- **PreToolUse**: enforces allowed_tools per state, bash discernment, command allowlisting
 - **PostToolUse**: interrupt detection (file pattern matching), fork/join status, capture
 - **Stop**: blocks Codex from yielding while an active workflow is nonfinal and
   permits it only after a final state.

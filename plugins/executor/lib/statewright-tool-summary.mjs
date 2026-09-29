@@ -26,8 +26,53 @@ function workflowCount(value) {
   return null;
 }
 
+function transitionUsage(value) {
+  const used = value?.usage?.transitions ?? value?.transition_count;
+  const limit = value?.usage?.limit;
+  const remaining = value?.usage?.remaining;
+  if (used === undefined && limit === undefined && remaining === undefined) return "";
+  const count = used === undefined ? "" : limit === undefined ? clean(used) : `${clean(used)}/${clean(limit)}`;
+  const parts = [];
+  if (count) parts.push(`${count} transition${String(used) === "1" ? "" : "s"}`);
+  if (remaining !== undefined) parts.push(`${clean(remaining)} remaining`);
+  return parts.length ? ` · ${parts.join(" · ")}` : "";
+}
+
+function forkBranches(value) {
+  if (!value?.branches || typeof value.branches !== "object" || Array.isArray(value.branches)) return "";
+  const entries = Object.entries(value.branches).slice(0, 4).map(([name, branch]) => {
+    const branchName = clean(name).slice(0, 48);
+    const status = clean(branch?.status).slice(0, 32) || "unknown";
+    return branchName ? `${branchName}: ${status}` : "";
+  }).filter(Boolean);
+  const remainder = Math.max(0, Object.keys(value.branches).length - entries.length);
+  return entries.length ? ` · ${entries.join(", ")}${remainder ? `, +${remainder} more` : ""}` : "";
+}
+
+function transitionLine(value) {
+  const from = clean(value?.from);
+  const to = clean(value?.to);
+  const forkTarget = clean(value?.on_complete).slice(0, 48);
+  const movement = value?.forked === true ? `fork${forkTarget ? ` → ${forkTarget}` : ""}`
+    : from && to ? `${from} → ${to}` : to || from || "transition";
+  let status = "completed";
+  if (value?.status === "pending_approval" || value?.requires_approval === true) status = "approval pending";
+  else if (value?.branch_completed) status = `branch ${clean(value.branch_completed).slice(0, 48)} completed`;
+  else if (value?.forked === true) status = `forked${forkBranches(value)}`;
+  else if (value?.joined === true) status = "joined";
+  else if (value?.forced === true) status = "forced";
+  else if (value?.transitioned === true) status = "transitioned";
+  return `${movement} · ${status}${transitionUsage(value)}`;
+}
+
+function isTransitionReceipt(value) {
+  return Boolean(value && typeof value === "object" && ([
+    "from", "to", "transitioned", "forced", "forked", "joined", "branch_completed", "requires_approval", "transition_count",
+  ].some(key => Object.hasOwn(value, key)) || value.status === "pending_approval"));
+}
+
 export function statewrightToolSummary(item) {
-  if (item?.type !== "mcpToolCall" || item.server !== "statewright" || typeof item.tool !== "string") return null;
+  if (!["mcpToolCall", "McpToolCall"].includes(item?.type) || item.server !== "statewright" || typeof item.tool !== "string") return null;
   const value = resultValue(item.result);
   const tool = item.tool.replace(/^statewright_/, "");
   const rawText = typeof value === "string" ? clean(value) : "";
@@ -37,15 +82,15 @@ export function statewrightToolSummary(item) {
   }
   if (item.tool === "statewright_get_state") return stateLine(value) ?? "state unavailable";
   if (item.tool === "statewright_transition") {
-    if (value?.status === "pending_approval") return `${clean(value.from)} → ${clean(value.to)} · approval pending`;
-    if (value?.transitioned === true || value?.forced === true) return `${clean(value.from)} → ${clean(value.to)} · transitioned`;
+    if (isTransitionReceipt(value)) return transitionLine(value);
     return stateLine(value) ?? "transition completed";
   }
   if (item.tool === "statewright_load_workflow") {
     const state = value?.state_snapshot ?? value;
     const name = clean(value?.loaded ?? value?.workflow ?? state?.workflow);
+    const branch = clean(value?.branch).slice(0, 48);
     const line = stateLine(state) ?? clean(value?.initial_state);
-    return [name, line, "loaded"].filter(Boolean).join(" · ");
+    return [name, branch ? `branch ${branch}` : null, line, "loaded"].filter(Boolean).join(" · ");
   }
   if (["statewright_deactivate", "statewright_pause"].includes(item.tool)) {
     return item.tool.endsWith("pause") ? "workflow paused" : "workflow deactivated";
@@ -73,6 +118,31 @@ export function statewrightToolSummary(item) {
   return `${clean(tool)} · completed`;
 }
 
+// The native Codex MCP transport displays result.content verbatim. Replace only
+// successful transition JSON with the bounded supervisor line while retaining
+// the authoritative object in structuredContent for hooks and other clients.
+export function summarizeStatewrightMcpResponse(tool, response) {
+  if (tool !== "statewright_transition" || !response?.result || response.result.isError === true) return response;
+  const value = resultValue(response.result);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return response;
+  const summary = statewrightToolSummary({
+    type: "mcpToolCall",
+    server: "statewright",
+    tool,
+    status: "completed",
+    result: { structuredContent: value },
+  });
+  if (!summary) return response;
+  return {
+    ...response,
+    result: {
+      ...response.result,
+      structuredContent: value,
+      content: [{ type: "text", text: `Statewright supervisor: ${summary}` }],
+    },
+  };
+}
+
 export function summarizeStatewrightToolCompletion(message) {
   if (message?.method !== "item/completed") return message;
   const summary = statewrightToolSummary(message.params?.item);
@@ -81,5 +151,28 @@ export function summarizeStatewrightToolCompletion(message) {
   return { ...message, params: { ...message.params, item: { ...item,
     result: { content: [{ type: "text", text: `Statewright supervisor: ${summary}` }],
       ...(item.result?.isError === true ? { isError: true } : {}) },
+  } } };
+}
+
+// Native Codex renders an mcpToolCall when it receives item/started. At that
+// point the invocation has already been sent upstream, so its arguments are
+// presentation-only. Replace Statewright control-plane starts with a bounded
+// supervisor status rather than exposing events, rationales, paths, or other
+// tool arguments in the transcript.
+export function summarizeStatewrightToolStart(message) {
+  if (message?.method !== "item/started") return message;
+  const item = message.params?.item;
+  if (!['mcpToolCall', 'McpToolCall'].includes(item?.type)
+    || item.server !== 'statewright' || typeof item.tool !== 'string'
+    || ['statewright_search_docs', 'statewright_search_references'].includes(item.tool)) return message;
+  const tool = item.tool.replace(/^statewright_/, '');
+  const text = item.tool === 'statewright_transition'
+    ? 'transition requested'
+    : `${clean(tool)} requested`;
+  return { ...message, params: { ...message.params, item: {
+    id: item.id,
+    type: 'agentMessage',
+    phase: 'commentary',
+    text: `Statewright supervisor: ${text}`,
   } } };
 }

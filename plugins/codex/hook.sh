@@ -109,7 +109,7 @@ statewright_tools_label() {
   policy_mode=$(printf '%s' "$state_json" | jq -r '.context.tool_policy_mode // .tool_policy_mode // empty' 2>/dev/null || true)
   allowed=$(printf '%s' "$state_json" | jq -r '.allowed_tools // [] | join(", ")' 2>/dev/null || true)
   disallowed=$(printf '%s' "$state_json" | jq -r '.disallowed_tools // [] | join(", ")' 2>/dev/null || true)
-  if [ "$policy_mode" = "blacklist_heuristic_v1" ]; then
+  if statewright_policy_mode_is_denylist "$policy_mode"; then
     printf 'unrestricted except explicit blocks: %s' "${disallowed:-(none)}"
   elif [ -n "$allowed" ]; then
     printf '%s' "$allowed"
@@ -142,10 +142,14 @@ extract_mcp_result_text() {
   printf '%s' "$response" | jq -r '
     def first_text:
       [ .[]? | select(.type? == "text") | .text? | strings ][0] // empty;
+    def result_value:
+      if type == "string" then . else tojson end;
     if type == "string" then .
     elif type == "array" then first_text
     elif type == "object" then
-      if (.content? | type) == "array" then (.content | first_text)
+      if .structuredContent? != null then (.structuredContent | result_value)
+      elif .result?.structuredContent? != null then (.result.structuredContent | result_value)
+      elif (.content? | type) == "array" then (.content | first_text)
       elif (.result?.content? | type) == "array" then (.result.content | first_text)
       elif (.text? | type) == "string" then .text
       else tojson
@@ -317,7 +321,8 @@ emit_native_telemetry() {
 # never kills Codex itself; it only persists the authoritative next route.
 request_interactive_route_restart() {
   local state_json="$1"
-  local control_dir model effort model_ladder request_path root_session_id registration
+  local restore_original="${2:-false}"
+  local control_dir model effort service_tier model_ladder request_path root_session_id registration
   control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
   [ -n "$control_dir" ] || return 0
   # One-shot Codex children may inherit a managed parent's route directory when
@@ -331,9 +336,17 @@ request_interactive_route_restart() {
     'if .version == 1 and .client_id == $client_id and (.session_id | type) == "string" then .session_id else empty end' \
     "$registration" 2>/dev/null || true)
   [ -n "$root_session_id" ] && [ "$HOOK_SESSION" = "$root_session_id" ] || return 0
-  model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
-  effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
-  model_ladder=$(echo "$state_json" | jq -c 'if (.model_ladder | type) == "array" then .model_ladder else [] end' 2>/dev/null || echo '[]')
+  if [ "$restore_original" = "true" ]; then
+    model=""
+    effort=""
+    service_tier=""
+    model_ladder='[]'
+  else
+    model=$(echo "$state_json" | jq -r '.model // empty' 2>/dev/null || true)
+    effort=$(echo "$state_json" | jq -r '.thinking_level // empty' 2>/dev/null || true)
+    service_tier=$(echo "$state_json" | jq -r '.env_overrides.STATEWRIGHT_CODEX_SERVICE_TIER // empty' 2>/dev/null || true)
+    model_ladder=$(echo "$state_json" | jq -c 'if (.model_ladder | type) == "array" then .model_ladder else [] end' 2>/dev/null || echo '[]')
+  fi
   mkdir -p "$control_dir" || return 0
   # A thread has one authoritative next route. State transitions in the same
   # turn supersede earlier boundaries instead of accumulating replayable work.
@@ -347,8 +360,13 @@ request_interactive_route_restart() {
     --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" \
     --arg model "$model" \
     --arg effort "$effort" \
+    --arg service_tier "$service_tier" \
+    --argjson restore_original "$restore_original" \
     --argjson model_ladder "$model_ladder" \
-    '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder} + (if $turn_id != "" then {turn_id: $turn_id} else {} end)' \
+    '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder}
+      + (if $service_tier != "" then {service_tier: $service_tier} else {} end)
+      + (if $restore_original then {restore_original: true} else {} end)
+      + (if $turn_id != "" then {turn_id: $turn_id} else {} end)' \
     > "$request_path.$$.tmp" && mv "$request_path.$$.tmp" "$request_path"
 }
 
@@ -466,6 +484,7 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
+      request_interactive_route_restart "$STATE_JSON" true
       rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
       echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       exit 0
@@ -517,7 +536,7 @@ case "$ENDPOINT" in
     GUARDS_INFO=$(echo "$STATE_JSON" | jq -r '.guards // {} | to_entries | map(.key + ": " + .value.field + " " + .value.op + " " + (.value.value | tostring)) | join("; ")' 2>/dev/null || true)
 
     CONTINUATION_STEER="CONTINUATION STEER: You are in autonomous mode. Continue taking state-allowed tool actions and transition through the workflow until a final completion or failure state. Do not send a final response, pause, summarize, or wait for user input at intermediate states."
-    CONTEXT="Statewright workflow active. $CONTINUATION_STEER Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
+    CONTEXT="Statewright workflow active. $CONTINUATION_STEER Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. MANDATORY: Every statewright_transition call MUST include data.rationale explaining WHY you are transitioning. Format: statewright_transition(event='EVENT', data={'rationale': 'specific reason', ...guard fields}). Available transitions: $TRANSITIONS. Execution preference: use one bounded native operation at a time (for example rg, git diff, or an explicit project task); avoid heredocs, inline interpreters, and compound blobs unless their execution intent is structurally necessary and authorized.${SM_CONTEXT:+ State context: $SM_CONTEXT.}${GUARDS_INFO:+ Guards: $GUARDS_INFO.}${BLOCKED_ENV:+ BLOCKED env vars (do not use): $BLOCKED_ENV.}${ENV_OVERRIDES:+ Use these env vars instead: $ENV_OVERRIDES.}${AVAILABLE_CMDS:+ PREFER these commands over raw shell: $AVAILABLE_CMDS.}${INSTRUCTIONS:+ Instructions: $INSTRUCTIONS.}"
     jq -n --arg ctx "$CONTEXT" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
     exit 0
     ;;
@@ -530,10 +549,25 @@ case "$ENDPOINT" in
 
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
-    # Always allow system/internal/MCP tools
-    case "$TOOL_NAME" in
-      *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|Agent|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+    DELEGATION_OPERATION="$TOOL_NAME"
+    case "$DELEGATION_OPERATION" in
+      mcp__*__*)
+        DELEGATION_OPERATION=${DELEGATION_OPERATION#mcp__}
+        DELEGATION_OPERATION=${DELEGATION_OPERATION#*__}
+        ;;
     esac
+    DELEGATION_KEY=$(printf '%s' "$DELEGATION_OPERATION" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    RAW_DELEGATION=false
+    case "$DELEGATION_KEY" in
+      agent|spawnagent|*collaborationspawnagent) RAW_DELEGATION=true ;;
+    esac
+
+    # Always allow system/internal/MCP tools
+    if [ "$RAW_DELEGATION" != "true" ]; then
+      case "$TOOL_NAME" in
+        *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+      esac
+    fi
 
     if [ -f "$GATEWAY_UNAVAILABLE_FILE" ]; then
       jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway state is unavailable; the active workflow fails closed."}}'
@@ -557,10 +591,47 @@ case "$ENDPOINT" in
     STATEWRIGHT_DISALLOWED_TOOLS="$DISALLOWED"
     STATEWRIGHT_TOOL_POLICY_MODE="$POLICY_MODE"
 
+    # A provider-native child receives a fresh tool surface, so it cannot be
+    # authorized as an ordinary tool call or by classifier approval. Ask the
+    # provider-neutral gateway whether this should stay inline or bind to a
+    # workflow-declared fork/subworkflow, then deny the raw spawn either way.
+    if [ "$RAW_DELEGATION" = "true" ]; then
+      ADAPTER_RESULT=$(adapter_pre_tool_call "$TOOL_NAME")
+      if ! printf '%s' "$ADAPTER_RESULT" | jq -e '
+        type == "object"
+        and (.decision == "deny" or .decision == "block")
+        and .risk_assessment.deterministic_source == "unmanaged_agent_delegation"
+        and .delegation.schema == "statewright/managed-delegation/v1"
+      ' >/dev/null 2>&1; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright could not bind this raw delegated agent to the current workflow; continue inline."}}'
+        exit 0
+      fi
+      DELEGATION_RECOMMENDATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.delegation.recommendation // "continue_inline"')
+      MANAGED_EVENTS=$(printf '%s' "$ADAPTER_RESULT" | jq -r ".delegation.managed_transition_candidates // [] | map(.event + \" (\" + .kind + \")\") | join(\", \")")
+      if [ "$DELEGATION_RECOMMENDATION" = "statewright_managed_fork" ]; then
+        if [ -n "$MANAGED_EVENTS" ]; then
+          ADAPTER_DISPLAY="Statewright guard: denied · this delegated task requests a different model or reasoning route. Candidate workflow-managed child transitions: ${MANAGED_EVENTS}. Use one only when its declared child route matches the request; the child remains attached to the parent workflow evidence."
+        else
+          ADAPTER_DISPLAY="Statewright guard: denied · this delegated task requests a different model or reasoning route, but the current state declares no managed fork or subworkflow transition. Continue inline or transition to a state that declares one."
+        fi
+      else
+        ADAPTER_DISPLAY="Statewright guard: denied · continue inline by default so evidence stays attached to the current workflow. A raw delegated agent would receive a separate, unbounded tool surface."
+      fi
+      ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '{
+        managed_delegation: .delegation,
+        classifier_receipt: (.risk_assessment | walk(
+          if type == "object" then del(.command, .raw_command, .tool_input, .input, .arguments) else . end
+        ))
+      }')
+      jq -n --arg reason "$ADAPTER_DISPLAY" --arg receipt "$ADAPTER_RECEIPT" \
+        '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason,"additionalContext":("[statewright] Managed delegation receipt: " + $receipt)}}'
+      exit 0
+    fi
+
     # Existing workflows that omitted allowed_tools intentionally had no
     # standalone Codex restriction. Preserve that legacy contract; only the
     # explicit deny/heuristic mode activates omission-as-unrestricted logic.
-    if ! statewright_blacklist_mode && [ -z "$ALLOWED" ]; then
+    if ! statewright_denylist_mode && [ -z "$ALLOWED" ]; then
       exit 0
     fi
 
@@ -569,20 +640,20 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # blacklist_heuristic_v1 has one authoritative decision path. The gateway
+    # denylist_heuristic_v1 has one authoritative decision path. The gateway
     # combines deterministic classification with the configured System One
     # fallback; duplicating command patterns here can preempt that fallback.
-    if statewright_blacklist_mode; then
+    if statewright_denylist_mode; then
       ADAPTER_RESULT=$(adapter_pre_tool_call "$TOOL_NAME")
       if ! printf '%s' "$ADAPTER_RESULT" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway decision unavailable; blacklist policy fails closed."}}'
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway decision unavailable; denylist policy fails closed."}}'
         exit 0
       fi
 
       ADAPTER_ACTIVE=$(printf '%s' "$ADAPTER_RESULT" | jq -r 'if has("active") then .active else true end' 2>/dev/null || true)
       ADAPTER_DECISION=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.decision // empty' 2>/dev/null || true)
       if [ "$ADAPTER_ACTIVE" = "false" ]; then
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway has no active workflow for the locally active blacklist policy."}}'
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright gateway has no active workflow for the locally active denylist policy."}}'
         exit 0
       fi
       if [ "$ADAPTER_DECISION" = "allow" ]; then
@@ -593,14 +664,114 @@ case "$ENDPOINT" in
         exit 0
       fi
 
+      # Keep the complete, already-redacted receipt available to the agent in
+      # additionalContext, but make the native permission surface read like a
+      # Statewright supervisor event rather than a JSON/probability dump.
       ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
       [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
-      jq -n --arg reason "$ADAPTER_REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}'
+      UNMANAGED_DELEGATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r \
+        '.risk_assessment.deterministic_source == "unmanaged_agent_delegation"' 2>/dev/null || true)
+      RUN_ID=$(printf '%s' "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+      APPROVAL_REQUEST=""
+      if [ "$UNMANAGED_DELEGATION" != "true" ]; then
+        APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
+          --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" --arg state "$CURRENT" '
+          .risk_assessment? as $risk
+          | if ($risk | type) != "object" then empty else {
+              schema: "statewright/classifier-approval-request/v1",
+              thread_id: $thread_id,
+              run_id: $run_id,
+              state: $state,
+              classifier_receipt: {
+                intent_fingerprint: $risk.intent_fingerprint,
+                invocation_fingerprint: $risk.invocation_fingerprint,
+                final_denial_basis: ($risk.final_denial_basis // $risk.resolution_basis),
+                required_authority: $risk.required_authority
+              }
+            } end
+          ' 2>/dev/null || true)
+      fi
+      APPROVAL_RESULT=""
+      if [ -n "$APPROVAL_REQUEST" ] && command -v node >/dev/null 2>&1; then
+        APPROVAL_RESULT=$(printf '%s' "$APPROVAL_REQUEST" \
+          | node "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null || true)
+      fi
+      APPROVAL_ACTION=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.action // empty' 2>/dev/null || true)
+      if [ "$APPROVAL_ACTION" = "allow_once" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"[statewright] Human approval granted for this exact invocation once."}}'
+        exit 0
+      fi
+      if [ "$UNMANAGED_DELEGATION" = "true" ]; then
+        ADAPTER_DISPLAY="Statewright guard: denied · a raw delegated agent would receive a separate, unbounded tool surface. Continue inline by default so evidence stays attached to the current workflow. If the task requires a model change or an isolated execution boundary, use a Statewright-managed fork attached to this workflow."
+      else
+        ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
+        def pct($value): (((($value // 0) * 100) | round | tostring) + "%");
+        .risk_assessment? as $risk
+        | if ($risk | type) != "object" then empty else
+            (($risk.final_denial_basis // $risk.resolution_basis // "unknown") | tostring) as $basis
+            | (($risk.required_authority // "approved execution path") | tostring) as $required
+            | (if $basis == "semantic_threshold_not_met"
+              or $basis == "incomplete_structural_evidence"
+              or $basis == "semantic_vector_unavailable"
+              or $basis == "semantic_assessment_incomplete"
+              then "Statewright guard: denied · System One could not prove a safe local effect. Next: prefer one bounded native operation (for example rg, git diff, or a project task) instead of a heredoc or inline interpreter; use the approved execution path when code must run."
+              elif $basis == "deterministic_nonlocal_risk"
+              then "Statewright guard: denied · known non-local effect. Next: use the approved execution path."
+              elif ($basis | startswith("workflow_capability_"))
+              then "Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants " + $required + "."
+              elif ($basis | startswith("classifier_policy_"))
+              then "Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with " + $required + "."
+              else "Statewright guard: denied · classifier policy requires " + $required + "."
+              end) as $message
+            | if $risk.semantic_status == "Assessed" and (($risk.semantic_vector? | type) == "object")
+              then $message + " System One signals: read-only " + pct($risk.semantic_vector.read_only)
+                + ", write " + pct($risk.semantic_vector.may_write)
+                + ", destructive " + pct($risk.semantic_vector.destructive)
+                + ", external " + pct($risk.semantic_vector.external_or_account_effect) + "."
+              else $message end
+          end
+        ' 2>/dev/null || true)
+      fi
+      if [ -z "$ADAPTER_DISPLAY" ]; then
+        ADAPTER_DISPLAY="$ADAPTER_REASON"
+      fi
+      if [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "rework" ]; then
+        REWORK_ATTEMPTS=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.attempts // 0' 2>/dev/null || echo 0)
+        REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}; after this budget, the same classified intent will be sent for native human approval."
+      elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "deny" ]; then
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval was not granted."
+      fi
+      ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '
+        .risk_assessment? as $risk
+        | if ($risk | type) != "object" then empty else
+            {
+              classifier_receipt: (
+                $risk
+                | walk(
+                    if type == "object" then
+                      del(.command, .raw_command, .tool_input, .input, .arguments)
+                    else . end
+                  )
+              )
+            }
+          end
+      ' 2>/dev/null || true)
+      if [ -n "$ADAPTER_RECEIPT" ] && printf '%s' "$APPROVAL_RESULT" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        ADAPTER_RECEIPT=$(jq -cn --argjson receipt "$ADAPTER_RECEIPT" --argjson approval "$APPROVAL_RESULT" \
+          '$receipt + {classifier_approval: $approval}')
+      fi
+      if [ -n "$ADAPTER_RECEIPT" ]; then
+        jq -n --arg reason "$ADAPTER_DISPLAY" --arg receipt "$ADAPTER_RECEIPT" \
+          '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason,"additionalContext":("[statewright] Machine classifier receipt: " + $receipt)}}'
+      else
+        jq -n --arg reason "$ADAPTER_DISPLAY" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$reason}}'
+      fi
       exit 0
     fi
 
     # Legacy workflows retain their local capability and command-prefix
-    # behavior. blacklist_heuristic_v1 has already exited through the gateway.
+    # behavior. denylist_heuristic_v1 has already exited through the gateway.
     if statewright_tool_allowed "$TOOL_NAME" "$HOOK_INPUT"; then
       # Tool name is in allowed_tools — but if it's Bash, classify the command
       # to prevent bypass of Write/Destructive restrictions via shell redirects
@@ -670,7 +841,7 @@ case "$ENDPOINT" in
       exit 0  # Allowed — silent pass
     fi
 
-    # Tool denied by an explicit capability blacklist or opaque-tool gate.
+    # Tool denied by an explicit capability denylist or opaque-tool gate.
     if [ "$STATEWRIGHT_TOOL_MODE" = "opaque" ]; then
       REASON="Tool '$TOOL_NAME' has opaque mutation semantics in the '$CURRENT' phase. Use an executor-owned semantic-risk approval gate before running it."
       jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
@@ -847,6 +1018,7 @@ case "$ENDPOINT" in
           if [ "$IS_FINAL" = "true" ]; then
             emit_native_telemetry "workflow_completed" "$STATE_JSON"
             clear_interactive_route_requests
+            request_interactive_route_restart "$STATE_JSON" true
           else
             emit_native_telemetry "state_boundary" "$STATE_JSON"
             request_interactive_route_restart "$STATE_JSON"

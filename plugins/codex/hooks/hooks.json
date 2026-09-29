@@ -24,7 +24,7 @@
           {
             "type": "command",
             "command": "bash \"$PLUGIN_ROOT/hook.sh\" pre-tool",
-            "timeout": 5000
+            "timeout": 610000
           }
         ]
       }

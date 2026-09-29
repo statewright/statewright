@@ -121,3 +121,38 @@ test("status sink failure cannot interrupt protocol delivery", () => {
   p.accept("t1", "request1", "next");
   assert.equal(receive(start()).length, 3);
 });
+
+test("workflow start reports its return route and terminal restoration reports completion", () => {
+  const events = [];
+  const p = new HandoffPresentation({onStatus: event => events.push(event)});
+  p.prepare("t1", "request1", {
+    ...details,
+    serviceTier: "priority",
+    returnRoute: {
+      model: "openai-codex/gpt-6-astra",
+      effort: "high",
+      service_tier: "priority",
+    },
+  });
+  p.accept("t1", "request1", "next");
+  const started = start();
+  p.observe(started);
+  const visible = p.present(started);
+  assert.match(visible[2].params.item.text, /returns to openai-codex\/gpt-6-astra \/ high \/ priority/);
+  assert.equal(events[0].return_model, "openai-codex/gpt-6-astra");
+  assert.equal(events[0].return_service_tier, "priority");
+
+  p.prepare("t1", "request2", {
+    runId: "run1",
+    state: "complete",
+    model: "gpt-6-astra",
+    effort: "high",
+    serviceTier: "priority",
+    restoredOriginal: true,
+  });
+  assert.deepEqual(p.accept("t1", "request2", "restored"), []);
+  const restoredStart = start("restored");
+  const restoredVisible = p.present(restoredStart);
+  assert.match(restoredVisible[2].params.item.text, /workflow complete · restored gpt-6-astra \/ high \/ priority/);
+  assert.equal(events[1].restored_original, true);
+});

@@ -136,7 +136,15 @@ pub struct Gateway {
     usage: UsageLedger,
     /// Required for adapter-only reports. Never exposed in tools/list.
     usage_control_token: Option<String>,
+    /// True when the remote MCP host owns the conversation model and has not
+    /// advertised a Statewright-managed routing channel.
+    host_controls_model: bool,
+    /// MCP client name captured from initialize.clientInfo for diagnostics and
+    /// a user-facing routing disclosure.
+    host_client_name: Option<String>,
 }
+
+const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Tool policy and transitions remain enforced. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
 
 #[derive(Debug)]
 pub struct NativeUsageError {
@@ -257,6 +265,8 @@ impl Gateway {
             project_id: None,
             usage: UsageLedger::default(),
             usage_control_token: std::env::var("STATEWRIGHT_USAGE_CONTROL_TOKEN").ok(),
+            host_controls_model: false,
+            host_client_name: None,
         }
     }
 
@@ -481,7 +491,22 @@ impl Gateway {
         state["run_session_id"] = json!(self.transport_session_id);
         state["state_epoch"] = json!(self.usage.state_epoch());
         state["capture_output"] = json!(capture_output);
+        if self.host_controls_model {
+            state["model_routing"] = json!({
+                "status": "host_controlled",
+                "enforced": false,
+                "host_client": self.host_client_name,
+                "message": HOST_MODEL_ROUTING_WARNING,
+            });
+        }
         state
+    }
+
+    /// Mark whether this transport has a Statewright-managed host routing
+    /// channel. Remote web MCP hosts omit that channel and retain ownership of
+    /// the model running the conversation.
+    pub fn set_remote_host_model_control(&mut self, host_controls_model: bool) {
+        self.host_controls_model = host_controls_model;
     }
 
     /// Set the API key fingerprint for session ownership verification.
@@ -754,7 +779,7 @@ impl Gateway {
     /// Handle an incoming JSON-RPC request and return a response.
     pub async fn handle_message(&mut self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
         match request.method.as_str() {
-            "initialize" => Some(self.handle_initialize(request.id)),
+            "initialize" => Some(self.handle_initialize(request.id, request.params.as_ref())),
             "notifications/initialized" => None, // notification, no response
             "tools/list" => Some(self.handle_tools_list(request.id)),
             "tools/call" => Some(self.handle_tools_call(request.id, request.params).await),
@@ -767,20 +792,32 @@ impl Gateway {
         }
     }
 
-    fn handle_initialize(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": { "listChanged": false }
-                },
-                "serverInfo": {
-                    "name": "statewright-gateway",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }),
-        )
+    fn handle_initialize(
+        &mut self,
+        id: Option<serde_json::Value>,
+        params: Option<&serde_json::Value>,
+    ) -> JsonRpcResponse {
+        self.host_client_name = params
+            .and_then(|value| value.get("clientInfo"))
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(128).collect());
+        let mut result = json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": { "listChanged": false }
+            },
+            "serverInfo": {
+                "name": "statewright-gateway",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+        if self.host_controls_model {
+            result["instructions"] = json!(HOST_MODEL_ROUTING_WARNING);
+        }
+        JsonRpcResponse::success(id, result)
     }
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
@@ -3773,6 +3810,7 @@ mod tests {
         assert_eq!(snapshot["run_id"], "run-1");
         assert_eq!(snapshot["run_session_id"], "test-session");
         assert_eq!(snapshot["capture_output"], true);
+        assert!(snapshot.get("model_routing").is_none());
     }
 
     #[tokio::test]
@@ -3787,6 +3825,41 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["serverInfo"]["name"], "statewright-gateway");
+        assert!(result.get("instructions").is_none());
+    }
+
+    #[tokio::test]
+    async fn unmanaged_remote_initialize_and_state_disclose_host_model_control() {
+        let mut gw = test_gateway();
+        gw.set_remote_host_model_control(true);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "initialize".into(),
+            params: Some(json!({
+                "clientInfo": {"name": "ChatGPT", "version": "1"}
+            })),
+            id: Some(json!(1)),
+        };
+
+        let response = gw.handle_message(req).await.unwrap();
+        let result = response.result.unwrap();
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("cannot apply")
+        );
+
+        let snapshot = gw.enrich_state_snapshot(json!({"state": "planning"}), false);
+        assert_eq!(snapshot["model_routing"]["status"], "host_controlled");
+        assert_eq!(snapshot["model_routing"]["enforced"], false);
+        assert_eq!(snapshot["model_routing"]["host_client"], "ChatGPT");
+        assert!(
+            snapshot["model_routing"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Tool policy and transitions remain enforced")
+        );
     }
 
     #[tokio::test]

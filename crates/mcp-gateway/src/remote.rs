@@ -310,6 +310,12 @@ async fn handle_sse(
 
     // Set API key fingerprint for /message auth verification
     gateway.set_api_key_fingerprint(&api_key);
+    gateway.set_remote_host_model_control(
+        headers
+            .get(CLIENT_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(str::is_empty),
+    );
 
     // Create SSE channel
     let (tx, rx) = mpsc::channel::<String>(32);
@@ -385,7 +391,8 @@ async fn handle_streamable_http(
     // session header selects a fork/launcher branch beneath that client root.
     let client_id = headers
         .get(CLIENT_ID_HEADER)
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty());
     let mcp_session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
@@ -460,6 +467,9 @@ async fn handle_streamable_http(
         sessions.get(&session_key).cloned().unwrap()
     };
     let mut session = session.lock().await;
+    session
+        .gateway
+        .set_remote_host_model_control(client_id.is_none());
 
     // Process request
     match session.gateway.handle_message(request).await {
@@ -1415,6 +1425,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
+        let first_body = first.into_body().collect().await.unwrap().to_bytes();
+        let first_payload: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        assert!(
+            first_payload["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("cannot apply")
+        );
 
         let revoked = app
             .oneshot(
@@ -1431,6 +1449,30 @@ mod tests {
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(revoked.headers().contains_key(header::WWW_AUTHENTICATE));
+    }
+
+    #[tokio::test]
+    async fn streamable_http_managed_client_does_not_get_web_routing_warning() {
+        let (state, _) =
+            test_state_with_revalidating_pb("https://mcp.statewright.example/mcp").await;
+        let response = build_router(state)
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sw_live_oauth_token")
+                    .header(CLIENT_ID_HEADER, "swc_native_client")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"statewright-codex","version":"1"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload["result"].get("instructions").is_none());
     }
 
     // --- Legacy SSE auth ---

@@ -97,10 +97,16 @@ Before tagging or publishing 0.3.4:
 1. Complete native Desktop acceptance by resuming a same-root conversation
    that was not started with Statewright plus Codex.app, then send a subsequent
    turn successfully.
-2. Confirm the release branch is clean and update the plugin version,
+2. Complete ChatGPT plugin acceptance independently of the Codex App Server
+   launcher: register the staging HTTPS `/mcp` endpoint in ChatGPT, complete
+   OAuth, open an ordinary ChatGPT conversation that originated on mobile, and
+   prove that a direct Statewright tool call succeeds. Merely opening the cloud
+   conversation in ChatGPT + Statewright is not evidence that the local Codex
+   plugin was attached.
+3. Confirm the release branch is clean and update the plugin version,
    capability table, and root release banner from 0.3.3 to the final 0.3.4
    build identity.
-3. Run the exact-commit hosted CI and plugin canaries required by the release
+4. Run the exact-commit hosted CI and plugin canaries required by the release
    workflow.
 
 No tag, push, publication, production deployment, or active-session restart is

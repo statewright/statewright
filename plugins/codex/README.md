@@ -144,6 +144,14 @@ turns. It is a single-thread experimental broker: it does not patch or
 redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
 chats, approvals, or generated-answer correctness.
 
+This launcher applies to **Codex/Work chats backed by Codex App Server**. A
+cloud ChatGPT conversation, including one started on mobile and later opened in
+the Desktop app, remains a ChatGPT conversation and does not inherit the local
+Codex MCP process. To use Statewright in those conversations, connect the
+deployed Statewright MCP endpoint as a ChatGPT plugin and enable that plugin in
+the conversation. The local launcher and the remote ChatGPT plugin are two
+separate host integrations over the same Statewright service.
+
 On macOS, open a chat that uses the installed Statewright plugin once. Its MCP
 startup quietly provisions **ChatGPT + Statewright** in your user Applications
 folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
@@ -182,6 +190,11 @@ otherwise it refuses to overwrite the user's setting. Re-run `enable` after
 updating the plugin so its private shim points at the newly installed runtime.
 A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
 chat remain required before this is release-ready.
+
+ChatGPT/mobile acceptance is separate: register the deployed HTTPS `/mcp`
+endpoint in ChatGPT developer mode, complete its OAuth flow, then verify direct
+Statewright tool visibility in an ordinary ChatGPT conversation that originated
+on mobile. A passing Codex App Server resume does not satisfy that gate.
 
 ### Native workflow approvals (experimental App Server mode)
 

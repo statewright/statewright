@@ -85,6 +85,12 @@ resume a same-root historical conversation not originally started through
 Statewright, then submit a subsequent turn. Until that succeeds, version
 metadata remains at 0.3.3 and no 0.3.4 tag or publication should occur.
 
+That native acceptance covers Codex App Server history only. Before release,
+the staging remote MCP endpoint must also be registered as a ChatGPT plugin and
+complete OAuth plus a direct Statewright tool call in an ordinary ChatGPT
+conversation that originated on mobile. Opening a cloud ChatGPT conversation
+inside the wrapped Desktop process does not attach the local Codex MCP server.
+
 After acceptance, update release metadata, rerun exact-commit hosted CI and
 plugin canaries, and require clean Statewright and Auldwyrm integration trees
 before any tag or push. The current work did not push, tag, publish, deploy to

@@ -53,6 +53,27 @@ test("Desktop setup CLI executes through an installed-plugin symlink", async () 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Desktop setup CLI forwards the explicit staging gateway", async () => {
+  const { root, state, vendor, app, wrapper } = await fixture("statewright-desktop-staging-cli-");
+  const script = fileURLToPath(new URL("../scripts/statewright-desktop-setup.mjs", import.meta.url));
+  try {
+    const { stdout } = await execFile(process.execPath, [
+      script,
+      "enable",
+      "--state", state,
+      "--profile", "staging",
+      "--gateway-url", "https://staging.example.test",
+      "--original", vendor,
+      "--wrapper", wrapper,
+      "--app", app,
+    ], { env: { ...process.env, HOME: root } });
+    const record = JSON.parse(stdout);
+    assert.equal(record.gateway_url, "https://staging.example.test");
+    assert.equal(record.profile, "staging");
+    assert.equal(record.launcher_app_path, join(root, "Applications", "ChatGPT + Statewright Staging.app"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Desktop setup creates an explicit-launch shim without mutating launchd", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-setup-");
   const launchctl = launchctlHarness("/prior/codex");
@@ -93,6 +114,43 @@ test("Concurrent automatic provisioning converges on one durable client identity
     const recorded = JSON.parse(await readFile(state, "utf8"));
     assert.equal(recorded.client_id, results[0].client_id);
     assert.equal((await desktopDoctor({ statePath: state })).ok, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Automatic provisioning follows a moved bundled Codex binary without changing client identity", async () => {
+  const { root, state, app, applications, wrapper } = await fixture("statewright-desktop-vendor-move-");
+  const oldVendor = join(root, "ChatGPT.app", "Contents", "Resources", "codex");
+  const newVendor = join(root, "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex");
+  try {
+    await mkdir(dirname(oldVendor), { recursive: true });
+    await executable(oldVendor);
+    const original = await enableDesktop({ statePath: state, app, applicationsDirectory: applications, wrapper, node: process.execPath, vendorCandidates: [newVendor, oldVendor] });
+    assert.equal(original.original_codex, oldVendor);
+
+    await rm(oldVendor);
+    await mkdir(dirname(newVendor), { recursive: true });
+    await executable(newVendor);
+    const migrated = await provisionDesktop({ statePath: state, app, applicationsDirectory: applications, wrapper, node: process.execPath, vendorCandidates: [newVendor, oldVendor] });
+
+    assert.equal(migrated.original_codex, newVendor);
+    assert.equal(migrated.client_id, original.client_id);
+    assert.equal((await desktopDoctor({ statePath: state })).ok, true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Automatic provisioning does not replace a missing custom Codex binary", async () => {
+  const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-custom-vendor-");
+  const bundledVendor = join(root, "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex");
+  try {
+    const original = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    await rm(vendor);
+    await mkdir(dirname(bundledVendor), { recursive: true });
+    await executable(bundledVendor);
+    await assert.rejects(
+      () => provisionDesktop({ statePath: state, app, applicationsDirectory: applications, wrapper, node: process.execPath, vendorCandidates: [bundledVendor] }),
+      /different Statewright Desktop setup/,
+    );
+    assert.equal(JSON.parse(await readFile(state, "utf8")).client_id, original.client_id);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

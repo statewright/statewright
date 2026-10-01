@@ -1347,9 +1347,7 @@ fn classify_segment(segment: &str) -> OpClass {
         // intentionally not generic interpreter/build-tool permission: every
         // accepted argv is literal and bounded, and the normalized intent
         // still requires explicit workflow capability.
-        _ if invoked == base_cmd && local_execution_intent(segment, base_cmd).is_some() => {
-            OpClass::BoundedLocalExecution
-        }
+        _ if local_execution_intent(segment, base_cmd).is_some() => OpClass::BoundedLocalExecution,
 
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
@@ -1396,6 +1394,17 @@ fn bounded_node_local_execution(segment: &str) -> bool {
     };
     let args = tokens.get(1..).unwrap_or_default();
     match args {
+        [flag, pattern, paths @ ..]
+            if flag == "--test"
+                && pattern
+                    .strip_prefix("--test-name-pattern=")
+                    .is_some_and(|value| !value.is_empty())
+                && !paths.is_empty() =>
+        {
+            paths
+                .iter()
+                .all(|path| bounded_relative_path(path, ".test.mjs"))
+        }
         [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => paths
             .iter()
             .all(|path| bounded_relative_path(path, ".test.mjs")),
@@ -2268,8 +2277,12 @@ mod tests {
     fn bounded_local_execution_requires_a_small_literal_grammar() {
         for command in [
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs",
+            "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "/opt/toolchains/bin/node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
             "cargo test --offline -p statewright-mcp-gateway",
+            "/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline -p statewright-mcp-gateway allowed_commands_admit_only_ast_proven_read_only_composition",
         ] {
             assert_eq!(
@@ -2281,6 +2294,14 @@ mod tests {
         for command in [
             "node arbitrary-script.mjs",
             "node --test ../outside.test.mjs",
+            "node --test --test-name-pattern= plugins/executor/tests/browser-onboarding.test.mjs",
+            "node --test --test-name-pattern=codex",
+            "node --test --test-name-pattern=codex /tmp/outside.test.mjs",
+            "node --test --test-name-pattern=codex ../outside.test.mjs",
+            "node --test --test-name-pattern=codex --watch plugins/executor/tests/browser-onboarding.test.mjs",
+            "node --test --test-name-pattern=codex --require=fixture plugins/executor/tests/browser-onboarding.test.mjs",
+            "node --test --test-name-pattern=codex --test-name-pattern=other plugins/executor/tests/browser-onboarding.test.mjs",
+            "node --test --test-name-pattern=codex plugins/executor/tests/browser-onboarding.test.mjs > receipt.txt",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs && curl https://example.invalid",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
             "cargo test -p statewright-mcp-gateway",

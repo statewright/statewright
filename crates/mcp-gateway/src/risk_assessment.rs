@@ -4056,6 +4056,32 @@ mod tests {
         };
 
         assert_eq!(resolved("node --version"), ResolvedEffect::ReadOnly);
+        let focused_node_test = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd": "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs"}),
+            Some("validate"),
+        );
+        assert_eq!(focused_node_test.risk, RiskBand::Moderate);
+        assert_eq!(focused_node_test.exposure, ExposureBand::Local);
+        assert_eq!(
+            focused_node_test.required_capability,
+            Some("BoundedLocalExecution")
+        );
+        let request = focused_node_test.semantic_request.as_ref().unwrap().clone();
+        assert_eq!(
+            pipeline_from_parts(
+                focused_node_test,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway"),
+            ResolvedEffect::BoundedLocalExecution
+        );
         assert_eq!(resolved("npm test"), ResolvedEffect::BoundedLocalExecution);
         assert_eq!(
             resolved("pnpm run test"),

@@ -124,9 +124,9 @@ source "${SCRIPT_DIR}/client-id.sh"
 
 key_fingerprint() {
   if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+    printf '%s' "$1" | LC_ALL=C LANG=C shasum -a 256 | LC_ALL=C LANG=C awk '{print $1}'
   else
-    printf '%s' "$1" | sha256sum | awk '{print $1}'
+    printf '%s' "$1" | LC_ALL=C LANG=C sha256sum | LC_ALL=C LANG=C awk '{print $1}'
   fi
 }
 
@@ -135,9 +135,10 @@ invalid_key_matches() {
     [ "$(cat "$INVALID_KEY_SENTINEL" 2>/dev/null)" = "$(key_fingerprint "$1")" ]
 }
 
-open_keys_page() {
-  local url="${1:-https://statewright.ai/keys}"
+open_device_approval_page() {
+  local url="$1"
   local -a browser_command=()
+  [ -n "$url" ] || return 1
   [ "${STATEWRIGHT_NO_BROWSER:-false}" = "true" ] && return 1
   if [ "${OS:-}" = "Windows_NT" ] && command -v powershell.exe >/dev/null 2>&1; then
     if [ -n "${STATEWRIGHT_BROWSER_OPEN_PROBE:-}" ]; then
@@ -245,14 +246,32 @@ poll_device_authorization() {
 }
 
 mark_invalid_key() {
-  local fingerprint
+  local fingerprint service source
   fingerprint=$(key_fingerprint "$1")
   mkdir -p "$STATEWRIGHT_DIR" 2>/dev/null || return 0
   if [ "$(cat "$INVALID_KEY_SENTINEL" 2>/dev/null || true)" != "$fingerprint" ]; then
-    if open_keys_page; then
-      printf '%s\n' "$fingerprint" > "$INVALID_KEY_SENTINEL"
-      chmod 600 "$INVALID_KEY_SENTINEL"
-    fi
+    printf '%s\n' "$fingerprint" > "$INVALID_KEY_SENTINEL"
+    chmod 600 "$INVALID_KEY_SENTINEL"
+    service=$(gateway_service_label "$GW_URL")
+    source=$(credential_source_label)
+    printf 'Statewright credential from %s was rejected by %s. Browser setup was not started. Use statewright_connect only to set up a missing credential.\n' "$source" "$service" >&2
+  fi
+}
+
+gateway_service_label() {
+  local url="$1"
+  if [[ "$url" =~ ^(https?)://([A-Za-z0-9.-]+)(:[0-9]+)?(/|$) ]]; then
+    printf '%s://%s%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+  else
+    printf '%s' 'the configured Statewright gateway'
+  fi
+}
+
+credential_source_label() {
+  if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
+    printf '%s' 'STATEWRIGHT_API_KEY'
+  else
+    printf '%s' '~/.statewright/api_key'
   fi
 }
 
@@ -622,7 +641,8 @@ while IFS= read -r line; do
 
   if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
     if [ "$METHOD" != "notifications/initialized" ]; then
-      echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key is invalid or revoked. Visit https://statewright.ai/keys to generate a new key, then restart this client."},"id":'"$ID"'}'
+      INVALID_KEY_MESSAGE="Statewright credential from $(credential_source_label) was rejected by $(gateway_service_label "$GW_URL"). Browser setup was not started."
+      jq -cn --arg text "$INVALID_KEY_MESSAGE" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-1,message:$text},id:$id}'
     fi
     continue
   fi
@@ -647,7 +667,7 @@ while IFS= read -r line; do
         jq -cn --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:"Statewright account connection could not be started. Try again, or use https://statewright.ai/keys as the manual recovery path."},id:$id}'
       else
         (poll_device_authorization "$DEVICE_CODE" "$EXPIRES_IN" "$POLL_INTERVAL") >/dev/null 2>&1 &
-        if open_keys_page "$VERIFY_URL"; then
+        if open_device_approval_page "$VERIFY_URL"; then
           CONNECT_TEXT="Opened secure Statewright approval in your browser. Confirm that it shows device code $USER_CODE, then approve it. This plugin will verify and store the credential automatically; do not paste an API key into chat."
         else
           CONNECT_TEXT="Open $VERIFY_URL and confirm device code $USER_CODE. After approval, this plugin will verify and store the credential automatically; do not paste an API key into chat."

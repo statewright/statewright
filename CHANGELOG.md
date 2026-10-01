@@ -3,6 +3,32 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Codex Plugin 0.3.4] — 2026-10-01
+
+### Added
+- **[codex]** Add an explicit development Desktop profile alongside staging and
+  production profiles.
+- **[gateway]** Record privacy-bounded classifier denials with a short retention
+  window for field calibration.
+
+### Changed
+- **[gateway]** Classify bounded test runners by their proven literal argument
+  grammar even when the executable is path-qualified; unsupported Node flags,
+  unsafe paths, chaining, substitution, redirects, and opaque effects still
+  fail closed.
+- **[codex]** Keep web-hosted workflow calls separate from local enforcement
+  ownership and reconcile an authoritative inactive local workflow without
+  treating a transport failure as inactivity.
+
+### Fixed
+- **[codex]** Stop automatic browser launches after `invalid_api_key`; OAuth
+  starts only through the explicit connection command, while invalid
+  credentials continue to fail closed.
+- **[codex]** Make invalid-key fingerprinting locale-stable so the diagnostic
+  sentinel is reliably recorded without exposing the credential.
+- **[codex]** Discard stale Stop continuation state when authoritative gateway
+  state is unavailable.
+
 ## [Codex Plugin 0.3.3] — 2026-09-11
 
 ### Fixed

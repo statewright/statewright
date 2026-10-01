@@ -54,7 +54,7 @@ const DESKTOP_PROFILES = Object.freeze({
     stateFile: "codex-desktop-development.json",
     shimName: "statewright-desktop-codex-development",
     launcherName: "statewright-desktop-development-launch.mjs",
-    gatewayUrl: "https://statewright-dev-mcp.casa.enhasa.cloud",
+    gatewayUrl: null,
     apiKeyFile: "dev_api_key",
   }),
 });

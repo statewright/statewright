@@ -90,19 +90,28 @@ bounded local directory creation and data-only heredoc writes. The temporary
 credential was revoked and the temporary user deleted. Production was not
 changed.
 
-## Remaining cut gates
+## Included follow-ups
 
-## Queued release follow-ups
-
-- `034-README-PRICING` — Update the README Pro offer to show the struck-through
+- `034-README-PRICING` — The README Pro offer now shows the struck-through
   $19 list price, the active $9/mo Early Bird price, and that the $9 price stays
   locked while the subscription remains active. This is a next-release
   documentation change; it does not change the live pricing site.
-- `034-NONINTERACTIVE-AUTH` — Remove the generic Codex MCP proxy's automatic
-  browser launch after an `invalid_api_key` response. Keep the explicit
+- `034-NONINTERACTIVE-AUTH` — The generic Codex MCP proxy no longer opens a
+  browser after an `invalid_api_key` response. Keep the explicit
   `statewright_connect` device-approval path and fail-closed key handling. The
-  local source change needs focused auth regression coverage and later release
-  branch integration; it does not authorize installation, reload, or release.
+  focused auth regression covers the noninteractive failure path. The explicit
+  OAuth command remains the only browser-opening path.
+- `034-LOCAL-OWNERSHIP-RECONCILIATION` — Cloud connector calls cannot claim
+  local hook ownership. Authoritative local inactivity clears only the affected
+  local binding, while transport failures remain fail closed and stale Stop
+  cache data cannot continue a workflow.
+- `034-BOUNDED-NODE-PATTERN` — A literal `node --test
+  --test-name-pattern=<nonempty literal> <bounded *.test.mjs paths>` invocation
+  receives bounded-local-execution authority. Absolute and parent paths,
+  unsupported Node flags, watch/loaders/eval, redirection, substitution,
+  chaining, and network effects remain denied.
+
+## Remaining cut gates
 
 Before tagging or publishing 0.3.4:
 
@@ -115,11 +124,10 @@ Before tagging or publishing 0.3.4:
    prove that a direct Statewright tool call succeeds. Merely opening the cloud
    conversation in ChatGPT + Statewright is not evidence that the local Codex
    plugin was attached.
-3. Confirm the release branch is clean and update the plugin version,
-   capability table, and root release banner from 0.3.3 to the final 0.3.4
-   build identity.
+3. Confirm the full-tree staging candidate is clean and that its plugin
+   version, capability table, root release banner, and packaged build identity
+   all agree on 0.3.4.
 4. Run the exact-commit hosted CI and plugin canaries required by the release
    workflow.
 
-No tag, push, publication, production deployment, or active-session restart is
-authorized by this draft.
+No tag, publication, or production deployment is authorized by this draft.

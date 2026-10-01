@@ -75,7 +75,7 @@ test("Desktop setup CLI forwards the explicit staging gateway", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Desktop setup CLI accepts the development profile and its default gateway", async () => {
+test("Desktop setup CLI accepts the development profile with an explicit gateway", async () => {
   const { root, state, vendor, app, wrapper } = await fixture("statewright-desktop-development-cli-");
   const script = fileURLToPath(new URL("../scripts/statewright-desktop-setup.mjs", import.meta.url));
   try {
@@ -84,12 +84,13 @@ test("Desktop setup CLI accepts the development profile and its default gateway"
       "enable",
       "--state", state,
       "--profile", "development",
+      "--gateway-url", "https://development.example.test",
       "--original", vendor,
       "--wrapper", wrapper,
       "--app", app,
     ], { env: { ...process.env, HOME: root } });
     const record = JSON.parse(stdout);
-    assert.equal(record.gateway_url, "https://statewright-dev-mcp.casa.enhasa.cloud");
+    assert.equal(record.gateway_url, "https://development.example.test");
     assert.equal(record.profile, "development");
     assert.equal(record.launcher_app_path, join(root, "Applications", "ChatGPT + Statewright Dev.app"));
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -330,10 +331,14 @@ test("Production, staging, and development Desktop profiles install independentl
       /requires an explicit --gateway-url/,
     );
     const staging = await enableDesktop({ statePath: stagingState, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
-    const development = await enableDesktop({ statePath: developmentState, profile: "development", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    await assert.rejects(
+      () => enableDesktop({ statePath: developmentState, profile: "development", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath }),
+      /requires an explicit --gateway-url/,
+    );
+    const development = await enableDesktop({ statePath: developmentState, profile: "development", gatewayUrl: "https://development.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     assert.equal(production.gateway_url, "https://mcp.statewright.ai");
     assert.equal(staging.gateway_url, "https://staging.example.test");
-    assert.equal(development.gateway_url, "https://statewright-dev-mcp.casa.enhasa.cloud");
+    assert.equal(development.gateway_url, "https://development.example.test");
     assert.notEqual(production.client_id, staging.client_id);
     assert.notEqual(production.client_id, development.client_id);
     assert.notEqual(staging.client_id, development.client_id);

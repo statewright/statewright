@@ -12,7 +12,7 @@ const launcherPath = fileURLToPath(import.meta.url);
 
 function managedClientVersion(argv = process.argv.slice(2)) {
   const hostIndex = argv.indexOf("--host");
-  return hostIndex >= 0 && argv[hostIndex + 1] === "claude" ? "0.3.1" : "0.3.3";
+  return hostIndex >= 0 && argv[hostIndex + 1] === "claude" ? "0.3.1" : "0.3.4";
 }
 
 function parseArgs(argv) {

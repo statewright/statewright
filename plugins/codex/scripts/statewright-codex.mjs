@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const PLUGIN_NAME = "codex";
-const PLUGIN_VERSION = "0.3.3";
+const PLUGIN_VERSION = "0.3.4";
 
 import { readFile, readFile as readFileAsync } from "node:fs/promises";
 import { realpathSync, readFileSync } from "node:fs";

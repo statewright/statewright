@@ -280,12 +280,12 @@ The gateway exposes these tools to the connected agent:
 
 ## Pricing
 
-The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway. Prices won't go up.
+The managed cloud at [statewright.ai](https://statewright.ai) handles workflow storage, run history, and the MCP gateway. The Pro Early Bird price stays locked at $9/mo while the subscription remains active.
 
 | Plan | Workflows | Transitions/mo | Run History | Price |
 |------|-----------|-------------|----------------|-------|
 | Free | 3 | 200 | 72 hours | $0 |
-| Pro | 10 | 2500 | 7 days | $19/mo |
+| Pro | 10 | 2500 | 7 days | ~~$19~~ $9/mo (Early Bird) |
 | Team | 30 | 10000 | 90 days | $99/mo |
 | Enterprise | Unlimited | Unlimited | to Specification | [Contact us](mailto:sales@statewright.ai) |
 

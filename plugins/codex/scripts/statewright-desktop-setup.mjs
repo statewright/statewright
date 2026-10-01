@@ -5,7 +5,7 @@ import { access, chmod, mkdir, readFile, readdir, realpath, rename, rm, writeFil
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { invokeCredentialHelper } from "./lib/desktop-runtime/credential-store.mjs";
@@ -13,6 +13,7 @@ import { canonicalGateway } from "./lib/desktop-runtime/gateway-profile.mjs";
 
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_VENDOR_CODEX_CANDIDATES = Object.freeze([
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
   "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
   "/Applications/ChatGPT.app/Contents/Resources/codex",
 ]);
@@ -22,6 +23,7 @@ const LEGACY_DESKTOP_APP_EXECUTABLE = "Statewright ChatGPT";
 const DEFAULT_LAUNCHCTL = "/bin/launchctl";
 const DESKTOP_ENVIRONMENT_KEY = "CODEX_CLI_PATH";
 const DESKTOP_LOCK_TIMEOUT_MS = 5_000;
+const NATIVE_LAUNCHER_NAME = "statewright-native-desktop-launcher";
 const DESKTOP_PROFILES = Object.freeze({
   production: Object.freeze({
     name: "production",
@@ -74,10 +76,44 @@ async function readOptionalJson(path) { try { return JSON.parse(await readFile(p
 async function writeAtomic(path, contents, mode) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); const temporary = `${path}.${process.pid}.tmp`; await writeFile(temporary, contents, { mode }); await chmod(temporary, mode); await rename(temporary, path); }
 async function executable(path) { try { await access(path, constants.X_OK); return true; } catch { return false; } }
 async function readable(path) { try { await access(path, constants.R_OK); return true; } catch { return false; } }
+async function sha256(path) { return createHash("sha256").update(await readFile(path)).digest("hex"); }
+function defaultNativeLauncherCandidate(platform = process.platform, arch = process.arch) { return resolve(SCRIPT_ROOT, "..", "native", `${platform}-${arch}`, NATIVE_LAUNCHER_NAME); }
+function legacyDesktopShimContents(statePath, nodeExecutable, runtime) { return `#!/bin/sh\nSTATEWRIGHT_DESKTOP_STATE_PATH=${shellQuote(statePath)} exec ${shellQuote(nodeExecutable)} ${shellQuote(runtime)} "$@"\n`; }
+function nativeDesktopConfigContents({ statePath, originalCodex, nodeExecutable, runtime }) {
+  const values = { original_codex: originalCodex, node_executable: nodeExecutable, broker_script: runtime, state_path: statePath };
+  for (const [name, value] of Object.entries(values)) if (!value || /[\r\n]/.test(value)) throw new Error(`Native Desktop launcher ${name} is not a safe single-line path.`);
+  return `version=1\noriginal_codex=${originalCodex}\nnode_executable=${nodeExecutable}\nbroker_script=${runtime}\nstate_path=${statePath}\n`;
+}
+function parseNativeDesktopConfig(contents) {
+  const values = {};
+  for (const line of contents.split(/\r?\n/)) {
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    if (separator < 1) return null;
+    const key = line.slice(0, separator);
+    if (!["version", "original_codex", "node_executable", "broker_script", "state_path"].includes(key) || Object.hasOwn(values, key)) return null;
+    values[key] = line.slice(separator + 1);
+  }
+  return values.version === "1" && values.original_codex && values.node_executable && values.broker_script && values.state_path ? values : null;
+}
+async function readVerifiedNativeInstallation({ state, statePath, shimPath, profile }) {
+  const receiptPath = `${shimPath}.receipt.json`;
+  const configPath = `${shimPath}.conf`;
+  if (state?.native_launcher_receipt && state.native_launcher_receipt !== receiptPath) return null;
+  if (state?.native_launcher_config && state.native_launcher_config !== configPath) return null;
+  const receipt = await readOptionalJson(receiptPath);
+  if (!receipt || receipt.shim_path !== shimPath || receipt.state_path !== statePath || receipt.profile !== profile.name || !/^[a-f0-9]{64}$/.test(receipt.binary_sha256 ?? "")) return null;
+  if (!await executable(shimPath) || !await readable(configPath) || await sha256(shimPath) !== receipt.binary_sha256) return null;
+  const config = parseNativeDesktopConfig(await readFile(configPath, "utf8"));
+  if (!config || config.state_path !== statePath || config.node_executable !== state?.node_executable || config.broker_script !== state?.wrapper || !await executable(config.original_codex)) return null;
+  return { receipt, receiptPath, configPath };
+}
 async function resolveVendorCodex({ original, existing, candidates = DEFAULT_VENDOR_CODEX_CANDIDATES }) {
   if (original) return resolve(original);
+  const resolvedCandidates = candidates.map(value => resolve(value));
+  if (existing?.version === 3 && existing.original_codex && !resolvedCandidates.includes(resolve(existing.original_codex)) && await executable(existing.original_codex)) return resolve(existing.original_codex);
+  for (const candidate of resolvedCandidates) if (await executable(candidate)) return candidate;
   if (existing?.version === 3 && existing.original_codex && await executable(existing.original_codex)) return resolve(existing.original_codex);
-  for (const candidate of candidates.map(value => resolve(value))) if (await executable(candidate)) return candidate;
   return resolve(candidates[0]);
 }
 function delay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)); }
@@ -266,6 +302,47 @@ async function removeLegacyLaunchdOverride(state, options) {
   if (path) await setLaunchdEnvironment(options.launchctlExecFile, path, state.previous_launchd_value);
 }
 
+async function installNativeDesktopDispatcher({ existing, verified, source, statePath, shimPath, launcherAppPath, profile, originalCodex, nodeExecutable, runtime, writeAtomicFn }) {
+  if (!source && !verified) throw new Error("Native Desktop routing was previously enabled, but its installed launcher no longer verifies and no replacement launcher is available. Reinstall with --native-launcher; refusing to restore the app-server-only shell shim.");
+  if (source && resolve(source) === resolve(shimPath) && !verified) throw new Error("The native launcher source cannot be the unverified destination shim.");
+
+  const receiptPath = `${shimPath}.receipt.json`;
+  const configPath = `${shimPath}.conf`;
+  const recordedRollbackPath = existing?.rollback_shim_path ?? verified?.receipt?.rollback_path;
+  if (recordedRollbackPath && !recordedRollbackPath.startsWith(`${shimPath}.pre-native`)) throw new Error("Recorded native Desktop rollback path is outside the profile launcher boundary.");
+  const rollbackPath = recordedRollbackPath ?? `${shimPath}.pre-native`;
+  if (!await executable(rollbackPath)) {
+    if (await executable(shimPath) && !verified) await writeAtomicFn(rollbackPath, await readFile(shimPath), 0o700);
+    else await writeAtomicFn(rollbackPath, legacyDesktopShimContents(statePath, nodeExecutable, runtime), 0o700);
+  }
+
+  await writeAtomicFn(configPath, nativeDesktopConfigContents({ statePath, originalCodex, nodeExecutable, runtime }), 0o600);
+  if (source && resolve(source) !== resolve(shimPath)) await writeAtomicFn(shimPath, await readFile(source), 0o700);
+  const binaryHash = await sha256(shimPath);
+  const rollbackHash = await sha256(rollbackPath);
+  const receipt = {
+    version: 1,
+    profile: profile.name,
+    launcher_app_path: launcherAppPath,
+    state_path: statePath,
+    shim_path: shimPath,
+    sidecar_path: configPath,
+    rollback_path: rollbackPath,
+    launcher_source: source ? resolve(source) : (existing?.native_launcher_source ?? null),
+    binary_sha256: binaryHash,
+    rollback_sha256: rollbackHash,
+    installed_at: new Date().toISOString(),
+  };
+  await writeAtomicFn(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, 0o600);
+  return {
+    launcher_kind: "native_dispatcher",
+    native_launcher_source: receipt.launcher_source,
+    native_launcher_config: configPath,
+    native_launcher_receipt: receiptPath,
+    rollback_shim_path: rollbackPath,
+  };
+}
+
 export function parseDesktopArgs(argv) {
   const [command = "doctor", ...rest] = argv;
   const options = { command };
@@ -273,8 +350,8 @@ export function parseDesktopArgs(argv) {
     const value = rest[index];
     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
     const key = value.slice(2);
-    if (!["state", "original", "wrapper", "app", "profile", "gateway-url"].includes(key)) throw new Error(`Unknown option: ${value}`);
-    const optionKey = key === "gateway-url" ? "gatewayUrl" : key;
+    if (!["state", "original", "wrapper", "app", "profile", "gateway-url", "native-launcher"].includes(key)) throw new Error(`Unknown option: ${value}`);
+    const optionKey = key === "gateway-url" ? "gatewayUrl" : key === "native-launcher" ? "nativeLauncher" : key;
     options[optionKey] = rest[++index];
     if (!options[optionKey]) throw new Error(`${value} requires a value.`);
   }
@@ -282,7 +359,7 @@ export function parseDesktopArgs(argv) {
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
   const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
@@ -300,20 +377,30 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);
   if (!await executable(nodeExecutable)) throw new Error(`Node executable is not executable: ${nodeExecutable}`);
   if (!await readable(runtime)) throw new Error(`Desktop broker module is not readable: ${runtime}`);
+  if (nativeLauncher && !await executable(resolve(nativeLauncher))) throw new Error(`Native Desktop launcher is not executable: ${resolve(nativeLauncher)}`);
   const bundledVendorMigration = existing?.version === 3
     && existing.original_codex !== vendor
     && vendorCandidates.map(value => resolve(value)).includes(resolve(existing.original_codex))
-    && vendorCandidates.map(value => resolve(value)).includes(vendor)
-    && !await executable(existing.original_codex);
+    && vendorCandidates.map(value => resolve(value)).includes(vendor);
   if (existing && existing.version !== 2 && (existing.version !== 3 || (existing.profile ?? "production") !== profile.name || existing.shim_path !== shim || (existing.original_codex !== vendor && !bundledVendorMigration) || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
   const legacyPath = await legacyLaunchdPath(existing, { launchctlExecFile, launchctlPath });
+  await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
+  const verifiedNative = await readVerifiedNativeInstallation({ state: existing, statePath: resolvedState, shimPath: shim, profile });
+  const recordedNative = existing?.launcher_kind === "native_dispatcher";
+  const recordedNativeSource = existing?.native_launcher_source && await executable(existing.native_launcher_source) ? resolve(existing.native_launcher_source) : null;
+  const packagedNativeSource = nativeLauncherCandidate && await executable(resolve(nativeLauncherCandidate)) ? resolve(nativeLauncherCandidate) : null;
+  const nativeSource = nativeLauncher ? resolve(nativeLauncher) : packagedNativeSource ?? recordedNativeSource;
+  const useNative = Boolean(nativeSource || verifiedNative || recordedNative);
+  if (!useNative && requireNativeLauncher) throw new Error(`The macOS Desktop setup requires the packaged native dispatcher, but it is unavailable at ${resolve(nativeLauncherCandidate)}. Reinstall the Codex plugin or pass --native-launcher from a trusted build; refusing to create the app-server-only shell shim.`);
+  const launcherState = useNative
+    ? await installNativeDesktopDispatcher({ existing, verified: verifiedNative, source: nativeSource, statePath: resolvedState, shimPath: shim, launcherAppPath, profile, originalCodex: vendor, nodeExecutable, runtime, writeAtomicFn })
+    : { launcher_kind: "legacy_app_server_shell" };
+  if (!useNative) await writeAtomicFn(shim, legacyDesktopShimContents(resolvedState, nodeExecutable, runtime), 0o700);
   const state = existing?.version === 3
-    ? { ...existing, profile: profile.name, original_codex: vendor, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
-    : { version: 3, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+    ? { ...existing, ...launcherState, profile: profile.name, original_codex: vendor, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
+    : { version: 3, ...launcherState, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
   delete state.api_key_path; // Leave legacy files untouched; they are not launch credentials.
   state.credential_store = "gateway_keyring";
-  await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
-  await writeAtomicFn(shim, `#!/bin/sh\nSTATEWRIGHT_DESKTOP_STATE_PATH=${shellQuote(resolvedState)} exec ${shellQuote(nodeExecutable)} ${shellQuote(runtime)} "$@"\n`, 0o700);
   if (legacyPath) {
     await setLaunchdEnvironment(launchctlExecFile, legacyPath, existing.previous_launchd_value);
     try {
@@ -415,6 +502,11 @@ export async function disableDesktop({ statePath, profile: profileName = "produc
     const appRemoved = await removeVerifiedDesktopApp(state.launcher_app_path, profile);
     const launcherRemoved = await removeVerifiedDesktopLauncher(resolvedState, profile, state.launcher_path);
     await rm(state.shim_path, { force: true });
+    if (state.launcher_kind === "native_dispatcher") {
+      await rm(`${state.shim_path}.conf`, { force: true });
+      await rm(`${state.shim_path}.receipt.json`, { force: true });
+      if (state.rollback_shim_path?.startsWith(`${state.shim_path}.pre-native`)) await rm(state.rollback_shim_path, { force: true });
+    }
     await rm(resolvedState, { force: true });
     return { ...state, disabled: true, app_removed: appRemoved, launcher_removed: launcherRemoved };
   });
@@ -435,7 +527,8 @@ export async function desktopDoctor({ statePath, profile: profileName = "product
     credentialPresent = status?.ok === true && status?.status === "configured";
     credentialReason = credentialPresent ? "available" : "missing_or_unavailable";
   } catch { credentialReason = "store_unavailable"; }
-  return { ok: state.credential_store === "gateway_keyring" && await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath) && credentialPresent, profile: profile.name, state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, credential_store: state.credential_store ?? "legacy_setup_requires_enable", credential_present: credentialPresent, credential_status: credentialReason, client_id: state.client_id, launch_mode: "explicit_process_environment" };
+  const nativeInstallation = state.launcher_kind === "native_dispatcher" ? await readVerifiedNativeInstallation({ state, statePath: resolvedState, shimPath: state.shim_path, profile }) : true;
+  return { ok: state.credential_store === "gateway_keyring" && await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath) && credentialPresent && Boolean(nativeInstallation), profile: profile.name, state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, credential_store: state.credential_store ?? "legacy_setup_requires_enable", credential_present: credentialPresent, credential_status: credentialReason, client_id: state.client_id, launcher_kind: state.launcher_kind ?? "legacy_app_server_shell", launch_mode: "explicit_process_environment" };
 }
 
 export async function readDesktopState(path = defaultDesktopStatePath()) {
@@ -453,9 +546,9 @@ async function invokedAsEntryPoint(argument = process.argv[1]) {
 if (await invokedAsEntryPoint()) {
   const options = parseDesktopArgs(process.argv.slice(2));
   let result;
-  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app });
-  else if (options.command === "provision-all") result = await provisionDesktopProfiles({ app: options.app });
-  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app });
+  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher });
+  else if (options.command === "provision-all") result = await provisionDesktopProfiles({ app: options.app, nativeLauncher: options.nativeLauncher });
+  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher });
   else if (options.command === "launch") result = await launchDesktop({ statePath: options.state, profile: options.profile });
   else if (options.command === "disable") result = await disableDesktop({ statePath: options.state, profile: options.profile });
   else if (options.command === "doctor") result = await desktopDoctor({ statePath: options.state, profile: options.profile });

@@ -120,6 +120,11 @@ test("plugin release workflow resolves distinct names and curated notes", async 
   assert.match(workflow, /cargo test --target "\$\{\{ matrix\.target \}\}" -p statewright-credentials/);
   assert.match(workflow, /pattern: credential-helper-\*/);
   assert.match(workflow, /name: Smoke packaged plugin against production/);
+  assert.match(workflow, /name: Build native Desktop launcher/);
+  assert.match(workflow, /platform: darwin-x64/);
+  assert.match(workflow, /platform: darwin-arm64/);
+  assert.match(workflow, /plugins\/codex\/native\/\$platform\/statewright-native-desktop-launcher/);
+  assert.match(workflow, /name: Verify packaged native Desktop launchers/);
   assert.match(workflow, /name: Submit packaged plugin adoption telemetry event/);
   assert.match(workflow, /uses: actions\/attest@v4/);
   assert.match(workflow, /attestations: write/);

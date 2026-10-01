@@ -4119,6 +4119,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "statewright-native-desktop-launcher"
+version = "0.1.0"
+
+[[package]]
 name = "statewright-tui"
 version = "0.1.0"
 dependencies = [

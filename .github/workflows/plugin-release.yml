@@ -53,8 +53,40 @@ jobs:
           path: credential-helper/${{ matrix.asset }}
           if-no-files-found: error
 
+  native-desktop-launcher:
+    if: startsWith(github.ref_name, 'codex-v')
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            platform: darwin-x64
+          - target: aarch64-apple-darwin
+            platform: darwin-arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build native Desktop launcher
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup target add "$TARGET"
+          cargo build --release --target "$TARGET" -p statewright-native-desktop-launcher
+      - name: Stage native Desktop launcher
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: cp "target/$TARGET/release/statewright-native-desktop-launcher" "statewright-native-desktop-launcher-$PLATFORM"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-desktop-launcher-${{ matrix.platform }}
+          path: statewright-native-desktop-launcher-${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 1
+
   package:
-    needs: credential-helper
+    needs: [credential-helper, native-desktop-launcher]
+    if: always() && needs.credential-helper.result == 'success' && (startsWith(github.ref_name, 'claude-v') || needs.native-desktop-launcher.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -153,6 +185,20 @@ jobs:
             node --test plugins/claude-code/tests/*.test.mjs
             bash -n plugins/claude-code/hook.sh plugins/claude-code/client-id.sh plugins/claude-code/mcp-proxy.sh plugins/claude-code/setup.sh
           fi
+      - name: Download native Desktop launchers
+        if: steps.plugin.outputs.directory == 'plugins/codex'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-desktop-launcher-*
+          path: ${{ runner.temp }}/native-desktop-launchers
+          merge-multiple: true
+      - name: Add native Desktop launchers to Codex plugin
+        if: steps.plugin.outputs.directory == 'plugins/codex'
+        run: |
+          for platform in darwin-x64 darwin-arm64; do
+            mkdir -p "plugins/codex/native/$platform"
+            install -m 0755 "$RUNNER_TEMP/native-desktop-launchers/statewright-native-desktop-launcher-$platform" "plugins/codex/native/$platform/statewright-native-desktop-launcher"
+          done
       - name: Package plugin
         env:
           ARCHIVE: ${{ steps.plugin.outputs.archive }}
@@ -203,6 +249,11 @@ jobs:
           unzip -q "$RUNNER_TEMP/release/$ARCHIVE" -d "$RUNNER_TEMP/plugin-candidate"
           digest=$(shasum -a 256 "$RUNNER_TEMP/release/$ARCHIVE" | awk '{print $1}')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Verify packaged native Desktop launchers
+        if: needs.package.outputs.plugin == 'codex'
+        run: |
+          test -x "$RUNNER_TEMP/plugin-candidate/plugins/codex/native/darwin-x64/statewright-native-desktop-launcher"
+          test -x "$RUNNER_TEMP/plugin-candidate/plugins/codex/native/darwin-arm64/statewright-native-desktop-launcher"
       - name: Smoke packaged plugin against production
         env:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}

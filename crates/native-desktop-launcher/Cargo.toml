@@ -1,0 +1,12 @@
+[package]
+name = "statewright-native-desktop-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "statewright-native-desktop-launcher"
+path = "src/main.rs"

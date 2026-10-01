@@ -216,6 +216,17 @@ folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
 from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
 shim only for that process tree; normal ChatGPT launches are unchanged.
 
+The macOS plugin artifact includes architecture-specific native dispatchers for
+Apple Silicon and Intel. The dispatcher sends only an exact `app-server`
+invocation through Statewright's existing broker; `exec-server` and every other
+Codex mode are replaced in-process by the signed Codex executable bundled with
+ChatGPT. This preserves the caller's arguments, environment, working directory,
+standard streams, signals, and exit status. Automatic provisioning records a
+profile-specific sidecar, receipt, and rollback shim. Once a profile records
+native dispatch, setup fails closed if neither the installed binary nor an
+approved replacement verifies; it never silently regenerates the old
+app-server-only shell.
+
 The installed plugin always binds this standard launcher to the production
 gateway (`https://mcp.statewright.ai`). Desktop reads the credential for its exact
 gateway from the OS keyring, not a plaintext key file or an inherited shell key.
@@ -235,14 +246,28 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs do
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
 
+A source checkout does not contain a prebuilt native binary. Pass a trusted
+local build explicitly when testing setup from source:
+
+```bash
+cargo build --release -p statewright-native-desktop-launcher
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable \
+  --native-launcher /path/to/statewright/target/release/statewright-native-desktop-launcher
+```
+
 The production profile uses the public Statewright gateway. An internal
 staging profile must receive its endpoint explicitly so private infrastructure
 is never compiled into the public plugin:
 
 ```bash
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable \
-  --profile staging --gateway-url https://your-staging-gateway.example
+  --profile staging --gateway-url https://your-staging-gateway.example \
+  --native-launcher /path/to/statewright/target/release/statewright-native-desktop-launcher
 ```
+
+Production, staging, and development keep separate state, shim, configuration,
+receipt, rollback, credential, and launcher-app paths. Disabling one profile
+removes only artifacts recorded by that profile.
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;

@@ -94,13 +94,176 @@ if [ "$NEEDS_BOOTSTRAP" = true ]; then
   fi
 fi
 
-# --- Helper: call MCP gateway ---
-mcp_call() {
-  printf '%s' "$1" | curl -sf --max-time 5 -X POST "$GW_URL/" \
+# --- Helpers: call the configured local MCP gateway ---
+# Keep the JSON-RPC envelope until the caller has established whether a reply
+# is an authoritative active state, an explicit inactive state, or a transport
+# failure.  Flattening it here used to turn all three into the same empty text.
+mcp_raw_call() {
+  local response
+  response=$(printf '%s' "$1" | curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
     "${SESSION_HEADER_ARGS[@]}" \
-    --data-binary @- 2>/dev/null | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+    --data-binary @- 2>/dev/null) || return 0
+  printf '%s' "$response"
+}
+
+mcp_call() {
+  mcp_raw_call "$1" | jq -r '.result.content[0].text // empty' 2>/dev/null || true
+}
+
+# Only the locally installed Statewright MCP server owns this hook's local
+# enforcement state.  Connector/server names are part of the trust boundary:
+# mcp__codex_apps__statewright_staging_* is deliberately not a local control
+# tool even though it contains the same operation names.
+is_local_statewright_tool() {
+  case "$1" in
+    mcp__statewright__statewright_*|mcp__plugin_statewright_statewright__statewright_*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_valid_state_snapshot() {
+  printf '%s' "$1" | jq -e '
+    type == "object"
+    and (.state | type == "string" and length > 0)
+    and (if has("workflow") then (.workflow | type == "string" and length > 0) else true end)
+    and (if has("run_id") then (.run_id | type == "string" and length > 0) else true end)
+    and (if has("run_session_id") then (.run_session_id | type == "string" and length > 0) else true end)
+    and (if has("is_final") then (.is_final | type == "boolean") else true end)
+    and (if has("allowed_tools") and .allowed_tools != null then (.allowed_tools | type == "array" and all(.[]; type == "string" and length > 0)) else true end)
+    and (if has("disallowed_tools") and .disallowed_tools != null then (.disallowed_tools | type == "array" and all(.[]; type == "string" and length > 0)) else true end)
+    and (if has("transitions") and .transitions != null then (.transitions | type == "array" and all(.[]; type == "object" and (.event | type == "string" and length > 0) and (.target | type == "string" and length > 0))) else true end)
+    and (if has("context") and .context != null then (.context | type == "object") else true end)
+    and (if (.context? | type) == "object" and (.context | has("tool_policy_mode")) then (.context.tool_policy_mode == null or (.context.tool_policy_mode | type == "string")) else true end)
+    and (if has("tool_policy_mode") and .tool_policy_mode != null then (.tool_policy_mode | type == "string") else true end)
+  ' >/dev/null 2>&1
+}
+
+is_valid_cached_state() {
+  is_valid_state_snapshot "$1" || return 1
+  printf '%s' "$1" | jq -e '
+    (.allowed_tools == null or (.allowed_tools | type) == "array")
+    and (.disallowed_tools == null or (.disallowed_tools | type) == "array")
+    and (.transitions == null or (.transitions | type) == "array")
+  ' >/dev/null 2>&1
+}
+
+local_statewright_action() {
+  case "$1" in
+    mcp__statewright__statewright_start|mcp__plugin_statewright_statewright__statewright_start|mcp__statewright__statewright_load_workflow|mcp__plugin_statewright_statewright__statewright_load_workflow) printf 'start' ;;
+    mcp__statewright__statewright_stop|mcp__plugin_statewright_statewright__statewright_stop|mcp__statewright__statewright_deactivate|mcp__plugin_statewright_statewright__statewright_deactivate|mcp__statewright__statewright_pause|mcp__plugin_statewright_statewright__statewright_pause) printf 'stop' ;;
+    mcp__statewright__statewright_transition|mcp__plugin_statewright_statewright__statewright_transition|mcp__statewright__statewright_force_state|mcp__plugin_statewright_statewright__statewright_force_state) printf 'transition' ;;
+    mcp__statewright__statewright_get_state|mcp__plugin_statewright_statewright__statewright_get_state) printf 'refresh_cache' ;;
+  esac
+}
+
+tool_response_is_error() {
+  printf '%s' "$1" | jq -e '
+    type == "object" and (
+      .isError == true or .error != null or .result?.isError == true or .result?.error != null
+    )
+  ' >/dev/null 2>&1
+}
+
+managed_root_is_owned() {
+  local registration="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}/codex-root-session.json"
+  [ -n "${STATEWRIGHT_ROUTE_CONTROL_DIR:-}" ] || return 0
+  [ -e "$registration" ] || return 0
+  jq -e --arg session_id "$HOOK_SESSION" --arg client_id "$CLIENT_ID" '
+    .version == 1 and .session_id == $session_id and .client_id == $client_id
+  ' "$registration" >/dev/null 2>&1
+}
+
+state_matches_local_binding() {
+  local state_json="$1" local_run local_session state_run state_session cached_run cached_session active_run active_session
+  if [ -f "$ACTIVE_FILE" ] && ! jq -e --arg client_id "$CLIENT_ID" --arg thread_id "$HOOK_SESSION" '
+    if has("version") then
+      .version == 1 and .client_id == $client_id and .thread_id == $thread_id
+      and (if has("run_id") then (.run_id | type == "string" and length > 0) else true end)
+      and (if has("run_session_id") then (.run_session_id | type == "string" and length > 0) else true end)
+    else
+      type == "object" and (.activated | type == "string" and length > 0)
+    end
+  ' "$ACTIVE_FILE" >/dev/null 2>&1; then
+    return 1
+  fi
+  active_run=$(jq -r '.run_id // empty' "$ACTIVE_FILE" 2>/dev/null || true)
+  active_session=$(jq -r '.run_session_id // empty' "$ACTIVE_FILE" 2>/dev/null || true)
+  state_run=$(printf '%s' "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)
+  state_session=$(printf '%s' "$state_json" | jq -r '.run_session_id // empty' 2>/dev/null || true)
+  if [ -n "$active_run" ] && { [ -z "$state_run" ] || [ "$state_run" != "$active_run" ]; }; then
+    return 1
+  fi
+  if [ -n "$active_session" ] && { [ -z "$state_session" ] || [ "$state_session" != "$active_session" ]; }; then
+    return 1
+  fi
+  local_run=$(cat "$PROJECT_DIR/.run_id" 2>/dev/null || true)
+  if [ -z "$local_run" ] && [ -f "$CACHE_FILE" ] && is_valid_cached_state "$(cat "$CACHE_FILE")"; then
+    cached_run=$(jq -r '.run_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+    local_run="$cached_run"
+  fi
+  if [ -n "$local_run" ] && { [ -z "$state_run" ] || [ "$state_run" != "$local_run" ]; }; then
+    return 1
+  fi
+  local_session=$(cat "$PROJECT_DIR/.run_session_id" 2>/dev/null || true)
+  if [ -z "$local_session" ] && [ -f "$CACHE_FILE" ] && is_valid_cached_state "$(cat "$CACHE_FILE")"; then
+    cached_session=$(jq -r '.run_session_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+    local_session="$cached_session"
+  fi
+  if [ -n "$local_session" ] && { [ -z "$state_session" ] || [ "$state_session" != "$local_session" ]; }; then
+    return 1
+  fi
+  return 0
+}
+
+# Emit a compact typed result.  Inactive is intentionally narrow: the exact
+# gateway no-active result must be corroborated by status from the same local
+# endpoint and client/session headers.  Everything else fails closed.
+fetch_local_state() {
+  local state_raw state_text status_raw status_text state_json
+  state_raw=$(mcp_raw_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
+  state_text=$(printf '%s' "$state_raw" | jq -r '
+    if .jsonrpc == "2.0" and .id == 1 and (.error | not)
+      and ((.result | type) == "object") and ((.result.isError // false) == false)
+      and ((.result.content | type) == "array")
+    then ([.result.content[]? | select(.type == "text") | .text | strings][0] // empty)
+    else empty end
+  ' 2>/dev/null || true)
+  if managed_root_is_owned && [ -n "$state_text" ] && is_valid_state_snapshot "$state_text" && state_matches_local_binding "$state_text"; then
+    state_json=$(printf '%s' "$state_text" | jq -c . 2>/dev/null || true)
+    jq -cn --argjson state "$state_json" '{kind:"active",state:$state}'
+    return 0
+  fi
+
+  if ! printf '%s' "$state_raw" | jq -e '
+    .jsonrpc == "2.0" and .id == 1 and (.error | not)
+    and (.result | type) == "object" and .result.isError == true
+    and (.result.content | type) == "array" and (.result.content | length) == 1
+    and .result.content[0] == {
+      type:"text", text:"No active workflow. Load a workflow before requesting state."
+    }
+  ' >/dev/null 2>&1; then
+    printf '%s\n' '{"kind":"unavailable"}'
+    return 0
+  fi
+
+  status_raw=$(mcp_raw_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_status","arguments":{}},"id":1}')
+  status_text=$(printf '%s' "$status_raw" | jq -r '
+    if .jsonrpc == "2.0" and .id == 1 and (.error | not)
+      and ((.result | type) == "object") and ((.result.isError // false) == false)
+      and ((.result.content | type) == "array")
+    then ([.result.content[]? | select(.type == "text") | .text | strings][0] // empty)
+    else empty end
+  ' 2>/dev/null || true)
+  if managed_root_is_owned && printf '%s' "$status_text" | jq -e '
+    type == "object" and has("active_workflow") and has("current_state")
+    and .active_workflow == null and .current_state == null
+  ' >/dev/null 2>&1; then
+    printf '%s\n' '{"kind":"inactive"}'
+  else
+    printf '%s\n' '{"kind":"unavailable"}'
+  fi
 }
 
 statewright_tools_label() {
@@ -389,6 +552,23 @@ clear_interactive_route_requests() {
   done < <(find "$control_dir" -maxdepth 1 -type f -name '*.route.json' -print 2>/dev/null)
 }
 
+# This is normal lifecycle cleanup, not a recovery shortcut: it is bounded to
+# the current derived thread directory and is called only after a confirmed
+# local terminal/inactive result or a successful local deactivate response.
+clear_local_enforcement_state() {
+  local clear_routes="${1:-true}"
+  managed_root_is_owned || return 1
+  [ "$clear_routes" = "true" ] && clear_interactive_route_requests
+  rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" \
+    "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" \
+    "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" \
+    "$PROJECT_DIR/.run_session_id" \
+    "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" \
+    "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" \
+    "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" \
+    "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+}
+
 reset_native_telemetry_state() {
   local epoch="$1"
   local effective_at
@@ -468,25 +648,38 @@ case "$ENDPOINT" in
       exit 0
     fi
 
-    # --- Active workflow: fetch state from gateway ---
-    STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
-
-    # Gateway unreachable — graceful degradation
-    if [ -z "$CURRENT" ]; then
+    # --- Active workflow: fetch typed state from the local gateway ---
+    FETCHED_STATE=$(fetch_local_state)
+    FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
+    if [ "$FETCH_KIND" = "inactive" ]; then
+      if clear_local_enforcement_state; then
+        echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[statewright] Local gateway confirms no active workflow. Stale local enforcement was reconciled for this thread."}}'
+      else
+        touch "$GATEWAY_UNAVAILABLE_FILE"
+        echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright ownership could not be reconciled. The active workflow remains fail-closed."}}'
+      fi
+      exit 0
+    fi
+    if [ "$FETCH_KIND" != "active" ]; then
       mkdir -p "$PROJECT_DIR"
       touch "$GATEWAY_UNAVAILABLE_FILE"
       echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright gateway unreachable. The active workflow remains fail-closed until authoritative state is restored."}}'
       exit 0
     fi
+    STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
+    CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
     rm -f "$GATEWAY_UNAVAILABLE_FILE"
 
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      request_interactive_route_restart "$STATE_JSON" true
-      rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq"
-      echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
+      if clear_local_enforcement_state false; then
+        request_interactive_route_restart "$STATE_JSON" true
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
+      else
+        touch "$GATEWAY_UNAVAILABLE_FILE"
+        echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"Statewright ownership could not be reconciled. The active workflow remains fail-closed."}}'
+      fi
       exit 0
     fi
 
@@ -564,8 +757,11 @@ case "$ENDPOINT" in
 
     # Always allow system/internal/MCP tools
     if [ "$RAW_DELEGATION" != "true" ]; then
+      if is_local_statewright_tool "$TOOL_NAME"; then
+        exit 0
+      fi
       case "$TOOL_NAME" in
-        *statewright_*|create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
+        create_goal|get_goal|update_goal|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
       esac
     fi
 
@@ -581,6 +777,15 @@ case "$ENDPOINT" in
     fi
 
     STATE_JSON=$(cat "$CACHE_FILE")
+    if ! is_valid_cached_state "$STATE_JSON"; then
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright state cache is invalid; the active workflow fails closed."}}'
+      exit 0
+    fi
+    if ! managed_root_is_owned || ! state_matches_local_binding "$STATE_JSON"; then
+      touch "$GATEWAY_UNAVAILABLE_FILE"
+      jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright local ownership binding is invalid; the active workflow fails closed."}}'
+      exit 0
+    fi
     ALLOWED=$(echo "$STATE_JSON" | jq -r '.allowed_tools // [] | .[]' 2>/dev/null || true)
     DISALLOWED=$(echo "$STATE_JSON" | jq -r '.disallowed_tools // [] | .[]' 2>/dev/null || true)
     POLICY_MODE=$(echo "$STATE_JSON" | jq -r '.context.tool_policy_mode // .tool_policy_mode // empty' 2>/dev/null || true)
@@ -858,18 +1063,12 @@ case "$ENDPOINT" in
     TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
     TOOL_RESULT=$(echo "$HOOK_INPUT" | jq -r '.tool_response // .tool_response // empty' 2>/dev/null || true)
 
-    # Match tool name regardless of prefix format (mcp__, plugin:, etc.)
+    # Only exact local MCP names may mutate this hook's local lifecycle.
+    # Cloud connector calls are ordinary foreign tools from this hook's view.
     SW_ACTION=""
-    case "$TOOL_NAME" in
-      *statewright_start*) SW_ACTION="start" ;;
-      *statewright_load_workflow*) SW_ACTION="start" ;;
-      *statewright_stop*) SW_ACTION="stop" ;;
-      *statewright_deactivate*) SW_ACTION="stop" ;;
-      *statewright_pause*) SW_ACTION="stop" ;;
-      *statewright_transition*) SW_ACTION="transition" ;;
-      *statewright_force_state*) SW_ACTION="transition" ;;
-      *statewright_get_state*) SW_ACTION="refresh_cache" ;;
-    esac
+    if is_local_statewright_tool "$TOOL_NAME"; then
+      SW_ACTION=$(local_statewright_action "$TOOL_NAME")
+    fi
 
     # capture.sh is deliberately opt-in and skips Statewright control tools.
     # Dispatch ordinary tool completions here; merely creating
@@ -933,28 +1132,49 @@ case "$ENDPOINT" in
         # A workflow load returns its authoritative post-load state. Never
         # re-query here: that can target a stale gateway session and activate
         # enforcement with the wrong phase.
-        PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
+        if tool_response_is_error "$TOOL_RESULT"; then
+          PARSED=""
+        else
+          PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
+        fi
         STATE_JSON=$(echo "$PARSED" | jq -c '.state_snapshot // empty' 2>/dev/null || true)
-        if [ -z "$STATE_JSON" ] || [ "$STATE_JSON" = "null" ]; then
+        if [ -z "$STATE_JSON" ] || [ "$STATE_JSON" = "null" ] || ! is_valid_state_snapshot "$STATE_JSON"; then
           jq -n \
             --arg tool "$TOOL_NAME" \
             '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:("[statewright] " + $tool + " did not return an authoritative state snapshot. Enforcement was not activated; reload the workflow after updating the gateway.")}}'
           exit 0
         fi
 
+        # A foreign managed root cannot acquire or replace this hook's local
+        # enforcement state. Preserve existing evidence and fail closed.
+        if ! managed_root_is_owned; then
+          if [ -f "$ACTIVE_FILE" ]; then
+            touch "$GATEWAY_UNAVAILABLE_FILE"
+          fi
+          jq -n '{hookSpecificOutput:{hookEventName:"PostToolUse",additionalContext:"[statewright] Local workflow result was refused because the managed root is not owned by this thread. Existing enforcement was preserved."}}'
+          exit 0
+        fi
+
         # Activate enforcement only after the exact load response is available.
         mkdir -p "$PROJECT_DIR"
-        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq"
-        echo "{\"activated\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$ACTIVE_FILE"
+        rm -f "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.run_session_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq"
+        RUN_ID=$(echo "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+        RUN_SESSION_ID=$(echo "$STATE_JSON" | jq -r '.run_session_id // empty' 2>/dev/null || true)
+        jq -n --arg client_id "$CLIENT_ID" --arg thread_id "$HOOK_SESSION" \
+          --arg activated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg run_id "$RUN_ID" --arg run_session_id "$RUN_SESSION_ID" \
+          '{version:1,client_id:$client_id,thread_id:$thread_id,activated:$activated}
+           + (if $run_id == "" then {} else {run_id:$run_id} end)
+           + (if $run_session_id == "" then {} else {run_session_id:$run_session_id} end)' > "$ACTIVE_FILE"
         echo "$STATE_JSON" > "$CACHE_FILE"
         rm -f "$GATEWAY_UNAVAILABLE_FILE"
         INITIAL_EPOCH=$(echo "$STATE_JSON" | jq -r '.state_epoch // 1' 2>/dev/null || echo "1")
         case "$INITIAL_EPOCH" in ''|*[!0-9]*) INITIAL_EPOCH=1 ;; esac
         reset_native_telemetry_state "$INITIAL_EPOCH"
 
-        RUN_ID=$(echo "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
         CAPTURE=$(echo "$STATE_JSON" | jq -r '.capture_output // false' 2>/dev/null || true)
         [ -n "$RUN_ID" ] && echo "$RUN_ID" > "$PROJECT_DIR/.run_id"
+        [ -n "$RUN_SESSION_ID" ] && echo "$RUN_SESSION_ID" > "$PROJECT_DIR/.run_session_id"
         [ "$CAPTURE" = "true" ] && touch "$PROJECT_DIR/.capture_enabled"
         emit_native_telemetry "workflow_loaded" "$STATE_JSON"
         clear_interactive_route_requests
@@ -967,9 +1187,15 @@ case "$ENDPOINT" in
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}. KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
         ;;
       stop)
-        # Deactivate enforcement
-        clear_interactive_route_requests
-        rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+        # A matching tool name is not evidence of a successful deactivate.
+        if tool_response_is_error "$TOOL_RESULT"; then
+          PARSED=""
+        else
+          PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
+        fi
+        if printf '%s' "$PARSED" | jq -e '(.deactivated == true or .stopped == true or .paused == true)' >/dev/null 2>&1; then
+          clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+        fi
         ;;
       transition)
         # Read previous state before refreshing
@@ -983,9 +1209,15 @@ case "$ENDPOINT" in
         IS_JOIN=$(echo "$PARSED_RESULT" | jq -r '.joined // false' 2>/dev/null || true)
         IS_BRANCH_DONE=$(echo "$PARSED_RESULT" | jq -r '.branch_completed // empty' 2>/dev/null || true)
 
-        # Refresh cache after transition
-        STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-        if [ -n "$STATE_JSON" ]; then
+        # Refresh only from a typed authoritative local result.
+        FETCHED_STATE=$(fetch_local_state)
+        FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
+        if [ "$FETCH_KIND" = "inactive" ]; then
+          clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+          exit 0
+        fi
+        if [ "$FETCH_KIND" = "active" ]; then
+          STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
           echo "$STATE_JSON" > "$CACHE_FILE"
           rm -f "$GATEWAY_UNAVAILABLE_FILE"
           NEW_STATE=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
@@ -1057,8 +1289,11 @@ case "$ENDPOINT" in
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} Present this approval request to the user in the current UI. Do not continue the workflow until the user approves or rejects it.\"}}"
             fi
           elif [ "$IS_FINAL" = "true" ]; then
-            rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$GATEWAY_UNAVAILABLE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.telemetry_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
-            echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
+            if clear_local_enforcement_state false; then
+              echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] ${PREV_STATE} => ${NEW_STATE} (workflow complete, enforcement deactivated)\"}}"
+            else
+              touch "$GATEWAY_UNAVAILABLE_FILE"
+            fi
           elif [ -n "$NEW_STATE" ]; then
             NEXT_TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
             NEXT_TOOLS=$(statewright_tools_label "$STATE_JSON")
@@ -1075,8 +1310,12 @@ case "$ENDPOINT" in
       refresh_cache)
         # Silently update cache from gateway state (catches force_state drift)
         if [ -f "$ACTIVE_FILE" ]; then
-          STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-          if [ -n "$STATE_JSON" ]; then
+          FETCHED_STATE=$(fetch_local_state)
+          FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
+          if [ "$FETCH_KIND" = "inactive" ]; then
+            clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+          elif [ "$FETCH_KIND" = "active" ]; then
+            STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
             PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
             AUTHORITATIVE_EPOCH=$(echo "$STATE_JSON" | jq -r '.state_epoch // empty' 2>/dev/null || true)
             echo "$STATE_JSON" > "$CACHE_FILE"
@@ -1105,12 +1344,30 @@ case "$ENDPOINT" in
   stop)
     [ "${STATEWRIGHT_STOP_CONTINUATION:-1}" = "0" ] && exit 0
     [ -f "$ACTIVE_FILE" ] || exit 0
+    # Never revive a stale cached continuation when the authoritative gateway
+    # is unavailable.  PreToolUse remains fail-closed until it recovers.
+    [ -f "$GATEWAY_UNAVAILABLE_FILE" ] && exit 0
     STATE_JSON=""
     if [ -f "$CACHE_FILE" ]; then
       STATE_JSON=$(cat "$CACHE_FILE")
+      is_valid_cached_state "$STATE_JSON" || exit 0
+      if ! managed_root_is_owned || ! state_matches_local_binding "$STATE_JSON"; then
+        touch "$GATEWAY_UNAVAILABLE_FILE"
+        exit 0
+      fi
     else
-      STATE_JSON=$(mcp_call '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"statewright_get_state","arguments":{}},"id":1}')
-      [ -n "$STATE_JSON" ] && echo "$STATE_JSON" > "$CACHE_FILE"
+      FETCHED_STATE=$(fetch_local_state)
+      FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
+      if [ "$FETCH_KIND" = "active" ]; then
+        STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
+        echo "$STATE_JSON" > "$CACHE_FILE"
+      elif [ "$FETCH_KIND" = "inactive" ]; then
+        clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+        exit 0
+      else
+        touch "$GATEWAY_UNAVAILABLE_FILE"
+        exit 0
+      fi
     fi
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
     [ -n "$CURRENT" ] || exit 0

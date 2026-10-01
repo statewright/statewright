@@ -203,6 +203,360 @@ test("new workflow boundaries supersede stale routes and deactivation drains the
   }
 });
 
+test("cloud connector lifecycle calls cannot acquire or release local enforcement", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-ownership-"));
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "ownership-test" };
+  const snapshot = {
+    workflow: "routing-test", state: "implement", run_id: "local-run",
+    allowed_tools: ["Read"], transitions: [],
+  };
+  try {
+    const foreignLoad = await invokeHook({ session_id: "ownership-thread",
+      tool_name: "mcp__codex_apps__statewright_staging_statewright_load_workflow",
+      tool_response: JSON.stringify({ state_snapshot: snapshot }) }, environment);
+    assert.equal(foreignLoad.status, 0, foreignLoad.stderr);
+    const noLocalState = await access(resolve(home, ".statewright", "sessions")).then(() => false, () => true);
+    assert.equal(noLocalState, true);
+
+    const localLoad = await invokeHook({ session_id: "ownership-thread",
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: JSON.stringify({ state_snapshot: snapshot }) }, environment);
+    assert.equal(localLoad.status, 0, localLoad.stderr);
+    const failedLocalStop = await invokeHook({ session_id: "ownership-thread",
+      tool_name: "mcp__statewright__statewright_deactivate",
+      tool_response: JSON.stringify({ deactivated: false }) }, environment);
+    assert.equal(failedLocalStop.status, 0, failedLocalStop.stderr);
+    const foreignStop = await invokeHook({ session_id: "ownership-thread",
+      tool_name: "mcp__codex_apps__statewright_staging_statewright_deactivate",
+      tool_response: JSON.stringify({ deactivated: true }) }, environment);
+    assert.equal(foreignStop.status, 0, foreignStop.stderr);
+    const localStop = await invokeHook({ session_id: "ownership-thread" }, environment, "stop");
+    assert.equal(localStop.status, 0, localStop.stderr);
+    assert.equal(JSON.parse(localStop.stdout).decision, "block");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("exact local inactive state reconciles only the current thread and admits pwd", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-inactive-"));
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const method = JSON.parse(body).params.name;
+      const result = method === "statewright_get_state"
+        ? { isError: true, content: [{ type: "text", text: "No active workflow. Load a workflow before requesting state." }] }
+        : { content: [{ type: "text", text: JSON.stringify({ active_workflow: null, current_state: null }) }] };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    });
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "inactive-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    const loaded = await invokeHook({ session_id: "inactive-thread",
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: JSON.stringify({ state_snapshot: {
+        workflow: "routing-test", state: "implement", run_id: "inactive-run", allowed_tools: ["Bash"], transitions: [],
+      } }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const reconciled = await invokeHook({ session_id: "inactive-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.equal(reconciled.status, 0, reconciled.stderr);
+    assert.match(reconciled.stdout, /Stale local enforcement was reconciled/);
+    const probe = await invokeHook({ session_id: "inactive-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.equal(probe.stdout, "");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("unconfirmed no-active reply remains fail-closed and suppresses stale Stop continuation", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-unavailable-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {
+      isError: true, content: [{ type: "text", text: "No active workflow. Load a workflow before requesting state." }],
+    } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "unavailable-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    const loaded = await invokeHook({ session_id: "unavailable-thread",
+      tool_name: "mcp__statewright__statewright_load_workflow",
+      tool_response: JSON.stringify({ state_snapshot: {
+        workflow: "routing-test", state: "intake", run_id: "unavailable-run", allowed_tools: ["Read"], transitions: [],
+      } }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const refreshed = await invokeHook({ session_id: "unavailable-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.equal(refreshed.status, 0, refreshed.stderr);
+    assert.match(refreshed.stdout, /fail-closed/);
+    const denied = await invokeHook({ session_id: "unavailable-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.match(denied.stdout, /gateway state is unavailable/);
+    const stopped = await invokeHook({ session_id: "unavailable-thread" }, environment, "stop");
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.equal(stopped.stdout, "");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Stop cache miss with a semantic error preserves fail-closed enforcement", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-stop-cache-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {
+      isError: true, content: [{ type: "text", text: "No active workflow. Load a workflow before requesting state." }],
+    } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "stop-cache-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    const loaded = await invokeHook({ session_id: "stop-cache-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "stop-cache-run", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
+    await rm(resolve(home, ".statewright", "sessions", sessionDir, ".state_cache"));
+    const stop = await invokeHook({ session_id: "stop-cache-thread" }, environment, "stop");
+    assert.equal(stop.stdout, "");
+    const denied = await invokeHook({ session_id: "stop-cache-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.match(denied.stdout, /gateway state is unavailable/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("conflicting active run remains fail-closed without replacing local state", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-conflict-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ workflow: "routing-test", state: "final", run_id: "foreign-run", is_final: true, allowed_tools: [], transitions: [] }) }] } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "conflict-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    await invokeHook({ session_id: "conflict-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "local-run", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    const prompt = await invokeHook({ session_id: "conflict-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+    const denied = await invokeHook({ session_id: "conflict-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.match(denied.stdout, /gateway state is unavailable/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("lookalike lifecycle tools, error envelopes, and foreign managed roots cannot acquire local enforcement", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-root-"));
+  const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-hook-root-control-"));
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const method = JSON.parse(body).params.name;
+      const result = method === "statewright_get_state"
+        ? { isError: true, content: [{ type: "text", text: "No active workflow. Load a workflow before requesting state." }] }
+        : { content: [{ type: "text", text: JSON.stringify({ active_workflow: null, current_state: null }) }] };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    });
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "foreign-root-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}`, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir };
+  const snapshot = { workflow: "routing-test", state: "implement", run_id: "root-run", allowed_tools: ["Read"], transitions: [] };
+  try {
+    await writeFile(resolve(controlDir, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: "another-thread", client_id: "another-client" }));
+    const lookalike = await invokeHook({ session_id: "root-thread", tool_name: "mcp__statewright__statewright_load_workflow_extra", tool_response: JSON.stringify({ state_snapshot: snapshot }) }, environment);
+    assert.equal(lookalike.status, 0, lookalike.stderr);
+    const envelopeFailure = await invokeHook({ session_id: "root-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ result: { isError: true, content: [{ type: "text", text: JSON.stringify({ state_snapshot: snapshot }) }] } }) }, environment);
+    assert.equal(envelopeFailure.status, 0, envelopeFailure.stderr);
+    const dormantProbe = await invokeHook({ session_id: "root-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.equal(dormantProbe.stdout, "");
+
+    const loaded = await invokeHook({ session_id: "root-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: snapshot }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    assert.match(loaded.stdout, /managed root is not owned/);
+    const noLocalState = await access(resolve(home, ".statewright", "sessions")).then(() => false, () => true);
+    assert.equal(noLocalState, true);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+    await rm(controlDir, { recursive: true, force: true });
+  }
+});
+
+test("loss of a bound run identity remains fail-closed", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-identity-loss-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ workflow: "routing-test", state: "implement", allowed_tools: ["Read"], transitions: [] }) }] } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "identity-loss-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    const loaded = await invokeHook({ session_id: "identity-loss-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "bound-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const prompt = await invokeHook({ session_id: "identity-loss-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+    const denied = await invokeHook({ session_id: "identity-loss-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.match(denied.stdout, /gateway state is unavailable/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("loss of a bound run session identity remains fail-closed independently", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-session-loss-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ workflow: "routing-test", state: "implement", run_id: "bound-run", allowed_tools: ["Read"], transitions: [] }) }] } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "session-loss-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    await invokeHook({ session_id: "session-loss-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "bound-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    const prompt = await invokeHook({ session_id: "session-loss-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+    const denied = await invokeHook({ session_id: "session-loss-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.match(denied.stdout, /gateway state is unavailable/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("malformed policy snapshots cannot activate local enforcement", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-policy-"));
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "policy-test" };
+  try {
+    const result = await invokeHook({ session_id: "policy-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", allowed_tools: ["Read", 7], transitions: [] } }) }, environment);
+    assert.match(result.stdout, /did not return an authoritative state snapshot/);
+    const noLocalState = await access(resolve(home, ".statewright", "sessions")).then(() => false, () => true);
+    assert.equal(noLocalState, true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("legacy cache identity constrains a refresh when sidecars are absent", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-legacy-binding-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ workflow: "routing-test", state: "implement", run_id: "foreign-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] }) }] } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "legacy-binding-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    await invokeHook({ session_id: "legacy-binding-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "bound-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
+    const sessionPath = resolve(home, ".statewright", "sessions", sessionDir);
+    await writeFile(resolve(sessionPath, ".active"), JSON.stringify({ activated: "legacy" }));
+    await rm(resolve(sessionPath, ".run_id"));
+    await rm(resolve(sessionPath, ".run_session_id"));
+    const prompt = await invokeHook({ session_id: "legacy-binding-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("versioned active binding constrains refresh when sidecars and cache are absent", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-active-binding-"));
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ workflow: "routing-test", state: "implement", run_id: "foreign-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] }) }] } }));
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "active-binding-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    await invokeHook({ session_id: "active-binding-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "bound-run", run_session_id: "bound-session", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
+    const sessionPath = resolve(home, ".statewright", "sessions", sessionDir);
+    await rm(resolve(sessionPath, ".run_id"));
+    await rm(resolve(sessionPath, ".run_session_id"));
+    await rm(resolve(sessionPath, ".state_cache"));
+    const prompt = await invokeHook({ session_id: "active-binding-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("real HTTP gateway failures preserve enforcement and deny ordinary tools", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-http-failure-"));
+  const server = createServer((_request, response) => response.writeHead(500).end("gateway failed"));
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const environment = { HOME: home, STATEWRIGHT_CLIENT_ID: "http-failure-test", STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  try {
+    await invokeHook({ session_id: "http-failure-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "http-run", allowed_tools: ["Read"], transitions: [] } }) }, environment);
+    const prompt = await invokeHook({ session_id: "http-failure-thread", prompt: "continue" }, environment, "user-prompt");
+    assert.match(prompt.stdout, /fail-closed/);
+    const denied = await invokeHook({ session_id: "http-failure-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, environment, "pre-tool");
+    assert.match(denied.stdout, /gateway state is unavailable/);
+    const stop = await invokeHook({ session_id: "http-failure-thread" }, environment, "stop");
+    assert.equal(stop.stdout, "");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("corroborated inactive cleanup preserves a sibling thread's evidence", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-hook-sibling-"));
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      const method = JSON.parse(body).params.name;
+      const result = method === "statewright_get_state"
+        ? { isError: true, content: [{ type: "text", text: "No active workflow. Load a workflow before requesting state." }] }
+        : { content: [{ type: "text", text: JSON.stringify({ active_workflow: null, current_state: null }) }] };
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    });
+  });
+  await new Promise((resolveStart) => server.listen(0, "127.0.0.1", resolveStart));
+  const { port } = server.address();
+  const gateway = { STATEWRIGHT_API_KEY: "test-key", STATEWRIGHT_GATEWAY_URL: `http://127.0.0.1:${port}` };
+  const current = { HOME: home, STATEWRIGHT_CLIENT_ID: "current-sibling-test", ...gateway };
+  const sibling = { HOME: home, STATEWRIGHT_CLIENT_ID: "other-sibling-test", ...gateway };
+  try {
+    await invokeHook({ session_id: "current-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "current-run", allowed_tools: ["Bash"], transitions: [] } }) }, current);
+    await invokeHook({ session_id: "sibling-thread", tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: { workflow: "routing-test", state: "implement", run_id: "sibling-run", allowed_tools: ["Read"], transitions: [] } }) }, sibling);
+    const sessionRoot = resolve(home, ".statewright", "sessions");
+    const entries = await readdir(sessionRoot);
+    const siblingDir = (await Promise.all(entries.map(async (entry) => ({ entry, active: await readFile(resolve(sessionRoot, entry, ".active"), "utf8") })))).find(({ active }) => active.includes("sibling-run"));
+    const siblingActive = await readFile(resolve(sessionRoot, siblingDir.entry, ".active"), "utf8");
+    const siblingCache = await readFile(resolve(sessionRoot, siblingDir.entry, ".state_cache"), "utf8");
+    const reconciled = await invokeHook({ session_id: "current-thread", prompt: "continue" }, current, "user-prompt");
+    assert.match(reconciled.stdout, /Stale local enforcement was reconciled/);
+    assert.equal(await readFile(resolve(sessionRoot, siblingDir.entry, ".active"), "utf8"), siblingActive);
+    assert.equal(await readFile(resolve(sessionRoot, siblingDir.entry, ".state_cache"), "utf8"), siblingCache);
+    const currentProbe = await invokeHook({ session_id: "current-thread", tool_name: "Bash", tool_input: { command: "pwd" } }, current, "pre-tool");
+    assert.equal(currentProbe.stdout, "");
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("workflow load beneath codex exec does not request a parent TUI restart", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-hook-"));
   const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-route-"));

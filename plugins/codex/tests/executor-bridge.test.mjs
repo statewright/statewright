@@ -143,6 +143,7 @@ async function startNativeGateway() {
         allowed_tools: ["Read", "Bash"],
         disallowed_tools: ["Write"],
         transitions: [],
+        run_id: "native-hook-test-run",
         context: { tool_policy_mode: "denylist_heuristic_v1" },
       };
     } else if (toolName === "opaque_mutation_tool") {
@@ -248,9 +249,13 @@ async function startClassifierApprovalProxy() {
 }
 
 async function invoke(command, args, input, environment) {
+  const inherited = { ...process.env };
+  for (const key of Object.keys(inherited)) {
+    if (key.startsWith("STATEWRIGHT_")) delete inherited[key];
+  }
   return await new Promise((resolveChild) => {
     const child = spawn(command, args, {
-      env: { ...process.env, ...environment },
+      env: { ...inherited, ...environment },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

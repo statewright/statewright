@@ -34,6 +34,7 @@ async function fixture(prefix) {
     moduleFile(wrapper),
     writeFile(join(dirname(state), "api_key"), "test-production-key\n", { mode: 0o600 }),
     writeFile(join(dirname(state), "staging_api_key"), "test-staging-key\n", { mode: 0o600 }),
+    writeFile(join(dirname(state), "dev_api_key"), "test-development-key\n", { mode: 0o600 }),
     writeFile(desktopRuntime, `export async function startDesktopMcpBridge({ environment }) { return { url: "http://127.0.0.1:43123", token: \`${"${environment.STATEWRIGHT_GATEWAY_URL}"}|${"${environment.STATEWRIGHT_API_KEY}"}\`, close: async () => {} }; }\n`),
   ]);
   return { root, state, vendor, app, applications, wrapper };
@@ -71,6 +72,26 @@ test("Desktop setup CLI forwards the explicit staging gateway", async () => {
     assert.equal(record.gateway_url, "https://staging.example.test");
     assert.equal(record.profile, "staging");
     assert.equal(record.launcher_app_path, join(root, "Applications", "ChatGPT + Statewright Staging.app"));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Desktop setup CLI accepts the development profile and its default gateway", async () => {
+  const { root, state, vendor, app, wrapper } = await fixture("statewright-desktop-development-cli-");
+  const script = fileURLToPath(new URL("../scripts/statewright-desktop-setup.mjs", import.meta.url));
+  try {
+    const { stdout } = await execFile(process.execPath, [
+      script,
+      "enable",
+      "--state", state,
+      "--profile", "development",
+      "--original", vendor,
+      "--wrapper", wrapper,
+      "--app", app,
+    ], { env: { ...process.env, HOME: root } });
+    const record = JSON.parse(stdout);
+    assert.equal(record.gateway_url, "https://statewright-dev-mcp.casa.enhasa.cloud");
+    assert.equal(record.profile, "development");
+    assert.equal(record.launcher_app_path, join(root, "Applications", "ChatGPT + Statewright Dev.app"));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -298,9 +319,10 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("Production and staging Desktop profiles install independently", async () => {
+test("Production, staging, and development Desktop profiles install independently", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-profiles-");
   const stagingState = join(dirname(state), "codex-desktop-staging.json");
+  const developmentState = join(dirname(state), "codex-desktop-development.json");
   try {
     const production = await enableDesktop({ statePath: state, profile: "production", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     await assert.rejects(
@@ -308,12 +330,23 @@ test("Production and staging Desktop profiles install independently", async () =
       /requires an explicit --gateway-url/,
     );
     const staging = await enableDesktop({ statePath: stagingState, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    const development = await enableDesktop({ statePath: developmentState, profile: "development", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     assert.equal(production.gateway_url, "https://mcp.statewright.ai");
     assert.equal(staging.gateway_url, "https://staging.example.test");
+    assert.equal(development.gateway_url, "https://statewright-dev-mcp.casa.enhasa.cloud");
     assert.notEqual(production.client_id, staging.client_id);
+    assert.notEqual(production.client_id, development.client_id);
+    assert.notEqual(staging.client_id, development.client_id);
     assert.equal(production.launcher_app_path, join(applications, "ChatGPT + Statewright.app"));
     assert.equal(staging.launcher_app_path, join(applications, "ChatGPT + Statewright Staging.app"));
+    assert.equal(development.launcher_app_path, join(applications, "ChatGPT + Statewright Dev.app"));
     assert.equal(staging.api_key_path, join(dirname(state), "staging_api_key"));
+    assert.equal(development.api_key_path, join(dirname(state), "dev_api_key"));
+    assert.equal((await desktopDoctor({ statePath: state, profile: "production" })).ok, true);
+    assert.equal((await desktopDoctor({ statePath: stagingState, profile: "staging" })).ok, true);
+    assert.equal((await desktopDoctor({ statePath: developmentState, profile: "development" })).ok, true);
+    const developmentDisabled = await disableDesktop({ statePath: developmentState, profile: "development" });
+    assert.equal(developmentDisabled.app_removed, true);
     assert.equal((await desktopDoctor({ statePath: state, profile: "production" })).ok, true);
     assert.equal((await desktopDoctor({ statePath: stagingState, profile: "staging" })).ok, true);
     const disabled = await disableDesktop({ statePath: stagingState, profile: "staging" });

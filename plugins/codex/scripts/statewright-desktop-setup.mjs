@@ -45,12 +45,24 @@ const DESKTOP_PROFILES = Object.freeze({
     gatewayUrl: null,
     apiKeyFile: "staging_api_key",
   }),
+  development: Object.freeze({
+    name: "development",
+    appName: "ChatGPT + Statewright Dev.app",
+    displayName: "ChatGPT + Statewright Dev",
+    executableName: "ChatGPT + Statewright Dev",
+    bundleId: "ai.statewright.chatgpt.development",
+    stateFile: "codex-desktop-development.json",
+    shimName: "statewright-desktop-codex-development",
+    launcherName: "statewright-desktop-development-launch.mjs",
+    gatewayUrl: "https://statewright-dev-mcp.casa.enhasa.cloud",
+    apiKeyFile: "dev_api_key",
+  }),
 });
 const execFile = promisify(execFileCallback);
 
 function desktopProfile(name = "production") {
   const profile = DESKTOP_PROFILES[name];
-  if (!profile) throw new Error(`Unknown Desktop profile: ${name}. Expected production or staging.`);
+  if (!profile) throw new Error(`Unknown Desktop profile: ${name}. Expected production, staging, or development.`);
   return profile;
 }
 export function defaultDesktopStatePath(home = homedir(), profile = "production") { return join(home, ".statewright", desktopProfile(profile).stateFile); }

@@ -257,6 +257,90 @@ test("codex searches public docs without a local credential or gateway request",
   }
 });
 
+test("codex invalid key remains non-interactive and reports a redacted configured service", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-invalid-key-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const browserCapture = join(root, "browser-command.txt");
+  const curlCapture = join(root, "curl-command.txt");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  try {
+    await mkdir(bin, { recursive: true });
+    const fakeCurl = join(bin, "curl");
+    await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+url=''
+previous=''
+printf '%s\\n' "$@" >> "$STATEWRIGHT_CURL_CAPTURE"
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  case "$argument" in http://*|https://*) url="$argument" ;; esac
+  previous="$argument"
+done
+case "$url" in
+  */api/client-tools)
+    printf '%s' '{"error":"invalid_api_key"}' > "$output"
+    printf '401'
+    ;;
+  *)
+    printf '%s' '{"jsonrpc":"2.0","result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}},"id":1}'
+    ;;
+esac
+`);
+    await chmod(fakeCurl, 0o755);
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_API_KEY: "sw_live_fixture_invalid_key",
+      STATEWRIGHT_GATEWAY_URL: "https://user:secret@gateway.example.test:8443/private?token=hidden",
+      STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: browserCapture,
+      STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+
+    const child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
+      cwd: root,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+    await waitForOutput(() => stdout, /"id":1/);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
+    const invalidMarker = join(home, ".statewright", "invalid_api_key");
+    await waitForOutput(async () => {
+      try { return await readFile(invalidMarker, "utf8"); } catch { return ""; }
+    }, /[0-9a-f]{64}/, 10_000);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+    await waitForOutput(() => stdout, /"id":2/);
+    child.stdin.end();
+    const code = await new Promise((resolveClose, rejectClose) => {
+      child.once("error", rejectClose);
+      child.once("close", resolveClose);
+    });
+
+    assert.equal(code, 0, stderr);
+    assert.match(await readFile(curlCapture, "utf8"), /\/api\/client-tools/);
+    await assert.rejects(readFile(browserCapture));
+    assert.match(stderr, /credential from STATEWRIGHT_API_KEY was rejected/);
+    assert.match(stderr, /the configured Statewright gateway/);
+    assert.doesNotMatch(stderr, /secret|token=|private|statewright\.ai\/keys/);
+    const invalidResponse = responseById(stdout, 2);
+    assert.equal(invalidResponse.error.code, -1);
+    assert.match(invalidResponse.error.message, /Browser setup was not started/);
+    assert.doesNotMatch(invalidResponse.error.message, /secret|token=|private|keys/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 for (const [name, proxy] of legacyProxies) {
   test(`${name} preserves its existing Windows signup onboarding`, async () => {
     const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));

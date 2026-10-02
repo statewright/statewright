@@ -2570,6 +2570,58 @@ mod tests {
     }
 
     #[test]
+    fn native_package_build_evidence_admits_only_literal_vite_build() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "npm run build";
+        let input = json!({"cmd": command, "workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let proof = |resolved: &str| {
+            json!({
+                "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                "files":[{"path":"package.json","sha256":"a".repeat(64)}],
+                "commands":[{"original":resolved,"resolved":resolved}],
+            })
+        };
+
+        let admitted = proof("vite build");
+        assert_eq!(
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&admitted))
+                .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        for denied in [
+            "vite build --watch",
+            "vite build --config outside.js",
+            "vite build --outDir ../outside",
+        ] {
+            let evidence = proof(denied);
+            assert_eq!(
+                apply_native_command_evidence(
+                    base(),
+                    None,
+                    "exec_command",
+                    &input,
+                    Some(&evidence)
+                )
+                .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{denied}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
     fn agent_delegation_is_known_transitive_authority() {
         for tool_name in [
             "mcp__collaboration__spawn_agent",

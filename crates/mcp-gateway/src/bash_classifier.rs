@@ -1384,6 +1384,7 @@ fn local_execution_intent(segment: &str, executable: &str) -> Option<LocalExecut
         "cargo" => bounded_cargo_local_execution(segment),
         "npm" | "pnpm" => bounded_package_test_local_execution(segment, executable),
         "vitest" => bounded_vitest_local_execution(segment),
+        "vite" => bounded_vite_local_execution(segment),
         _ => false,
     };
     validation.then_some(LocalExecutionIntent::Validation)
@@ -1518,6 +1519,19 @@ fn bounded_vitest_local_execution(segment: &str) -> bool {
             .any(|suffix| bounded_relative_path(path, suffix))
                 && !path.starts_with('-')
         })
+}
+
+/// Admit the conventional argument-free Vite production build after a native
+/// package-script expansion has exposed it as the actual execution unit. Vite
+/// configuration is repository code, like test-runner configuration, so this
+/// remains a moderate local execution requiring explicit workflow authority.
+/// Any CLI option stays unclassified because options such as `--outDir` and
+/// `--config` can redirect effects or load code outside the bounded project.
+fn bounded_vite_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    matches!(tokens.as_slice(), [executable, operation] if executable == "vite" && operation == "build")
 }
 
 fn bounded_test_filter(value: &str) -> bool {
@@ -2423,6 +2437,26 @@ mod tests {
             "npm test && curl https://example.invalid",
             "npm test > receipt.txt",
             "pnpm test --filter workspace",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn vite_build_requires_a_literal_bounded_grammar() {
+        assert_eq!(classify("vite build"), vec![OpClass::BoundedLocalExecution]);
+        for command in [
+            "/tmp/vite build",
+            "vite",
+            "vite build --watch",
+            "vite build --config outside.js",
+            "vite build --outDir ../outside",
+            "vite build && curl https://example.invalid",
+            "vite build > receipt.txt",
         ] {
             assert_ne!(
                 classify(command),

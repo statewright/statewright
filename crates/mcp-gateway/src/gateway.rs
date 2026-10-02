@@ -6573,6 +6573,11 @@ mod tests {
                 .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked"))
         );
         assert_eq!(result["risk_assessment"]["equivalent_retry_allowed"], false);
+        assert_eq!(result["risk_assessment"]["reformulation_allowed"], false);
+        assert_eq!(
+            result["risk_assessment"]["exact_invocation_retry_allowed"],
+            false
+        );
         assert_eq!(
             result["risk_assessment"]["final_denial_basis"],
             "workflow_capability_write_denied"

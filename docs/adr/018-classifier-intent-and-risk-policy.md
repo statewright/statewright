@@ -45,6 +45,11 @@ effects.
    renders those bounded fields into its denial reason because the raw gateway
    object is not otherwise visible to the model. Never include command text,
    paths, payloads, heredoc contents, credentials, or source code.
+   Reworkable uncertain denials set `reformulation_allowed=true` and retain
+   `equivalent_retry_allowed=true` for adapter compatibility, while
+   `exact_invocation_retry_allowed=false` makes clear that the same denied
+   invocation must not be replayed. Known-risk and workflow-capability denials
+   keep all retry/reformulation fields false.
 7. Treat simple local directory creation as a deterministic local write and
    retain delegated commands such as arbitrary Taskfile targets as unresolved
    until their manifest or an equivalent typed declaration is inspected.

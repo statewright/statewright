@@ -432,6 +432,9 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
         if first.rsplit('/').next() == Some("sed") && first != "sed" {
             return None;
         }
+        if first.rsplit('/').next() == Some("nl") && first != "nl" {
+            return None;
+        }
         if first.rsplit('/').next()? == "git" {
             if first != "git" {
                 return None;
@@ -1237,7 +1240,7 @@ fn classify_segment(segment: &str) -> OpClass {
         "echo" | "printf" if safe_output_command(segment, invoked) => OpClass::SafeOutput,
 
         // File read commands
-        "cat" | "head" | "tail" => {
+        "cat" | "head" | "tail" | "nl" => {
             // cat with redirect is FileWrite — handled by has_output_redirect
             OpClass::FileRead
         }
@@ -2518,6 +2521,24 @@ mod tests {
         let classes = classify("echo hello; rm temp.txt");
         assert!(classes.contains(&OpClass::SafeOutput));
         assert!(classes.contains(&OpClass::Destructive));
+    }
+
+    #[test]
+    fn semicolon_separated_read_pipelines_require_every_leaf_to_be_proven() {
+        let command = "nl -ba src/components/BookingWizard.vue | sed -n '485,525p'; nl -ba src/components/__tests__/BookingWizard.checkout.spec.js | sed -n '445,530p'; nl -ba docs/milestones/2026-10-02-checkout-durable-outcome.md | sed -n '28,46p'";
+        assert_eq!(readonly_capabilities(command), Some(vec!["Read"]));
+
+        let write = format!("{command}; printf receipt > receipt.txt");
+        assert!(classify(&write).contains(&OpClass::FileWrite));
+        assert_eq!(readonly_capabilities(&write), None);
+
+        let destructive = format!("{command}; rm receipt.txt");
+        assert!(classify(&destructive).contains(&OpClass::Destructive));
+        assert_eq!(readonly_capabilities(&destructive), None);
+
+        let external = format!("{command}; curl https://example.invalid");
+        assert!(classify(&external).contains(&OpClass::Network));
+        assert_eq!(readonly_capabilities(&external), None);
     }
 
     // --- Redirect edge cases ---

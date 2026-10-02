@@ -391,6 +391,7 @@ fn sanitize_semantic_shape(
             | "nc"
             | "ncat"
             | "netcat"
+            | "nl"
             | "node"
             | "npm"
             | "patch"

@@ -339,6 +339,17 @@ impl<'a> FinalDecisionContext<'a> {
 }
 
 impl RiskPipelineAssessment {
+    fn reformulation_allowed(basis: &str) -> bool {
+        matches!(
+            basis,
+            "semantic_threshold_not_met"
+                | "incomplete_structural_evidence"
+                | "semantic_vector_unavailable"
+                | "semantic_assessment_incomplete"
+                | "semantic_authorization_disabled"
+        )
+    }
+
     fn intent_fingerprint(&self) -> String {
         // Fingerprint only the already-redacted semantic request.  Provider
         // shims use this identity to recognize a repeated intent without
@@ -533,6 +544,14 @@ impl RiskPipelineAssessment {
                 required_authority,
             } => (false, serde_json::json!(basis), required_authority),
         };
+        let effective_denial_basis = final_denial_basis.as_str().unwrap_or(resolution_basis);
+        let reformulation_allowed = matches!(resolved_effect, ResolvedEffect::DenyUncertain)
+            && Self::reformulation_allowed(effective_denial_basis);
+        let exact_invocation_retry_allowed = decision_allowed
+            && !matches!(
+                resolved_effect,
+                ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain
+            );
         let vector = self.semantic.vector.as_ref().map(|value| {
             serde_json::json!({
                 "read_only": value.read_only.get(),
@@ -558,8 +577,13 @@ impl RiskPipelineAssessment {
             "resolution_basis": resolution_basis,
             "final_denial_basis": final_denial_basis,
             "required_authority": required_authority,
-            "equivalent_retry_allowed": decision_allowed
-                && !matches!(resolved_effect, ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain),
+            // Compatibility field consumed by existing adapters. For an
+            // uncertain classifier denial it means the agent may reformulate
+            // the request on the failed structural axis; it never authorizes
+            // replaying the exact denied invocation.
+            "equivalent_retry_allowed": exact_invocation_retry_allowed || reformulation_allowed,
+            "reformulation_allowed": reformulation_allowed,
+            "exact_invocation_retry_allowed": exact_invocation_retry_allowed,
         })
     }
 
@@ -4067,7 +4091,26 @@ mod tests {
             visible["required_authority"],
             "complete_structural_evidence_or_separate_approval"
         );
-        assert_eq!(visible["equivalent_retry_allowed"], false);
+        assert_eq!(visible["equivalent_retry_allowed"], true);
+        assert_eq!(visible["reformulation_allowed"], true);
+        assert_eq!(visible["exact_invocation_retry_allowed"], false);
+        let semantic_denial = missing_shape.visible_json_for_denial(
+            "semantic_threshold_not_met",
+            "complete_structural_evidence_or_separate_approval",
+        );
+        assert_eq!(semantic_denial["equivalent_retry_allowed"], true);
+        assert_eq!(semantic_denial["reformulation_allowed"], true);
+        assert_eq!(semantic_denial["exact_invocation_retry_allowed"], false);
+        let capability_denial =
+            missing_shape.visible_json_for_denial("workflow_capability_read_denied", "Read");
+        assert_eq!(capability_denial["equivalent_retry_allowed"], false);
+        assert_eq!(capability_denial["reformulation_allowed"], false);
+        assert_eq!(capability_denial["exact_invocation_retry_allowed"], false);
+        let known_risk = external_pipeline
+            .visible_json_for_denial("effective_known_risk", "separate_approved_execution_path");
+        assert_eq!(known_risk["equivalent_retry_allowed"], false);
+        assert_eq!(known_risk["reformulation_allowed"], false);
+        assert_eq!(known_risk["exact_invocation_retry_allowed"], false);
         assert!(
             visible["intent_fingerprint"]
                 .as_str()
@@ -4246,6 +4289,7 @@ mod tests {
             "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi",
             "(pwd; git status --short)",
             "git rev-parse HEAD && rg needle crates | head -20",
+            "nl -ba src/components/BookingWizard.vue | sed -n '485,525p'; nl -ba src/components/__tests__/BookingWizard.checkout.spec.js | sed -n '445,530p'; nl -ba docs/milestones/2026-10-02-checkout-durable-outcome.md | sed -n '28,46p'",
             "case inspect in inspect) git status --short;; esac",
             "for reference in HEAD main; do git rev-parse \"$reference\"; done",
         ] {

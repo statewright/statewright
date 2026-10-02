@@ -61,5 +61,43 @@ Final review also closed a PATH-provenance gap: bare Vitest can resolve to the
 verified local runner only inside package scripts, not directly from a shell
 or Taskfile. Missing/ambiguous package configuration remains unresolved.
 
-Source candidate bundle: `0.3.4+codex.20261002033943`. Local commit and
-installed/staging provenance are pending. No new staging pass claimed.
+## Candidate and installation receipt
+
+Implementation commit: `f04e96a` on canonical `main`. Candidate bundle:
+`0.3.4+codex.20261002033943`. At 2026-10-02T03:39Z onward, the supported
+`codex plugin add statewright@personal --json` control returned success for
+that version. Its source is the existing personal marketplace entry pointing
+to `/Users/ben/dev/statewright/plugins/codex`. No credentials were supplied or
+printed, no OAuth flow was invoked, and no resident process was restarted.
+
+Independent SHA-256 calculation confirmed source and installed-cache matches:
+
+| File | SHA-256 |
+| --- | --- |
+| `hook.sh` | `d162c9abdc443de2b930e3f69745d1c2c2d6f9ad237f54fc77eeffba40e7efbb` |
+| `scripts/lib/command-evidence.mjs` | `1173275900a52b0be3593bb31071b55e6982be7a45c81d6f6f6641060f98dd05` |
+| `scripts/lib/command-yaml.generated.mjs` | `6bc9d43f5435c853da3903224dfb67fa6557d1d0c74a796265a796e6cdd6102c` |
+
+`cargo build --offline --release -p statewright-mcp-gateway` passed. Local
+`target/release/statewright-gateway` SHA-256 is
+`4a38297ed00f62d3ae60eca5fd7bbecbe2b034a520ae64346dc9e569ffc7895e`.
+Existing unused-variable/dead-code warnings remain; no unrelated cleanup.
+Local plugin archive `dist/statewright-codex-0.3.4-rc.f04e96a.zip` was generated
+directly from the committed plugin subtree; SHA-256:
+`fe9cf924e0aef61e36b3948b7929590677056d12a93d0be6a381e102b7b29934`.
+The first shasum attempt failed due to the inherited invalid locale; the same
+command succeeded with `LC_ALL=C`. This was not a policy denial.
+
+The cache is shared with the desktop, but successful installation does not
+prove any already-running app server loaded these bytes. Live staging still
+reports gateway `release-2498471`, application/server `release-4608248`, all
+with one ready replica. No new staging pass, runtime swap or deployment is
+claimed. A gateway-only staging replacement is prohibited: the next deployment
+must use the full-tree release lane, followed by affected-session refresh and
+actual admission verification. Do not treat this source/install receipt as
+authority to interrupt unrelated sessions.
+
+Read-only pane inspection confirms `death-rebirth:3.1`, pane `%4`, cwd
+`/Users/ben/dev/nomad`, pane PID `6437`. The pane records run
+`27405ade-a33d-49e3-8381-d25b339d7a75` terminal blocked after the two test
+denials. No keys were sent, workflow loaded, test replayed, or Nomad file edited.

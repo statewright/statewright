@@ -103,6 +103,34 @@ and arbitrary effects inside repository test code is outside this boundary.
 Ordinary file changes during collection are detected; execution is not an atomic
 filesystem snapshot. Existing workflow ownership, risk and approval gates remain.
 
+The producer and verifier share a normalized literal invocation contract. It
+records the executable, argv, transparent wrapper chain, and names of literal
+environment assignments. Only option-free `command [--]` and `env [--]
+NAME=value` wrappers normalize; runtime-injection variables such as `PATH`,
+`NODE_OPTIONS`, loader paths, and Git/npm execution configuration invalidate
+the evidence. The raw command remains bound separately, so environment values
+cannot change without invalidating the proof even though those values are not
+copied into the typed invocation or semantic telemetry. Pipes, semicolons,
+boolean branches, redirections, and substitutions remain AST structure; known
+effects from every leaf are combined monotonically and an opaque companion can
+never erase a known write, network, or destructive effect.
+
+Native evidence may bind a literal relative Node `.mjs`, `.cjs`, or `.js`
+entrypoint to its observed bytes and effective cwd. This grants only
+`BoundedLocalExecution`; it does not claim the script or its imports are
+read-only, local-only, or side-effect free. That is the same repository-code
+execution trust boundary already accepted for authorized tests. Arbitrary Node
+flags, eval/import/loader forms, absolute or escaping paths, and upstream MCP
+evidence remain unresolved. A future sandbox is required to enforce filesystem
+or network effects inside repository code.
+
+Literal `task -d DIR`, `task --dir DIR`, and `task --dir=DIR` select a bounded
+nested manifest and assign that directory as the effective cwd for expanded
+units. The collector still rejects dynamic globals, environment blocks,
+includes, templates it cannot resolve, configuration overrides, cycles, and
+workspace escapes. Directory normalization therefore fixes equivalent command
+shape drift without treating a Taskfile as self-authorizing.
+
 The inspected Nomad Taskfile has a dynamic global VERSION shell variable and
 environment references, so it remains unresolved under this static contract.
 Reporting that limitation is required; classifying only its Vitest body would

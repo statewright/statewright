@@ -10,6 +10,19 @@ has not been tagged or published.
   reads can be admitted without teaching the policy every LLM-generated shell
   spelling, while hidden writes, executable heredocs, malformed input, and
   opaque effects remain conservative.
+- The native collector and gateway now share a normalized literal invocation
+  contract for argv, environment-assignment names, transparent wrappers, and
+  effective cwd. This removes spelling-specific drift without broadening
+  authority: dangerous runtime-injection variables and unsupported wrappers
+  remain unresolved.
+- Native evidence can bind a literal relative Node repository entrypoint and
+  `task -d/--dir` nested manifest to observed bytes and effective cwd. The
+  result requires `BoundedLocalExecution`; it is not treated as read-only and
+  dynamic Taskfiles still fail closed.
+- Compound classification preserves every known leaf effect. An opaque command
+  or path-qualified lookalike cannot erase a redirect/write, network, or
+  destructive effect, and mutable `/tmp` lookalikes cannot borrow utility or
+  runner authority from their basename.
 - Ambiguous effects can use the existing typed System One assessment path.
   Semantic evidence may resolve only bounded uncertainty; it cannot bypass the
   active workflow's capability boundary or override a proven risky effect.
@@ -65,22 +78,26 @@ target name alone is not evidence that the underlying recipe is local or safe.
 
 ## Release review status
 
-The source review found no remaining critical, high, or medium product defect.
-It repaired two release-hygiene defects: a stale generated Claude
-managed-client bundle (`8a9ae59`) and private staging infrastructure embedded
-in public plugin source (`0169131`). Staging Desktop setup now requires an
-explicit `--gateway-url`; production behavior is unchanged.
+The classifier architecture review rejected another executable-name exception
+and required one normalized invocation contract with evidence attached to the
+corresponding command units. The implemented contract keeps repository-code
+execution behind `BoundedLocalExecution`, preserves AST effect unions, and
+keeps unsupported environment, wrapper, manifest, and path shapes unresolved.
+It does not claim that hashing an entrypoint proves the behavior of its imports.
 
 The integration branches intentionally retain standalone formatter commits:
 
 - Statewright `6ce64ba` — `style: format Rust workspace`;
 - Auldwyrm `acdbb8b` — `style: format release workspace`.
 
-Fresh local validation of the integrated source includes the Statewright Rust
-workspace, focused OAuth hook and account-cleanup tests, the OAuth UI unit
-test, formatter checks, plugin bundle synchronization, and the complete
-`task test:plugin-release` gate. Details and the separate Auldwyrm baseline
-limitation are recorded in the companion pre-release review receipt.
+Fresh local validation of the integrated source includes 361 passing gateway
+tests (one intentionally ignored), the complete Rust workspace, 633 executor
+tests, 160 Codex tests, 27 Claude tests, 6 Cursor tests, 356 Pi tests, 14
+OpenCode tests, 74 OMX tests, formatter checks, generated-bundle synchronization,
+shell policy, proxy handshake, and the complete `task test:plugin-release`
+gate. A timing-only Desktop lock test was made scheduler-independent after the
+full gate reproduced teardown racing its fixed success delay; product lock code
+was unchanged.
 
 The earlier mobile and desktop Playwright runs remain inherited evidence from
 their exact deployed source receipts. This review independently reran the

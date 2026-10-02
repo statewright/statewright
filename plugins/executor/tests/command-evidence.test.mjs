@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectCommandEvidence, literalArgv } from "../lib/command-evidence.mjs";
+import { collectCommandEvidence, literalArgv, literalInvocation } from "../lib/command-evidence.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "sw-command-evidence-"));
@@ -44,6 +44,23 @@ test("literal launcher parser rejects shell execution and malformed quoting", ()
   }
 });
 
+test("literal invocation normalizes assignments and transparent wrappers", () => {
+  assert.deepEqual(literalInvocation("STATEWRIGHT_DIR='/workspace/statewright' command -- node scripts/preflight.mjs preflight"), {
+    executable: "node", args: ["scripts/preflight.mjs", "preflight"],
+    environment_names: ["STATEWRIGHT_DIR"], wrappers: ["command"],
+  });
+  assert.deepEqual(literalInvocation("env LC_ALL=C node --test tests/a.test.mjs"), {
+    executable: "node", args: ["--test", "tests/a.test.mjs"],
+    environment_names: ["LC_ALL"], wrappers: ["env"],
+  });
+  for (const text of [
+    "NODE_OPTIONS=--require=evil node --test tests/a.test.mjs",
+    "PATH=/tmp command node --test tests/a.test.mjs",
+    "env -S node --test tests/a.test.mjs",
+    "command -p node --test tests/a.test.mjs",
+  ]) assert.equal(literalInvocation(text), null, text);
+});
+
 test("bare npx needs an installed matching local Vitest binary", async t => {
   const root = await fixture(t);
   const cmd = "npx vitest run tests/a.spec.js";
@@ -53,7 +70,9 @@ test("bare npx needs an installed matching local Vitest binary", async t => {
   assert.equal(result.complete, true);
   assert.equal(result.command, cmd);
   assert.equal(result.requested_cwd, root);
-  assert.deepEqual(result.commands, [{ original: cmd, resolved: "node_modules/.bin/vitest run tests/a.spec.js" }]);
+  assert.deepEqual(result.commands.map(({ original, resolved, cwd }) => ({ original, resolved, cwd })), [
+    { original: cmd, resolved: "node_modules/.bin/vitest run tests/a.spec.js", cwd: "." },
+  ]);
   assert.ok(result.files.every(file => /^[a-f0-9]{64}$/.test(file.sha256)));
   for (const arg of ["../escape.spec.js", "/tmp/a.spec.js", "--watch", "--config=outside.js", "--reporter=json", "-a.spec.js"]) {
     assert.equal((await inspect(root, `npx vitest run ${arg}`)).complete, false, arg);
@@ -74,9 +93,28 @@ test("collector entrypoint runs through a symlinked plugin cache", async t => {
   });
   assert.equal(result.complete, true);
   assert.equal(result.command, command);
-  assert.deepEqual(result.commands, [
-    { original: command, resolved: "node_modules/.bin/vitest run tests/a.spec.js" },
+  assert.deepEqual(result.commands.map(({ original, resolved, cwd }) => ({ original, resolved, cwd })), [
+    { original: command, resolved: "node_modules/.bin/vitest run tests/a.spec.js", cwd: "." },
   ]);
+});
+
+test("hash-binds a literal Node repository entrypoint without executing it", async t => {
+  const root = await fixture(t);
+  await mkdir(join(root, "scripts"));
+  await writeFile(join(root, "scripts/preflight.mjs"), "throw new Error('must never execute during inspection')\n");
+  const command = "STATEWRIGHT_DIR=/workspace/statewright command -- node scripts/preflight.mjs preflight";
+  const result = await inspect(root, command);
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.invocation, literalInvocation(command));
+  assert.deepEqual(result.commands.map(({ resolved, cwd }) => ({ resolved, cwd })), [{ resolved: command, cwd: "." }]);
+  assert.ok(result.files.some(file => file.path === "scripts/preflight.mjs"));
+  for (const denied of [
+    "node ../preflight.mjs", "node /tmp/preflight.mjs", "node --import=evil scripts/preflight.mjs",
+    "NODE_OPTIONS=--require=evil node scripts/preflight.mjs", "env -S node scripts/preflight.mjs",
+  ]) {
+    const evidence = await inspect(root, denied);
+    assert.ok(evidence == null || evidence.complete === false, denied);
+  }
 });
 
 test("Taskfile commands and dependencies expand without executing them", async t => {
@@ -86,6 +124,24 @@ test("Taskfile commands and dependencies expand without executing them", async t
   const result = await inspect(root, "task checks");
   assert.equal(result.complete, true);
   assert.deepEqual(result.commands.map(unit => unit.resolved), ["node_modules/.bin/vitest run", "git status --short"]);
+});
+
+test("task directory flags select a bounded nested manifest", async t => {
+  const root = await fixture(t);
+  await mkdir(join(root, "site/scripts"), { recursive: true });
+  await writeFile(join(root, "site/scripts/check.mjs"), "export {}\n");
+  await writeFile(join(root, "site/Taskfile.yml"), "version: '3'\ntasks:\n  check:\n    cmds: [node scripts/check.mjs preflight]\n");
+  for (const command of ["task -d site check", "task --dir site check", "task --dir=site check"]) {
+    const result = await inspect(root, command);
+    assert.equal(result.complete, true, command);
+    assert.ok(result.files.some(file => file.path === "site/Taskfile.yml"), command);
+    assert.ok(result.files.some(file => file.path === "site/scripts/check.mjs"), command);
+    assert.deepEqual(result.commands.map(unit => unit.cwd), ["site"], command);
+  }
+  for (const command of ["task -d ../outside check", "task --dir=/tmp check", "task -d site check extra"]) {
+    const result = await inspect(root, command);
+    assert.ok(result == null || result.complete === false, command);
+  }
 });
 
 test("bare Vitest requires package-script PATH provenance", async t => {
@@ -164,8 +220,9 @@ test("symlinked manifests escaping cwd are rejected", async t => {
 
 test("unsupported wrapper flags never produce trusted evidence", async t => {
   const root = await fixture(t);
-  for (const cmd of ["task --dir /tmp unit", "task unit -- --watch", "npm run test -- --watch"]) {
-    assert.equal((await inspect(root, cmd)).complete, false, cmd);
+  for (const cmd of ["task --dir /tmp unit", "task unit -- --watch", "npm run test -- --watch", "env -i task unit"]) {
+    const result = await inspect(root, cmd);
+    assert.ok(result == null || result.complete === false, cmd);
   }
   assert.equal(await collectCommandEvidence("mcp__evil__exec_command", { cmd: "task unit", workdir: root }), null);
 });

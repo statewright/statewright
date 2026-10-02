@@ -1300,9 +1300,6 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell");
     }
-    if classes.contains(&OpClass::Opaque) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
-    }
     // The read-only proof is stricter than the broad operation classifier and
     // rejects redirects, expansions, and path-qualified lookalikes.
     if bash_classifier::readonly_capabilities(command).is_some() {
@@ -1861,6 +1858,7 @@ struct LocalCommandEvidence {
     command: String,
     requested_cwd: Option<String>,
     cwd: Option<String>,
+    invocation: bash_classifier::LiteralInvocation,
     collected_at_ms: i64,
     complete: bool,
     commands: Vec<LocalCommandUnit>,
@@ -1873,6 +1871,8 @@ struct LocalCommandEvidence {
 struct LocalCommandUnit {
     original: String,
     resolved: String,
+    cwd: String,
+    invocation: Option<bash_classifier::LiteralInvocation>,
 }
 
 #[derive(Deserialize)]
@@ -1912,17 +1912,22 @@ pub fn apply_native_command_evidence(
     let Some(command) = command else {
         return pipeline;
     };
-    let Some(tokens) = bash_classifier::simple_command_tokens(command) else {
+    let Some(invocation) = bash_classifier::literal_invocation(command) else {
         return pipeline;
     };
-    let supported_root = match tokens.as_slice() {
-        [exe, target] if exe == "task" => !target.starts_with('-'),
-        [exe, op] if matches!(exe.as_str(), "npm" | "pnpm") => op == "test",
-        [exe, op, name] if matches!(exe.as_str(), "npm" | "pnpm") => {
-            op == "run" && !name.starts_with('-')
+    let supported_root = match (invocation.executable.as_str(), invocation.args.as_slice()) {
+        ("task", [target]) => !target.starts_with('-'),
+        ("task", [flag, directory, target]) if matches!(flag.as_str(), "-d" | "--dir") => {
+            !directory.is_empty() && !target.starts_with('-')
         }
-        [exe, runner, op, ..] if exe == "npx" => runner == "vitest" && op == "run",
-        [exe, op, ..] if exe == "vitest" => op == "run",
+        ("task", [flag, target]) if flag.starts_with("--dir=") => {
+            flag.len() > "--dir=".len() && !target.starts_with('-')
+        }
+        ("npm" | "pnpm", [op]) => op == "test",
+        ("npm" | "pnpm", [op, name]) => op == "run" && !name.starts_with('-'),
+        ("npx", [runner, op, ..]) => runner == "vitest" && op == "run",
+        ("vitest", [op, ..]) => op == "run",
+        ("node", _) => bash_classifier::bounded_node_repository_entrypoint(&invocation).is_some(),
         _ => false,
     };
     if !supported_root {
@@ -1951,6 +1956,7 @@ pub fn apply_native_command_evidence(
     if proof.schema != "statewright/local-command-evidence/v1"
         || proof.tool_name != tool_name
         || proof.command != command
+        || proof.invocation != invocation
         || proof.requested_cwd.as_deref() != requested_cwd
         || !proof
             .cwd
@@ -1978,18 +1984,48 @@ pub fn apply_native_command_evidence(
         if unit.original.len() > 8192 || unit.resolved.len() > 8192 {
             return incomplete(deterministic);
         }
+        let parsed_unit_invocation = bash_classifier::literal_invocation(&unit.original);
+        if unit.invocation != parsed_unit_invocation
+            || (unit.cwd != "."
+                && (unit.cwd.is_empty()
+                    || std::path::Path::new(&unit.cwd).is_absolute()
+                    || unit
+                        .cwd
+                        .split('/')
+                        .any(|part| matches!(part, "" | "." | ".."))))
+        {
+            return incomplete(deterministic);
+        }
+        if let Some(entrypoint) = parsed_unit_invocation
+            .as_ref()
+            .and_then(bash_classifier::bounded_node_repository_entrypoint)
+        {
+            if unit.original != unit.resolved {
+                return incomplete(deterministic);
+            }
+            let bound_path = if unit.cwd == "." {
+                entrypoint.to_owned()
+            } else {
+                format!("{}/{entrypoint}", unit.cwd)
+            };
+            if !proof.files.iter().any(|file| file.path == bound_path) {
+                return incomplete(deterministic);
+            }
+            classes.push(OpClass::BoundedLocalExecution);
+            continue;
+        }
         if unit.original != unit.resolved {
-            let Some(mut original) = bash_classifier::simple_command_tokens(&unit.original) else {
+            let Some(unit_invocation) = parsed_unit_invocation.as_ref() else {
                 return incomplete(deterministic);
             };
-            if original.first().map(String::as_str) == Some("npx") {
-                original.remove(0);
-            }
-            if original.first().map(String::as_str) != Some("vitest") {
+            if unit_invocation.executable != "npx"
+                || unit_invocation.args.first().map(String::as_str) != Some("vitest")
+            {
                 return incomplete(deterministic);
             }
-            original[0] = "node_modules/.bin/vitest".into();
-            if bash_classifier::simple_command_tokens(&unit.resolved).as_ref() != Some(&original)
+            let mut expected = vec!["node_modules/.bin/vitest".to_owned()];
+            expected.extend(unit_invocation.args.iter().skip(1).cloned());
+            if bash_classifier::simple_command_tokens(&unit.resolved).as_ref() != Some(&expected)
                 || bash_classifier::classify(&unit.resolved) != vec![OpClass::BoundedLocalExecution]
             {
                 return incomplete(deterministic);
@@ -2267,7 +2303,7 @@ mod tests {
         );
         assert_eq!(
             assess_shell("(rm -rf /private/victim) >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("/tmp/echo payload >receipt.txt"),
@@ -2311,18 +2347,31 @@ mod tests {
         for command in [
             "git worktree add \"$(rm -rf /private/victim)\" main",
             "git worktree add \"$(curl https://example.invalid)\" main",
+            "git worktree add <(rm -rf /private/victim) main",
+        ] {
+            assert_eq!(
+                assess_shell(command),
+                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                "{command}"
+            );
+        }
+        for command in [
             "git worktree add \"$(rm -rf /private/victim)\" main >receipt.txt",
             "git worktree add /private/worktree main >\"$(rm -rf /private/victim)\"",
             "git p{u..u}sh origin main >receipt.txt",
             "git worktree rem{o..o}ve --force /private/worktree >receipt.txt",
-            "git worktree add <(rm -rf /private/victim) main",
             "git worktree add >(rm -rf /private/victim) main",
             "cp <(rm -rf /private/victim) output.txt",
             "echo \"$(rm -rf /private/victim)\" >output.txt",
         ] {
             assert_eq!(
                 assess_shell(command),
-                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    "Write",
+                ),
                 "{command}"
             );
         }
@@ -2484,11 +2533,21 @@ mod tests {
             json!({
                 "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
                 "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "invocation":bash_classifier::literal_invocation(command).unwrap(),
                 "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
                 "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}], "commands":units,
             })
         };
-        let unit = json!({"original":"npx vitest run tests/a.spec.js", "resolved":"node_modules/.bin/vitest run tests/a.spec.js"});
+        let evidence_unit = |original: &str, resolved: &str| {
+            json!({
+                "original":original, "resolved":resolved, "cwd":".",
+                "invocation":bash_classifier::literal_invocation(original),
+            })
+        };
+        let unit = evidence_unit(
+            "npx vitest run tests/a.spec.js",
+            "node_modules/.bin/vitest run tests/a.spec.js",
+        );
         assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
         let original_fingerprint = base().deterministic.invocation_fingerprint;
         let valid = proof(vec![unit.clone()]);
@@ -2525,10 +2584,7 @@ mod tests {
             ("rm -rf output", ResolvedEffect::DenyKnownRisk),
             ("unknown-runner x", ResolvedEffect::DenyUncertain),
         ] {
-            let p = proof(vec![
-                unit.clone(),
-                json!({"original":nested,"resolved":nested}),
-            ]);
+            let p = proof(vec![unit.clone(), evidence_unit(nested, nested)]);
             assert_eq!(
                 apply_native_command_evidence(base(), None, "exec_command", &input, Some(&p))
                     .resolve_effect(),
@@ -2556,9 +2612,10 @@ mod tests {
                 "{key}"
             );
         }
-        let forged_rewrite = proof(vec![
-            json!({"original":"curl https://example.invalid", "resolved":"node_modules/.bin/vitest run"}),
-        ]);
+        let forged_rewrite = proof(vec![evidence_unit(
+            "curl https://example.invalid",
+            "node_modules/.bin/vitest run",
+        )]);
         assert_eq!(
             apply_native_command_evidence(
                 base(),
@@ -2611,9 +2668,11 @@ mod tests {
             json!({
                 "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
                 "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "invocation":bash_classifier::literal_invocation(command).unwrap(),
                 "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
                 "files":[{"path":"package.json","sha256":"a".repeat(64)}],
-                "commands":[{"original":resolved,"resolved":resolved}],
+                "commands":[{"original":resolved,"resolved":resolved,"cwd":".",
+                    "invocation":bash_classifier::literal_invocation(resolved)}],
             })
         };
 
@@ -2640,6 +2699,104 @@ mod tests {
                 .resolve_effect(),
                 ResolvedEffect::DenyUncertain,
                 "{denied}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_task_directory_evidence_binds_effective_unit_cwd() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "task -d site test:unit";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let evidence = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command).unwrap(),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+            "files":[{"path":"site/Taskfile.yml","sha256":"a".repeat(64)}],
+            "commands":[{
+                "original":"node --test tests/a.test.mjs",
+                "resolved":"node --test tests/a.test.mjs",
+                "cwd":"site",
+                "invocation":bash_classifier::literal_invocation("node --test tests/a.test.mjs"),
+            }],
+        });
+        assert_eq!(
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&evidence))
+                .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        for unit_cwd in ["../site", "/workspace/site", "site/../other"] {
+            let mut invalid = evidence.clone();
+            invalid["commands"][0]["cwd"] = json!(unit_cwd);
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&invalid))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{unit_cwd}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_node_entrypoint_evidence_binds_invocation_cwd_environment_and_bytes() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "STATEWRIGHT_DIR=/workspace/statewright command -- node site/scripts/preflight.mjs preflight";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+        let evidence = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command).unwrap(),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+            "files":[{"path":"site/scripts/preflight.mjs","sha256":"a".repeat(64)}],
+            "commands":[{"original":command,"resolved":command,"cwd":".",
+                "invocation":bash_classifier::literal_invocation(command)}],
+        });
+        let admitted =
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&evidence));
+        assert_eq!(
+            admitted.resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(admitted.deterministic.source, "native_command_evidence");
+
+        for mutation in ["files", "invocation", "commands"] {
+            let mut invalid = evidence.clone();
+            match mutation {
+                "files" => {
+                    invalid["files"] =
+                        json!([{"path":"site/scripts/other.mjs","sha256":"a".repeat(64)}])
+                }
+                "invocation" => invalid["invocation"]["environment_names"] = json!([]),
+                "commands" => invalid["commands"][0]["cwd"] = json!("site"),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&invalid))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{mutation}"
             );
         }
         set_test_shell_ast_authority_enabled(None);
@@ -3577,6 +3734,8 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_dispatcher_uses_explicit_staging_config_and_bounded_worker() {
+        use axum::{Router, http::StatusCode, routing::post};
+
         let request = semantic_request(
             None,
             "read_file",
@@ -3592,25 +3751,33 @@ mod tests {
         let enabled =
             SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(1);
+        // Use a deterministic loopback 503 rather than an assumed-unused port.
+        // On some hosts a refused connection can consume most of the client
+        // deadline under concurrent tests, which made the worker assertion
+        // spuriously fail without exercising a different product behavior.
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let provider = SemanticProviderConfig {
             kind: SemanticProviderKind::OpenAiCompatible,
-            endpoint: "http://127.0.0.1:1".into(),
+            endpoint,
             model: "test".into(),
             bearer_token: None,
-            timeout: std::time::Duration::from_millis(50),
+            timeout: std::time::Duration::from_secs(1),
         };
         let runtime = start_semantic_shadow_runtime(&enabled, receipt_sender, provider);
         assert!(dispatch_semantic_shadow(&enabled, Some(&runtime), &request).is_none());
-        let receipt = tokio::time::timeout(
-            // The provider deadline remains 50ms; leave scheduler slack so
-            // this test verifies bounded completion without assuming an idle
-            // shared test runtime.
-            std::time::Duration::from_millis(500),
-            receipt_receiver.recv(),
-        )
-        .await
-        .expect("bounded worker should emit promptly")
-        .expect("bounded receipt sender should remain open");
+        let receipt =
+            tokio::time::timeout(std::time::Duration::from_secs(1), receipt_receiver.recv())
+                .await
+                .expect("bounded worker should emit promptly")
+                .expect("bounded receipt sender should remain open");
         assert_eq!(receipt.status, SemanticAssessorStatus::Unavailable);
         assert!(receipt.vector.is_none());
     }

@@ -6640,9 +6640,11 @@ mod tests {
                         "command_evidence": {
                             "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
                             "command":"task unit", "requested_cwd":"/workspace", "cwd":"/workspace",
+                            "invocation":crate::bash_classifier::literal_invocation("task unit").unwrap(),
                             "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
                             "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}],
-                            "commands":[{"original":leaf,"resolved":leaf}]
+                            "commands":[{"original":leaf,"resolved":leaf,"cwd":".",
+                                "invocation":crate::bash_classifier::literal_invocation(leaf)}]
                         }
                     }
                 })),

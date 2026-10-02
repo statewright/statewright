@@ -12,6 +12,11 @@ import { desktopDoctor, disableDesktop, enableDesktop, launchDesktop, provisionD
 const execFile = promisify(execFileCallback);
 async function executable(path) { await writeFile(path, "#!/bin/sh\nexit 0\n"); await chmod(path, 0o700); }
 async function moduleFile(path) { await writeFile(path, "export {};\n"); }
+async function waitUntil(predicate, message, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(predicate(), message);
+}
 function launchctlHarness(initialValue = null) {
   let value = initialValue;
   const calls = [];
@@ -208,23 +213,29 @@ test("A competing setup preserves a live ticket paused before owner publication"
   const secondGate = new Promise(resolve => { releaseSecond = resolve; });
   let firstEntered = false;
   let secondEntered = false;
+  let first;
+  let second;
   try {
-    const first = withDesktopLock(state, async () => { firstEntered = true; await firstGate; }, { ticketName: `${process.pid}-paused`, beforeOwnerPublish: async () => { publisherPaused(); await publishGate; } });
+    first = withDesktopLock(state, async () => { firstEntered = true; await firstGate; }, { ticketName: `${process.pid}-paused`, beforeOwnerPublish: async () => { publisherPaused(); await publishGate; } });
     await paused;
-    const second = withDesktopLock(state, async () => { secondEntered = true; await secondGate; }, { ticketName: `${process.pid}-competitor` });
+    second = withDesktopLock(state, async () => { secondEntered = true; await secondGate; }, { ticketName: `${process.pid}-competitor` });
     await new Promise(resolve => setTimeout(resolve, 75));
     assert.equal(secondEntered, false);
     releasePublisher();
-    await new Promise(resolve => setTimeout(resolve, 75));
-    assert.equal(secondEntered, true);
+    await waitUntil(() => secondEntered, "the published competing ticket should enter first");
     assert.equal(firstEntered, false);
     releaseSecond();
-    await new Promise(resolve => setTimeout(resolve, 75));
-    assert.equal(firstEntered, true);
+    await waitUntil(() => firstEntered, "the paused publisher should enter after its predecessor");
     releaseFirst();
     await Promise.all([first, second]);
     assert.equal(secondEntered, true);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    releasePublisher?.();
+    releaseSecond?.();
+    releaseFirst?.();
+    await Promise.allSettled([first, second].filter(Boolean));
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Independent setup processes converge after recovering a shared stale ticket", async () => {

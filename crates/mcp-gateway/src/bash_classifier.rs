@@ -55,46 +55,149 @@ pub struct SemanticCommandShape {
     pub delegates_unknown_effect: bool,
 }
 
+/// One literal shell invocation after removing only structurally transparent
+/// wrappers. Values remain private to the native hook/gateway boundary; only
+/// environment names are retained here so semantic telemetry cannot receive
+/// credentials or repository paths.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct LiteralInvocation {
+    pub executable: String,
+    pub args: Vec<String>,
+    pub environment_names: Vec<String>,
+    pub wrappers: Vec<String>,
+}
+
+fn literal_assignment(token: &str) -> Option<(&str, &str)> {
+    let (name, value) = token.split_once('=')?;
+    if name.is_empty()
+        || name
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+    Some((name, value))
+}
+
+fn runtime_injection_environment(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "PATH"
+            | "CDPATH"
+            | "BASH_ENV"
+            | "ENV"
+            | "SHELLOPTS"
+            | "BASHOPTS"
+            | "GLOBIGNORE"
+            | "NODE_OPTIONS"
+            | "NODE_PATH"
+            | "PYTHONPATH"
+            | "PYTHONHOME"
+            | "RUBYOPT"
+            | "PERL5OPT"
+            | "PERL5LIB"
+            | "GIT_EXEC_PATH"
+            | "GIT_SSH"
+            | "GIT_SSH_COMMAND"
+    ) || upper.starts_with("LD_")
+        || upper.starts_with("DYLD_")
+        || upper.starts_with("GIT_CONFIG_")
+        || upper.starts_with("NPM_CONFIG_")
+}
+
+/// Normalize the literal launcher shape used by both deterministic
+/// classification and native command-evidence verification. Shell execution,
+/// expansion, redirects and malformed quoting are rejected by
+/// `simple_command_tokens` before wrapper handling begins.
+pub(crate) fn literal_invocation(command: &str) -> Option<LiteralInvocation> {
+    let tokens = simple_command_tokens(command)?;
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut index = 0;
+    let mut environment_names = Vec::new();
+    let mut wrappers = Vec::new();
+
+    let consume_assignments = |index: &mut usize, names: &mut Vec<String>| -> Option<()> {
+        while let Some(token) = tokens.get(*index) {
+            let Some((name, _value)) = literal_assignment(token) else {
+                break;
+            };
+            if runtime_injection_environment(name) {
+                return None;
+            }
+            names.push(name.to_owned());
+            *index += 1;
+        }
+        Some(())
+    };
+    consume_assignments(&mut index, &mut environment_names)?;
+
+    // Only the option-free transparent forms are supported. `command -p`,
+    // `env -S`, `env -i`, `exec`, and other launchers can change executable
+    // provenance or argument interpretation and therefore stay unresolved.
+    for _ in 0..4 {
+        match tokens.get(index).map(String::as_str) {
+            Some("command") => {
+                wrappers.push("command".to_owned());
+                index += 1;
+                if tokens.get(index).map(String::as_str) == Some("--") {
+                    index += 1;
+                } else if tokens
+                    .get(index)
+                    .is_some_and(|token| token.starts_with('-'))
+                {
+                    return None;
+                }
+            }
+            Some("env") => {
+                wrappers.push("env".to_owned());
+                index += 1;
+                if tokens.get(index).map(String::as_str) == Some("--") {
+                    index += 1;
+                } else if tokens
+                    .get(index)
+                    .is_some_and(|token| token.starts_with('-'))
+                {
+                    return None;
+                }
+                consume_assignments(&mut index, &mut environment_names)?;
+            }
+            _ => break,
+        }
+    }
+    let executable = tokens.get(index)?.clone();
+    if matches!(executable.as_str(), "command" | "env") {
+        return None;
+    }
+    Some(LiteralInvocation {
+        executable,
+        args: tokens[index + 1..].to_vec(),
+        environment_names,
+        wrappers,
+    })
+}
+
 /// Extract bounded command structure. Ambiguous syntax produces no shape and
 /// therefore remains fail-closed at the semantic authorization boundary.
 pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape>> {
     let mut shapes = Vec::new();
     for segment in split_segments(command).into_iter().take(8) {
-        let tokens = simple_command_tokens(segment.trim())?;
-        if tokens.is_empty() {
-            continue;
-        }
-        let mut index = 0;
-        while tokens
-            .get(index)
-            .is_some_and(|token| token.contains('=') && !token.starts_with('='))
-        {
-            index += 1;
-        }
-        if tokens
-            .get(index)
-            .is_some_and(|token| token.rsplit('/').next() == Some("command"))
-        {
-            index += 1;
-        }
-        if tokens
-            .get(index)
-            .is_some_and(|token| token.rsplit('/').next() == Some("env"))
-        {
-            index += 1;
-            while tokens
-                .get(index)
-                .is_some_and(|token| token.starts_with('-') || token.contains('='))
-            {
-                index += 1;
-            }
-        }
-        let executable = tokens.get(index)?.rsplit('/').next()?.to_ascii_lowercase();
+        let invocation = literal_invocation(segment.trim())?;
+        let executable = invocation
+            .executable
+            .rsplit('/')
+            .next()?
+            .to_ascii_lowercase();
         if !semantic_label(&executable) {
             return None;
         }
-        index += 1;
-        let operation = semantic_operation(&executable, &tokens[index..]);
+        let operation = semantic_operation(&executable, &invocation.args);
         let delegates_unknown_effect =
             semantic_delegates_unknown_effect(&executable, operation.as_deref());
         shapes.push(SemanticCommandShape {
@@ -897,26 +1000,14 @@ fn readonly_passthrough_capability(segment: &str) -> Option<&'static str> {
 /// redirect-aware parser rejects expansions and shell composition before
 /// removing the redirect target, so only literal bare echo/printf calls get
 /// deterministic SafeOutput treatment.
-fn safe_output_command(segment: &str, invoked: &str) -> bool {
-    if !matches!(invoked, "echo" | "printf") {
-        return false;
-    }
-    let Some(tokens) = git_command_tokens(segment) else {
-        return false;
-    };
-    let Some(command_index) = tokens
-        .iter()
-        .position(|token| !token.contains('=') || token.starts_with('-'))
-    else {
-        return false;
-    };
-    if tokens.get(command_index).map(String::as_str) != Some(invoked) {
+fn safe_output_command(invocation: &LiteralInvocation, invoked: &str) -> bool {
+    if invocation.executable != invoked || !matches!(invoked, "echo" | "printf") {
         return false;
     }
     if invoked == "echo" {
         return true;
     }
-    let args = &tokens[command_index + 1..];
+    let args = &invocation.args;
     args.len() == 1 && !args[0].starts_with("-v") && !args[0].contains('%')
 }
 
@@ -985,17 +1076,14 @@ fn is_shell_identifier(value: &str) -> bool {
         && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-fn classify_tmux(segment: &str) -> OpClass {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return OpClass::Passthrough;
-    };
-    if tokens.first().and_then(|token| token.rsplit('/').next()) != Some("tmux") {
+fn classify_tmux(invocation: &LiteralInvocation) -> OpClass {
+    if invocation.executable.rsplit('/').next() != Some("tmux") {
         return OpClass::Passthrough;
     }
-    let Some(operation) = tokens.get(1).map(String::as_str) else {
+    let Some(operation) = invocation.args.first().map(String::as_str) else {
         return OpClass::Passthrough;
     };
-    let args = &tokens[2..];
+    let args = &invocation.args[1..];
     let has_shell_format = args.iter().any(|argument| argument.contains("#("));
     match operation {
         "capture-pane"
@@ -1169,6 +1257,13 @@ fn split_segments(command: &str) -> Vec<String> {
     let mut in_double_quote = false;
 
     while let Some(ch) = chars.next() {
+        if ch == '\\' && !in_single_quote {
+            current.push(ch);
+            if let Some(escaped) = chars.next() {
+                current.push(escaped);
+            }
+            continue;
+        }
         if ch == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
             current.push(ch);
@@ -1219,31 +1314,23 @@ fn split_segments(command: &str) -> Vec<String> {
 
 /// Classify a single command segment (no pipes, no `&&`/`;`).
 fn classify_segment(segment: &str) -> OpClass {
-    let tokens: Vec<&str> = segment.split_whitespace().collect();
-    if tokens.is_empty() {
-        return OpClass::Passthrough;
-    }
-
-    // Skip leading env var assignments (FOO=bar command ...)
-    let cmd_idx = tokens
-        .iter()
-        .position(|t| !t.contains('=') || t.starts_with('-'));
-    let invoked = match cmd_idx {
-        Some(idx) => tokens[idx],
-        None => return OpClass::Passthrough,
+    let Some(invocation) = literal_invocation(segment) else {
+        return classify_nonliteral_segment(segment);
     };
+    let invoked = invocation.executable.as_str();
+    let mut normalized_tokens = Vec::with_capacity(invocation.args.len() + 1);
+    normalized_tokens.push(invoked);
+    normalized_tokens.extend(invocation.args.iter().map(String::as_str));
+    let tokens = normalized_tokens;
 
-    // Strip path prefix: /usr/bin/grep → grep
+    // Interpret only a small set of executable locations as equivalent to a
+    // bare command. Arbitrary path-qualified lookalikes are repository/user
+    // code, not the utility or runner named by their basename.
     let base_cmd = invoked.rsplit('/').next().unwrap_or(invoked);
-    // `sed` and `nl` borrow a deliberately narrow read-only grammar below.
-    // Do not let an arbitrary path-qualified executable borrow that proof by
-    // basename; the AST authority reuses this classification for each leaf.
-    if invoked != base_cmd && matches!(base_cmd, "sed" | "nl") {
-        return OpClass::Passthrough;
-    }
+    let trusted_executable = trusted_executable_spelling(invoked, base_cmd);
 
-    match base_cmd {
-        "echo" | "printf" if safe_output_command(segment, invoked) => OpClass::SafeOutput,
+    let class = match base_cmd {
+        "echo" | "printf" if safe_output_command(&invocation, invoked) => OpClass::SafeOutput,
 
         // File read commands
         "cat" | "head" | "tail" | "nl" => {
@@ -1257,14 +1344,14 @@ fn classify_segment(segment: &str) -> OpClass {
         // File search. `find` can execute or write, so its action forms are
         // never admitted as a provider-neutral read operation.
         "find" => {
-            if find_has_action(segment) {
+            if find_has_action(&invocation.args) {
                 OpClass::Destructive
             } else {
                 OpClass::FileSearch
             }
         }
         "fd" => {
-            if fd_has_execution(segment) {
+            if fd_has_execution(&invocation.args) {
                 OpClass::Destructive
             } else {
                 OpClass::FileSearch
@@ -1274,12 +1361,9 @@ fn classify_segment(segment: &str) -> OpClass {
 
         // File modify (in-place)
         "sed" => {
-            let Some(parsed) = simple_command_tokens(segment) else {
-                return OpClass::Passthrough;
-            };
-            if sed_has_in_place(&parsed[1..]) {
+            if sed_has_in_place(&invocation.args) {
                 OpClass::FileModify
-            } else if readonly_sed_args(&parsed[1..]) {
+            } else if readonly_sed_args(&invocation.args) {
                 OpClass::FileRead
             } else {
                 OpClass::Passthrough
@@ -1347,7 +1431,9 @@ fn classify_segment(segment: &str) -> OpClass {
         // from general interpreter/build execution so extra argv, path-
         // qualified lookalikes, and shell syntax remain unclassified.
         "node" | "cargo" | "rustc" | "npm" | "pnpm" | "pytest"
-            if invoked == base_cmd && bounded_version_probe(segment, base_cmd) =>
+            if invoked == base_cmd
+                && invocation.environment_names.is_empty()
+                && bounded_version_probe(&invocation, base_cmd) =>
         {
             OpClass::SafeOutput
         }
@@ -1356,26 +1442,135 @@ fn classify_segment(segment: &str) -> OpClass {
         // intentionally not generic interpreter/build-tool permission: every
         // accepted argv is literal and bounded, and the normalized intent
         // still requires explicit workflow capability.
-        _ if local_execution_intent(segment, base_cmd).is_some() => OpClass::BoundedLocalExecution,
+        _ if local_execution_intent(&invocation, base_cmd).is_some() => {
+            OpClass::BoundedLocalExecution
+        }
 
         // Tmux reads and bounded local orchestration. Arbitrary send-keys and
         // session creation remain passthrough for semantic fail-closed review.
-        "tmux" => classify_tmux(segment),
+        "tmux" => classify_tmux(&invocation),
 
         // Everything else
         _ => OpClass::Passthrough,
+    };
+    let class = if trusted_executable
+        || matches!(
+            class,
+            OpClass::Destructive | OpClass::Network | OpClass::GitWrite
+        ) {
+        class
+    } else {
+        OpClass::Opaque
+    };
+    // Arbitrary environment changes can alter commands otherwise classified
+    // as reads. The explicit local-execution capability already represents
+    // repository-code execution, but no other effect class may borrow that
+    // authority from an assignment-prefixed spelling.
+    if !invocation.environment_names.is_empty() && !matches!(class, OpClass::BoundedLocalExecution)
+    {
+        OpClass::Opaque
+    } else {
+        class
     }
 }
 
-fn bounded_version_probe(segment: &str, executable: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return false;
+fn trusted_executable_spelling(invoked: &str, base: &str) -> bool {
+    if invoked == base
+        || invoked == "node_modules/.bin/vitest"
+        || invoked == format!("/bin/{base}")
+        || invoked == format!("/usr/bin/{base}")
+        || invoked == format!("/usr/sbin/{base}")
+    {
+        return true;
+    }
+    if base == "node" && invoked == "/opt/toolchains/bin/node" {
+        return true;
+    }
+    base == "cargo"
+        && invoked.starts_with('/')
+        && invoked.ends_with("/.cargo/bin/cargo")
+        && !invoked.split('/').any(|part| part == "..")
+}
+
+/// Preserve known outer effects when shell redirection prevents the strict
+/// literal-invocation parser from succeeding. This path never grants bounded
+/// execution or a semantic read downgrade; it only keeps established write,
+/// destructive, network, and simple utility effects from disappearing.
+fn classify_nonliteral_segment(segment: &str) -> OpClass {
+    let Some(tokens) = git_command_tokens(segment) else {
+        let raw = segment.split_whitespace().collect::<Vec<_>>();
+        let Some(invoked) = raw
+            .iter()
+            .copied()
+            .find(|token| !token.contains('=') || token.starts_with('-'))
+        else {
+            return OpClass::Opaque;
+        };
+        return match invoked.rsplit('/').next().unwrap_or(invoked) {
+            "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
+            "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
+            "tee" | "cp" | "mv" | "install" | "rsync" | "dd" => OpClass::FileWrite,
+            "patch" => OpClass::FileModify,
+            _ => OpClass::Opaque,
+        };
     };
+    let Some(index) = tokens
+        .iter()
+        .position(|token| literal_assignment(token).is_none())
+    else {
+        return OpClass::Opaque;
+    };
+    if tokens[..index].iter().any(|token| {
+        literal_assignment(token).is_some_and(|(name, _value)| runtime_injection_environment(name))
+    }) {
+        return OpClass::Opaque;
+    }
+    let invoked = tokens[index].as_str();
+    let base = invoked.rsplit('/').next().unwrap_or(invoked);
+    let args = &tokens[index + 1..];
+    // Redirection forced this command through the conservative parser.  Only
+    // bare executable spellings may retain a low/moderate known effect here;
+    // a path-qualified lookalike is arbitrary code and must stay opaque.  The
+    // high-risk destructive/network cases below remain recognizable by
+    // basename because that can only make the decision stricter.
+    let bare = invoked == base;
+    match base {
+        "echo" if bare => OpClass::SafeOutput,
+        "printf"
+            if bare && args.len() == 1 && !args[0].starts_with("-v") && !args[0].contains('%') =>
+        {
+            OpClass::SafeOutput
+        }
+        "cat" | "head" | "tail" | "nl" if bare => OpClass::FileRead,
+        "grep" | "rg" | "ag" | "ack" | "ripgrep" if bare => OpClass::ContentSearch,
+        "find" if bare && find_has_action(args) => OpClass::Destructive,
+        "fd" if bare && fd_has_execution(args) => OpClass::Destructive,
+        "sed" if bare && sed_has_in_place(args) => OpClass::FileModify,
+        "patch" if bare => OpClass::FileModify,
+        "tee" | "cp" | "mv" | "install" | "rsync" | "dd" if bare => OpClass::FileWrite,
+        "mkdir" if bare => OpClass::LocalWrite,
+        "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
+        "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
+        "git" if invoked == "git" => {
+            let refs = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+            classify_git(&refs)
+        }
+        "node" | "cargo" | "rustc" | "npm" | "pnpm" | "pytest" | "vitest" | "vite" => {
+            OpClass::Passthrough
+        }
+        _ => OpClass::Opaque,
+    }
+}
+
+fn bounded_version_probe(invocation: &LiteralInvocation, executable: &str) -> bool {
+    let mut tokens = Vec::with_capacity(invocation.args.len() + 1);
+    tokens.push(invocation.executable.as_str());
+    tokens.extend(invocation.args.iter().map(String::as_str));
     matches!(
         tokens.as_slice(),
         [actual, flag]
-            if actual == executable
-                && matches!(flag.as_str(), "--version" | "-V" | "-v")
+            if *actual == executable
+                && matches!(*flag, "--version" | "-V" | "-v")
     )
 }
 
@@ -1387,23 +1582,23 @@ enum LocalExecutionIntent {
 /// Normalize runner-specific argv into a policy-level intent. Adding a new
 /// runner extends this adapter boundary; authorization remains centralized on
 /// `BoundedLocalExecution` rather than growing executable-specific bypasses.
-fn local_execution_intent(segment: &str, executable: &str) -> Option<LocalExecutionIntent> {
+fn local_execution_intent(
+    invocation: &LiteralInvocation,
+    executable: &str,
+) -> Option<LocalExecutionIntent> {
     let validation = match executable {
-        "node" => bounded_node_local_execution(segment),
-        "cargo" => bounded_cargo_local_execution(segment),
-        "npm" | "pnpm" => bounded_package_test_local_execution(segment, executable),
-        "vitest" => bounded_vitest_local_execution(segment),
-        "vite" => bounded_vite_local_execution(segment),
+        "node" => bounded_node_local_execution(invocation),
+        "cargo" => bounded_cargo_local_execution(invocation),
+        "npm" | "pnpm" => bounded_package_test_local_execution(invocation, executable),
+        "vitest" => bounded_vitest_local_execution(invocation),
+        "vite" => bounded_vite_local_execution(invocation),
         _ => false,
     };
     validation.then_some(LocalExecutionIntent::Validation)
 }
 
-fn bounded_node_local_execution(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return false;
-    };
-    let args = tokens.get(1..).unwrap_or_default();
+fn bounded_node_local_execution(invocation: &LiteralInvocation) -> bool {
+    let args = invocation.args.as_slice();
     match args {
         [flag, pattern, paths @ ..]
             if flag == "--test"
@@ -1424,11 +1619,26 @@ fn bounded_node_local_execution(segment: &str) -> bool {
     }
 }
 
-fn bounded_cargo_local_execution(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return false;
-    };
-    let args = tokens.get(1..).unwrap_or_default();
+/// Native command evidence may bind a literal repository entrypoint to fresh
+/// local bytes. This grammar does not claim the program is read-only; callers
+/// must retain `BoundedLocalExecution` and verify the entrypoint path/hash.
+pub(crate) fn bounded_node_repository_entrypoint(invocation: &LiteralInvocation) -> Option<&str> {
+    if invocation.executable != "node" || invocation.args.len() > 65 {
+        return None;
+    }
+    let entrypoint = invocation.args.first()?;
+    if entrypoint.starts_with('-')
+        || ![".mjs", ".cjs", ".js"]
+            .iter()
+            .any(|suffix| bounded_relative_path(entrypoint, suffix))
+    {
+        return None;
+    }
+    Some(entrypoint)
+}
+
+fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
+    let args = invocation.args.as_slice();
     if args.first().map(String::as_str) != Some("test")
         || !args.iter().any(|arg| arg == "--offline")
     {
@@ -1478,13 +1688,13 @@ fn bounded_cargo_local_execution(segment: &str) -> bool {
 /// explicit `BoundedLocalExecution` capability. Keeping the argv grammar
 /// exact prevents alternate project roots, arbitrary lifecycle scripts, and
 /// test-runner arguments from borrowing that authority.
-fn bounded_package_test_local_execution(segment: &str, executable: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
+fn bounded_package_test_local_execution(invocation: &LiteralInvocation, executable: &str) -> bool {
+    if invocation.executable != executable {
         return false;
-    };
-    match tokens.as_slice() {
-        [actual, operation] => actual == executable && operation == "test",
-        [actual, run, script] => actual == executable && run == "run" && script == "test",
+    }
+    match invocation.args.as_slice() {
+        [operation] => operation == "test",
+        [run, script] => run == "run" && script == "test",
         _ => false,
     }
 }
@@ -1496,14 +1706,11 @@ fn bounded_label(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
 }
 
-fn bounded_vitest_local_execution(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
+fn bounded_vitest_local_execution(invocation: &LiteralInvocation) -> bool {
+    let [operation, paths @ ..] = invocation.args.as_slice() else {
         return false;
     };
-    let [executable, operation, paths @ ..] = tokens.as_slice() else {
-        return false;
-    };
-    executable == "node_modules/.bin/vitest"
+    invocation.executable == "node_modules/.bin/vitest"
         && operation == "run"
         && paths.iter().all(|path| {
             [
@@ -1536,11 +1743,9 @@ fn bounded_vitest_local_execution(segment: &str) -> bool {
 /// remains a moderate local execution requiring explicit workflow authority.
 /// Any CLI option stays unclassified because options such as `--outDir` and
 /// `--config` can redirect effects or load code outside the bounded project.
-fn bounded_vite_local_execution(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return false;
-    };
-    matches!(tokens.as_slice(), [executable, operation] if executable == "vite" && operation == "build")
+fn bounded_vite_local_execution(invocation: &LiteralInvocation) -> bool {
+    invocation.executable == "vite"
+        && matches!(invocation.args.as_slice(), [operation] if operation == "build")
 }
 
 fn bounded_test_filter(value: &str) -> bool {
@@ -1564,11 +1769,8 @@ fn bounded_relative_path(path: &str, suffix: &str) -> bool {
 
 /// Detect write/execute actions after shell quoting and escapes have been
 /// resolved. A parser failure is unsafe for classification and fails closed.
-fn find_has_action(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return true;
-    };
-    tokens.iter().skip(1).any(|token| {
+fn find_has_action(args: &[String]) -> bool {
+    args.iter().any(|token| {
         matches!(
             token.as_str(),
             "-delete"
@@ -1586,11 +1788,8 @@ fn find_has_action(segment: &str) -> bool {
 
 /// fd can execute an arbitrary command through either long or short exec
 /// flags. As with find actions, parsing ambiguity fails closed.
-fn fd_has_execution(segment: &str) -> bool {
-    let Some(tokens) = simple_command_tokens(segment) else {
-        return true;
-    };
-    tokens.iter().skip(1).any(|token| {
+fn fd_has_execution(args: &[String]) -> bool {
+    args.iter().any(|token| {
         matches!(token.as_str(), "-x" | "-X")
             // fd accepts short option clusters.  Treat any cluster containing
             // its exec switches as executable rather than trying to interpret
@@ -2028,9 +2227,9 @@ mod tests {
     }
 
     #[test]
-    fn echo_expansion_is_passthrough() {
+    fn echo_expansion_is_opaque() {
         let classes = classify("echo $PATH");
-        assert!(classes.contains(&OpClass::Passthrough));
+        assert!(classes.contains(&OpClass::Opaque));
         assert!(!classes.contains(&OpClass::FileWrite));
     }
 
@@ -2137,7 +2336,7 @@ mod tests {
         assert_eq!(classify("git worktree opaque"), vec![OpClass::Passthrough]);
         assert_eq!(
             classify("/tmp/git worktree add /private/worktree main"),
-            vec![OpClass::Passthrough]
+            vec![OpClass::Opaque]
         );
         for command in [
             "git -C worktree add /private/worktree main",
@@ -2430,7 +2629,14 @@ mod tests {
 
     #[test]
     fn package_test_requires_bounded_local_execution() {
-        for command in ["npm test", "npm run test", "pnpm test", "pnpm run test"] {
+        for command in [
+            "npm test",
+            "npm run test",
+            "pnpm test",
+            "pnpm run test",
+            "TEST_MODE=1 npm test",
+            "env LC_ALL=C command -- npm test",
+        ] {
             assert_eq!(
                 classify(command),
                 vec![OpClass::BoundedLocalExecution],
@@ -2441,7 +2647,10 @@ mod tests {
             "npm run build",
             "npm test -- --watch",
             "npm --prefix ../outside test",
-            "TEST_MODE=1 npm test",
+            "NODE_OPTIONS=--require=fixture npm test",
+            "PATH=/tmp npm test",
+            "env -S npm test",
+            "command -p npm test",
             "/tmp/npm test",
             "npm test && curl https://example.invalid",
             "npm test > receipt.txt",
@@ -2453,6 +2662,39 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn literal_invocation_normalizes_only_transparent_launchers() {
+        let invocation = literal_invocation(
+            "STATEWRIGHT_DIR='/workspace/statewright' command -- node scripts/preflight.mjs preflight",
+        )
+        .unwrap();
+        assert_eq!(invocation.executable, "node");
+        assert_eq!(invocation.args, ["scripts/preflight.mjs", "preflight"]);
+        assert_eq!(invocation.environment_names, ["STATEWRIGHT_DIR"]);
+        assert_eq!(invocation.wrappers, ["command"]);
+
+        for command in [
+            "NODE_OPTIONS=--require=fixture node --test tests/a.test.mjs",
+            "PATH=/tmp node --test tests/a.test.mjs",
+            "env -S node --test tests/a.test.mjs",
+            "env -i node --test tests/a.test.mjs",
+            "command -p node --test tests/a.test.mjs",
+        ] {
+            assert!(literal_invocation(command).is_none(), "{command}");
+            assert_eq!(classify(command), vec![OpClass::Opaque], "{command}");
+        }
+    }
+
+    #[test]
+    fn assignment_prefixed_compounds_preserve_every_leaf_effect() {
+        let classes = classify(
+            "LC_ALL=C node --test tests/a.test.mjs; echo changed > result.txt; curl https://example.invalid",
+        );
+        assert!(classes.contains(&OpClass::BoundedLocalExecution));
+        assert!(classes.contains(&OpClass::FileWrite));
+        assert!(classes.contains(&OpClass::Network));
     }
 
     #[test]
@@ -2546,13 +2788,10 @@ mod tests {
         assert!(classify(&external).contains(&OpClass::Network));
         assert_eq!(readonly_capabilities(&external), None);
 
-        assert_eq!(
-            classify("/tmp/nl -ba README.md"),
-            vec![OpClass::Passthrough]
-        );
+        assert_eq!(classify("/tmp/nl -ba README.md"), vec![OpClass::Opaque]);
         assert_eq!(
             classify("/tmp/sed -n '1,10p' README.md"),
-            vec![OpClass::Passthrough]
+            vec![OpClass::Opaque]
         );
     }
 
@@ -2660,15 +2899,33 @@ mod tests {
     // --- Env var prefix handling ---
 
     #[test]
-    fn env_var_prefix_stripped() {
+    fn env_var_prefix_does_not_borrow_read_authority() {
         let classes = classify("FOO=bar grep 'pattern' .");
+        assert_eq!(classes, vec![OpClass::Opaque]);
+    }
+
+    #[test]
+    fn trusted_system_path_preserves_command_identity() {
+        let classes = classify("/usr/bin/grep 'pattern' .");
         assert!(classes.contains(&OpClass::ContentSearch));
     }
 
     #[test]
-    fn path_prefix_stripped() {
-        let classes = classify("/usr/bin/grep 'pattern' .");
-        assert!(classes.contains(&OpClass::ContentSearch));
+    fn mutable_path_qualified_lookalikes_remain_opaque() {
+        for command in [
+            "/tmp/cat README.md",
+            "/tmp/grep pattern .",
+            "/tmp/node --test tests/a.test.mjs",
+            "/tmp/cargo test --offline --workspace",
+            "/tmp/vite build",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::Opaque], "{command}");
+        }
+        assert_eq!(classify("/tmp/rm -rf target"), vec![OpClass::Destructive]);
+        assert_eq!(
+            classify("/tmp/curl https://example.invalid"),
+            vec![OpClass::Network]
+        );
     }
 
     #[test]

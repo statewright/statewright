@@ -435,7 +435,13 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     const evidence = gateway.requests.at(-1).body.params.arguments.command_evidence;
     assert.equal(evidence.command, "task unit");
     assert.equal(evidence.complete, true);
-    assert.deepEqual(evidence.commands, [{original: "git status --short", resolved: "git status --short"}]);
+    assert.deepEqual(
+      evidence.commands.map(({original, resolved, cwd}) => ({original, resolved, cwd})),
+      [{original: "git status --short", resolved: "git status --short", cwd: "."}],
+    );
+    assert.deepEqual(evidence.commands[0].invocation, {
+      executable: "git", args: ["status", "--short"], environment_names: [], wrappers: [],
+    });
     assert.equal(evidence.requested_cwd, home);
     assert.ok(!inspection.stdout.includes("Taskfile.yml"));
 
@@ -450,9 +456,11 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     assert.equal(narrowPathInspection.status, 0, narrowPathInspection.stderr);
     const narrowPathEvidence = gateway.requests.at(-1).body.params.arguments.command_evidence;
     assert.equal(narrowPathEvidence.complete, true);
-    assert.deepEqual(narrowPathEvidence.commands, [
-      {original: "git status --short", resolved: "git status --short"},
-    ]);
+    assert.deepEqual(
+      narrowPathEvidence.commands.map(({original, resolved, cwd}) => ({original, resolved, cwd})),
+      [{original: "git status --short", resolved: "git status --short", cwd: "."}],
+    );
+    assert.deepEqual(narrowPathEvidence.commands[0].invocation, evidence.commands[0].invocation);
 
     const ordinaryShellInspection = await invoke("/bin/bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id, tool_name: "exec_command",

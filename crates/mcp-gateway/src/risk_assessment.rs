@@ -1829,6 +1829,177 @@ fn pipeline_from_parts(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandEvidence {
+    schema: String,
+    tool_name: String,
+    command: String,
+    requested_cwd: Option<String>,
+    cwd: Option<String>,
+    collected_at_ms: i64,
+    complete: bool,
+    commands: Vec<LocalCommandUnit>,
+    files: Vec<LocalCommandFile>,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandUnit {
+    original: String,
+    resolved: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandFile {
+    path: String,
+    sha256: String,
+}
+
+/// Only the native adapter invokes this boundary. Evidence is generated from
+/// current local bytes by the managed hook, not from model-authored tool input.
+/// As with GitLocalWrite, the local account/plugin is trusted, not attested
+/// against malicious same-user tampering. Never expose these bytes to System One.
+pub fn apply_native_command_evidence(
+    pipeline: RiskPipelineAssessment,
+    registered_tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    evidence: Option<&serde_json::Value>,
+) -> RiskPipelineAssessment {
+    let Some(evidence) = evidence.filter(|value| !value.is_null()) else {
+        return pipeline;
+    };
+    if registered_tool.is_some()
+        || native_tool_family(tool_name) != Some(NativeToolFamily::Command)
+        || matches!(
+            pipeline.deterministic.risk,
+            RiskBand::High | RiskBand::Critical
+        )
+    {
+        return pipeline;
+    }
+    let command = arguments
+        .get("command")
+        .or_else(|| arguments.get("cmd"))
+        .and_then(|v| v.as_str());
+    let Some(command) = command else {
+        return pipeline;
+    };
+    let Some(tokens) = bash_classifier::simple_command_tokens(command) else {
+        return pipeline;
+    };
+    let supported_root = match tokens.as_slice() {
+        [exe, target] if exe == "task" => !target.starts_with('-'),
+        [exe, op] if matches!(exe.as_str(), "npm" | "pnpm") => op == "test",
+        [exe, op, name] if matches!(exe.as_str(), "npm" | "pnpm") => {
+            op == "run" && !name.starts_with('-')
+        }
+        [exe, runner, op, ..] if exe == "npx" => runner == "vitest" && op == "run",
+        [exe, op, ..] if exe == "vitest" => op == "run",
+        _ => false,
+    };
+    if !supported_root {
+        return pipeline;
+    }
+    let mut deterministic = pipeline.deterministic;
+    let incomplete = |mut value: ShadowAssessment| {
+        value.risk = RiskBand::Moderate;
+        value.exposure = ExposureBand::Unknown;
+        value.source = "native_command_evidence_incomplete";
+        pipeline_from_parts(value, pipeline.semantic.clone(), false)
+    };
+    if evidence.to_string().len() > 128 * 1024 {
+        return incomplete(deterministic);
+    }
+    let Ok(proof) = serde_json::from_value::<LocalCommandEvidence>(evidence.clone()) else {
+        return incomplete(deterministic);
+    };
+    let requested_cwd = arguments
+        .get("workdir")
+        .or_else(|| arguments.get("cwd"))
+        .and_then(|v| v.as_str());
+    let age = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(proof.collected_at_ms);
+    if proof.schema != "statewright/local-command-evidence/v1"
+        || proof.tool_name != tool_name
+        || proof.command != command
+        || proof.requested_cwd.as_deref() != requested_cwd
+        || !proof
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| std::path::Path::new(cwd).is_absolute())
+        || !(-5000..=30000).contains(&age)
+        || !proof.complete
+        || proof.reason.is_some()
+        || proof.commands.is_empty()
+        || proof.commands.len() > 32
+        || proof.files.is_empty()
+        || proof.files.len() > 64
+        || proof.files.iter().any(|file| {
+            file.path.is_empty()
+                || std::path::Path::new(&file.path).is_absolute()
+                || file.path.split('/').any(|p| matches!(p, "" | "." | ".."))
+                || file.sha256.len() != 64
+                || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return incomplete(deterministic);
+    }
+    let mut classes = vec![OpClass::BoundedLocalExecution];
+    for unit in &proof.commands {
+        if unit.original.len() > 8192 || unit.resolved.len() > 8192 {
+            return incomplete(deterministic);
+        }
+        if unit.original != unit.resolved {
+            let Some(mut original) = bash_classifier::simple_command_tokens(&unit.original) else {
+                return incomplete(deterministic);
+            };
+            if original.first().map(String::as_str) == Some("npx") {
+                original.remove(0);
+            }
+            if original.first().map(String::as_str) != Some("vitest") {
+                return incomplete(deterministic);
+            }
+            original[0] = "node_modules/.bin/vitest".into();
+            if bash_classifier::simple_command_tokens(&unit.resolved).as_ref() != Some(&original)
+                || bash_classifier::classify(&unit.resolved) != vec![OpClass::BoundedLocalExecution]
+            {
+                return incomplete(deterministic);
+            }
+        }
+        let ast = shell_ast_shadow::assess(&unit.resolved);
+        if ast.status != ParseStatus::Parsed {
+            classes.push(OpClass::Opaque);
+        }
+        classes.extend(ast.classes);
+    }
+    // Every expanded execution unit contributes to the risk/capability union.
+    // Incomplete leaves cannot erase a known write, delete or network operation.
+    let known = if classes.contains(&OpClass::Destructive) {
+        (RiskBand::Critical, ExposureBand::Local)
+    } else if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
+        (RiskBand::High, ExposureBand::External)
+    } else if classes
+        .iter()
+        .any(|c| matches!(c, OpClass::Opaque | OpClass::Passthrough))
+    {
+        (RiskBand::Moderate, ExposureBand::Unknown)
+    } else {
+        (RiskBand::Moderate, ExposureBand::Local)
+    };
+    deterministic.risk = known.0;
+    deterministic.exposure = known.1;
+    deterministic.required_capability = local_effect_capability(&classes);
+    deterministic.source = "native_command_evidence";
+    // Unresolved expansions need more structural evidence, not a probability
+    // inferred from the innocent name of their original wrapper.
+    pipeline_from_parts(deterministic, pipeline.semantic, false)
+}
+
 fn semantic_failsafe_floor(
     deterministic: RiskBand,
     semantic: &SemanticAssessmentReceipt,
@@ -2269,6 +2440,133 @@ mod tests {
             assess_mcp(None, "mcp__mail__send_email"),
             assessment(RiskBand::High, ExposureBand::Account, "mcp_name")
         );
+    }
+
+    #[test]
+    fn native_command_evidence_resolves_units_without_losing_effects_or_identity() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "task test:unit";
+        let input = json!({"cmd": command, "workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let proof = |units: Vec<serde_json::Value>| {
+            json!({
+                "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}], "commands":units,
+            })
+        };
+        let unit = json!({"original":"npx vitest run tests/a.spec.js", "resolved":"node_modules/.bin/vitest run tests/a.spec.js"});
+        assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+        let original_fingerprint = base().deterministic.invocation_fingerprint;
+        let valid = proof(vec![unit.clone()]);
+        let admitted =
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&valid));
+        assert_eq!(
+            admitted.resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            admitted.deterministic.required_capability,
+            Some("BoundedLocalExecution")
+        );
+        assert_eq!(
+            admitted.deterministic.invocation_fingerprint,
+            original_fingerprint
+        );
+        assert!(!admitted.visible_json().to_string().contains("/workspace"));
+        assert!(
+            !serde_json::to_string(admitted.deterministic.semantic_request.as_ref().unwrap())
+                .unwrap()
+                .contains("tests/a.spec.js")
+        );
+
+        for (nested, expected) in [
+            (
+                "echo x > output.txt",
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+            ),
+            (
+                "curl https://example.invalid",
+                ResolvedEffect::DenyKnownRisk,
+            ),
+            ("rm -rf output", ResolvedEffect::DenyKnownRisk),
+            ("unknown-runner x", ResolvedEffect::DenyUncertain),
+        ] {
+            let p = proof(vec![
+                unit.clone(),
+                json!({"original":nested,"resolved":nested}),
+            ]);
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&p))
+                    .resolve_effect(),
+                expected,
+                "{nested}"
+            );
+        }
+        for (key, value) in [
+            ("command", json!("task other")),
+            ("tool_name", json!("Bash")),
+            ("requested_cwd", json!("/other")),
+            ("cwd", json!("relative")),
+            ("collected_at_ms", json!(0)),
+            ("complete", json!(false)),
+            ("schema", json!("statewright/local-command-evidence/v2")),
+            ("commands", json!([])),
+            ("files", json!([])),
+        ] {
+            let mut p = valid.clone();
+            p[key] = value;
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&p))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{key}"
+            );
+        }
+        let forged_rewrite = proof(vec![
+            json!({"original":"curl https://example.invalid", "resolved":"node_modules/.bin/vitest run"}),
+        ]);
+        assert_eq!(
+            apply_native_command_evidence(
+                base(),
+                None,
+                "exec_command",
+                &input,
+                Some(&forged_rewrite)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        let registered: ToolInfo =
+            serde_json::from_value(json!({"name":"exec_command","inputSchema":{}})).unwrap();
+        assert_eq!(
+            apply_native_command_evidence(
+                base(),
+                Some(&registered),
+                "exec_command",
+                &input,
+                Some(&valid)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        // Supplying a look-alike field through ordinary tool arguments cannot
+        // enter the native evidence path.
+        let spoofed = json!({"cmd":command,"workdir":"/workspace","command_evidence":valid});
+        assert_eq!(
+            assess_invocation(None, "exec_command", &spoofed, None).exposure,
+            ExposureBand::Unknown
+        );
+        set_test_shell_ast_authority_enabled(None);
     }
 
     #[test]

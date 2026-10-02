@@ -426,6 +426,19 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
       tool_input: {operation: "bounded-fixture"},
     });
 
+    await writeFile(resolve(home, "Taskfile.yml"), "version: '3'\ntasks:\n  unit:\n    cmds: [git status --short]\n");
+    const inspection = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id, tool_name: "exec_command",
+      tool_input: {cmd: "task unit", workdir: home, command_evidence: {complete: true, command: "forged"}},
+    }, environment);
+    assert.equal(inspection.status, 0, inspection.stderr);
+    const evidence = gateway.requests.at(-1).body.params.arguments.command_evidence;
+    assert.equal(evidence.command, "task unit");
+    assert.equal(evidence.complete, true);
+    assert.deepEqual(evidence.commands, [{original: "git status --short", resolved: "git status --short"}]);
+    assert.equal(evidence.requested_cwd, home);
+    assert.ok(!inspection.stdout.includes("Taskfile.yml"));
+
     const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "Read",

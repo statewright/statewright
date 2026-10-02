@@ -54,6 +54,8 @@ for command in 'cat README.md' 'cat README.md && cat LICENSE' "rg -n 'needle' sr
   assert_allowed $'Read\nBash' exec_command "$(shell_input "$command")"
   test "$STATEWRIGHT_TOOL_MODE" = "bash"
 done
+# This asserts only dispatch to the gateway, NOT command admission. Manifest
+# expansion and final capability/risk decisions are covered by gateway tests.
 assert_allowed $'Read\nBash' exec_command "$(shell_input 'task test:unit')"
 test "$STATEWRIGHT_TOOL_MODE" = "bash"
 for native in Read read_file Grep grep search_files Glob glob find find_files ls list_directory; do

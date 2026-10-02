@@ -75,6 +75,36 @@ The gateway still needs a typed delegated-command resolver for Taskfile and
 similar manifests. Until then, unknown targets remain conservative rather than
 being mislabeled safe.
 
+### Local structural evidence extension (2026-10-02)
+
+The native Codex hook and executor adapter can now collect
+`statewright/local-command-evidence/v1` before requesting admission. Collection
+reads bounded local manifest bytes without executing Task, npm, templates, or
+test code. Static Taskfile dependencies and package pre/main/post scripts are
+expanded; dynamic globals, includes, environment overrides, configuration,
+cycles, symlink escapes, unknown schema fields, and unsupported arguments remain
+unresolved. A local Vitest binary can resolve bare npx only after checking its
+package/bin binding and excluding npm's earlier package-owned-bin/workspace
+branches. This does not make all npx invocations safe.
+
+Evidence travels separately from model-authored tool input. The gateway checks
+schema, command, tool, cwd, timestamp, bounds and permitted normalizations before
+classifying every expanded unit and combining capabilities. Registered upstream
+tools cannot inherit this evidence. Raw evidence never enters System One or
+visible receipts. Hashes record local observations, not independent remote
+verification or cryptographic attestation. The authenticated native adapter and
+local OS account are trusted; protection against malicious same-user tampering
+and arbitrary effects inside repository test code is outside this boundary.
+Ordinary file changes during collection are detected; execution is not an atomic
+filesystem snapshot. Existing workflow ownership, risk and approval gates remain.
+
+The inspected Nomad Taskfile has a dynamic global VERSION shell variable and
+environment references, so it remains unresolved under this static contract.
+Reporting that limitation is required; classifying only its Vitest body would
+hide a possible `.version` write. Missing/malformed/stale evidence cannot authorize
+an opaque command. Source tests, bundle synchronization and deployment evidence
+are separate release gates.
+
 ## Rollout and rollback
 
 The change must be committed and independently reviewed before staging. The

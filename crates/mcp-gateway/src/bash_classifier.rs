@@ -1383,6 +1383,7 @@ fn local_execution_intent(segment: &str, executable: &str) -> Option<LocalExecut
         "node" => bounded_node_local_execution(segment),
         "cargo" => bounded_cargo_local_execution(segment),
         "npm" | "pnpm" => bounded_package_test_local_execution(segment, executable),
+        "vitest" => bounded_vitest_local_execution(segment),
         _ => false,
     };
     validation.then_some(LocalExecutionIntent::Validation)
@@ -1428,7 +1429,16 @@ fn bounded_cargo_local_execution(segment: &str) -> bool {
     let mut positional_filters = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--offline" | "--locked" | "--lib" | "--quiet" | "--no-fail-fast" => {
+            "--offline"
+            | "--locked"
+            | "--lib"
+            | "--quiet"
+            | "--no-fail-fast"
+            | "--workspace"
+            | "--all-targets"
+            | "--tests"
+            | "--all-features"
+            | "--no-default-features" => {
                 index += 1;
             }
             "-p" | "--package" => {
@@ -1474,6 +1484,40 @@ fn bounded_label(value: &str) -> bool {
         && value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+fn bounded_vitest_local_execution(segment: &str) -> bool {
+    let Some(tokens) = simple_command_tokens(segment) else {
+        return false;
+    };
+    let [executable, operation, paths @ ..] = tokens.as_slice() else {
+        return false;
+    };
+    executable == "node_modules/.bin/vitest"
+        && operation == "run"
+        && paths.iter().all(|path| {
+            [
+                ".test.js",
+                ".test.ts",
+                ".test.jsx",
+                ".test.tsx",
+                ".test.mjs",
+                ".test.cjs",
+                ".test.mts",
+                ".test.cts",
+                ".spec.js",
+                ".spec.ts",
+                ".spec.jsx",
+                ".spec.tsx",
+                ".spec.mjs",
+                ".spec.cjs",
+                ".spec.mts",
+                ".spec.cts",
+            ]
+            .iter()
+            .any(|suffix| bounded_relative_path(path, suffix))
+                && !path.starts_with('-')
+        })
 }
 
 fn bounded_test_filter(value: &str) -> bool {
@@ -2282,6 +2326,8 @@ mod tests {
             "/opt/toolchains/bin/node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
             "cargo test --offline -p statewright-mcp-gateway",
+            "cargo test --offline --workspace",
+            "cargo test --workspace --all-targets --all-features --offline",
             "/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline -p statewright-mcp-gateway allowed_commands_admit_only_ast_proven_read_only_composition",
         ] {
@@ -2306,6 +2352,9 @@ mod tests {
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
             "cargo test -p statewright-mcp-gateway",
             "cargo test --offline --manifest-path ../outside/Cargo.toml",
+            "cargo test --workspace",
+            "cargo test --offline --workspace --target-dir /tmp/outside",
+            "cargo test --offline --workspace --config net.offline=false",
             "cargo test --offline -p statewright-mcp-gateway -- --nocapture",
         ] {
             assert_ne!(
@@ -2320,6 +2369,40 @@ mod tests {
     fn pytest_is_passthrough() {
         let classes = classify("pytest -x tests/");
         assert!(classes.contains(&OpClass::Passthrough));
+    }
+
+    #[test]
+    fn local_vitest_family_has_explicit_adversarial_neighbors() {
+        for command in [
+            "node_modules/.bin/vitest run",
+            "node_modules/.bin/vitest run pb/hooks/__tests__/example.spec.js tests/a.test.ts",
+        ] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+        for command in [
+            "vitest run",
+            "npx vitest run",
+            "npx playwright test",
+            "task test:unit",
+            "node_modules/.bin/vitest --watch",
+            "node_modules/.bin/vitest run --config=outside.js",
+            "node_modules/.bin/vitest run --reporter=json",
+            "node_modules/.bin/vitest run ../outside.spec.js",
+            "node_modules/.bin/vitest run /tmp/outside.spec.js",
+            "node_modules/.bin/vitest run --flag.spec.js",
+            "node_modules/.bin/vitest run && curl https://example.invalid",
+            "node_modules/.bin/vitest run > output.txt",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
     }
 
     #[test]

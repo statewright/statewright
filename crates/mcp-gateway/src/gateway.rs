@@ -1317,10 +1317,21 @@ impl Gateway {
         }
     }
 
+    #[cfg(test)]
     async fn adapter_pre_tool(
         &mut self,
         tool_name: &str,
         tool_input: &serde_json::Value,
+    ) -> serde_json::Value {
+        self.adapter_pre_tool_with_evidence(tool_name, tool_input, None)
+            .await
+    }
+
+    async fn adapter_pre_tool_with_evidence(
+        &mut self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        command_evidence: Option<&serde_json::Value>,
     ) -> serde_json::Value {
         if self.active_workflow.is_none() {
             return json!({"decision": "allow", "active": false});
@@ -1347,6 +1358,13 @@ impl Gateway {
             intent,
         )
         .await;
+        let pipeline = risk_assessment::apply_native_command_evidence(
+            pipeline,
+            registered_tool,
+            tool_name,
+            tool_input,
+            command_evidence,
+        );
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => {
@@ -1731,7 +1749,13 @@ impl Gateway {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 let tool_input = arguments.get("tool_input").cloned().unwrap_or(json!({}));
-                let response = self.adapter_pre_tool(tool_name, &tool_input).await;
+                let response = self
+                    .adapter_pre_tool_with_evidence(
+                        tool_name,
+                        &tool_input,
+                        arguments.get("command_evidence"),
+                    )
+                    .await;
                 JsonRpcResponse::success(
                     id,
                     serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -6560,6 +6584,85 @@ mod tests {
             .unwrap();
         assert_eq!(session.current_state, "inspect");
         assert_eq!(session.iteration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn command_evidence_adapter_keeps_read_only_and_network_boundaries() {
+        for (allow_execution, leaf, expect_allow) in [
+            (true, "node_modules/.bin/vitest run tests/a.spec.js", true),
+            (false, "node_modules/.bin/vitest run tests/a.spec.js", false),
+            (
+                true,
+                "node_modules/.bin/vitest run tests/a.spec.js && echo x > marker",
+                false,
+            ),
+            (
+                true,
+                "node_modules/.bin/vitest run tests/a.spec.js && curl https://example.invalid",
+                false,
+            ),
+        ] {
+            let allowed = if allow_execution {
+                vec!["Read", "Bash", "BoundedLocalExecution"]
+            } else {
+                vec!["Read", "Bash"]
+            };
+            let definition: MachineDefinition = serde_json::from_value(json!({
+                "id":"command-evidence-policy", "initial":"validate",
+                "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "states": {"validate":{"allowed_tools":allowed,"disallowed_tools":["Write"],"on":{"DONE":"done"}},"done":{"type":"final"}}
+            })).unwrap();
+            let manager = SessionManager::new();
+            manager.create("evidence-session".into(), definition.clone());
+            let mut workflows = HashMap::new();
+            workflows.insert("command-evidence-policy".into(), definition);
+            let mut gateway = Gateway::new(
+                manager,
+                UpstreamManager::mock(vec![]),
+                "evidence-session".into(),
+                workflows,
+                Some("command-evidence-policy".into()),
+                String::new(),
+                None,
+            );
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(1)),
+                params: Some(json!({
+                    "name":"statewright_adapter_pre_tool", "arguments": {
+                        "tool_name":"exec_command", "tool_input":{"cmd":"task unit","workdir":"/workspace"},
+                        "command_evidence": {
+                            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                            "command":"task unit", "requested_cwd":"/workspace", "cwd":"/workspace",
+                            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                            "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}],
+                            "commands":[{"original":leaf,"resolved":leaf}]
+                        }
+                    }
+                })),
+            };
+            let response = gateway.handle_message(req).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(
+                response.result.unwrap()["content"][0]["text"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                value["decision"] == "allow",
+                expect_allow,
+                "{leaf}: {value}"
+            );
+            assert_eq!(
+                gateway
+                    .session_manager
+                    .get("evidence-session")
+                    .unwrap()
+                    .current_state,
+                "validate"
+            );
+        }
     }
 
     #[tokio::test]

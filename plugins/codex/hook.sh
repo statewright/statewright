@@ -283,16 +283,24 @@ statewright_tools_label() {
 
 adapter_pre_tool_call() {
   local tool_name="$1"
-  local tool_input request
+  local tool_input request command_evidence evidence_request
   tool_input=$(printf '%s' "$HOOK_INPUT" | jq -c '
     (.tool_input // .input // {}) as $input
     | if ($input | type) == "object" then $input else {} end
   ' 2>/dev/null || true)
   [ -n "$tool_input" ] || tool_input='{}'
+  command_evidence=null
+  if command -v node >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" ]; then
+    evidence_request=$(jq -cn --arg tool_name "$tool_name" --arg cwd "$PWD" \
+      --argjson tool_input "$tool_input" '{tool_name:$tool_name,cwd:$cwd,tool_input:$tool_input}')
+    command_evidence=$(printf '%s' "$evidence_request" | node "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" 2>/dev/null) || command_evidence=null
+    printf '%s' "$command_evidence" | jq -e 'type == "object" or type == "null"' >/dev/null 2>&1 || command_evidence=null
+  fi
   request=$(jq -cn \
     --arg tool_name "$tool_name" \
     --argjson tool_input "$tool_input" \
-    '{jsonrpc:"2.0",method:"tools/call",params:{name:"statewright_adapter_pre_tool",arguments:{tool_name:$tool_name,tool_input:$tool_input}},id:1}')
+    --argjson command_evidence "$command_evidence" \
+    '{jsonrpc:"2.0",method:"tools/call",params:{name:"statewright_adapter_pre_tool",arguments:({tool_name:$tool_name,tool_input:$tool_input} + (if $command_evidence == null then {} else {command_evidence:$command_evidence} end))},id:1}')
   mcp_call "$request"
 }
 

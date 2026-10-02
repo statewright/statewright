@@ -12,5 +12,9 @@
   "license": "FSL-1.1-ALv2",
   "dependencies": {
     "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "yaml": "2.9.1"
   }
 }

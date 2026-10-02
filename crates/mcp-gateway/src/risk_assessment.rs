@@ -4700,6 +4700,16 @@ mod tests {
             );
             assert_eq!(unresolved.resolve_effect(), ResolvedEffect::DenyUncertain);
         }
+        for lookalike in ["/tmp/nl -ba README.md", "/tmp/sed -n '1,10p' README.md"] {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": lookalike}),
+                Some("validate"),
+            );
+            assert_eq!(deterministic.risk, RiskBand::Moderate, "{lookalike}");
+            assert_eq!(deterministic.exposure, ExposureBand::Unknown, "{lookalike}");
+        }
 
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);

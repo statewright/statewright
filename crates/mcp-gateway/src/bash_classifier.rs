@@ -1235,6 +1235,12 @@ fn classify_segment(segment: &str) -> OpClass {
 
     // Strip path prefix: /usr/bin/grep → grep
     let base_cmd = invoked.rsplit('/').next().unwrap_or(invoked);
+    // `sed` and `nl` borrow a deliberately narrow read-only grammar below.
+    // Do not let an arbitrary path-qualified executable borrow that proof by
+    // basename; the AST authority reuses this classification for each leaf.
+    if invoked != base_cmd && matches!(base_cmd, "sed" | "nl") {
+        return OpClass::Passthrough;
+    }
 
     match base_cmd {
         "echo" | "printf" if safe_output_command(segment, invoked) => OpClass::SafeOutput,
@@ -2539,6 +2545,15 @@ mod tests {
         let external = format!("{command}; curl https://example.invalid");
         assert!(classify(&external).contains(&OpClass::Network));
         assert_eq!(readonly_capabilities(&external), None);
+
+        assert_eq!(
+            classify("/tmp/nl -ba README.md"),
+            vec![OpClass::Passthrough]
+        );
+        assert_eq!(
+            classify("/tmp/sed -n '1,10p' README.md"),
+            vec![OpClass::Passthrough]
+        );
     }
 
     // --- Redirect edge cases ---

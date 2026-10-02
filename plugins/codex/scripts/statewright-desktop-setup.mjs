@@ -191,6 +191,7 @@ try {
     env: {
       ...process.env,
       CODEX_CLI_PATH: state.shim_path,
+      STATEWRIGHT_NODE_BIN: state.node_executable,
       STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,
       STATEWRIGHT_DESKTOP_MCP_TOKEN: bridge.token,
     },

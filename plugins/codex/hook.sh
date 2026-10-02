@@ -8,12 +8,38 @@ ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Codex may launch hooks with a narrower PATH than the interactive shell that
+# started the app server. Resolve the JavaScript runtime once from an explicit
+# override, the hook PATH, or the standard per-user/system install locations.
+# The hook remains fail-closed when no executable runtime can be found.
+statewright_resolve_node() {
+  local candidate
+  for candidate in \
+    "${STATEWRIGHT_NODE_BIN:-}" \
+    "$(command -v node 2>/dev/null || true)" \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node \
+    "${HOME}/.volta/bin/node" \
+    "${HOME}/.asdf/shims/node" \
+    "${HOME}/.local/share/mise/shims/node" \
+    "${HOME}/.local/bin/node"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && [ ! -d "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+STATEWRIGHT_NODE_RUNTIME=$(statewright_resolve_node || true)
+
 # Executor-owned runs must use the authenticated loopback bridge before any
 # standalone bootstrap, credential lookup, cache mutation, or telemetry setup.
 if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   EXECUTOR_HOOK="${SCRIPT_DIR}/scripts/executor-hook.mjs"
-  if command -v node >/dev/null 2>&1 && [ -f "$EXECUTOR_HOOK" ]; then
-    printf '%s' "$HOOK_INPUT" | node "$EXECUTOR_HOOK" "$ENDPOINT"
+  if [ -n "$STATEWRIGHT_NODE_RUNTIME" ] && [ -f "$EXECUTOR_HOOK" ]; then
+    printf '%s' "$HOOK_INPUT" | "$STATEWRIGHT_NODE_RUNTIME" "$EXECUTOR_HOOK" "$ENDPOINT"
     exit $?
   fi
   case "$ENDPOINT" in
@@ -281,20 +307,48 @@ statewright_tools_label() {
   fi
 }
 
+statewright_command_supports_local_evidence() {
+  local command="$1"
+  [[ "$command" =~ ^[[:space:]]*(task|npm|pnpm|npx|vitest)([[:space:]]|$) ]]
+}
+
 adapter_pre_tool_call() {
   local tool_name="$1"
-  local tool_input request command_evidence evidence_request
+  local tool_input request command_evidence evidence_request evidence_reason command
   tool_input=$(printf '%s' "$HOOK_INPUT" | jq -c '
     (.tool_input // .input // {}) as $input
     | if ($input | type) == "object" then $input else {} end
   ' 2>/dev/null || true)
   [ -n "$tool_input" ] || tool_input='{}'
   command_evidence=null
-  if command -v node >/dev/null 2>&1 && [ -f "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" ]; then
+  evidence_reason="node_runtime_unavailable"
+  if [ -n "$STATEWRIGHT_NODE_RUNTIME" ] && [ -f "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" ]; then
+    evidence_reason="collector_returned_null"
     evidence_request=$(jq -cn --arg tool_name "$tool_name" --arg cwd "$PWD" \
       --argjson tool_input "$tool_input" '{tool_name:$tool_name,cwd:$cwd,tool_input:$tool_input}')
-    command_evidence=$(printf '%s' "$evidence_request" | node "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" 2>/dev/null) || command_evidence=null
+    command_evidence=$(printf '%s' "$evidence_request" | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/lib/command-evidence.mjs" 2>/dev/null) || command_evidence=null
     printf '%s' "$command_evidence" | jq -e 'type == "object" or type == "null"' >/dev/null 2>&1 || command_evidence=null
+  elif [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
+    evidence_reason="collector_missing"
+  fi
+  # Preserve a redacted, typed failure signal for command families that the
+  # gateway can structurally expand. This keeps an unavailable local runtime
+  # distinguishable from an ordinary semantic-classifier denial without
+  # weakening the fail-closed decision.
+  if [ "$command_evidence" = "null" ] && statewright_is_shell_tool "$tool_name"; then
+    command=$(printf '%s' "$tool_input" | jq -r '.command // .cmd // empty' 2>/dev/null || true)
+    if statewright_command_supports_local_evidence "$command"; then
+      command_evidence=$(jq -cn \
+        --arg schema "statewright/local-command-evidence/v1" \
+        --arg tool_name "$tool_name" \
+        --arg command "$command" \
+        --arg cwd "$PWD" \
+        --arg reason "$evidence_reason" \
+        --argjson requested_cwd "$(printf '%s' "$tool_input" | jq -c '.workdir // .cwd // null')" \
+        --argjson collected_at_ms "$(( $(date +%s) * 1000 ))" \
+        '{schema:$schema,tool_name:$tool_name,command:$command,requested_cwd:$requested_cwd,
+          cwd:$cwd,collected_at_ms:$collected_at_ms,complete:false,commands:[],files:[],reason:$reason}')
+    fi
   fi
   request=$(jq -cn \
     --arg tool_name "$tool_name" \
@@ -381,7 +435,10 @@ emit_native_telemetry() {
   echo "$seq" > "$PROJECT_DIR/.telemetry_seq"
   event_id=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)
   [ -z "$event_id" ] && event_id=$(printf '%s' "${session_id}:${seq}:$(date -u +%s%N)" | shasum -a 256 | cut -c1-32)
-  timestamp=$(node -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || true)
+  timestamp=""
+  if [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
+    timestamp=$("$STATEWRIGHT_NODE_RUNTIME" -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || true)
+  fi
   [ -z "$timestamp" ] && timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   effective_at=$(cat "$PROJECT_DIR/.state_effective_at" 2>/dev/null || true)
   [ -z "$effective_at" ] && effective_at="$timestamp"
@@ -414,10 +471,10 @@ emit_native_telemetry() {
   if ! curl -sf --max-time 1 -X POST "$LOCAL_TELEMETRY_URL/v1/state-bindings" \
     -H 'Content-Type: application/json' \
     -d "$binding_payload" >/dev/null 2>&1; then
-    if ! printf '%s' "$binding_payload" | \
+    if [ -z "$STATEWRIGHT_NODE_RUNTIME" ] || ! printf '%s' "$binding_payload" | \
       STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
       STATEWRIGHT_API_KEY="$API_KEY" \
-      node "$TELEMETRY_AGENT" --bind-stdin >/dev/null 2>&1; then
+      "$STATEWRIGHT_NODE_RUNTIME" "$TELEMETRY_AGENT" --bind-stdin >/dev/null 2>&1; then
       echo "[statewright] failed to durably record workflow token binding" >&2
     fi
   fi
@@ -580,7 +637,10 @@ clear_local_enforcement_state() {
 reset_native_telemetry_state() {
   local epoch="$1"
   local effective_at
-  effective_at=$(node -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || true)
+  effective_at=""
+  if [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
+    effective_at=$("$STATEWRIGHT_NODE_RUNTIME" -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || true)
+  fi
   [ -z "$effective_at" ] && effective_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "$epoch" > "$PROJECT_DIR/.state_epoch"
   echo "$effective_at" > "$PROJECT_DIR/.state_effective_at"
@@ -905,9 +965,9 @@ case "$ENDPOINT" in
           ' 2>/dev/null || true)
       fi
       APPROVAL_RESULT=""
-      if [ -n "$APPROVAL_REQUEST" ] && command -v node >/dev/null 2>&1; then
+      if [ -n "$APPROVAL_REQUEST" ] && [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
         APPROVAL_RESULT=$(printf '%s' "$APPROVAL_REQUEST" \
-          | node "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null || true)
+          | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null || true)
       fi
       APPROVAL_ACTION=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.action // empty' 2>/dev/null || true)
       if [ "$APPROVAL_ACTION" = "allow_once" ]; then

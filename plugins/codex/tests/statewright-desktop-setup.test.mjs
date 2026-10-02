@@ -112,6 +112,7 @@ test("Desktop setup creates an explicit-launch shim without mutating launchd", a
     assert.equal(record.launcher_app_path, join(applications, "ChatGPT + Statewright.app"));
     assert.match(await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright"), "utf8"), /statewright-desktop-launch[.]mjs/);
     assert.match(await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright"), "utf8"), new RegExp(process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(await readFile(record.launcher_path, "utf8"), /STATEWRIGHT_NODE_BIN: state\.node_executable/);
     assert.doesNotMatch(await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright"), "utf8"), /\/usr\/bin\/env node/);
     assert.doesNotMatch(await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright"), "utf8"), new RegExp(wrapper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.match(await readFile(record.shim_path, "utf8"), new RegExp(wrapper.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

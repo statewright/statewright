@@ -439,6 +439,28 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     assert.equal(evidence.requested_cwd, home);
     assert.ok(!inspection.stdout.includes("Taskfile.yml"));
 
+    const narrowPathInspection = await invoke("/bin/bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id, tool_name: "exec_command",
+      tool_input: {cmd: "task unit", workdir: home},
+    }, {
+      ...environment,
+      PATH: "/usr/bin:/bin",
+      STATEWRIGHT_NODE_BIN: process.execPath,
+    });
+    assert.equal(narrowPathInspection.status, 0, narrowPathInspection.stderr);
+    const narrowPathEvidence = gateway.requests.at(-1).body.params.arguments.command_evidence;
+    assert.equal(narrowPathEvidence.complete, true);
+    assert.deepEqual(narrowPathEvidence.commands, [
+      {original: "git status --short", resolved: "git status --short"},
+    ]);
+
+    const ordinaryShellInspection = await invoke("/bin/bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id, tool_name: "exec_command",
+      tool_input: {cmd: "pwd", workdir: home},
+    }, environment);
+    assert.equal(ordinaryShellInspection.status, 0, ordinaryShellInspection.stderr);
+    assert.equal(Object.hasOwn(gateway.requests.at(-1).body.params.arguments, "command_evidence"), false);
+
     const denied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
       tool_name: "Read",

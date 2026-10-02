@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { open, realpath, access } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "./command-yaml.generated.mjs";
@@ -187,8 +187,20 @@ export async function collectCommandEvidence(toolName, input, { cwd = process.cw
   return evidence;
 }
 
-// A hook-owned entrypoint. Strip any model-provided evidence before collecting.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// A hook-owned entrypoint. Codex local-model runs expose plugin caches through
+// symlinks, while Node canonicalizes import.meta.url. Canonicalize both sides
+// so an installed collector invoked through that cache alias still runs.
+const invokedAsEntrypoint = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+
+// Strip any model-provided evidence before collecting.
+if (invokedAsEntrypoint) {
   let text = "";
   for await (const chunk of process.stdin) {
     text += chunk;

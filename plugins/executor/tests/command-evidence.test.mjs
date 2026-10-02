@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, chmod, symlink, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { collectCommandEvidence, literalArgv } from "../lib/command-evidence.mjs";
 
 async function fixture(t) {
@@ -19,6 +21,21 @@ async function vitest(root) {
   await symlink("../vitest/vitest.mjs", join(root, "node_modules/.bin/vitest"));
 }
 const inspect = (root, cmd) => collectCommandEvidence("exec_command", { cmd, workdir: root });
+
+async function invokeCollector(path, request) {
+  const child = spawn(process.execPath, [path], { stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  child.stdin.end(JSON.stringify(request));
+  const code = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  assert.equal(code, 0, stderr);
+  return JSON.parse(stdout);
+}
 
 test("literal launcher parser rejects shell execution and malformed quoting", () => {
   assert.deepEqual(literalArgv("npx vitest run 'tests/a.spec.js'"), ["npx", "vitest", "run", "tests/a.spec.js"]);
@@ -41,6 +58,25 @@ test("bare npx needs an installed matching local Vitest binary", async t => {
   for (const arg of ["../escape.spec.js", "/tmp/a.spec.js", "--watch", "--config=outside.js", "--reporter=json", "-a.spec.js"]) {
     assert.equal((await inspect(root, `npx vitest run ${arg}`)).complete, false, arg);
   }
+});
+
+test("collector entrypoint runs through a symlinked plugin cache", async t => {
+  const root = await fixture(t);
+  await vitest(root);
+  const modulePath = fileURLToPath(new URL("../lib/command-evidence.mjs", import.meta.url));
+  const alias = join(root, "plugin-lib");
+  await symlink(dirname(modulePath), alias, "dir");
+  const command = "npx vitest run tests/a.spec.js";
+  const result = await invokeCollector(join(alias, "command-evidence.mjs"), {
+    tool_name: "exec_command",
+    cwd: root,
+    tool_input: { cmd: command, workdir: root },
+  });
+  assert.equal(result.complete, true);
+  assert.equal(result.command, command);
+  assert.deepEqual(result.commands, [
+    { original: command, resolved: "node_modules/.bin/vitest run tests/a.spec.js" },
+  ]);
 });
 
 test("Taskfile commands and dependencies expand without executing them", async t => {

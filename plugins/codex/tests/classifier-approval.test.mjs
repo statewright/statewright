@@ -31,7 +31,9 @@ test("classifier approval helper forwards only bounded redacted identity", async
     fetch: async (url, options) => {
       observed = {url: String(url), options, body: JSON.parse(options.body)};
       return new Response(JSON.stringify({schema: "statewright/classifier-approval/v1",
-        action: "allow_once", invocation_fingerprint: "invocation_v1_exact"}), {status: 200});
+        action: "allow_once", thread_id: "thread-one", run_id: "run-one", state: "implement",
+        intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
+        basis: "semantic_threshold_not_met"}), {status: 200});
     },
   });
   assert.equal(result.action, "allow_once");
@@ -47,19 +49,38 @@ test("classifier approval helper forwards only bounded redacted identity", async
       action: "rework",
       attempts: 1,
       max_reworks: 2,
+      thread_id: "thread-one",
+      run_id: "run-one",
+      state: "implement",
+      intent_fingerprint: "intent_v1_family",
+      invocation_fingerprint: "invocation_v1_exact",
+      basis: "semantic_threshold_not_met",
     }), {status: 200}),
   });
   assert.equal(routed.action, "rework");
 });
 
-test("classifier approval helper fails closed on absent identities and mismatched allow", async () => {
+test("classifier approval helper fails closed on absent and mismatched response identities", async () => {
   assert.equal((await requestClassifierApproval({...input, classifier_receipt: {
     ...input.classifier_receipt, invocation_fingerprint: null,
   }})).action, "deny");
-  await assert.rejects(() => requestClassifierApproval(input, {
-    environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
-    readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "secret"}),
-    fetch: async () => new Response(JSON.stringify({action: "allow_once",
-      invocation_fingerprint: "invocation_v1_other"}), {status: 200}),
-  }), /identity_mismatch/);
+  for (const mismatch of [
+    {thread_id: "thread-other"},
+    {run_id: "run-other"},
+    {state: "validate"},
+    {intent_fingerprint: "intent_v1_other"},
+    {invocation_fingerprint: "invocation_v1_other"},
+    {basis: "classifier_policy_low_local"},
+  ]) {
+    await assert.rejects(() => requestClassifierApproval(input, {
+      environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
+      readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "secret"}),
+      fetch: async () => new Response(JSON.stringify({
+        schema: "statewright/classifier-approval/v1", action: "allow_once",
+        thread_id: "thread-one", run_id: "run-one", state: "implement",
+        intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
+        basis: "semantic_threshold_not_met", ...mismatch,
+      }), {status: 200}),
+    }), /identity_mismatch/);
+  }
 });

@@ -234,6 +234,16 @@ no inference or real approval decision. These are not desktop/Windows GUI or
 live staging journey certificates. Marketplace release packaging and the live
 pause/approve/resume road test remain separate release gates.
 
+Classifier fallback approval is a separate, invocation-scoped path. In a
+managed `codex-local-models` session, repeated distinct reformulations of one
+redacted denied intent may be presented through the native permission form.
+The companion must own the exact thread and return the matching thread, run,
+state, intent, invocation, and denial-basis identities. One acceptance releases
+only the waiting invocation. Exact retries, concurrent requests, stale replies,
+dismissal, timeout, disconnect, an unavailable companion, or an unsupported
+client stay denied. This path does not resume a terminal workflow or replace a
+workflow-transition approval.
+
 Start a workflow via MCP tool:
 
 ```

@@ -1013,7 +1013,36 @@ case "$ENDPOINT" in
         REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
         ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}; after this budget, the same classified intent will be sent for native human approval."
       elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "deny" ]; then
-        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval was not granted."
+        APPROVAL_REASON=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.reason // empty' 2>/dev/null || true)
+        case "$APPROVAL_REASON" in
+          human_declined)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Human approval was denied; do not replay this invocation."
+            ;;
+          human_cancelled)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} The native approval dialog was dismissed; the invocation remains denied."
+            ;;
+          exact_invocation_already_observed)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} The exact denied invocation cannot count as rework; change the invocation on the reported structural axis."
+            ;;
+          approval_already_pending)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} One approval request for this intent is already pending; this concurrent invocation remains denied."
+            ;;
+          approval_previously_denied)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Approval for this intent was already denied or dismissed; reformulate or wait for a new bounded approval window."
+            ;;
+          native_approval_timeout|approval_request_aborted|provider_connection_closed|native_approval_unavailable)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval did not complete; the invocation remains denied."
+            ;;
+          invalid_redacted_classifier_receipt)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} This denial is not eligible for classifier fallback approval."
+            ;;
+          *)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval was not granted."
+            ;;
+        esac
+      elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ -n "$APPROVAL_REQUEST" ] \
+          && { [ "$APPROVAL_ACTION" = "unavailable" ] || [ -z "$APPROVAL_ACTION" ]; }; then
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval is unavailable in this client or runtime; the invocation remains denied. Use a supported managed local App Server session or reformulate instead of replaying it."
       fi
       ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '
         .risk_assessment? as $risk

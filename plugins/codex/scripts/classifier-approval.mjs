@@ -82,8 +82,16 @@ export async function requestClassifierApproval(value, options = {}) {
   if (!["rework", "allow_once", "deny"].includes(result.action)) {
     throw new Error("local_models_classifier_approval_invalid_action");
   }
-  if (result.action === "allow_once"
-      && result.invocation_fingerprint !== request.classifier_receipt.invocation_fingerprint) {
+  const expectedIdentity = {
+    schema: "statewright/classifier-approval/v1",
+    thread_id: request.thread_id,
+    run_id: request.run_id,
+    state: request.state,
+    intent_fingerprint: request.classifier_receipt.intent_fingerprint,
+    invocation_fingerprint: request.classifier_receipt.invocation_fingerprint,
+    basis: request.classifier_receipt.final_denial_basis,
+  };
+  if (Object.entries(expectedIdentity).some(([key, expected]) => result[key] !== expected)) {
     throw new Error("local_models_classifier_approval_identity_mismatch");
   }
   return result;

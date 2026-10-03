@@ -40,6 +40,11 @@ has not been tagged or published.
   status and probabilities, and equivalent-retry guidance so agents can
   reformulate on the failed axis without receiving raw command or payload
   contents.
+- Managed Codex classifier denials now have a bounded native approval handoff.
+  Distinct reformulations exhaust a small rework budget before a single exact
+  invocation can be presented to the owning thread. Full request identity is
+  checked on return; retries, concurrent requests, stale replies, cancellation,
+  timeout, disconnect, and unavailable or unsupported clients remain denied.
 - The MCP gateway binds OAuth access tokens to the exact protected resource.
   Authorization-code issuance uses PKCE S256, one-time codes, scoped expiring
   access tokens, refresh rotation, replay rejection, and revocation.
@@ -67,6 +72,11 @@ effects stay on the conservative fallback path.
 OAuth discovery and browser consent do not broaden token authority. The
 gateway revalidates the bearer and its exact MCP resource on each request.
 Production was not changed during development or staging validation.
+
+Classifier fallback approval is not workflow recovery. It cannot revive a
+terminal blocked run, authorize a different invocation, or transfer approval
+between threads, runs, states, or denial bases. A real native TUI acceptance
+journey remains required in addition to local protocol tests.
 
 Historical-thread adoption is limited to the same canonical checkout and one
 managed client. It does not authorize cross-project attachment, replacing an

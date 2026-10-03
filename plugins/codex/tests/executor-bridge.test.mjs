@@ -239,6 +239,7 @@ async function startClassifierApprovalProxy() {
     response.writeHead(200, {"Content-Type": "application/json"});
     response.end(JSON.stringify({schema: "statewright/classifier-approval/v1",
       action: attempts > 2 ? "allow_once" : "rework", attempts, max_reworks: 2,
+      thread_id: body.thread_id, run_id: body.run_id, state: body.state,
       intent_fingerprint: body.classifier_receipt.intent_fingerprint,
       invocation_fingerprint: body.classifier_receipt.invocation_fingerprint,
       basis: body.classifier_receipt.final_denial_basis}));
@@ -538,6 +539,17 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     assert.match(approvedOutput.additionalContext, /Human approval granted/);
     assert.equal(classifierApproval.requests.length, 3);
     assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-(command|input)-sentinel/);
+
+    const approvalUnavailable = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+      session_id, tool_name: "classifier_denied", tool_input: {command: "private-input-sentinel"},
+    }, {...environment, LOCAL_MODELS_RUN_DIR: resolve(home, "missing-local-models-run")});
+    assert.equal(approvalUnavailable.status, 0, approvalUnavailable.stderr);
+    const unavailableApprovalOutput = JSON.parse(approvalUnavailable.stdout).hookSpecificOutput;
+    assert.equal(unavailableApprovalOutput.permissionDecision, "deny");
+    assert.match(unavailableApprovalOutput.permissionDecisionReason,
+      /Native human approval is unavailable in this client or runtime/);
+    assert.match(unavailableApprovalOutput.permissionDecisionReason,
+      /reformulate instead of replaying it/);
 
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,

@@ -158,9 +158,12 @@ test("a partial restoration survives reconstruction but an explicit manual chang
     assert.equal(partial.status, "ready");
     assert.equal(partial.partial_application, true);
 
-    await reconnected.relinquish(binding.thread_id, ["model"], { model: "openai-codex/gpt-6-astra" });
+    // This explicit native selection is byte-for-byte indistinguishable from
+    // the model half of an owned partial restore. The acknowledged manual
+    // settings path must therefore outrank tuple-shape recovery.
+    await reconnected.relinquish(binding.thread_id, ["model"], { model: nullableOrigin.model });
     const manual = {
-      model: "openai-codex/gpt-6-astra",
+      model: nullableOrigin.model,
       effort: "medium",
       service_tier: "priority",
     };

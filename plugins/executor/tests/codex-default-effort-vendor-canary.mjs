@@ -69,10 +69,34 @@ try {
   send({ method: "initialized", params: {} });
   const started = await rpc("thread/start", { model: "gpt-5.6-sol", cwd: home, approvalPolicy: "never" });
   const threadId = started.thread.id;
-  const initialAt = notifications.length;
-  await rpc("thread/settings/update", { threadId, model: "gpt-5.6-terra", effort: "medium" });
-  const routed = await waitForSettings(threadId, initialAt,
-    settings => settings.model === "gpt-5.6-terra" && settings.effort === "medium");
+  const developerInstructions = "Statewright default-effort vendor canary; no inference.";
+  const originalAt = notifications.length;
+  await rpc("thread/settings/update", {
+    threadId,
+    model: "gpt-5.6-sol",
+    effort: null,
+    collaborationMode: { mode: "default", settings: {
+      model: "gpt-5.6-sol", reasoning_effort: null, developer_instructions: developerInstructions,
+    } },
+  });
+  const original = await waitForSettings(threadId, originalAt,
+    settings => settings.model === "gpt-5.6-sol"
+      && Object.hasOwn(settings, "effort") && settings.effort === null
+      && settings.collaborationMode?.mode === "default"
+      && settings.collaborationMode.settings?.model === "gpt-5.6-sol"
+      && Object.hasOwn(settings.collaborationMode.settings, "reasoning_effort")
+      && settings.collaborationMode.settings.reasoning_effort === null
+      && settings.collaborationMode.settings.developer_instructions === developerInstructions);
+
+  const routedAt = notifications.length;
+  const routedCollaborationMode = structuredClone(original.collaborationMode);
+  routedCollaborationMode.settings.model = "gpt-5.6-terra";
+  routedCollaborationMode.settings.reasoning_effort = "medium";
+  await rpc("thread/settings/update", { threadId, model: "gpt-5.6-terra", effort: "medium",
+    collaborationMode: routedCollaborationMode });
+  const routed = await waitForSettings(threadId, routedAt,
+    settings => settings.model === "gpt-5.6-terra" && settings.effort === "medium"
+      && settings.collaborationMode?.settings?.developer_instructions === developerInstructions);
   assert(routed.collaborationMode?.mode, "native settings must expose the current collaboration mode");
   assert(routed.collaborationMode?.settings, "native settings must expose collaboration settings");
 
@@ -88,27 +112,28 @@ try {
   });
   const restored = await waitForSettings(threadId, restoreAt,
     settings => settings.model === "gpt-5.6-sol"
+      && Object.hasOwn(settings, "effort") && settings.effort === null
       && settings.collaborationMode?.settings?.model === "gpt-5.6-sol"
+      && Object.hasOwn(settings.collaborationMode.settings, "reasoning_effort")
       && settings.collaborationMode?.settings?.reasoning_effort === null);
   assert.equal(restored.collaborationMode.mode, routed.collaborationMode.mode);
-  const routedHasInstructions = Object.hasOwn(routed.collaborationMode.settings, "developer_instructions")
-    && routed.collaborationMode.settings.developer_instructions != null;
-  if (routedHasInstructions) {
-    assert.equal(restored.collaborationMode.settings.developer_instructions,
-      routed.collaborationMode.settings.developer_instructions);
-  }
+  assert.equal(restored.collaborationMode.settings.developer_instructions, developerInstructions);
   console.log(JSON.stringify({
     schema: "statewright/codex-default-effort-canary/v1",
     binary,
     result: "pass",
     inference_started: false,
-    initial: { model: "gpt-5.6-sol", effort: "medium" },
-    routed: { model: routed.model, effort: routed.effort,
-      collaboration_effort: routed.collaborationMode.settings.reasoning_effort ?? null },
-    restored: { model: restored.model, effort: restored.effort ?? null,
-      collaboration_effort: restored.collaborationMode.settings.reasoning_effort ?? null },
+    original: { model: original.model, effort_present: Object.hasOwn(original, "effort"), effort: original.effort,
+      collaboration_effort_present: Object.hasOwn(original.collaborationMode.settings, "reasoning_effort"),
+      collaboration_effort: original.collaborationMode.settings.reasoning_effort },
+    routed: { model: routed.model, effort_present: Object.hasOwn(routed, "effort"), effort: routed.effort,
+      collaboration_effort_present: Object.hasOwn(routed.collaborationMode.settings, "reasoning_effort"),
+      collaboration_effort: routed.collaborationMode.settings.reasoning_effort },
+    restored: { model: restored.model, effort_present: Object.hasOwn(restored, "effort"), effort: restored.effort,
+      collaboration_effort_present: Object.hasOwn(restored.collaborationMode.settings, "reasoning_effort"),
+      collaboration_effort: restored.collaborationMode.settings.reasoning_effort },
     collaboration_mode_preserved: true,
-    explicit_developer_instructions_preserved: routedHasInstructions ? true : "implicit_default_rematerialized",
+    explicit_developer_instructions_preserved: true,
   }));
 } finally {
   for (const request of pending.values()) clearTimeout(request.timer);

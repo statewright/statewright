@@ -50,6 +50,37 @@ function sameAxis(left, right, axis) {
     && (!Object.hasOwn(left, axis) || value(left[axis]) === value(right[axis]));
 }
 
+function normalizeRoute(route) {
+  const model = value(route?.model);
+  if (!model) return null;
+  return {
+    model,
+    ...(Object.hasOwn(route, "effort") ? { effort: value(route.effort) } : {}),
+    ...(Object.hasOwn(route, "service_tier") ? { service_tier: value(route.service_tier) } : {}),
+  };
+}
+
+function ownedPartialRestore(record, observed, attempt) {
+  const requested = normalizeRoute(attempt?.requested);
+  const before = normalizeRoute(attempt?.observed_before);
+  if (!requested || !before || !sameWorkflowRouteBinding(attempt?.binding, record.binding)) return false;
+  if (Object.keys(record.manual ?? {}).length > 0) return false;
+  const changed = AXES.filter(axis => !sameAxis(before, requested, axis));
+  if (changed.length < 2 || changed.some(axis => !record.ownership[axis])) return false;
+  let fromBefore = false;
+  let fromRequested = false;
+  for (const axis of AXES) {
+    if (sameAxis(observed, requested, axis)) {
+      if (changed.includes(axis)) fromRequested = true;
+    } else if (sameAxis(observed, before, axis)) {
+      if (changed.includes(axis)) fromBefore = true;
+    } else {
+      return false;
+    }
+  }
+  return fromBefore && fromRequested;
+}
+
 function validBinding(binding) {
   if (!binding || typeof binding !== "object" || Array.isArray(binding)) return false;
   const normalized = workflowRouteBinding(binding, binding.thread_id);
@@ -68,6 +99,15 @@ function validRecord(record, threadId) {
   if (Object.keys(record.manual).some(axis => !AXES.includes(axis))) return false;
   if (record.routed !== null && (!record.routed || typeof record.routed !== "object" || Array.isArray(record.routed)
       || !value(record.routed.model))) return false;
+  if (record.restore_attempt != null) {
+    const attempt = record.restore_attempt;
+    if (!attempt || typeof attempt !== "object" || Array.isArray(attempt)
+        || !value(attempt.id) || !Number.isInteger(attempt.epoch) || attempt.epoch < 1
+        || !sameWorkflowRouteBinding(attempt.binding, record.binding)
+        || !normalizeRoute(attempt.requested) || !normalizeRoute(attempt.observed_before)
+        || attempt.last_observed != null && !normalizeRoute(attempt.last_observed)
+        || typeof attempt.prepared_at !== "string") return false;
+  }
   if (!STATUSES.has(record.status) || typeof record.captured_at !== "string" || typeof record.updated_at !== "string") return false;
   return true;
 }
@@ -143,6 +183,7 @@ export class WorkflowRouteOriginStore {
       ownership: Object.fromEntries(AXES.map(axis => [axis, axis === "model" || Object.hasOwn(normalized, axis)])),
       manual: {},
       routed: null,
+      restore_attempt: null,
       status: "captured",
       captured_at: timestamp,
       updated_at: timestamp,
@@ -162,6 +203,7 @@ export class WorkflowRouteOriginStore {
     };
     if (!routed.model) return { status: "invalid_route" };
     record.routed = routed;
+    record.restore_attempt = null;
     record.status = "active";
     record.updated_at = this.now();
     await this.#write(record);
@@ -226,7 +268,9 @@ export class WorkflowRouteOriginStore {
       || sameAxis(observed, record.routed, axis));
     const observedMatchesRestore = record.status === "restore_pending"
       && AXES.every(axis => !Object.hasOwn(route, axis) || sameAxis(observed, route, axis));
-    if (!observedMatchesRouted && !observedMatchesRestore) {
+    const partialApplication = record.status === "restore_pending"
+      && ownedPartialRestore(record, observed, record.restore_attempt);
+    if (!observedMatchesRouted && !observedMatchesRestore && !partialApplication) {
       await this.#remove(binding.thread_id);
       return { status: "relinquished", route: observed, restored: [], relinquished: [...AXES],
         reason: "observed_route_diverged" };
@@ -236,10 +280,25 @@ export class WorkflowRouteOriginStore {
       await this.#remove(binding.thread_id);
       return { status: "relinquished", route, restored, relinquished };
     }
+    if (record.status !== "restore_pending" || !record.restore_attempt) {
+      const epoch = Number.isInteger(record.restore_attempt?.epoch) ? record.restore_attempt.epoch + 1 : 1;
+      record.restore_attempt = {
+        id: randomUUID(),
+        epoch,
+        binding: structuredClone(binding),
+        requested: structuredClone(route),
+        observed_before: structuredClone(observed),
+        last_observed: structuredClone(observed),
+        prepared_at: this.now(),
+      };
+    } else {
+      record.restore_attempt.last_observed = structuredClone(observed);
+    }
     record.status = "restore_pending";
     record.updated_at = this.now();
     await this.#write(record);
-    return { status: "ready", route, restored, relinquished, record: structuredClone(record) };
+    return { status: "ready", route, restored, relinquished,
+      ...(partialApplication ? { partial_application: true } : {}), record: structuredClone(record) };
   }
 
   async confirmRestore(binding) {

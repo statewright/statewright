@@ -1,0 +1,82 @@
+{
+  "schema": "statewright-model-repair-candidate/v1",
+  "artifact_id": "model-observed-route-20261003-210723",
+  "producer": "existing Statewright model-repair owner",
+  "classification": "internal",
+  "repo": {"path": "/Users/ben/dev/statewright", "branch": "main"},
+  "run": {"workflow": null, "status": "inactive", "session_id": "01a0e95c-3993-7eb1-a562-0b3991eb2858"},
+  "prepared_at": "2026-10-03T21:07:23Z",
+  "package_version": "0.3.4+codex.20261003210723",
+  "base": "85bc601e9c3f87865e9040cf450df78ec53221b0",
+  "diff_sha256": "09878cc56e23fd01c0535b55c940aa54ff4722c0a96a110941575bbb21aabe0b",
+  "files": [
+    {
+      "path": "plugins/executor/lib/codex-app-server-route-proxy.mjs",
+      "preimage_sha256": "1ade29ce4a769bdd12e592ed4555b146014b509385ed603a12085849416b5947",
+      "candidate_sha256": "354f437598a5dc800ce432bbb02ccb46349c47504cb19ca6ff7aa6858897cf95"
+    },
+    {
+      "path": "plugins/executor/tests/codex-app-server-transport.test.mjs",
+      "preimage_sha256": "a48d7bffaf97866eebfb207ed1fb4fcd47efa5ff4def709ddbee25af4baa3a2a",
+      "candidate_sha256": "288780468bca97bee8a664639dcca612e537558c159dd3bdbaa341ce57ecdf23"
+    },
+    {
+      "path": "plugins/codex/scripts/lib/desktop-runtime/codex-app-server-route-proxy.mjs",
+      "preimage_sha256": "0713eb3d20bdedf6b7b4688e2da5d16b8c270d7aec67d36d25b0b32bcca9c4dc",
+      "candidate_sha256": "d48a14b40c5e31aae96169d13b179c23fd6b6300df8df98226b7aaa16ae50059"
+    },
+    {
+      "path": "plugins/codex/.codex-plugin/plugin.json",
+      "preimage_sha256": "73d82b5f55b6f03b41a9523eba454627f046e9f6244fd20cd1bfbc8ce0565720",
+      "candidate_sha256": "f3584fdf632d1b71df0b3df8d60ee923a5cc078f266d49f1713bdb2e6e6adbb4"
+    }
+  ],
+  "package_input_count": 117,
+  "package_inputs_sha256": "c35bc8a60b02e2e822f6932e04ac1b7565391c3688d0b20fb45722303df9106d",
+  "companion_unchanged": {
+    "head": "2c70fed89a3badccd54692862c885dc6bb886c87",
+    "index_tree": "f3949617b8df002139819e44152dd4a95467b4d3",
+    "staged_diff_sha256": "3c6bbc15a9a0f086c051088a251ab813cb042a5029f2ad4f2ea79e50acbffe50",
+    "tracked_diff_sha256": "8923d9510b504292bdf61114f7ba69a1b15f151ca96ced4ed4347065569264e8",
+    "provider_sha256": "0b17f4b0d8968a9dee6d612eec5ea113b0ef68f7a5a54353a9f497b388ffb85c"
+  },
+  "installed_version": "0.3.4+codex.20261003153800",
+  "installed_files": [
+    {
+      "path": "hook.sh",
+      "sha256": "e0c9bd4e833c8596086def729857597babdb5470f7395667e29cc7c2a288cead"
+    },
+    {
+      "path": "scripts/lib/desktop-runtime/codex-app-server-route-proxy.mjs",
+      "sha256": "0713eb3d20bdedf6b7b4688e2da5d16b8c270d7aec67d36d25b0b32bcca9c4dc"
+    },
+    {
+      "path": "scripts/lib/desktop-runtime/workflow-route-origin.mjs",
+      "sha256": "0115a351b3fcb804652d4ceffec0669467dffd0b69126db586a8fdf5cf79e8a6"
+    }
+  ],
+  "validation": {
+    "red": {
+      "pass": 15,
+      "fail": 3,
+      "names": [
+        "bare-model",
+        "inherited-tier",
+        "native-canary"
+      ]
+    },
+    "focused": {
+      "pass": 105,
+      "fail": 0,
+      "skipped": 0
+    },
+    "affected": {
+      "pass": 173,
+      "fail": 0,
+      "skipped": 0
+    },
+    "bundle_check": "passed",
+    "diff_check": "passed",
+    "live_acceptance": "pending_install_and_exact_review"
+  }
+}

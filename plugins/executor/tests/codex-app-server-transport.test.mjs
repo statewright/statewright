@@ -798,7 +798,13 @@ test("App Server proxy restores the captured route after the authoritative workf
   }
 });
 
-for (const scenario of ["snapshot", "compact", "saved-capitalized", "no-item", "later-turn", "nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "late-manual", "deactivate", "failed-deactivate"])
+for (const scenario of [
+  "snapshot", "compact", "bare-model", "inherited-tier", "inherited-effort", "native-null-effort",
+  "native-canary", "native-canary-deactivate", "missing-provider", "missing-effort", "missing-tier",
+  "saved-capitalized", "no-item", "later-turn", "nonterminal", "foreign-server", "foreign-turn",
+  "wrong-run", "wrong-session", "unavailable", "manual", "manual-effort", "manual-tier",
+  "observed-provider-change", "late-manual", "deactivate", "failed-deactivate",
+])
 test(`App Server restores the original native settings at turn end: ${scenario}`, async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -812,10 +818,21 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     run_id: "run-immediate", run_session_id: "run-session-immediate", state: "implement",
     model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default",
   };
+  // Production routes can be bare model IDs and leave the native tier alone.
+  // Keep these inputs distinct from the actual provider-qualified observation.
+  if (["bare-model", "native-canary", "native-canary-deactivate", "missing-provider"].includes(scenario)) route.model = "gpt-5.6-terra";
+  if (["inherited-tier", "native-canary", "native-canary-deactivate"].includes(scenario)) delete route.service_tier;
+  if (["inherited-effort", "native-null-effort"].includes(scenario)) delete route.effort;
+  const actualTier = route.service_tier ?? "priority";
+  const actualEffort = scenario === "native-null-effort" ? null : "medium";
+  const originalEffort = scenario.startsWith("native-canary") || scenario === "native-null-effort" ? "high" : null;
+  const deactivation = ["deactivate", "native-canary-deactivate", "failed-deactivate", "foreign-server"].includes(scenario);
+  const originStore = new WorkflowRouteOriginStore();
   let pending = route;
   let state = { ...route, thinking_level: route.effort, is_final: false };
   const injected = [], confirmed = [], errors = [];
   const proxy = await startCodexAppServerRouteProxy({
+    workflowOriginStore: originStore,
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     approvalService: {
       getState: async () => { if (state === "unavailable") throw new Error("fixture gateway unavailable"); return state; },
@@ -844,7 +861,7 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     assert.equal((await receive("thread/start")).method, "thread/start");
     upstreamSocket.send(JSON.stringify({ id: 1, result: {
       thread: { id: route.session_id }, modelProvider: "openai", model: "gpt-5.6-sol",
-      reasoningEffort: null, serviceTier: "priority",
+      reasoningEffort: originalEffort, serviceTier: "priority",
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
 
@@ -856,18 +873,34 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     });
     assert.equal(routed.params.model, "gpt-5.6-terra");
     upstreamSocket.send(JSON.stringify({ id: 2, result: { turn: { id: "turn-immediate" } } }));
-    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
-      threadId: route.session_id, threadSettings: {
-        model: "gpt-5.6-terra", modelProvider: "openai", effort: "medium", serviceTier: "default",
+    const nativeSettings = {
+        model: "gpt-5.6-terra", modelProvider: "openai", effort: actualEffort, serviceTier: actualTier,
         collaborationMode: {
           mode: "default",
-          settings: { model: "gpt-5.6-terra", reasoning_effort: "medium", developer_instructions: "keep this" },
+          settings: { model: "gpt-5.6-terra", reasoning_effort: actualEffort, developer_instructions: "keep this" },
         },
-      },
+    };
+    if (scenario === "missing-provider") delete nativeSettings.modelProvider;
+    if (scenario === "missing-effort") delete nativeSettings.effort;
+    if (scenario === "missing-tier") delete nativeSettings.serviceTier;
+    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
+      threadId: route.session_id, threadSettings: nativeSettings,
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
 
     let ownedTurnId = "turn-immediate";
+    if (scenario.startsWith("missing-")) {
+      assert.equal(confirmed.at(-1)?.confirmed, false, "missing native evidence is not confirmation");
+      if (scenario === "missing-provider") assert.equal(confirmed.at(-1).reason, "confirmed_route_provider_unknown");
+      const retained = await originStore.inspect(route.session_id);
+      assert.equal(retained.status, "captured");
+      assert.equal(retained.routed, null, "never manufacture a confirmed route from requested settings");
+      return;
+    }
+    assert.equal(confirmed.at(-1)?.confirmed, true);
+    assert.deepEqual((await originStore.inspect(route.session_id)).routed, {
+      model: "openai-codex/gpt-5.6-terra", effort: actualEffort, service_tier: actualTier,
+    }, "persist the settings-confirmed native route, not the requested route");
     if (scenario === "later-turn") {
       upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
         turn: {id: ownedTurnId, status: "completed", items: []}}}));
@@ -883,20 +916,26 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     }
     state = { ...state, state: "complete", is_final: true };
     if (scenario === "nonterminal") state = {...state, state: "validate", is_final: false};
-    if (["foreign-server", "deactivate", "failed-deactivate"].includes(scenario)) state = null;
+    if (deactivation) state = null;
     if (scenario === "wrong-run") state = {...state, run_id: "another-run"};
     if (scenario === "wrong-session") state = {...state, run_session_id: "another-session"};
     if (scenario === "unavailable") state = "unavailable";
-    if (scenario === "manual") {
+    if (["manual", "manual-effort", "manual-tier"].includes(scenario)) {
+      const change = scenario === "manual-effort" ? {effort: "high"}
+        : scenario === "manual-tier" ? {serviceTier: "flex"} : {model: "gpt-6-astra", effort: "high"};
       client.send(JSON.stringify({id: 3, method: "thread/settings/update", params: {
-        threadId: route.session_id, model: "gpt-6-astra", effort: "high",
+        threadId: route.session_id, ...change,
       }}));
       assert.equal((await receive("manual settings")).method, "thread/settings/update");
       upstreamSocket.send(JSON.stringify({id: 3, result: {}}));
       upstreamSocket.send(JSON.stringify({method: "thread/settings/updated", params: {
-        threadId: route.session_id, threadSettings: {model: "gpt-6-astra", modelProvider: "openai", effort: "high"},
+        threadId: route.session_id, threadSettings: {...nativeSettings, ...change},
       }}));
     }
+    if (scenario === "observed-provider-change") upstreamSocket.send(JSON.stringify({
+      method: "thread/settings/updated", params: {threadId: route.session_id,
+        threadSettings: {...nativeSettings, modelProvider: "other-provider"}},
+    }));
     if (scenario === "snapshot") upstreamSocket.send(JSON.stringify({ method: "item/started", params: {
       threadId: route.session_id, turnId: "turn-immediate", item: {
         id: "terminal-item", type: "mcpToolCall", status: "inProgress", server: "statewright",
@@ -904,7 +943,7 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
       },
     } }));
     const result = scenario === "snapshot" ? {state_snapshot: state}
-      : ["deactivate", "foreign-server", "failed-deactivate"].includes(scenario) ? {deactivated: true}
+      : deactivation ? {deactivated: true}
       : {transitioned: true, from: "implement", to: "complete", requires_approval: false,
           approval_message: null, transition_count: 1, usage: null};
     const completedTurnId = scenario === "foreign-turn" ? "unseen-turn" : ownedTurnId;
@@ -913,13 +952,13 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
         id: "terminal-item", type: scenario === "saved-capitalized" ? "McpToolCall" : "mcpToolCall",
         status: scenario === "failed-deactivate" ? "failed" : "completed",
         server: scenario === "foreign-server" ? "other-server" : "statewright",
-        tool: ["deactivate", "failed-deactivate", "foreign-server"].includes(scenario) ? "statewright_deactivate" : "statewright_transition",
+        tool: deactivation ? "statewright_deactivate" : "statewright_transition",
         result: {structuredContent: result},
       },
     } }));
     upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
       turn: {id: completedTurnId, status: "completed", items: []}}}));
-    if (["nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "failed-deactivate"].includes(scenario)) {
+    if (["nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "manual-effort", "manual-tier", "observed-provider-change", "failed-deactivate"].includes(scenario)) {
       const unexpected = [];
       const record = raw => unexpected.push(JSON.parse(String(raw)));
       upstreamSocket.on("message", record);
@@ -944,10 +983,10 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     assert.ok(restoration, `terminal restoration request missing: ${JSON.stringify(errors)}`);
     assert.equal(restoration.method, "thread/settings/update");
     assert.deepEqual(restoration.params, {
-      threadId: route.session_id, model: "gpt-5.6-sol", effort: null, serviceTier: "priority",
+      threadId: route.session_id, model: "gpt-5.6-sol", effort: originalEffort, serviceTier: "priority",
       collaborationMode: {
         mode: "default",
-        settings: { model: "gpt-5.6-sol", reasoning_effort: null, developer_instructions: "keep this" },
+        settings: { model: "gpt-5.6-sol", reasoning_effort: originalEffort, developer_instructions: "keep this" },
       },
     });
     upstreamSocket.send(JSON.stringify({ id: restoration.id, result: {} }));
@@ -960,10 +999,10 @@ test(`App Server restores the original native settings at turn end: ${scenario}`
     }
     upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
       threadId: route.session_id, threadSettings: {
-        model: "gpt-5.6-sol", modelProvider: "openai", effort: null, serviceTier: "priority",
+        model: "gpt-5.6-sol", modelProvider: "openai", effort: originalEffort, serviceTier: "priority",
         collaborationMode: {
           mode: "default",
-          settings: { model: "gpt-5.6-sol", reasoning_effort: null, developer_instructions: "keep this" },
+          settings: { model: "gpt-5.6-sol", reasoning_effort: originalEffort, developer_instructions: "keep this" },
         },
       },
     } }));

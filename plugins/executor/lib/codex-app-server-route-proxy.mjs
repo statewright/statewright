@@ -1508,11 +1508,22 @@ export async function startCodexAppServerRouteProxy({
               const result = await workflowOriginStore.confirmRestore(receipt.origin_binding);
               receipt.confirmed = result.status === "restored";
             } else {
-              await workflowOriginStore.confirmRoute(receipt.origin_binding, {
-                model: receipt.route?.model,
-                effort: receipt.route?.effort,
-                service_tier: receipt.route?.service_tier ?? receipt.route?.serviceTier,
-              });
+              // Ownership is of the actual native settings we changed, not
+              // the route request (which may omit provider, effort or tier).
+              // Use the same qualified identity as capture/restore, and do
+              // not turn absent native evidence into an explicit null.
+              if (!receipt.actualProvider) {
+                receipt.confirmed = false;
+                receipt.reason = "confirmed_route_provider_unknown";
+              } else {
+                const result = await workflowOriginStore.confirmRoute(receipt.origin_binding, {
+                  model: qualifiedRouteModel(receipt.actualModel, receipt.actualProvider),
+                  ...(Object.hasOwn(receipt, "actualEffort") ? { effort: receipt.actualEffort } : {}),
+                  ...(Object.hasOwn(receipt, "actualServiceTier") ? { service_tier: receipt.actualServiceTier } : {}),
+                });
+                receipt.confirmed = result.status === "confirmed";
+                if (!receipt.confirmed) receipt.reason = result.status;
+              }
             }
           }
           await onRouteConfirmed(receipt);

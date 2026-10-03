@@ -487,7 +487,6 @@ test("App Server routing overrides the native next turn and requires a settings 
     actualModel: "gpt-5.6-sol",
     actualProvider: "openai",
     actualEffort: "high",
-    actualServiceTier: null,
     confirmed: true,
   });
   assert.equal(settingsConfirmRoute(receipt, {
@@ -643,6 +642,13 @@ test("an unspecified original effort is explicitly cleared and must be confirmed
     threadId: route.session_id, threadSettings: {model: "gpt-5.6-sol", modelProvider: "openai",
       effort: null, serviceTier: "priority", collaborationMode: {settings: {model: "gpt-5.6-sol", reasoning_effort: null}}},
   }}).confirmed, true);
+  const missing = settingsConfirmRoute(applied.receipt, {method: "thread/settings/updated", params: {
+    threadId: route.session_id, threadSettings: {model: "gpt-5.6-sol", modelProvider: "openai",
+      serviceTier: "priority", collaborationMode: {settings: {model: "gpt-5.6-sol"}}},
+  }});
+  assert.equal(missing.confirmed, false);
+  assert.equal(Object.hasOwn(missing, "actualEffort"), false);
+  assert.equal(Object.hasOwn(missing, "actualCollaborationEffort"), false);
 });
 
 test("App Server proxy restores the captured route after the authoritative workflow becomes terminal", async () => {
@@ -826,7 +832,7 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     assert.equal((await receive("thread/start")).method, "thread/start");
     upstreamSocket.send(JSON.stringify({ id: 1, result: {
       thread: { id: route.session_id }, modelProvider: "openai", model: "gpt-5.6-sol",
-      reasoningEffort: "high", serviceTier: "priority",
+      reasoningEffort: null, serviceTier: "priority",
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
 
@@ -841,6 +847,10 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
       threadId: route.session_id, threadSettings: {
         model: "gpt-5.6-terra", modelProvider: "openai", effort: "medium", serviceTier: "default",
+        collaborationMode: {
+          mode: "default",
+          settings: { model: "gpt-5.6-terra", reasoning_effort: "medium", developer_instructions: "keep this" },
+        },
       },
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
@@ -873,12 +883,20 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     assert.ok(restoration, `terminal restoration request missing: ${JSON.stringify(errors)}`);
     assert.equal(restoration.method, "thread/settings/update");
     assert.deepEqual(restoration.params, {
-      threadId: route.session_id, model: "gpt-5.6-sol", effort: "high", serviceTier: "priority",
+      threadId: route.session_id, model: "gpt-5.6-sol", effort: null, serviceTier: "priority",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-5.6-sol", reasoning_effort: null, developer_instructions: "keep this" },
+      },
     });
     upstreamSocket.send(JSON.stringify({ id: restoration.id, result: {} }));
     upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
       threadId: route.session_id, threadSettings: {
-        model: "gpt-5.6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority",
+        model: "gpt-5.6-sol", modelProvider: "openai", effort: null, serviceTier: "priority",
+        collaborationMode: {
+          mode: "default",
+          settings: { model: "gpt-5.6-sol", reasoning_effort: null, developer_instructions: "keep this" },
+        },
       },
     } }));
     for (let attempt = 0; attempt < 50 && confirmed.length < 2; attempt++) {

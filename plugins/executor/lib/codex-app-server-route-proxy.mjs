@@ -209,29 +209,33 @@ export function settingsConfirmRoute(receipt, notification) {
   const settings = params.threadSettings ?? {};
   const actualModel = routeModel(settings.model);
   const actualProvider = String(settings.modelProvider ?? "").trim() || null;
-  const actualEffort = settings.effort ?? null;
-  const actualServiceTier = settings.serviceTier ?? null;
+  const actualEffort = firstOwn([settings, "effort"]);
+  const actualServiceTier = firstOwn([settings, "serviceTier"]);
   const collaborationSettings = settings.collaborationMode?.settings ?? null;
-  const actualCollaborationModel = collaborationSettings ? routeModel(collaborationSettings.model) : null;
-  const actualCollaborationEffort = collaborationSettings?.reasoning_effort ?? null;
+  const actualCollaborationModel = firstOwn([collaborationSettings, "model"]);
+  const actualCollaborationEffort = firstOwn([collaborationSettings, "reasoning_effort"]);
   const collaborationReceipt = receipt.collaborationModeApplied ? {
-    actualCollaborationModel,
-    actualCollaborationEffort,
+    ...(actualCollaborationModel.available ? { actualCollaborationModel: routeModel(actualCollaborationModel.value) } : {}),
+    ...(actualCollaborationEffort.available ? { actualCollaborationEffort: actualCollaborationEffort.value } : {}),
   } : {};
   return {
     ...receipt,
     actualModel,
     actualProvider,
-    actualEffort,
-    actualServiceTier,
+    ...(actualEffort.available ? { actualEffort: actualEffort.value } : {}),
+    ...(actualServiceTier.available ? { actualServiceTier: actualServiceTier.value } : {}),
     ...collaborationReceipt,
     confirmed: sameRouteValue(actualModel, receipt.effectiveModel)
       && (!receipt.effectiveProvider || sameRouteValue(actualProvider, receipt.effectiveProvider))
-      && (!receipt.effortSpecified || sameRouteValue(actualEffort, receipt.effectiveEffort))
-      && (!receipt.effectiveServiceTier || sameRouteValue(actualServiceTier, receipt.effectiveServiceTier))
+      && (!receipt.effortSpecified || actualEffort.available
+        && sameRouteValue(actualEffort.value, receipt.effectiveEffort))
+      && (!receipt.effectiveServiceTier || actualServiceTier.available
+        && sameRouteValue(actualServiceTier.value, receipt.effectiveServiceTier))
       && (!receipt.collaborationModeApplied || (
-        sameRouteValue(actualCollaborationModel, receipt.effectiveModel)
-        && (!receipt.effortSpecified || sameRouteValue(actualCollaborationEffort, receipt.effectiveEffort))
+        actualCollaborationModel.available
+        && sameRouteValue(actualCollaborationModel.value, receipt.effectiveModel)
+        && (!receipt.effortSpecified || actualCollaborationEffort.available
+          && sameRouteValue(actualCollaborationEffort.value, receipt.effectiveEffort))
       )),
   };
 }
@@ -780,7 +784,10 @@ export async function startCodexAppServerRouteProxy({
           restoration_status: restoration.status,
           ...restoration.route,
         };
-        const applied = applyRouteToTurnStart({ method: "turn/start", params: { threadId } }, marker, process.env);
+        const applied = applyRouteToTurnStart({ method: "turn/start", params: {
+          threadId,
+          ...(settings.collaborationMode ? { collaborationMode: structuredClone(settings.collaborationMode) } : {}),
+        } }, marker, process.env);
         if (!applied.receipt) throw new Error("Statewright terminal restoration could not construct a bound native settings update.");
         applied.receipt.origin_binding = binding;
         applied.receipt.restoration = { ...restoration, trigger: terminal.kind };
@@ -796,6 +803,8 @@ export async function startCodexAppServerRouteProxy({
             model: applied.message.params.model,
             effort: applied.message.params.effort,
             serviceTier: applied.message.params.serviceTier,
+            ...(applied.message.params.collaborationMode
+              ? { collaborationMode: applied.message.params.collaborationMode } : {}),
           });
         } catch (error) {
           receipts.delete(threadId);

@@ -92,6 +92,87 @@ test("an interrupted restore remains retryable before or after native settings a
   }
 });
 
+test("an owned partial restoration retains provenance and remains retryable", async () => {
+  const store = new WorkflowRouteOriginStore({ clientId: binding.client_id, ownsBinding: async () => true });
+  const nullableOrigin = {
+    provider: "openai",
+    model: "openai-codex/gpt-5.6-sol",
+    effort: null,
+    service_tier: "priority",
+  };
+  const routed = {
+    model: "openai-codex/gpt-5.6-terra",
+    effort: "medium",
+    service_tier: "priority",
+  };
+  const partiallyApplied = {
+    model: "openai-codex/gpt-5.6-sol",
+    effort: "medium",
+    service_tier: "priority",
+  };
+  await store.capture(binding, nullableOrigin);
+  await store.confirmRoute(binding, routed);
+  assert.equal((await store.prepareRestore(binding, routed)).status, "ready");
+
+  const recovered = await store.prepareRestore(binding, partiallyApplied);
+  assert.equal(recovered.status, "ready");
+  assert.equal(recovered.partial_application, true);
+  assert.deepEqual(recovered.route, {
+    model: nullableOrigin.model,
+    effort: null,
+    service_tier: "priority",
+  });
+  const retained = await store.inspect(binding.thread_id);
+  assert.equal(retained.status, "restore_pending");
+  assert.equal(retained.restore_attempt.epoch, 1);
+  assert.deepEqual(retained.restore_attempt.requested, recovered.route);
+  assert.deepEqual(retained.restore_attempt.observed_before, routed);
+  assert.deepEqual(retained.restore_attempt.last_observed, partiallyApplied);
+});
+
+test("a partial restoration survives reconstruction but an explicit manual change wins", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-route-origin-partial-"));
+  try {
+    const nullableOrigin = {
+      provider: "openai",
+      model: "openai-codex/gpt-5.6-sol",
+      effort: null,
+      service_tier: "priority",
+    };
+    const routed = {
+      model: "openai-codex/gpt-5.6-terra",
+      effort: "medium",
+      service_tier: "priority",
+    };
+    const first = new WorkflowRouteOriginStore({ root, clientId: binding.client_id, ownsBinding: async () => true });
+    await first.capture(binding, nullableOrigin);
+    await first.confirmRoute(binding, routed);
+    await first.prepareRestore(binding, routed);
+
+    const reconnected = new WorkflowRouteOriginStore({ root, clientId: binding.client_id, ownsBinding: async () => true });
+    const partial = await reconnected.prepareRestore(binding, {
+      model: nullableOrigin.model,
+      effort: "medium",
+      service_tier: "priority",
+    });
+    assert.equal(partial.status, "ready");
+    assert.equal(partial.partial_application, true);
+
+    await reconnected.relinquish(binding.thread_id, ["model"], { model: "openai-codex/gpt-6-astra" });
+    const manual = {
+      model: "openai-codex/gpt-6-astra",
+      effort: "medium",
+      service_tier: "priority",
+    };
+    const preserved = await reconnected.prepareRestore(binding, manual);
+    assert.equal(preserved.status, "relinquished");
+    assert.deepEqual(preserved.route, manual);
+    assert.equal(await reconnected.inspect(binding.thread_id), null);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a reconstructed pending restoration remains retryable only with current authority", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-route-origin-pending-"));
   try {

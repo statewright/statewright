@@ -28,10 +28,13 @@ export function redactedApprovalRequest(value) {
   const receipt = value.classifier_receipt;
   const basis = receipt?.final_denial_basis ?? receipt?.resolution_basis;
   const request = {
-    schema: "statewright/classifier-approval-request/v1",
+    schema: "statewright/classifier-approval-request/v2",
     thread_id: printable(value.thread_id) ? value.thread_id : null,
     run_id: printable(value.run_id) ? value.run_id : null,
+    run_session_id: printable(value.run_session_id) ? value.run_session_id : null,
     state: printable(value.state) ? value.state : null,
+    state_epoch: Number.isSafeInteger(value.state_epoch) && value.state_epoch >= 0
+      ? value.state_epoch : null,
     classifier_receipt: {
       intent_fingerprint: fingerprint(receipt?.intent_fingerprint, "intent_v1_"),
       invocation_fingerprint: fingerprint(receipt?.invocation_fingerprint, "invocation_v1_"),
@@ -44,7 +47,8 @@ export function redactedApprovalRequest(value) {
       separate_approval_allowed: receipt?.separate_approval_allowed === true,
     },
   };
-  return request.thread_id && request.run_id && request.state
+  return request.thread_id && request.run_id && request.run_session_id
+    && request.state && request.state_epoch !== null
     && request.classifier_receipt.intent_fingerprint
     && request.classifier_receipt.invocation_fingerprint
     && request.classifier_receipt.final_denial_basis
@@ -70,7 +74,7 @@ function runDirectory(environment) {
 
 export async function requestClassifierApproval(value, options = {}) {
   const request = redactedApprovalRequest(value);
-  if (!request) return {schema: "statewright/classifier-approval/v1",
+  if (!request) return {schema: "statewright/classifier-approval/v2",
     action: "deny", reason: "invalid_redacted_classifier_receipt"};
   const environment = options.environment ?? process.env;
   const runtime = JSON.parse(await (options.readFile ?? readFile)(
@@ -100,10 +104,12 @@ export async function requestClassifierApproval(value, options = {}) {
     throw new Error("local_models_classifier_approval_invalid_action");
   }
   const expectedIdentity = {
-    schema: "statewright/classifier-approval/v1",
+    schema: "statewright/classifier-approval/v2",
     thread_id: request.thread_id,
     run_id: request.run_id,
+    run_session_id: request.run_session_id,
     state: request.state,
+    state_epoch: request.state_epoch,
     intent_fingerprint: request.classifier_receipt.intent_fingerprint,
     invocation_fingerprint: request.classifier_receipt.invocation_fingerprint,
     basis: request.classifier_receipt.final_denial_basis,
@@ -130,7 +136,7 @@ async function main() {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch(error => process.stdout.write(`${JSON.stringify({
-    schema: "statewright/classifier-approval/v1", action: "unavailable",
+    schema: "statewright/classifier-approval/v2", action: "unavailable",
     reason: String(error?.message ?? error).slice(0, 128),
   })}\n`));
 }

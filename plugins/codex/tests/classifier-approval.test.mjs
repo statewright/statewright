@@ -8,7 +8,9 @@ import { redactedApprovalRequest, requestClassifierApproval } from "../scripts/c
 const input = {
   thread_id: "thread-one",
   run_id: "run-one",
+  run_session_id: "session-one",
   state: "implement",
+  state_epoch: 4,
   classifier_receipt: {
     intent_fingerprint: "intent_v1_family",
     invocation_fingerprint: "invocation_v1_exact",
@@ -33,8 +35,9 @@ test("classifier approval helper forwards only bounded redacted identity", async
     environment: {LOCAL_MODELS_RUN_DIR: runDir},
     fetch: async (url, options) => {
       observed = {url: String(url), options, body: JSON.parse(options.body)};
-      return new Response(JSON.stringify({schema: "statewright/classifier-approval/v1",
-        action: "allow_once", thread_id: "thread-one", run_id: "run-one", state: "implement",
+      return new Response(JSON.stringify({schema: "statewright/classifier-approval/v2",
+        action: "allow_once", thread_id: "thread-one", run_id: "run-one",
+        run_session_id: "session-one", state: "implement", state_epoch: 4,
         intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
         basis: "semantic_threshold_not_met",
         required_authority: "complete_structural_evidence_or_separate_approval",
@@ -51,13 +54,15 @@ test("classifier approval helper forwards only bounded redacted identity", async
   const routed = await requestClassifierApproval(input, {
     environment: {STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes")},
     fetch: async () => new Response(JSON.stringify({
-      schema: "statewright/classifier-approval/v1",
+      schema: "statewright/classifier-approval/v2",
       action: "rework",
       attempts: 1,
       max_reworks: 2,
       thread_id: "thread-one",
       run_id: "run-one",
+      run_session_id: "session-one",
       state: "implement",
+      state_epoch: 4,
       intent_fingerprint: "intent_v1_family",
       invocation_fingerprint: "invocation_v1_exact",
       basis: "semantic_threshold_not_met",
@@ -81,7 +86,17 @@ test("classifier approval helper rejects ineligible or incomplete gateway receip
     {...input.classifier_receipt, separate_approval_allowed: false},
   ]) {
     assert.deepEqual(await requestClassifierApproval({...input, classifier_receipt: classifierReceipt}), {
-      schema: "statewright/classifier-approval/v1",
+      schema: "statewright/classifier-approval/v2",
+      action: "deny",
+      reason: "invalid_redacted_classifier_receipt",
+    });
+  }
+  for (const incomplete of [
+    {...input, run_session_id: ""},
+    {...input, state_epoch: null},
+  ]) {
+    assert.deepEqual(await requestClassifierApproval(incomplete), {
+      schema: "statewright/classifier-approval/v2",
       action: "deny",
       reason: "invalid_redacted_classifier_receipt",
     });
@@ -90,10 +105,12 @@ test("classifier approval helper rejects ineligible or incomplete gateway receip
 
 test("classifier approval helper fails closed on mismatched response identities", async () => {
   for (const mismatch of [
-    {schema: "statewright/classifier-approval/v2"},
+    {schema: "statewright/classifier-approval/v1"},
     {thread_id: "thread-other"},
     {run_id: "run-other"},
+    {run_session_id: "session-other"},
     {state: "validate"},
+    {state_epoch: 5},
     {intent_fingerprint: "intent_v1_other"},
     {invocation_fingerprint: "invocation_v1_other"},
     {basis: "classifier_policy_low_local"},
@@ -106,8 +123,9 @@ test("classifier approval helper fails closed on mismatched response identities"
       environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
       readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "secret"}),
       fetch: async () => new Response(JSON.stringify({
-        schema: "statewright/classifier-approval/v1", action: "allow_once",
-        thread_id: "thread-one", run_id: "run-one", state: "implement",
+        schema: "statewright/classifier-approval/v2", action: "allow_once",
+        thread_id: "thread-one", run_id: "run-one", run_session_id: "session-one",
+        state: "implement", state_epoch: 4,
         intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
         basis: "semantic_threshold_not_met",
         required_authority: "complete_structural_evidence_or_separate_approval",
@@ -123,7 +141,7 @@ test("classifier approval helper rejects unsupported actions and non-loopback ru
     environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
     readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "secret"}),
     fetch: async () => new Response(JSON.stringify({
-      schema: "statewright/classifier-approval/v1", action: "approve_forever",
+      schema: "statewright/classifier-approval/v2", action: "approve_forever",
     }), {status: 200}),
   }), /invalid_action/);
   await assert.rejects(() => requestClassifierApproval(input, {

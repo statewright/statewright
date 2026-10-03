@@ -945,16 +945,22 @@ case "$ENDPOINT" in
       UNMANAGED_DELEGATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r \
         '.risk_assessment.deterministic_source == "unmanaged_agent_delegation"' 2>/dev/null || true)
       RUN_ID=$(printf '%s' "$STATE_JSON" | jq -r '.run_id // empty' 2>/dev/null || true)
+      RUN_SESSION_ID=$(printf '%s' "$STATE_JSON" | jq -r '.run_session_id // empty' 2>/dev/null || true)
+      STATE_EPOCH=$(printf '%s' "$STATE_JSON" | jq -r '.state_epoch // empty' 2>/dev/null || true)
       APPROVAL_REQUEST=""
       if [ "$UNMANAGED_DELEGATION" != "true" ]; then
         APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
-          --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" --arg state "$CURRENT" '
+          --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" \
+          --arg run_session_id "$RUN_SESSION_ID" --arg state "$CURRENT" \
+          --arg state_epoch "$STATE_EPOCH" '
           .risk_assessment? as $risk
           | if ($risk | type) != "object" then empty else {
-              schema: "statewright/classifier-approval-request/v1",
+              schema: "statewright/classifier-approval-request/v2",
               thread_id: $thread_id,
               run_id: $run_id,
+              run_session_id: $run_session_id,
               state: $state,
+              state_epoch: (if ($state_epoch | test("^[0-9]+$")) then ($state_epoch | tonumber) else null end),
               classifier_receipt: {
                 intent_fingerprint: $risk.intent_fingerprint,
                 invocation_fingerprint: $risk.invocation_fingerprint,

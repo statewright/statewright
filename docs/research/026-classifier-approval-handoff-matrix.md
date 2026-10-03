@@ -85,10 +85,10 @@ runtime context. No guessed exact-request cause is treated as fact.
 | Gateway unit | Capability, classifier-policy, known-risk denial | Separate approval false | Rust negative assertions |
 | Hook unit | Raw command/arguments in receipt | Never forwarded | Codex helper redaction test |
 | Hook unit | Missing/false eligibility field or unsupported basis | Local deny, no request | Codex helper table |
-| Hook unit | Any response identity field changed | Fail closed | Mutation table across schema, thread, run, state, intent, invocation, basis, authority, retry policy |
+| Hook unit | Any response identity field changed | Fail closed | Mutation table across schema, thread, run, run session, state, state epoch, intent, invocation, basis, authority, retry policy |
 | Hook integration | Eligible uncertainty | Redacted request; rework then allow-once translation | Native gateway bridge fixture |
 | Hook integration | Capability or classifier-policy denial | No native approval request | Negative bridge cases |
-| Protocol unit | Same intent, different thread/run/state/basis | Isolated counters and authority | Companion controller scope test |
+| Protocol unit | Same intent, different thread/run/run-session/state/epoch/basis | Isolated counters and authority | Companion controller scope test |
 | Protocol unit | Exact invocation replay | Denied without consuming rework | Shared gate and companion tests |
 | Protocol unit | One matching native accept | Release exact pending invocation once | Companion controller test |
 | Protocol unit | Stale/duplicate reply ID | Cannot release another invocation | Companion controller and proxy tests |
@@ -119,3 +119,71 @@ candidate. A live cancellation, delayed response, app restart, and stale reply
 should be included in that acceptance pass. Until then, actual live TUI
 coverage remains unverified and the revised source supersedes the older
 candidate's validation rather than inheriting it.
+
+## Local approval pipeline boundary
+
+The classifier rule remains gateway policy. The gateway alone decides whether
+an uncertain invocation is eligible for separate approval and emits the
+redacted intent and invocation fingerprints. Neither the Codex hook nor the
+native-session host may reclassify a command or widen that eligibility.
+
+The Codex hook is a thin synchronous transport adapter. It forwards only the
+gateway receipt plus the owning thread, workflow run, gateway run session,
+state, state epoch, intent, and invocation. It never renders a dialog, counts
+retries, or treats transport failure as permission.
+
+The local native-session host owns presentation and applies an ordered chain of
+responsibility. Handlers run serially by explicit priority; this is not a race:
+
+1. `workflow-transition-barrier` verifies the authoritative execution context.
+   A pending workflow-transition approval, terminal or changed state, or an
+   unavailable state reader returns a terminal denial/error. This priority is
+   required because classifier approval is documented not to replace a
+   workflow-transition approval.
+2. `classifier-invocation` handles an otherwise eligible classifier request,
+   including rework accounting and one exact native prompt.
+
+Only `NotHandled` advances to the next handler. `Deny`, `Ask`, `Allow`, and
+`Error` short-circuit. An explicit denial therefore cannot fall through to a
+later allowing handler. An error or unavailable required handler is translated
+to a denial. A request unsupported by every handler is `NotHandled` internally
+and becomes `unsupported_approval_request` at the protected HTTP boundary.
+
+The existing loopback-authenticated `POST /classifier-approval` endpoint is
+retained as the classifier-specific adapter. Its request and response schemas
+are `statewright/classifier-approval-request/v2` and
+`statewright/classifier-approval/v2`. Version 2 requires `thread_id`, `run_id`,
+`run_session_id`, `state`, `state_epoch`, intent fingerprint, invocation
+fingerprint, denial basis, authority, and retry-policy fields to match exactly.
+The invocation fingerprint is the command identity; raw command text and tool
+arguments never cross this boundary.
+
+This is a coordinated Statewright-hook and local-companion contract. A v2 hook
+with a v1 host, or a v1 hook with a v2 host, fails closed. Adoption therefore
+requires one full-tree staging candidate and a fresh local host process; it is
+not safe to deploy either side independently. No compatibility fallback may
+silently strip the run-session or state-epoch binding.
+
+The durable workflow-transition controller remains separate because it owns a
+gateway ticket, reviewer authorization, parking journal, and resume lifecycle.
+Its native rendering can later become another thin pipeline adapter, but this
+repair does not merge its persistence semantics into invocation approval or
+create a second recovery implementation.
+
+The implemented pipeline is presently in the `codex-local-models` native host,
+which is the mode that owns the reproduced Nomad thread. The standalone
+Statewright managed-client resident still has its own durable transition gate
+and does not yet advertise the classifier endpoint. That is a remaining mode
+gap, not a reason to duplicate the classifier controller in the resident.
+
+The smallest follow-on is to make the local approval pipeline a packaged host
+contract and give each mode a thin ownership adapter. A handler may return
+`NotHandled` only when it does not own the exact thread or request kind. The
+exact owning mode services the request; a second owner is an error, and an
+unavailable advertised owner fails closed. Source does not justify ranking
+`codex-local-models` ahead of the standalone resident (or vice versa): exact
+thread ownership selects the applicable handler, while the explicit priority
+orders approval kinds within that owner. This follow-on needs a portable
+package boundary and resident discovery receipt; importing a developer checkout
+by absolute path or silently probing connection failures would recreate the
+current deployment problem.

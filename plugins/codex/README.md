@@ -248,6 +248,16 @@ timeout, disconnect, an unavailable companion, or an unsupported client stay
 denied. This path does not resume a terminal workflow or replace a
 workflow-transition approval.
 
+The local host services approval requests through a serial, explicit-priority
+chain of responsibility. Only an unsupported (`NotHandled`) request may pass to
+the next handler; deny, ask, allow, and error are terminal, and required-handler
+errors fail closed. The authoritative workflow-transition barrier precedes the
+classifier fallback. The loopback `POST /classifier-approval` adapter uses the
+v2 request/response contract and binds the exact thread, workflow run, gateway
+run session, state, state epoch, intent, and invocation. Statewright and the
+local companion must therefore be updated as one full-tree staging candidate;
+mixed v1/v2 runtimes stay denied rather than dropping identity fields.
+
 Start a workflow via MCP tool:
 
 ```

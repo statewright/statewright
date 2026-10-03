@@ -144,6 +144,8 @@ async function startNativeGateway() {
         disallowed_tools: ["Write"],
         transitions: [],
         run_id: "native-hook-test-run",
+        run_session_id: "native-hook-test-session",
+        state_epoch: 1,
         context: { tool_policy_mode: "denylist_heuristic_v1" },
       };
     } else if (toolName === "opaque_mutation_tool") {
@@ -262,9 +264,10 @@ async function startClassifierApprovalProxy() {
     assert.equal(request.headers.authorization, "Bearer local-runtime-token");
     const attempts = requests.length;
     response.writeHead(200, {"Content-Type": "application/json"});
-    response.end(JSON.stringify({schema: "statewright/classifier-approval/v1",
+    response.end(JSON.stringify({schema: "statewright/classifier-approval/v2",
       action: attempts > 2 ? "allow_once" : "rework", attempts, max_reworks: 2,
-      thread_id: body.thread_id, run_id: body.run_id, state: body.state,
+      thread_id: body.thread_id, run_id: body.run_id,
+      run_session_id: body.run_session_id, state: body.state, state_epoch: body.state_epoch,
       intent_fingerprint: body.classifier_receipt.intent_fingerprint,
       invocation_fingerprint: body.classifier_receipt.invocation_fingerprint,
       basis: body.classifier_receipt.final_denial_basis,
@@ -303,6 +306,8 @@ const loadedState = {
     allowed_tools: ["Read"],
     transitions: [{ event: "EVIDENCE_READY", target: "design" }],
     run_id: "native-hook-test-run",
+    run_session_id: "native-hook-test-session",
+    state_epoch: 1,
     capture_output: true,
   },
 };

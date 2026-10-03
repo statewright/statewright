@@ -150,7 +150,7 @@ async function startNativeGateway() {
       decision = { decision: "allow", additional_context: "System One approved the bounded operation." };
     } else if (toolName === "Read") {
       decision = { decision: "deny", reason: "Gateway denied this read fixture." };
-    } else if (toolName === "classifier_denied") {
+    } else if (toolName?.startsWith("classifier_denied_")) {
       decision = {
         decision: "deny",
         reason: "Classifier denied this fixture.",
@@ -168,13 +168,38 @@ async function startNativeGateway() {
             irreversible: 0.01,
             external_or_account_effect: 0.01,
           },
-          resolution_basis: "deterministic_local_write",
-          final_denial_basis: "classifier_policy_low_local",
-          required_authority: "moderate_local_or_assessed_moderate_local",
-          equivalent_retry_allowed: false,
+          resolution_basis: "semantic_threshold_not_met",
+          final_denial_basis: "semantic_threshold_not_met",
+          required_authority: "complete_structural_evidence_or_separate_approval",
+          equivalent_retry_allowed: true,
+          reformulation_allowed: true,
+          exact_invocation_retry_allowed: false,
+          separate_approval_allowed: true,
           intent_fingerprint: "intent_v1_classifier-denied",
-          invocation_fingerprint: "invocation_v1_classifier-denied",
+          invocation_fingerprint: `invocation_v1_${toolName}`,
           command: "private-command-sentinel",
+        },
+      };
+    } else if (toolName === "policy_denied" || toolName === "capability_denied") {
+      const capability = toolName === "capability_denied";
+      decision = {
+        decision: "deny",
+        reason: capability ? "This phase lacks Write." : "This workflow risk band is too narrow.",
+        risk_assessment: {
+          deterministic_risk: "Moderate",
+          deterministic_exposure: "Local",
+          deterministic_source: "shell_ast",
+          semantic_status: "Assessed",
+          resolution_basis: "deterministic_local_write",
+          final_denial_basis: capability
+            ? "workflow_capability_write_denied" : "classifier_policy_low_local",
+          required_authority: capability ? "Write" : "BoundedLocalExecution",
+          equivalent_retry_allowed: false,
+          reformulation_allowed: false,
+          exact_invocation_retry_allowed: false,
+          separate_approval_allowed: false,
+          intent_fingerprint: `intent_v1_${toolName}`,
+          invocation_fingerprint: `invocation_v1_${toolName}`,
         },
       };
     } else if ([
@@ -242,7 +267,11 @@ async function startClassifierApprovalProxy() {
       thread_id: body.thread_id, run_id: body.run_id, state: body.state,
       intent_fingerprint: body.classifier_receipt.intent_fingerprint,
       invocation_fingerprint: body.classifier_receipt.invocation_fingerprint,
-      basis: body.classifier_receipt.final_denial_basis}));
+      basis: body.classifier_receipt.final_denial_basis,
+      required_authority: body.classifier_receipt.required_authority,
+      reformulation_allowed: body.classifier_receipt.reformulation_allowed,
+      exact_invocation_retry_allowed: body.classifier_receipt.exact_invocation_retry_allowed,
+      separate_approval_allowed: body.classifier_receipt.separate_approval_allowed}));
   });
   await new Promise(resolveStart => server.listen(0, "127.0.0.1", resolveStart));
   return {requests, url: `ws://127.0.0.1:${server.address().port}`,
@@ -483,17 +512,17 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
 
     const classifierDenied = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
-      tool_name: "classifier_denied",
+      tool_name: "classifier_denied_one",
       tool_input: {command: "private-input-sentinel"},
     }, environment);
     assert.equal(classifierDenied.status, 0, classifierDenied.stderr);
     const classifierOutput = JSON.parse(classifierDenied.stdout).hookSpecificOutput;
     assert.match(classifierOutput.permissionDecisionReason, /^Statewright guard: denied/);
-    assert.match(classifierOutput.permissionDecisionReason, /workflow risk band is too narrow/);
+    assert.match(classifierOutput.permissionDecisionReason, /could not prove a safe local effect/);
     assert.match(classifierOutput.permissionDecisionReason, /System One signals: read-only 4%, write 96%, destructive 1%, external 1%/);
     assert.match(classifierOutput.permissionDecisionReason, /Rework attempt 1\/2/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /basis=|p\(read=|private-(command|input)-sentinel/);
-    assert.match(classifierOutput.additionalContext, /"final_denial_basis":"classifier_policy_low_local"/);
+    assert.match(classifierOutput.additionalContext, /"final_denial_basis":"semantic_threshold_not_met"/);
     assert.match(classifierOutput.additionalContext, /"may_write":0\.96/);
     assert.doesNotMatch(classifierOutput.additionalContext, /private-(command|input)-sentinel/);
 
@@ -527,12 +556,12 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     }
 
     const classifierSecond = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id, tool_name: "classifier_denied", tool_input: {command: "private-input-sentinel"},
+      session_id, tool_name: "classifier_denied_two", tool_input: {command: "private-input-sentinel"},
     }, environment);
     assert.match(JSON.parse(classifierSecond.stdout).hookSpecificOutput.permissionDecisionReason,
       /Rework attempt 2\/2/);
     const classifierApproved = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id, tool_name: "classifier_denied", tool_input: {command: "private-input-sentinel"},
+      session_id, tool_name: "classifier_denied_three", tool_input: {command: "private-input-sentinel"},
     }, environment);
     const approvedOutput = JSON.parse(classifierApproved.stdout).hookSpecificOutput;
     assert.equal(approvedOutput.permissionDecision, undefined);
@@ -540,8 +569,19 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     assert.equal(classifierApproval.requests.length, 3);
     assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-(command|input)-sentinel/);
 
+    for (const tool_name of ["policy_denied", "capability_denied"]) {
+      const requestCount = classifierApproval.requests.length;
+      const ineligible = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name, tool_input: {command: "private-input-sentinel"},
+      }, environment);
+      const ineligibleOutput = JSON.parse(ineligible.stdout).hookSpecificOutput;
+      assert.equal(ineligibleOutput.permissionDecision, "deny");
+      assert.equal(classifierApproval.requests.length, requestCount,
+        `${tool_name} must not enter native classifier approval`);
+    }
+
     const approvalUnavailable = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
-      session_id, tool_name: "classifier_denied", tool_input: {command: "private-input-sentinel"},
+      session_id, tool_name: "classifier_denied_four", tool_input: {command: "private-input-sentinel"},
     }, {...environment, LOCAL_MODELS_RUN_DIR: resolve(home, "missing-local-models-run")});
     assert.equal(approvalUnavailable.status, 0, approvalUnavailable.stderr);
     const unavailableApprovalOutput = JSON.parse(approvalUnavailable.stdout).hookSpecificOutput;

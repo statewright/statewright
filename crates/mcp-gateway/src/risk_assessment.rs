@@ -552,6 +552,14 @@ impl RiskPipelineAssessment {
                 resolved_effect,
                 ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain
             );
+        // A human may resolve classifier uncertainty only when the gateway's
+        // final decision explicitly offers the separate-approval authority.
+        // Capability, policy, interceptor, and known-risk denials must never
+        // become approvable merely because an adapter recognizes their label.
+        let separate_approval_allowed = !decision_allowed
+            && matches!(resolved_effect, ResolvedEffect::DenyUncertain)
+            && reformulation_allowed
+            && required_authority == "complete_structural_evidence_or_separate_approval";
         let vector = self.semantic.vector.as_ref().map(|value| {
             serde_json::json!({
                 "read_only": value.read_only.get(),
@@ -584,6 +592,7 @@ impl RiskPipelineAssessment {
             "equivalent_retry_allowed": exact_invocation_retry_allowed || reformulation_allowed,
             "reformulation_allowed": reformulation_allowed,
             "exact_invocation_retry_allowed": exact_invocation_retry_allowed,
+            "separate_approval_allowed": separate_approval_allowed,
         })
     }
 
@@ -4261,23 +4270,53 @@ mod tests {
         assert_eq!(visible["equivalent_retry_allowed"], true);
         assert_eq!(visible["reformulation_allowed"], true);
         assert_eq!(visible["exact_invocation_retry_allowed"], false);
-        let semantic_denial = missing_shape.visible_json_for_denial(
+        assert_eq!(visible["separate_approval_allowed"], false);
+        for basis in [
             "semantic_threshold_not_met",
-            "complete_structural_evidence_or_separate_approval",
-        );
-        assert_eq!(semantic_denial["equivalent_retry_allowed"], true);
-        assert_eq!(semantic_denial["reformulation_allowed"], true);
-        assert_eq!(semantic_denial["exact_invocation_retry_allowed"], false);
+            "incomplete_structural_evidence",
+            "semantic_vector_unavailable",
+            "semantic_assessment_incomplete",
+            "semantic_authorization_disabled",
+        ] {
+            let semantic_denial = missing_shape.visible_json_for_denial(
+                basis,
+                "complete_structural_evidence_or_separate_approval",
+            );
+            assert_eq!(semantic_denial["equivalent_retry_allowed"], true, "{basis}");
+            assert_eq!(semantic_denial["reformulation_allowed"], true, "{basis}");
+            assert_eq!(
+                semantic_denial["exact_invocation_retry_allowed"], false,
+                "{basis}"
+            );
+            assert_eq!(
+                semantic_denial["separate_approval_allowed"], true,
+                "{basis}"
+            );
+        }
+        let wrong_authority = missing_shape
+            .visible_json_for_denial("semantic_threshold_not_met", "BoundedLocalExecution");
+        assert_eq!(wrong_authority["reformulation_allowed"], true);
+        assert_eq!(wrong_authority["separate_approval_allowed"], false);
         let capability_denial =
             missing_shape.visible_json_for_denial("workflow_capability_read_denied", "Read");
         assert_eq!(capability_denial["equivalent_retry_allowed"], false);
         assert_eq!(capability_denial["reformulation_allowed"], false);
         assert_eq!(capability_denial["exact_invocation_retry_allowed"], false);
+        assert_eq!(capability_denial["separate_approval_allowed"], false);
+        let classifier_policy_denial = missing_shape
+            .visible_json_for_denial("classifier_policy_low_local", "BoundedLocalExecution");
+        assert_eq!(classifier_policy_denial["reformulation_allowed"], false);
+        assert_eq!(
+            classifier_policy_denial["exact_invocation_retry_allowed"],
+            false
+        );
+        assert_eq!(classifier_policy_denial["separate_approval_allowed"], false);
         let known_risk = external_pipeline
             .visible_json_for_denial("effective_known_risk", "separate_approved_execution_path");
         assert_eq!(known_risk["equivalent_retry_allowed"], false);
         assert_eq!(known_risk["reformulation_allowed"], false);
         assert_eq!(known_risk["exact_invocation_retry_allowed"], false);
+        assert_eq!(known_risk["separate_approval_allowed"], false);
         assert!(
             visible["intent_fingerprint"]
                 .as_str()

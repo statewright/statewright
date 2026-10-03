@@ -14,17 +14,22 @@ function printable(value) {
 export function classifierIntent(receipt) {
   if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) return null;
   const fingerprint = receipt.intent_fingerprint;
+  const invocationFingerprint = receipt.invocation_fingerprint;
   const basis = receipt.final_denial_basis ?? receipt.resolution_basis;
-  if (!printable(fingerprint) || !fingerprint.startsWith("intent_v1_") || !printable(basis)) return null;
+  if (!printable(fingerprint) || !fingerprint.startsWith("intent_v1_")
+      || !printable(invocationFingerprint)
+      || !invocationFingerprint.startsWith("invocation_v1_")
+      || !printable(basis)) return null;
+  const reworkable = REWORKABLE_BASES.has(basis)
+    && receipt.required_authority === "complete_structural_evidence_or_separate_approval"
+    && receipt.reformulation_allowed === true
+    && receipt.exact_invocation_retry_allowed === false
+    && receipt.separate_approval_allowed === true;
   return {
     fingerprint,
-    invocationFingerprint: printable(receipt.invocation_fingerprint)
-      && receipt.invocation_fingerprint.startsWith("invocation_v1_")
-      ? receipt.invocation_fingerprint : null,
+    invocationFingerprint,
     basis,
-    reworkable: REWORKABLE_BASES.has(basis)
-      || basis.startsWith("classifier_policy_")
-      || basis.startsWith("workflow_capability_"),
+    reworkable,
   };
 }
 
@@ -52,6 +57,10 @@ export class ClassifierReworkGate {
     return JSON.stringify([runId ?? "run", state ?? "state", hostSessionId ?? "session"]);
   }
 
+  intentKey(scopeKey, intent) {
+    return JSON.stringify([scopeKey, intent.fingerprint, intent.basis]);
+  }
+
   prune(timestamp = this.now()) {
     for (const [key, value] of this.entries) {
       if (timestamp - value.updatedAt >= this.ttlMs) this.entries.delete(key);
@@ -64,10 +73,23 @@ export class ClassifierReworkGate {
     const timestamp = this.now();
     this.prune(timestamp);
     const scopeKey = this.scopeKey(scope);
-    const key = JSON.stringify([scopeKey, intent.fingerprint]);
+    const key = this.intentKey(scopeKey, intent);
     const previous = this.entries.get(key);
+    if (previous?.seenInvocations.has(intent.invocationFingerprint)) {
+      return Object.freeze({
+        schema: "statewright/classifier-rework/v1",
+        intent_fingerprint: intent.fingerprint,
+        invocation_fingerprint: intent.invocationFingerprint,
+        basis: intent.basis,
+        attempts: previous.attempts,
+        max_reworks: this.maxReworks,
+        action: "exact_invocation_denied",
+      });
+    }
     const attempts = (previous?.attempts ?? 0) + 1;
-    this.entries.set(key, { attempts, updatedAt: timestamp, scopeKey });
+    const seenInvocations = previous?.seenInvocations ?? new Set();
+    seenInvocations.add(intent.invocationFingerprint);
+    this.entries.set(key, { attempts, updatedAt: timestamp, scopeKey, seenInvocations });
     return Object.freeze({
       schema: "statewright/classifier-rework/v1",
       intent_fingerprint: intent.fingerprint,
@@ -82,7 +104,7 @@ export class ClassifierReworkGate {
   observeSuccess({ receipt, scope = {} }) {
     const intent = classifierIntent(receipt);
     if (!intent) return false;
-    return this.entries.delete(JSON.stringify([this.scopeKey(scope), intent.fingerprint]));
+    return this.entries.delete(this.intentKey(this.scopeKey(scope), intent));
   }
 
   clearScope(scope = {}) {

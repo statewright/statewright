@@ -6,6 +6,13 @@ import { fileURLToPath } from "node:url";
 
 const MAX_INPUT_BYTES = 32 * 1024;
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
+const APPROVABLE_BASES = new Set([
+  "semantic_threshold_not_met",
+  "incomplete_structural_evidence",
+  "semantic_vector_unavailable",
+  "semantic_assessment_incomplete",
+  "semantic_authorization_disabled",
+]);
 
 function printable(value, maximum = 256) {
   return typeof value === "string" && value.length > 0 && value.length <= maximum
@@ -31,12 +38,22 @@ export function redactedApprovalRequest(value) {
       final_denial_basis: printable(basis) ? basis : null,
       required_authority: printable(receipt?.required_authority)
         ? receipt.required_authority : "approved execution path",
+      reformulation_allowed: receipt?.reformulation_allowed === true,
+      exact_invocation_retry_allowed: receipt?.exact_invocation_retry_allowed === false
+        ? false : null,
+      separate_approval_allowed: receipt?.separate_approval_allowed === true,
     },
   };
   return request.thread_id && request.run_id && request.state
     && request.classifier_receipt.intent_fingerprint
     && request.classifier_receipt.invocation_fingerprint
-    && request.classifier_receipt.final_denial_basis ? request : null;
+    && request.classifier_receipt.final_denial_basis
+    && APPROVABLE_BASES.has(request.classifier_receipt.final_denial_basis)
+    && request.classifier_receipt.required_authority
+      === "complete_structural_evidence_or_separate_approval"
+    && request.classifier_receipt.reformulation_allowed
+    && request.classifier_receipt.exact_invocation_retry_allowed === false
+    && request.classifier_receipt.separate_approval_allowed ? request : null;
 }
 
 function runDirectory(environment) {
@@ -90,6 +107,10 @@ export async function requestClassifierApproval(value, options = {}) {
     intent_fingerprint: request.classifier_receipt.intent_fingerprint,
     invocation_fingerprint: request.classifier_receipt.invocation_fingerprint,
     basis: request.classifier_receipt.final_denial_basis,
+    required_authority: request.classifier_receipt.required_authority,
+    reformulation_allowed: request.classifier_receipt.reformulation_allowed,
+    exact_invocation_retry_allowed: request.classifier_receipt.exact_invocation_retry_allowed,
+    separate_approval_allowed: request.classifier_receipt.separate_approval_allowed,
   };
   if (Object.entries(expectedIdentity).some(([key, expected]) => result[key] !== expected)) {
     throw new Error("local_models_classifier_approval_identity_mismatch");

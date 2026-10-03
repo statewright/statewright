@@ -959,7 +959,10 @@ case "$ENDPOINT" in
                 intent_fingerprint: $risk.intent_fingerprint,
                 invocation_fingerprint: $risk.invocation_fingerprint,
                 final_denial_basis: ($risk.final_denial_basis // $risk.resolution_basis),
-                required_authority: $risk.required_authority
+                required_authority: $risk.required_authority,
+                reformulation_allowed: $risk.reformulation_allowed,
+                exact_invocation_retry_allowed: $risk.exact_invocation_retry_allowed,
+                separate_approval_allowed: $risk.separate_approval_allowed
               }
             } end
           ' 2>/dev/null || true)
@@ -1032,6 +1035,12 @@ case "$ENDPOINT" in
             ;;
           native_approval_timeout|approval_request_aborted|provider_connection_closed|native_approval_unavailable)
             ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval did not complete; the invocation remains denied."
+            ;;
+          approval_state_unavailable)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Human approval could not revalidate authoritative workflow state; the invocation remains denied."
+            ;;
+          approval_state_changed)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} The workflow run or state changed before approval completed; the stale invocation remains denied."
             ;;
           invalid_redacted_classifier_receipt)
             ADAPTER_DISPLAY="${ADAPTER_DISPLAY} This denial is not eligible for classifier fallback approval."

@@ -15,6 +15,12 @@ test("renders bounded rework and approval escalation without command data", () =
     max_reworks: 2,
     action: "approval_required",
   }), /native human approval/);
+  assert.match(formatClassifierRework({
+    schema: "statewright/classifier-rework/v1",
+    attempts: 1,
+    max_reworks: 2,
+    action: "exact_invocation_denied",
+  }), /exact denied invocation cannot count as rework/);
 });
 
 test("ignores malformed receipts", () => {

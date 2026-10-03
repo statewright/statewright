@@ -137,6 +137,14 @@ changed.
   receives bounded-local-execution authority. Absolute and parent paths,
   unsupported Node flags, watch/loaders/eval, redirection, substitution,
   chaining, and network effects remain denied.
+- `034-CLASSIFIER-APPROVAL-HANDOFF` — An uncertain classifier denial can enter
+  native, one-invocation approval only when the gateway receipt explicitly
+  permits separate approval. The local companion binds the owning thread,
+  run, state, redacted intent, exact invocation, denial basis, authority, and
+  retry policy, then revalidates the authoritative run/state at acceptance.
+  Capability, policy, interceptor, and known-risk denials remain
+  ineligible. Source and mock-protocol coverage is complete; a real native TUI
+  dialogue remains a release gate and is not claimed by these tests.
 
 ## Remaining cut gates
 

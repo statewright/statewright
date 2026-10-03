@@ -13,7 +13,10 @@ const input = {
     intent_fingerprint: "intent_v1_family",
     invocation_fingerprint: "invocation_v1_exact",
     final_denial_basis: "semantic_threshold_not_met",
-    required_authority: "assessed_moderate_local",
+    required_authority: "complete_structural_evidence_or_separate_approval",
+    reformulation_allowed: true,
+    exact_invocation_retry_allowed: false,
+    separate_approval_allowed: true,
     raw_command: "private sentinel",
     arguments: {secret: true},
   },
@@ -33,7 +36,10 @@ test("classifier approval helper forwards only bounded redacted identity", async
       return new Response(JSON.stringify({schema: "statewright/classifier-approval/v1",
         action: "allow_once", thread_id: "thread-one", run_id: "run-one", state: "implement",
         intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
-        basis: "semantic_threshold_not_met"}), {status: 200});
+        basis: "semantic_threshold_not_met",
+        required_authority: "complete_structural_evidence_or_separate_approval",
+        reformulation_allowed: true, exact_invocation_retry_allowed: false,
+        separate_approval_allowed: true}), {status: 200});
     },
   });
   assert.equal(result.action, "allow_once");
@@ -55,22 +61,46 @@ test("classifier approval helper forwards only bounded redacted identity", async
       intent_fingerprint: "intent_v1_family",
       invocation_fingerprint: "invocation_v1_exact",
       basis: "semantic_threshold_not_met",
+      required_authority: "complete_structural_evidence_or_separate_approval",
+      reformulation_allowed: true,
+      exact_invocation_retry_allowed: false,
+      separate_approval_allowed: true,
     }), {status: 200}),
   });
   assert.equal(routed.action, "rework");
 });
 
-test("classifier approval helper fails closed on absent and mismatched response identities", async () => {
-  assert.equal((await requestClassifierApproval({...input, classifier_receipt: {
-    ...input.classifier_receipt, invocation_fingerprint: null,
-  }})).action, "deny");
+test("classifier approval helper rejects ineligible or incomplete gateway receipts", async () => {
+  for (const classifierReceipt of [
+    {...input.classifier_receipt, invocation_fingerprint: null},
+    {...input.classifier_receipt, final_denial_basis: "workflow_capability_write_denied"},
+    {...input.classifier_receipt, final_denial_basis: "classifier_policy_low_local"},
+    {...input.classifier_receipt, required_authority: "BoundedLocalExecution"},
+    {...input.classifier_receipt, reformulation_allowed: false},
+    {...input.classifier_receipt, exact_invocation_retry_allowed: true},
+    {...input.classifier_receipt, separate_approval_allowed: false},
+  ]) {
+    assert.deepEqual(await requestClassifierApproval({...input, classifier_receipt: classifierReceipt}), {
+      schema: "statewright/classifier-approval/v1",
+      action: "deny",
+      reason: "invalid_redacted_classifier_receipt",
+    });
+  }
+});
+
+test("classifier approval helper fails closed on mismatched response identities", async () => {
   for (const mismatch of [
+    {schema: "statewright/classifier-approval/v2"},
     {thread_id: "thread-other"},
     {run_id: "run-other"},
     {state: "validate"},
     {intent_fingerprint: "intent_v1_other"},
     {invocation_fingerprint: "invocation_v1_other"},
     {basis: "classifier_policy_low_local"},
+    {required_authority: "BoundedLocalExecution"},
+    {reformulation_allowed: false},
+    {exact_invocation_retry_allowed: true},
+    {separate_approval_allowed: false},
   ]) {
     await assert.rejects(() => requestClassifierApproval(input, {
       environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
@@ -79,8 +109,25 @@ test("classifier approval helper fails closed on absent and mismatched response 
         schema: "statewright/classifier-approval/v1", action: "allow_once",
         thread_id: "thread-one", run_id: "run-one", state: "implement",
         intent_fingerprint: "intent_v1_family", invocation_fingerprint: "invocation_v1_exact",
-        basis: "semantic_threshold_not_met", ...mismatch,
+        basis: "semantic_threshold_not_met",
+        required_authority: "complete_structural_evidence_or_separate_approval",
+        reformulation_allowed: true, exact_invocation_retry_allowed: false,
+        separate_approval_allowed: true, ...mismatch,
       }), {status: 200}),
     }), /identity_mismatch/);
   }
+});
+
+test("classifier approval helper rejects unsupported actions and non-loopback runtimes", async () => {
+  await assert.rejects(() => requestClassifierApproval(input, {
+    environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
+    readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "secret"}),
+    fetch: async () => new Response(JSON.stringify({
+      schema: "statewright/classifier-approval/v1", action: "approve_forever",
+    }), {status: 200}),
+  }), /invalid_action/);
+  await assert.rejects(() => requestClassifierApproval(input, {
+    environment: {LOCAL_MODELS_RUN_DIR: "/runtime"},
+    readFile: async () => JSON.stringify({proxyUrl: "wss://example.invalid", proxyToken: "secret"}),
+  }), /not_loopback/);
 });

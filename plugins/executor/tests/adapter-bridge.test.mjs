@@ -192,6 +192,7 @@ test("bridge authenticates adapters and preserves one executor identity", async 
 
 test("bridge counts repeated classifier intent without retaining tool payloads", async () => {
   const telemetry = [];
+  let invocation = 0;
   const client = {
     async call(name) {
       if (name === "statewright_get_state") return { run_id: "run", state: "implement" };
@@ -201,7 +202,12 @@ test("bridge counts repeated classifier intent without retaining tool payloads",
         state: "implement",
         risk_assessment: {
           intent_fingerprint: "intent_v1_redacted",
+          invocation_fingerprint: `invocation_v1_${++invocation}`,
           final_denial_basis: "incomplete_structural_evidence",
+          required_authority: "complete_structural_evidence_or_separate_approval",
+          reformulation_allowed: true,
+          exact_invocation_retry_allowed: false,
+          separate_approval_allowed: true,
         },
       };
     },

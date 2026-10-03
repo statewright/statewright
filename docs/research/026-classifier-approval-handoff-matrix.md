@@ -107,6 +107,9 @@ runtime context. No guessed exact-request cause is treated as fact.
 | Pipeline integration | All optional handlers return `NotHandled` for a pass-through protocol class | Forward the original request/reply unchanged; do not manufacture approval | Provider unclaimed-reply forwarding behavior; dedicated shared-pipeline fixture remains follow-on |
 | Pipeline integration | All handlers return `NotHandled` for protected classifier approval | Deny as `unsupported_approval_request`; never infer approval from silence | Classifier endpoint integration test |
 | Pipeline integration | Required durable transition handler cannot answer | Keep the goal parked and surface an error; do not fall through or resume | Provider transition-barrier behavior; dedicated shared-pipeline fixture remains follow-on |
+| Codex host adapter | Classifier denial is eligible for human approval | `PreToolUse` remains a denial; presentation uses an explicit App Server elicitation request, never `permissionDecision: "ask"` | Codex executor-bridge assertion plus companion controller protocol test |
+| Host conformance | Host-native policy or another plugin denies before/around Praetorian | Preserve the host denial; the internal chain cannot override it | Required per-host runtime fixture; documentation alone is not a pass |
+| Host conformance | Adapter lacks a proven intercept/hold/prompt/resume path | Report the protected action as unsupported; do not advertise approval parity | Required per-host negative fixture; not implemented for unsupported modes |
 | Lifecycle | Interrupted/resumed provider | Pending request denied on disconnect; authority is not persisted | Proxy disconnect test |
 | Lifecycle | Terminal blocked workflow | Approval path does not resume it | Architectural boundary; no automatic recovery claim |
 
@@ -153,6 +156,43 @@ The current narrow fix remains in the existing Statewright hook and
 `codex-local-models` native host. Moving it now would create a second packaging
 and deployment problem before the repaired lifecycle has live conformance
 evidence. No parallel “shared approval” plugin or product identity is needed.
+
+### Host capability envelope
+
+Praetorian's first-handled priority chain is internal to the adapter-owned
+request after that adapter has legitimately intercepted or parked it. It does
+not replace the host's native policy composition and cannot promise to override
+a host-native rule or another plugin that denies or short-circuits first. An
+internal `Allow` means only that Praetorian has approved its exact bound request;
+the host may still deny it, and an adapter must preserve that denial.
+
+The cross-host research accepted for this design is capability-graded:
+
+| Host surface | Documented behavior | Praetorian implication |
+| --- | --- | --- |
+| Codex `PreToolUse` | `permissionDecision: "ask"` is parsed but unsupported; Codex reports the hook failure and continues the tool call. `PermissionRequest` runs only when Codex is already about to ask for approval and may decide or decline to decide. | Never map Statewright classifier uncertainty to a magical `PreToolUse` ask. The current narrow path keeps the hook denial in place and uses the separately implemented App Server elicitation protocol owned by the local host. |
+| Cursor generic `preToolUse` | `ask` is accepted by the schema but not enforced. Shell- and MCP-specific pre-execution hooks support `ask`. Cursor merges all matching hook decisions as deny over ask over allow. | A Cursor adapter must select and prove the action-specific supported surface. Praetorian cannot overrule another source's deny, and generic-hook coverage cannot be advertised as interactive approval. |
+| Claude settings `PreToolUse` | Matching hooks run concurrently and decisions compose as deny over defer over ask over allow. | Praetorian may participate only within that host composition; its allow cannot erase a competing deny. Interactive versus non-interactive `defer` behavior must be tested separately. |
+| Claude Mods | Mods form a `next()` middleware chain; a handler may answer without calling `next`, preventing later mods and Claude's own behavior from running. Managed-settings `PreToolUse` denial occurs before mods and is final. | A Mods adapter must record its chain position and prove that the protected call reaches it. An earlier short-circuit or managed denial is authoritative, not a Praetorian failure that may be retried through another surface. |
+
+Sources checked 2026-10-02: [Codex hooks](https://learn.chatgpt.com/docs/hooks),
+[Cursor hooks](https://prod.cursor.com/docs/hooks), [Claude hooks](https://code.claude.com/docs/en/hooks),
+and [Claude Mods events](https://code.claude.com/docs/en/plugins/mods/events).
+These vendor contracts bound the design; they do not establish the cause of the
+Nomad incident or prove any installed adapter's live behavior.
+
+The on-disk Homebrew command resolved read-only to `/opt/homebrew/bin/codex`
+(a link to `../lib/node_modules/@openai/codex/bin/codex.js`) and reported
+`codex-cli 0.160.0`. No restart or installation occurred. This is artifact
+provenance only: it does not prove the version already loaded by the running
+Nomad App Server, which still requires process/runtime evidence.
+
+For a sensitive corporate-policy effect, an adapter is eligible to claim
+enforcement only after proving interception, durable hold or park, authorized
+human presentation, exact response binding, and single-use resume/release on
+the actual supported runtime. A surface missing any required capability must
+publish that limitation as `unsupported` (or advisory where explicitly
+designed), rather than inheriting another host's coverage or claiming parity.
 
 The classifier rule remains gateway policy. The gateway alone decides whether
 an uncertain invocation is eligible for separate approval and emits the

@@ -522,6 +522,8 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     }, environment);
     assert.equal(classifierDenied.status, 0, classifierDenied.stderr);
     const classifierOutput = JSON.parse(classifierDenied.stdout).hookSpecificOutput;
+    assert.equal(classifierOutput.permissionDecision, "deny",
+      "classifier rework must remain a PreToolUse denial, not an unsupported ask");
     assert.match(classifierOutput.permissionDecisionReason, /^Statewright guard: denied/);
     assert.match(classifierOutput.permissionDecisionReason, /could not prove a safe local effect/);
     assert.match(classifierOutput.permissionDecisionReason, /System One signals: read-only 4%, write 96%, destructive 1%, external 1%/);
@@ -563,13 +565,17 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     const classifierSecond = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id, tool_name: "classifier_denied_two", tool_input: {command: "private-input-sentinel"},
     }, environment);
-    assert.match(JSON.parse(classifierSecond.stdout).hookSpecificOutput.permissionDecisionReason,
+    const classifierSecondOutput = JSON.parse(classifierSecond.stdout).hookSpecificOutput;
+    assert.equal(classifierSecondOutput.permissionDecision, "deny",
+      "classifier rework must not rely on PreToolUse ask to display a prompt");
+    assert.match(classifierSecondOutput.permissionDecisionReason,
       /Rework attempt 2\/2/);
     const classifierApproved = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id, tool_name: "classifier_denied_three", tool_input: {command: "private-input-sentinel"},
     }, environment);
     const approvedOutput = JSON.parse(classifierApproved.stdout).hookSpecificOutput;
     assert.equal(approvedOutput.permissionDecision, undefined);
+    assert.notEqual(approvedOutput.permissionDecision, "ask");
     assert.match(approvedOutput.additionalContext, /Human approval granted/);
     assert.equal(classifierApproval.requests.length, 3);
     assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-(command|input)-sentinel/);

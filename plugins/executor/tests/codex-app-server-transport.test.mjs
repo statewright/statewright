@@ -16,6 +16,7 @@ import {
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
+import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
@@ -607,6 +608,16 @@ test("only successful terminal or deactivate Statewright completions request res
   }
   assert.equal(terminalStatewrightCompletion(item("statewright_deactivate", { deactivated: true })).kind, "deactivated");
   assert.equal(terminalStatewrightCompletion(item("statewright_pause", { paused: true })), null);
+  for (const type of ["mcpToolCall", "McpToolCall"]) {
+    const compact = {transitioned: true, from: "localize", to: "blocked", requires_approval: false,
+      approval_message: null, transition_count: 2, usage: null};
+    const parsed = terminalStatewrightCompletion(item("statewright_transition", compact, {type}));
+    assert.equal(parsed.kind, "transition", "compact success is a hint, never proof of finality");
+    assert.equal(parsed.state, null);
+    for (const status of ["failed", "aborted", "inProgress"]) {
+      assert.equal(terminalStatewrightCompletion(item("statewright_transition", compact, {type, status})), null);
+    }
+  }
   assert.equal(terminalStatewrightCompletion(item("statewright_transition", {
     state_snapshot: { state: "implement", is_final: false },
   })), null);
@@ -787,7 +798,8 @@ test("App Server proxy restores the captured route after the authoritative workf
   }
 });
 
-test("App Server applies a confirmed terminal restoration without waiting for another user turn", async () => {
+for (const scenario of ["snapshot", "compact", "saved-capitalized", "no-item", "later-turn", "nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "late-manual", "deactivate", "failed-deactivate"])
+test(`App Server restores the original native settings at turn end: ${scenario}`, async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
   let upstreamSocket;
@@ -806,7 +818,7 @@ test("App Server applies a confirmed terminal restoration without waiting for an
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     approvalService: {
-      getState: async () => state,
+      getState: async () => { if (state === "unavailable") throw new Error("fixture gateway unavailable"); return state; },
       restore: async () => null,
     },
     takePendingRoute: async () => {
@@ -855,22 +867,71 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
 
+    let ownedTurnId = "turn-immediate";
+    if (scenario === "later-turn") {
+      upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+        turn: {id: ownedTurnId, status: "completed", items: []}}}));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      client.send(JSON.stringify({id: 4, method: "turn/start", params: {
+        threadId: route.session_id, model: "gpt-5.6-terra", effort: "medium", input: [],
+      }}));
+      assert.equal((await receive("later native turn without route marker").catch(error => {
+        assert.fail(`${error.message}; protocol=${JSON.stringify(errors)}`);
+      })).method, "turn/start");
+      ownedTurnId = "turn-later";
+      upstreamSocket.send(JSON.stringify({id: 4, result: {turn: {id: ownedTurnId}}}));
+    }
     state = { ...state, state: "complete", is_final: true };
-    upstreamSocket.send(JSON.stringify({ method: "item/started", params: {
+    if (scenario === "nonterminal") state = {...state, state: "validate", is_final: false};
+    if (["foreign-server", "deactivate", "failed-deactivate"].includes(scenario)) state = null;
+    if (scenario === "wrong-run") state = {...state, run_id: "another-run"};
+    if (scenario === "wrong-session") state = {...state, run_session_id: "another-session"};
+    if (scenario === "unavailable") state = "unavailable";
+    if (scenario === "manual") {
+      client.send(JSON.stringify({id: 3, method: "thread/settings/update", params: {
+        threadId: route.session_id, model: "gpt-6-astra", effort: "high",
+      }}));
+      assert.equal((await receive("manual settings")).method, "thread/settings/update");
+      upstreamSocket.send(JSON.stringify({id: 3, result: {}}));
+      upstreamSocket.send(JSON.stringify({method: "thread/settings/updated", params: {
+        threadId: route.session_id, threadSettings: {model: "gpt-6-astra", modelProvider: "openai", effort: "high"},
+      }}));
+    }
+    if (scenario === "snapshot") upstreamSocket.send(JSON.stringify({ method: "item/started", params: {
       threadId: route.session_id, turnId: "turn-immediate", item: {
         id: "terminal-item", type: "mcpToolCall", status: "inProgress", server: "statewright",
         tool: "statewright_transition",
       },
     } }));
-    upstreamSocket.send(JSON.stringify({ method: "item/completed", params: {
-      threadId: route.session_id, turnId: "turn-immediate", item: {
-        id: "terminal-item", type: "mcpToolCall", status: "completed", server: "statewright",
-        tool: "statewright_transition",
-        result: { structuredContent: { state_snapshot: {
-          run_id: route.run_id, run_session_id: route.run_session_id, state: "complete", is_final: true,
-        } } },
+    const result = scenario === "snapshot" ? {state_snapshot: state}
+      : ["deactivate", "foreign-server", "failed-deactivate"].includes(scenario) ? {deactivated: true}
+      : {transitioned: true, from: "implement", to: "complete", requires_approval: false,
+          approval_message: null, transition_count: 1, usage: null};
+    const completedTurnId = scenario === "foreign-turn" ? "unseen-turn" : ownedTurnId;
+    if (scenario !== "no-item") upstreamSocket.send(JSON.stringify({ method: "item/completed", params: {
+      threadId: route.session_id, turnId: completedTurnId, item: {
+        id: "terminal-item", type: scenario === "saved-capitalized" ? "McpToolCall" : "mcpToolCall",
+        status: scenario === "failed-deactivate" ? "failed" : "completed",
+        server: scenario === "foreign-server" ? "other-server" : "statewright",
+        tool: ["deactivate", "failed-deactivate", "foreign-server"].includes(scenario) ? "statewright_deactivate" : "statewright_transition",
+        result: {structuredContent: result},
       },
     } }));
+    upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+      turn: {id: completedTurnId, status: "completed", items: []}}}));
+    if (["nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "failed-deactivate"].includes(scenario)) {
+      const unexpected = [];
+      const record = raw => unexpected.push(JSON.parse(String(raw)));
+      upstreamSocket.on("message", record);
+      await new Promise(resolve => setTimeout(resolve, 75));
+      upstreamSocket.off("message", record);
+      assert(!unexpected.some(request => request.method === "thread/settings/update"), JSON.stringify(unexpected));
+      assert(!injected.some(receipt => receipt.route?.restored_original));
+      if (["wrong-run", "wrong-session", "unavailable"].includes(scenario)) {
+        assert(errors.some(error => /authoritative final run|fixture gateway unavailable/.test(error.message)), JSON.stringify(errors));
+      }
+      return;
+    }
     let restoration = null;
     for (let attempt = 0; attempt < 20 && !restoration; attempt++) {
       const request = await receive("terminal restoration activity");
@@ -890,6 +951,13 @@ test("App Server applies a confirmed terminal restoration without waiting for an
       },
     });
     upstreamSocket.send(JSON.stringify({ id: restoration.id, result: {} }));
+    if (scenario === "late-manual") {
+      client.send(JSON.stringify({id: 8, method: "thread/settings/update", params: {
+        threadId: route.session_id, model: "gpt-6-astra", effort: "high",
+      }}));
+      assert.equal((await receive("new manual settings during restore confirmation")).method, "thread/settings/update");
+      upstreamSocket.send(JSON.stringify({id: 8, result: {}}));
+    }
     upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
       threadId: route.session_id, threadSettings: {
         model: "gpt-5.6-sol", modelProvider: "openai", effort: null, serviceTier: "priority",
@@ -902,14 +970,94 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     for (let attempt = 0; attempt < 50 && confirmed.length < 2; attempt++) {
       await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
     }
+    if (scenario === "late-manual") {
+      assert.equal(confirmed.at(-1).confirmed, false);
+      assert.equal(confirmed.at(-1).reason, "restoration_owner_changed");
+      return;
+    }
     assert.equal(injected.at(-1).route.restored_original, true);
     assert.equal(confirmed.at(-1).confirmed, true);
     assert.deepEqual(errors, []);
+    const restoredCount = confirmed.length;
+    upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+      turn: {id: completedTurnId, status: "completed", items: []}}}));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(confirmed.length, restoredCount, "a replay cannot consume restoration twice");
   } finally {
     client.terminate();
     await proxy.close();
     for (const socket of upstream.clients) socket.terminate();
     await new Promise(resolveClose => upstream.close(resolveClose));
+  }
+});
+
+for (const scenario of ["final", "pending-inactive", "partial-inactive", "paused", "manual", "wrong-run", "unavailable", "unknown-effort"])
+test(`App Server reconciles a persisted origin on resume: ${scenario}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-origin-resume-"));
+  const binding = {thread_id: "thread-resume", root_session_id: "thread-resume", client_id: "client-resume",
+    run_id: "run-resume", run_session_id: "session-resume"};
+  const origin = {model: "openai-codex/gpt-5.6-sol", effort: null, service_tier: "priority"};
+  const routed = {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"};
+  const first = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+  await first.capture(binding, origin);
+  await first.confirmRoute(binding, routed);
+  if (["pending-inactive", "partial-inactive", "manual"].includes(scenario)) await first.prepareRestore(binding, routed);
+  if (scenario === "manual") await first.relinquish(binding.thread_id, ["model"], {model: origin.model});
+  const store = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+  const state = ["pending-inactive", "partial-inactive", "paused", "manual"].includes(scenario) ? null
+    : {run_id: scenario === "wrong-run" ? "foreign-run" : binding.run_id,
+        run_session_id: binding.run_session_id, state: "complete", is_final: true};
+  const upstream = new WebSocketServer({host: "127.0.0.1", port: 0});
+  await once(upstream, "listening");
+  const requests = [], confirmed = [], errors = [];
+  upstream.on("connection", socket => socket.on("message", raw => {
+    const request = JSON.parse(String(raw));
+    requests.push(request);
+    let result = {};
+    if (request.method === "thread/resume") result = {thread: {id: binding.thread_id}, modelProvider: "openai",
+      model: ["partial-inactive", "manual"].includes(scenario) ? "gpt-5.6-sol" : "gpt-5.6-terra",
+      ...(scenario === "unknown-effort" ? {} : {reasoningEffort: "medium"}), serviceTier: "priority"};
+    if (request.method === "thread/read") result = {thread: {id: binding.thread_id, status: {type: "idle"}}};
+    socket.send(JSON.stringify({id: request.id, result}));
+    if (request.method === "thread/settings/update") socket.send(JSON.stringify({method: "thread/settings/updated",
+      params: {threadId: binding.thread_id, threadSettings: {model: request.params.model,
+        modelProvider: "openai", effort: request.params.effort, serviceTier: request.params.serviceTier}}}));
+  }));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`, workflowOriginStore: store,
+    approvalService: {restore: async () => null, getState: async () => {
+      if (scenario === "unavailable") throw new Error("fixture gateway unavailable");
+      return state;
+    }},
+    onRouteConfirmed: async receipt => confirmed.push(receipt), onProtocolError: async error => errors.push(error),
+  });
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  try {
+    client.send(JSON.stringify({id: 1, method: "thread/resume", params: {threadId: binding.thread_id}}));
+    const response = JSON.parse(String(await once(client, "message")));
+    assert(!response.error);
+    const restores = () => requests.filter(request => request.method === "thread/settings/update");
+    if (["final", "pending-inactive", "partial-inactive"].includes(scenario)) {
+      for (let attempt = 0; attempt < 100 && !confirmed.length; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal(confirmed.length, 1, JSON.stringify(errors));
+      assert.equal(confirmed[0].confirmed, true);
+      assert.equal(restores().length, 1);
+      assert.equal(restores()[0].params.model, "gpt-5.6-sol");
+      assert(Object.hasOwn(restores()[0].params, "effort"));
+      assert.equal(restores()[0].params.effort, null);
+      assert.equal(await store.inspect(binding.thread_id), null);
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      assert.equal(restores().length, 0, JSON.stringify(errors));
+      assert.equal(Boolean(await store.inspect(binding.thread_id)), scenario !== "manual");
+    }
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise(resolve => upstream.close(resolve));
+    await rm(root, {recursive: true, force: true});
   }
 });
 

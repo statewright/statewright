@@ -207,7 +207,7 @@ test("new workflow boundaries supersede stale routes and deactivation drains the
   }
 });
 
-test("pause retains enforcement and route provenance without emitting a terminal restore", async () => {
+test("successful pause stops hook continuation without touching App Server model provenance, and resume rearms enforcement", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-pause-"));
   const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-pause-route-"));
   const environment = { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir };
@@ -219,15 +219,33 @@ test("pause retains enforcement and route provenance without emitting a terminal
         model: "openai-codex/gpt-5.6-terra", thinking_level: "medium", allowed_tools: ["Read"], transitions: [],
       } }) }, environment);
     assert.equal(loaded.status, 0, loaded.stderr);
+    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
+    const activePath = resolve(home, ".statewright", "sessions", sessionDir, ".active");
+    const originPath = resolve(controlDir, "app-server-origin.json");
+    const origin = JSON.stringify({model: "openai-codex/gpt-5.6-sol", effort: "high", run_id: "pause-run"});
+    await writeFile(originPath, origin);
+    const failed = await invokeHook({ session_id: "pause-thread",
+      tool_name: "mcp__statewright__statewright_pause", tool_response: {isError: true} }, environment);
+    assert.equal(failed.status, 0, failed.stderr);
+    await access(activePath);
     const paused = await invokeHook({ session_id: "pause-thread",
       tool_name: "mcp__statewright__statewright_pause", tool_response: JSON.stringify({ paused: true }) }, environment);
     assert.equal(paused.status, 0, paused.stderr);
-    const route = JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8"));
-    assert.equal(route.run_id, "pause-run");
-    assert.equal(route.run_session_id, "pause-run-session");
-    assert.equal(route.restore_original, undefined);
-    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
-    await access(resolve(home, ".statewright", "sessions", sessionDir, ".active"));
+    await assert.rejects(access(activePath), {code: "ENOENT"});
+    assert.equal(await readFile(originPath, "utf8"), origin);
+    assert.deepEqual((await readdir(controlDir)).filter(name => name.endsWith(".route.json")), []);
+    const stopped = await invokeHook({session_id: "pause-thread"}, environment, "stop");
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.equal(stopped.stdout.trim(), "");
+    const resumed = await invokeHook({session_id: "pause-thread",
+      tool_name: "mcp__statewright__statewright_load_workflow", tool_response: {state_snapshot: {
+        workflow: "routing-test", state: "validate", run_id: "pause-run", run_session_id: "pause-run-session",
+        model: "openai-codex/gpt-5.6-terra", thinking_level: "high", allowed_tools: ["Read"], transitions: [],
+      }}}, environment);
+    assert.equal(resumed.status, 0, resumed.stderr);
+    await access(activePath);
+    assert.equal(JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8")).state, "validate");
+    assert.equal(await readFile(originPath, "utf8"), origin);
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(controlDir, { recursive: true, force: true });

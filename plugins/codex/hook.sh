@@ -1330,9 +1330,14 @@ case "$ENDPOINT" in
         fi
         ;;
       pause)
-        # Pausing retains the run and its captured route origin. It is not a
-        # terminal lifecycle event and must not restore or relinquish routing.
-        :
+        # Pause releases hook enforcement, as before model restoration was
+        # introduced. The App Server's origin store has a separate lifetime.
+        if ! tool_response_is_error "$TOOL_RESULT"; then
+          PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
+          if printf '%s' "$PARSED" | jq -e '.paused == true' >/dev/null 2>&1; then
+            clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+          fi
+        fi
         ;;
       transition)
         # Read previous state before refreshing

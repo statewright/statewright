@@ -23,7 +23,7 @@ function structuredToolResult(result) {
 }
 
 export function localStatewrightLifecycle(item) {
-  if (item?.type !== "mcpToolCall") return null;
+  if (String(item?.type ?? "").toLowerCase() !== "mcptoolcall") return null;
   const rawTool = String(item.tool ?? "");
   const server = String(item.server ?? "");
   const namespacedLocalTool = rawTool.startsWith("mcp__statewright__statewright_")
@@ -51,6 +51,9 @@ export function terminalStatewrightCompletion(item) {
   if (["statewright_transition", "statewright_force_state"].includes(tool)) {
     const state = value?.state_snapshot ?? value?.state ?? value;
     if (state?.is_final === true) return { kind: "terminal", ...lifecycle, state };
+    if (value?.transitioned === true && typeof value?.to === "string") {
+      return { kind: "transition", ...lifecycle, state: null };
+    }
   }
   return null;
 }
@@ -443,6 +446,7 @@ export async function startCodexAppServerRouteProxy({
         await checkOwner();
         const route = reservation?.route ?? reservation;
         if (!route) return { route: { session_id: threadId, run_id: state.run_id,
+          ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
           state: state.state, model: state.model, effort: state.thinking_level } };
         // A route queued before the human decision cannot override the approved
         // destination. Retire only this exact run's known origin; all other
@@ -475,6 +479,7 @@ export async function startCodexAppServerRouteProxy({
       if (!reservation) {
         if (!authoritative || authoritative.is_final === true) return null;
         return { route: { session_id: threadId, run_id: authoritative.run_id,
+          ...(authoritative.run_session_id ? {run_session_id: authoritative.run_session_id} : {}),
           state: authoritative.state, model: authoritative.model, effort: authoritative.thinking_level,
           ...(Array.isArray(authoritative.model_ladder) ? { model_ladder: authoritative.model_ladder } : {}) } };
       }
@@ -568,7 +573,7 @@ export async function startCodexAppServerRouteProxy({
     const pendingManualSettings = new Map();
     const internalRequests = new Map();
     const switchingThreads = new Set();
-    const lifecycleRequests = new Map();
+    const terminalCompletions = new Map();
     const restoreInFlight = new Set();
     const routeConfirmationWaiters = new Map();
     const stateNames = new Map();
@@ -594,12 +599,11 @@ export async function startCodexAppServerRouteProxy({
       await forwardPayload(upstream, JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       return response;
     };
-    const lifecycleKey = (threadId, turnId, itemId) => JSON.stringify([threadId, turnId, itemId]);
     const bindingKey = binding => JSON.stringify([
       binding?.thread_id, binding?.run_id, binding?.run_session_id,
       binding?.client_id, binding?.root_session_id,
     ]);
-    const waitForRouteConfirmation = (threadId, receipt) => new Promise((resolveConfirmation, rejectConfirmation) => {
+    const waitForRouteConfirmation = (threadId, receipt, checkOwner) => new Promise(resolveConfirmation => {
       const existing = routeConfirmationWaiters.get(threadId);
       if (existing) {
         rejectConfirmation(new Error("Statewright route confirmation is already pending for this thread."));
@@ -607,10 +611,11 @@ export async function startCodexAppServerRouteProxy({
       }
       const timer = setTimeout(() => {
         routeConfirmationWaiters.delete(threadId);
-        rejectConfirmation(new Error("Codex App Server did not confirm the restored model settings."));
+        resolveConfirmation({confirmed: false, reason: "settings_confirmation_timeout"});
       }, 12_000);
       routeConfirmationWaiters.set(threadId, {
         receipt,
+        checkOwner,
         resolve: value => { clearTimeout(timer); routeConfirmationWaiters.delete(threadId); resolveConfirmation(value); },
       });
     });
@@ -710,6 +715,16 @@ export async function startCodexAppServerRouteProxy({
       const activityEpoch = lifecycle.activityEpoch;
       const release = await acquireRouteLease();
       try {
+        // A native turn can end without any projected MCP item. The execution
+        // boundary is authoritative; tool result formatting is only a hint.
+        if (terminal.kind === "reconcile" || terminal.kind === "reconnect") {
+          const state = await approvalService?.getState?.(threadId);
+          if (state?.is_final) terminal = {kind: "terminal", state};
+          else if (terminal.kind === "reconnect" && state === null
+              && (await workflowOriginStore.inspect(threadId))?.status === "restore_pending") {
+            terminal = {kind: "deactivated"};
+          } else return;
+        }
         const assertOwner = async () => {
           const currentBinding = await workflowOriginStore.binding(threadId);
           if (!currentBinding || !sameWorkflowRouteBinding(currentBinding, originalBinding)) {
@@ -718,11 +733,14 @@ export async function startCodexAppServerRouteProxy({
           if (operatorActivity.get(threadId) !== activityEpoch) {
             throw new Error("Statewright terminal restoration was superseded by newer native activity.");
           }
+          if (lifecycle.turnId ? turnOrigins.get(threadId)?.turnId !== lifecycle.turnId : activeThreads.has(threadId)) {
+            throw new Error("Statewright terminal restoration belongs to a superseded native turn.");
+          }
           const authoritative = await approvalService?.getState?.(threadId);
-          if (terminal.kind === "terminal") {
+          if (terminal.kind === "terminal" || terminal.kind === "transition") {
             const state = terminal.state;
-            if (!state?.is_final || state.run_id !== originalBinding.run_id
-                || state.run_session_id && state.run_session_id !== originalBinding.run_session_id
+            if ((state && (!state.is_final || state.run_id !== originalBinding.run_id
+                || state.run_session_id && state.run_session_id !== originalBinding.run_session_id))
                 || !authoritative?.is_final || authoritative.run_id !== originalBinding.run_id
                 || authoritative.run_session_id && authoritative.run_session_id !== originalBinding.run_session_id) {
               throw new Error("Statewright terminal restoration does not match the authoritative final run.");
@@ -796,7 +814,7 @@ export async function startCodexAppServerRouteProxy({
         await switchProvider(threadId, applied.receipt);
         await assertOwner();
         receipts.set(threadId, applied.receipt);
-        const confirmation = waitForRouteConfirmation(threadId, applied.receipt);
+        const confirmation = waitForRouteConfirmation(threadId, applied.receipt, assertOwner);
         try {
           await internalRpc("thread/settings/update", {
             threadId,
@@ -1012,10 +1030,12 @@ export async function startCodexAppServerRouteProxy({
             collaboration?.model ?? message.params.model,
             activeProviders.get(String(message.params.threadId)),
           );
-          if (axes.includes("effort")) changes.effort = collaboration?.reasoning_effort ?? message.params.effort;
+          if (axes.includes("effort")) changes.effort = collaboration && Object.hasOwn(collaboration, "reasoning_effort")
+            ? collaboration.reasoning_effort : message.params.effort;
           if (axes.includes("service_tier")) changes.service_tier = message.params.serviceTier;
           if (axes.length) pendingManualSettings.set(rpcIdKey(message.id), {
             threadId: String(message.params.threadId), axes, changes,
+            binding: await workflowOriginStore.binding(settingsThreadId),
           });
         }
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
@@ -1067,7 +1087,8 @@ export async function startCodexAppServerRouteProxy({
           await checkReleaseOwner();
           const state = approvedRelease?.state;
           let route = pendingRoute?.route ?? pendingRoute ?? (state && { session_id: threadId,
-            run_id: state.run_id, state: state.state, model: state.model, effort: state.thinking_level });
+            run_id: state.run_id, ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
+            state: state.state, model: state.model, effort: state.thinking_level });
           if (state && (route?.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
               || !route.model || route.model !== state.model || route.effort !== state.thinking_level)) {
             const error = new Error("Approval release lacks the authoritative destination route");
@@ -1158,7 +1179,12 @@ export async function startCodexAppServerRouteProxy({
             acknowledgeRoute = pendingRoute?.ack ?? null;
           }
           payload = JSON.stringify(message.method === "turn/start" ? applied.message : message);
-          if (provisionalTurn) provisionalTurn.model = routeModel(applied.message.params?.model);
+          if (provisionalTurn) {
+            provisionalTurn.model = routeModel(applied.message.params?.model);
+            provisionalTurn.binding = originBinding ?? await workflowOriginStore.binding(threadId);
+            provisionalTurn.activityEpoch = requestEpoch;
+            await checkReleaseOwner();
+          }
           if (applied.receipt) {
             routeReceipt = applied.receipt;
             acknowledgeRoute = pendingRoute?.ack ?? null;
@@ -1294,7 +1320,8 @@ export async function startCodexAppServerRouteProxy({
         const manualSettings = responseKey === null ? null : pendingManualSettings.get(responseKey);
         if (manualSettings) {
           pendingManualSettings.delete(responseKey);
-          if (!notification.error) await workflowOriginStore.relinquish(
+          if (!notification.error && sameWorkflowRouteBinding(manualSettings.binding,
+              await workflowOriginStore.binding(manualSettings.threadId))) await workflowOriginStore.relinquish(
             manualSettings.threadId,
             manualSettings.axes,
             manualSettings.changes,
@@ -1363,6 +1390,11 @@ export async function startCodexAppServerRouteProxy({
             removeActivity(pendingTurn.threadId, pendingTurn.reason);
             await sendPresentation(presentation.cancel(pendingTurn.threadId, responseId));
           } else {
+            if (notification.result?.turn?.id) turnOrigins.set(pendingTurn.threadId, {
+              turnId: notification.result.turn.id, binding: pendingTurn.binding,
+              activityEpoch: pendingTurn.activityEpoch,
+              provider: activeProviders.get(pendingTurn.threadId), model: pendingTurn.model,
+            });
             if (pendingTurn.model) {
               activeModels.set(pendingTurn.threadId, pendingTurn.model);
               if (turnOrigins.get(pendingTurn.threadId)?.turnId === notification.result?.turn?.id) turnOrigins.get(pendingTurn.threadId).model = pendingTurn.model;
@@ -1377,6 +1409,12 @@ export async function startCodexAppServerRouteProxy({
           // Pane labels are display-only. A local metadata write must never
           // turn a valid upstream resume into a failed native interaction.
           if (threadId) await onThreadResumed({ threadId }).catch(() => {});
+          if (threadId && !notification.error) {
+            const activityEpoch = operatorActivity.get(threadId);
+            const binding = await workflowOriginStore.binding(threadId);
+            if (binding) terminalRestoreHint = {threadId, terminal: {kind: "reconnect"},
+              lifecycle: {binding, activityEpoch, turnId: null}};
+          }
           payload = JSON.stringify(notification);
         }
         if (responseTo === "thread/list") {
@@ -1393,16 +1431,6 @@ export async function startCodexAppServerRouteProxy({
           payload = JSON.stringify(notification);
         }
         const statusThreadId = String(notification?.params?.threadId ?? "");
-        if (notification.method === "item/started" && statusThreadId && notification.params?.turnId
-            && notification.params?.item?.id) {
-          const lifecycle = localStatewrightLifecycle(notification.params.item);
-          if (lifecycle) {
-            const binding = await workflowOriginStore.binding(statusThreadId);
-            if (binding) lifecycleRequests.set(lifecycleKey(
-              statusThreadId, notification.params.turnId, notification.params.item.id,
-            ), { ...lifecycle, binding, activityEpoch: operatorActivity.get(statusThreadId) });
-          }
-        }
         if (notification.method === "item/completed" && statusThreadId && gate) {
           const snapshot = pendingApprovalSnapshot(notification.params.item);
           if (snapshot && turnOrigins.get(statusThreadId)?.turnId === notification.params.turnId) {
@@ -1410,12 +1438,13 @@ export async function startCodexAppServerRouteProxy({
           }
         }
         if (notification.method === "item/completed" && statusThreadId) {
-          const terminal = terminalStatewrightCompletion(notification.params.item);
-          const key = lifecycleKey(statusThreadId, notification.params.turnId, notification.params.item?.id);
-          const lifecycle = lifecycleRequests.get(key);
-          lifecycleRequests.delete(key);
-          if (terminal && lifecycle?.tool === terminal.tool) {
-            terminalRestoreHint = { threadId: statusThreadId, terminal, lifecycle };
+          const completion = terminalStatewrightCompletion(notification.params.item);
+          const origin = turnOrigins.get(statusThreadId);
+          if (completion && origin?.binding && !origin.completed
+              && origin.turnId === notification.params.turnId
+              && origin.activityEpoch === operatorActivity.get(statusThreadId)
+              && notification.params.item?.id) {
+            terminalCompletions.set(statusThreadId, {turnId: origin.turnId, terminal: completion});
           }
         }
         if (notification.method === "thread/settings/updated" && statusThreadId) {
@@ -1432,11 +1461,26 @@ export async function startCodexAppServerRouteProxy({
           if (notification.params?.status?.type === "active") addActivity(statusThreadId, "server-active");
           else activeThreads.delete(statusThreadId);
         } else if (notification?.method === "turn/started" && statusThreadId) {
-          turnOrigins.set(statusThreadId, {turnId: notification.params.turn.id,
-            provider: activeProviders.get(statusThreadId), model: activeModels.get(statusThreadId)});
+          const turnId = notification.params.turn.id;
+          if (turnOrigins.get(statusThreadId)?.turnId !== turnId) {
+            const pending = [...pendingTurnStarts.values()].find(entry => entry.threadId === statusThreadId);
+            const activityEpoch = operatorActivity.get(statusThreadId);
+            const binding = pending?.binding ?? await workflowOriginStore.binding(statusThreadId);
+            turnOrigins.set(statusThreadId, {turnId, binding, activityEpoch,
+              provider: activeProviders.get(statusThreadId), model: activeModels.get(statusThreadId)});
+          }
           addActivity(statusThreadId, "server-active");
         } else if (notification?.method === "turn/completed" && statusThreadId) {
           activeThreads.delete(statusThreadId);
+          const origin = turnOrigins.get(statusThreadId);
+          const hint = terminalCompletions.get(statusThreadId);
+          terminalCompletions.delete(statusThreadId);
+          if (origin?.binding && !origin.completed && origin.turnId === notification.params.turn?.id
+              && origin.activityEpoch === operatorActivity.get(statusThreadId)) {
+            origin.completed = true;
+            terminalRestoreHint = {threadId: statusThreadId, lifecycle: {...origin},
+              terminal: hint?.turnId === origin.turnId ? hint.terminal : {kind: "reconcile"}};
+          }
         }
         syncActivity();
         if (downstreamClosed && activeThreads.size === 0 && parkingCount === 0 && upstream.readyState === WebSocket.OPEN) upstream.close();
@@ -1450,9 +1494,19 @@ export async function startCodexAppServerRouteProxy({
         const receipt = settingsConfirmRoute(receipts.get(String(notification?.params?.threadId ?? "")), notification);
         if (receipt) {
           receipts.delete(receipt.threadId);
+          const waiter = routeConfirmationWaiters.get(receipt.threadId);
+          if (receipt.restoration?.trigger && !waiter) {
+            receipt.confirmed = false;
+            receipt.reason = "restoration_confirmation_expired";
+          }
+          if (receipt.confirmed && waiter?.checkOwner) {
+            try { await waiter.checkOwner(); }
+            catch { receipt.confirmed = false; receipt.reason = "restoration_owner_changed"; }
+          }
           if (receipt.confirmed && receipt.origin_binding) {
             if (receipt.route?.restored_original === true) {
-              await workflowOriginStore.confirmRestore(receipt.origin_binding);
+              const result = await workflowOriginStore.confirmRestore(receipt.origin_binding);
+              receipt.confirmed = result.status === "restored";
             } else {
               await workflowOriginStore.confirmRoute(receipt.origin_binding, {
                 model: receipt.route?.model,

@@ -178,7 +178,8 @@ is_valid_cached_state() {
 local_statewright_action() {
   case "$1" in
     mcp__statewright__statewright_start|mcp__plugin_statewright_statewright__statewright_start|mcp__statewright__statewright_load_workflow|mcp__plugin_statewright_statewright__statewright_load_workflow) printf 'start' ;;
-    mcp__statewright__statewright_stop|mcp__plugin_statewright_statewright__statewright_stop|mcp__statewright__statewright_deactivate|mcp__plugin_statewright_statewright__statewright_deactivate|mcp__statewright__statewright_pause|mcp__plugin_statewright_statewright__statewright_pause) printf 'stop' ;;
+    mcp__statewright__statewright_stop|mcp__plugin_statewright_statewright__statewright_stop|mcp__statewright__statewright_deactivate|mcp__plugin_statewright_statewright__statewright_deactivate) printf 'stop' ;;
+    mcp__statewright__statewright_pause|mcp__plugin_statewright_statewright__statewright_pause) printf 'pause' ;;
     mcp__statewright__statewright_transition|mcp__plugin_statewright_statewright__statewright_transition|mcp__statewright__statewright_force_state|mcp__plugin_statewright_statewright__statewright_force_state) printf 'transition' ;;
     mcp__statewright__statewright_get_state|mcp__plugin_statewright_statewright__statewright_get_state) printf 'refresh_cache' ;;
   esac
@@ -550,7 +551,7 @@ emit_native_telemetry() {
 request_interactive_route_restart() {
   local state_json="$1"
   local restore_original="${2:-false}"
-  local control_dir model effort service_tier model_ladder request_path root_session_id registration
+  local control_dir model effort service_tier model_ladder request_path root_session_id registration run_session_id
   control_dir="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}"
   [ -n "$control_dir" ] || return 0
   # One-shot Codex children may inherit a managed parent's route directory when
@@ -564,6 +565,7 @@ request_interactive_route_restart() {
     'if .version == 1 and .client_id == $client_id and (.session_id | type) == "string" then .session_id else empty end' \
     "$registration" 2>/dev/null || true)
   [ -n "$root_session_id" ] && [ "$HOOK_SESSION" = "$root_session_id" ] || return 0
+  run_session_id=$(echo "$state_json" | jq -r '.run_session_id // empty' 2>/dev/null || true)
   if [ "$restore_original" = "true" ]; then
     model=""
     effort=""
@@ -585,6 +587,7 @@ request_interactive_route_restart() {
     --arg root_session_id "$root_session_id" \
     --arg client_id "$CLIENT_ID" \
     --arg run_id "$(echo "$state_json" | jq -r '.run_id // empty' 2>/dev/null || true)" \
+    --arg run_session_id "$run_session_id" \
     --arg state "$(echo "$state_json" | jq -r '.state // empty' 2>/dev/null || true)" \
     --arg model "$model" \
     --arg effort "$effort" \
@@ -592,6 +595,7 @@ request_interactive_route_restart() {
     --argjson restore_original "$restore_original" \
     --argjson model_ladder "$model_ladder" \
     '{session_id: $session_id, root_session_id: $root_session_id, client_id: $client_id, run_id: $run_id, state: $state, model: $model, effort: $effort, model_ladder: $model_ladder}
+      + (if $run_session_id != "" then {run_session_id: $run_session_id} else {} end)
       + (if $service_tier != "" then {service_tier: $service_tier} else {} end)
       + (if $restore_original then {restore_original: true} else {} end)
       + (if $turn_id != "" then {turn_id: $turn_id} else {} end)' \
@@ -632,6 +636,23 @@ clear_local_enforcement_state() {
     "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.state_effective_at" \
     "$PROJECT_DIR/.telemetry_tool_bytes" "$PROJECT_DIR/.telemetry_tool_count" \
     "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+}
+
+restore_local_route_and_clear() {
+  local state_json="${1:-}"
+  if [ -z "$state_json" ] && [ -f "$CACHE_FILE" ]; then
+    state_json=$(cat "$CACHE_FILE" 2>/dev/null || true)
+  fi
+  # Missing provenance is a safe no-op: never invent a fallback pair. The
+  # route proxy records a typed skipped-restoration receipt when a bound
+  # marker cannot be matched to a captured origin.
+  if [ -n "$state_json" ] && is_valid_cached_state "$state_json" && state_matches_local_binding "$state_json"; then
+    clear_interactive_route_requests
+    request_interactive_route_restart "$state_json" true
+    clear_local_enforcement_state false
+  else
+    clear_local_enforcement_state
+  fi
 }
 
 reset_native_telemetry_state() {
@@ -720,7 +741,7 @@ case "$ENDPOINT" in
     FETCHED_STATE=$(fetch_local_state)
     FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
     if [ "$FETCH_KIND" = "inactive" ]; then
-      if clear_local_enforcement_state; then
+      if restore_local_route_and_clear; then
         echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[statewright] Local gateway confirms no active workflow. Stale local enforcement was reconciled for this thread."}}'
       else
         touch "$GATEWAY_UNAVAILABLE_FILE"
@@ -741,8 +762,7 @@ case "$ENDPOINT" in
     # Check for final state — auto-deactivate
     IS_FINAL=$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)
     if [ "$IS_FINAL" = "true" ]; then
-      if clear_local_enforcement_state false; then
-        request_interactive_route_restart "$STATE_JSON" true
+      if restore_local_route_and_clear "$STATE_JSON"; then
         echo "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"[statewright] Workflow complete. Final state: $CURRENT. Enforcement deactivated.\"}}"
       else
         touch "$GATEWAY_UNAVAILABLE_FILE"
@@ -1305,9 +1325,14 @@ case "$ENDPOINT" in
         else
           PARSED=$(extract_mcp_result_text "$TOOL_RESULT")
         fi
-        if printf '%s' "$PARSED" | jq -e '(.deactivated == true or .stopped == true or .paused == true)' >/dev/null 2>&1; then
-          clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+        if printf '%s' "$PARSED" | jq -e '(.deactivated == true or .stopped == true)' >/dev/null 2>&1; then
+          restore_local_route_and_clear || touch "$GATEWAY_UNAVAILABLE_FILE"
         fi
+        ;;
+      pause)
+        # Pausing retains the run and its captured route origin. It is not a
+        # terminal lifecycle event and must not restore or relinquish routing.
+        :
         ;;
       transition)
         # Read previous state before refreshing
@@ -1325,7 +1350,7 @@ case "$ENDPOINT" in
         FETCHED_STATE=$(fetch_local_state)
         FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
         if [ "$FETCH_KIND" = "inactive" ]; then
-          clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+          restore_local_route_and_clear || touch "$GATEWAY_UNAVAILABLE_FILE"
           exit 0
         fi
         if [ "$FETCH_KIND" = "active" ]; then
@@ -1425,9 +1450,14 @@ case "$ENDPOINT" in
           FETCHED_STATE=$(fetch_local_state)
           FETCH_KIND=$(printf '%s' "$FETCHED_STATE" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
           if [ "$FETCH_KIND" = "inactive" ]; then
-            clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+            restore_local_route_and_clear || touch "$GATEWAY_UNAVAILABLE_FILE"
           elif [ "$FETCH_KIND" = "active" ]; then
             STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
+            if [ "$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)" = "true" ]; then
+              emit_native_telemetry "workflow_completed" "$STATE_JSON"
+              restore_local_route_and_clear "$STATE_JSON" || touch "$GATEWAY_UNAVAILABLE_FILE"
+              exit 0
+            fi
             PREV_EPOCH=$(cat "$PROJECT_DIR/.state_epoch" 2>/dev/null || echo "0")
             AUTHORITATIVE_EPOCH=$(echo "$STATE_JSON" | jq -r '.state_epoch // empty' 2>/dev/null || true)
             echo "$STATE_JSON" > "$CACHE_FILE"
@@ -1474,7 +1504,7 @@ case "$ENDPOINT" in
         STATE_JSON=$(printf '%s' "$FETCHED_STATE" | jq -c '.state' 2>/dev/null || true)
         echo "$STATE_JSON" > "$CACHE_FILE"
       elif [ "$FETCH_KIND" = "inactive" ]; then
-        clear_local_enforcement_state || touch "$GATEWAY_UNAVAILABLE_FILE"
+        restore_local_route_and_clear || touch "$GATEWAY_UNAVAILABLE_FILE"
         exit 0
       else
         touch "$GATEWAY_UNAVAILABLE_FILE"
@@ -1483,7 +1513,11 @@ case "$ENDPOINT" in
     fi
     CURRENT=$(echo "$STATE_JSON" | jq -r '.state // empty' 2>/dev/null || true)
     [ -n "$CURRENT" ] || exit 0
-    [ "$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)" = "true" ] && exit 0
+    if [ "$(echo "$STATE_JSON" | jq -r '.is_final // false' 2>/dev/null || true)" = "true" ]; then
+      emit_native_telemetry "workflow_completed" "$STATE_JSON"
+      restore_local_route_and_clear "$STATE_JSON" || touch "$GATEWAY_UNAVAILABLE_FILE"
+      exit 0
+    fi
     [ -n "$(echo "$STATE_JSON" | jq -r '.pending_approval.approval_id // empty' 2>/dev/null || true)" ] && exit 0
     allow_stop_nudge "$STATE_JSON" || exit 0
     ITER=$(echo "$STATE_JSON" | jq -r '.iteration // 0' 2>/dev/null || true)

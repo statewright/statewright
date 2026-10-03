@@ -140,6 +140,9 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
   };
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
+    routeOwner: async id => id === threadId
+      ? { root_session_id: threadId, client_id: "fixture-client" }
+      : {},
     ...(withService ? { approvalService: service } : {}),
     takePendingRoute: async () => {
       const next = routes.shift() ?? null;

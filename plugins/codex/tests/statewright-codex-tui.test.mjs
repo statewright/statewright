@@ -196,7 +196,38 @@ test("new workflow boundaries supersede stale routes and deactivation drains the
     const stopped = await invokeHook({ session_id: "session-1", tool_name: "mcp__statewright__statewright_deactivate",
       tool_response: JSON.stringify({ deactivated: true }) }, { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir });
     assert.equal(stopped.status, 0, stopped.stderr);
-    assert.deepEqual((await readdir(controlDir)).filter(name => name.endsWith(".route.json")), []);
+    const remaining = (await readdir(controlDir)).filter(name => name.endsWith(".route.json"));
+    assert.deepEqual(remaining, ["current.route.json"]);
+    const restore = JSON.parse(await readFile(resolve(controlDir, remaining[0]), "utf8"));
+    assert.equal(restore.restore_original, true);
+    assert.equal(restore.run_id, "new-run");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(controlDir, { recursive: true, force: true });
+  }
+});
+
+test("pause retains enforcement and route provenance without emitting a terminal restore", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-tui-pause-"));
+  const controlDir = await mkdtemp(resolve(tmpdir(), "statewright-tui-pause-route-"));
+  const environment = { HOME: home, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir };
+  try {
+    await invokeHook({ session_id: "pause-thread", prompt: "start" }, environment, "user-prompt");
+    const loaded = await invokeHook({ session_id: "pause-thread", turn_id: "turn-load",
+      tool_name: "mcp__statewright__statewright_load_workflow", tool_response: JSON.stringify({ state_snapshot: {
+        workflow: "routing-test", state: "implement", run_id: "pause-run", run_session_id: "pause-run-session",
+        model: "openai-codex/gpt-5.6-terra", thinking_level: "medium", allowed_tools: ["Read"], transitions: [],
+      } }) }, environment);
+    assert.equal(loaded.status, 0, loaded.stderr);
+    const paused = await invokeHook({ session_id: "pause-thread",
+      tool_name: "mcp__statewright__statewright_pause", tool_response: JSON.stringify({ paused: true }) }, environment);
+    assert.equal(paused.status, 0, paused.stderr);
+    const route = JSON.parse(await readFile(resolve(controlDir, "current.route.json"), "utf8"));
+    assert.equal(route.run_id, "pause-run");
+    assert.equal(route.run_session_id, "pause-run-session");
+    assert.equal(route.restore_original, undefined);
+    const [sessionDir] = await readdir(resolve(home, ".statewright", "sessions"));
+    await access(resolve(home, ".statewright", "sessions", sessionDir, ".active"));
   } finally {
     await rm(home, { recursive: true, force: true });
     await rm(controlDir, { recursive: true, force: true });
@@ -678,6 +709,49 @@ if (!existsSync(marker)) {
     assert.equal(invocations.length, 2);
     assert.match(invocations[0], /-m gpt-5\.6-terra -c model_reasoning_effort="low"/);
     assert.match(invocations[1], /-m gpt-5\.6-sol -c model_reasoning_effort="high" resume session-1/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("interactive supervisor restores its original model, effort, and service tier on a bound terminal marker", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "statewright-tui-restore-"));
+  const fakeCodex = resolve(root, "fake-codex.mjs");
+  const calls = resolve(root, "calls.log");
+  try {
+    await writeFile(fakeCodex, `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const control = process.env.STATEWRIGHT_ROUTE_CONTROL_DIR;
+const countPath = join(control, "count");
+let count = 0;
+try { count = Number(readFileSync(countPath, "utf8")); } catch {}
+count += 1;
+writeFileSync(countPath, String(count));
+appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");
+writeFileSync(join(control, "codex-root-session.json"), JSON.stringify({ version: 1, session_id: "restore-thread", client_id: process.env.STATEWRIGHT_CLIENT_ID }));
+if (count === 1) {
+  writeFileSync(join(control, "route.json"), JSON.stringify({ session_id: "restore-thread", root_session_id: "restore-thread", client_id: process.env.STATEWRIGHT_CLIENT_ID, run_id: "restore-run", run_session_id: "restore-run-session", state: "implement", model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default" }));
+} else if (count === 2) {
+  writeFileSync(join(control, "terminal.route.json"), JSON.stringify({ session_id: "restore-thread", root_session_id: "restore-thread", client_id: process.env.STATEWRIGHT_CLIENT_ID, run_id: "restore-run", run_session_id: "restore-run-session", state: "complete", model: "", effort: "", restore_original: true }));
+}
+if (count < 3) {
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+  setInterval(() => {}, 1000);
+}
+`);
+    await chmod(fakeCodex, 0o755);
+    assert.equal(await run({
+      workflow: "routing-test", prompt: ["do work"], codexBin: fakeCodex,
+      fallbackModel: "gpt-5.6-sol", fallbackEffort: "high", fallbackServiceTier: "priority",
+      environment: { ...process.env, HOME: resolve(root, "home") },
+    }), 0);
+    const invocations = (await readFile(calls, "utf8")).trim().split("\n");
+    assert.equal(invocations.length, 3);
+    assert.match(invocations[0], /-m gpt-5\.6-sol .*model_reasoning_effort="high" .*service_tier="priority"/);
+    assert.match(invocations[1], /-m gpt-5\.6-terra .*model_reasoning_effort="medium" .*service_tier="default".*resume restore-thread/);
+    assert.match(invocations[2], /-m gpt-5\.6-sol .*model_reasoning_effort="high" .*service_tier="priority".*resume restore-thread/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

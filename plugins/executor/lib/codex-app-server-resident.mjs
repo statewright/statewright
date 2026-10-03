@@ -12,6 +12,7 @@ import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
+import { WorkflowRouteOriginStore } from "./workflow-route-origin.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -30,6 +31,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
   join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
+  join(EXECUTOR_ROOT, "workflow-route-origin.mjs"),
 ];
 
 function safeName(value) {
@@ -239,6 +241,11 @@ async function main() {
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
       ownsThread: async threadId => (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId });
   const knownThreadCwds = new Map();
+  const workflowOriginStore = new WorkflowRouteOriginStore({
+    root: join(root, "workflow-origins"),
+    clientId,
+    ownsBinding: async binding => (await readCodexRootSession(controlDir, clientId))?.sessionId === binding.thread_id,
+  });
   let runtime = null;
   let stopping = false;
   const stop = async () => {
@@ -275,6 +282,14 @@ async function main() {
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,
+    workflowOriginStore,
+    routeOwner: async threadId => {
+      const registration = await readCodexRootSession(controlDir, clientId);
+      return {
+        client_id: clientId,
+        root_session_id: registration?.sessionId === threadId ? registration.sessionId : null,
+      };
+    },
     onIdle: stop,
     telemetry: telemetryWriter(process.env),
     reporter,

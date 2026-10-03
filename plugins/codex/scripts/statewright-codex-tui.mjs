@@ -14,7 +14,7 @@ function usage() {
 }
 
 export function parseArgs(argv) {
-  const options = { codexBin: "codex", prompt: [], fallbackModel: "gpt-5.6-terra", fallbackEffort: "medium" };
+  const options = { codexBin: "codex", prompt: [], fallbackModel: "gpt-5.6-terra", fallbackEffort: "medium", fallbackServiceTier: "default" };
   let prompt = false;
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -23,6 +23,7 @@ export function parseArgs(argv) {
     if (value === "--workflow") options.workflow = argv[++index];
     else if (value === "--model") options.fallbackModel = argv[++index];
     else if (value === "--effort") options.fallbackEffort = argv[++index];
+    else if (value === "--service-tier") options.fallbackServiceTier = argv[++index];
     else if (value === "--codex-bin") options.codexBin = argv[++index];
     else if (value === "-h" || value === "--help") options.help = true;
     else throw new Error(`Unknown option: ${value}`);
@@ -35,8 +36,9 @@ export function cliModel(model) {
   return String(model ?? "").replace(/^openai-codex\//, "");
 }
 
-export function codexArgs({ model, effort, resumeSession, prompt }) {
+export function codexArgs({ model, effort, serviceTier, resumeSession, prompt }) {
   const route = ["-m", cliModel(model), "-c", `model_reasoning_effort=${JSON.stringify(effort)}`];
+  if (serviceTier) route.push("-c", `service_tier=${JSON.stringify(serviceTier)}`);
   return resumeSession ? [...route, "resume", resumeSession, prompt] : [...route, prompt];
 }
 
@@ -79,7 +81,8 @@ async function nextRequest(controlDir, consumed) {
 export async function run(options) {
   const controlDir = await mkdtemp(join(tmpdir(), "statewright-codex-route-"));
   const consumed = new Set();
-  let route = { model: options.fallbackModel, effort: options.fallbackEffort };
+  let route = { model: options.fallbackModel, effort: options.fallbackEffort, serviceTier: options.fallbackServiceTier };
+  let workflowOrigin = null;
   let resumeSession = null;
   let prompt = `Call statewright_load_workflow with workflow '${options.workflow}', then follow the active Statewright workflow. ${options.prompt.join(" ")}`;
   try {
@@ -96,14 +99,45 @@ export async function run(options) {
       while (!exited) {
         const request = await nextRequest(controlDir, consumed).catch(() => null);
         if (request) {
-          process.stderr.write(`[statewright] restarting Codex for ${request.state ?? "next"} on ${request.model}\n`);
-          route = { model: request.model || route.model, effort: request.effort || route.effort };
+          if (request.restore_original === true) {
+            const bindingMatches = workflowOrigin
+              && workflowOrigin.run_id === request.run_id
+              && workflowOrigin.session_id === request.session_id
+              && workflowOrigin.client_id === request.client_id
+              && workflowOrigin.root_session_id === request.root_session_id;
+            if (!bindingMatches) {
+              process.stderr.write("[statewright] skipped model restoration because the captured route origin did not match this workflow execution.\n");
+              continue;
+            }
+            route = { ...workflowOrigin.route };
+          } else {
+            if (request.run_id && !workflowOrigin) {
+              workflowOrigin = {
+                run_id: request.run_id,
+                run_session_id: request.run_session_id ?? null,
+                session_id: request.session_id,
+                root_session_id: request.root_session_id,
+                client_id: request.client_id,
+                route: { ...route },
+              };
+            } else if (workflowOrigin && request.run_id !== workflowOrigin.run_id) {
+              process.stderr.write("[statewright] refused a new workflow route until the prior route origin is restored or relinquished.\n");
+              continue;
+            }
+            route = {
+              model: request.model || route.model,
+              effort: request.effort || route.effort,
+              serviceTier: request.service_tier || route.serviceTier,
+            };
+          }
+          process.stderr.write(`[statewright] restarting Codex for ${request.state ?? "next"} on ${route.model}\n`);
           resumeSession = request.session_id;
           restartRequested = true;
           prompt = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
           signalChild(child, "SIGINT");
           setTimeout(() => signalChild(child, "SIGTERM"), 1500).unref();
           setTimeout(() => signalChild(child, "SIGKILL"), 3000).unref();
+          if (request.restore_original === true) workflowOrigin = null;
           break;
         }
         await delay(100);

@@ -7,12 +7,52 @@ import { summarizeStatewrightToolCompletion, summarizeStatewrightToolStart } fro
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
+import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
 function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "").trim();
 }
 
 function rpcIdKey(id) {
   return JSON.stringify([typeof id, id]);
+}
+
+function structuredToolResult(result) {
+  if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+  const text = result?.content?.find?.(entry => entry?.type === "text")?.text;
+  try { return text ? JSON.parse(text) : null; } catch { return null; }
+}
+
+export function localStatewrightLifecycle(item) {
+  if (item?.type !== "mcpToolCall") return null;
+  const rawTool = String(item.tool ?? "");
+  const server = String(item.server ?? "");
+  const namespacedLocalTool = rawTool.startsWith("mcp__statewright__statewright_")
+    || rawTool.startsWith("mcp__plugin_statewright_statewright__statewright_");
+  const bareLocalTool = rawTool.startsWith("statewright_")
+    && (server === "statewright" || server === "plugin_statewright_statewright");
+  const localTool = namespacedLocalTool || bareLocalTool;
+  const localServer = !server && namespacedLocalTool
+    || server === "statewright" || server === "plugin_statewright_statewright";
+  if (!localTool || !localServer) return null;
+  const tool = rawTool.slice(rawTool.lastIndexOf("statewright_"));
+  if (!["statewright_deactivate", "statewright_stop", "statewright_transition", "statewright_force_state"].includes(tool)) return null;
+  return { tool, server: server || rawTool.slice(0, rawTool.lastIndexOf("__statewright_")) };
+}
+
+export function terminalStatewrightCompletion(item) {
+  const lifecycle = localStatewrightLifecycle(item);
+  if (!lifecycle || item.status !== "completed" || item.error || item.result?.isError === true) return null;
+  const { tool } = lifecycle;
+  const value = structuredToolResult(item.result);
+  if (["statewright_deactivate", "statewright_stop"].includes(tool)
+      && (value?.deactivated === true || value?.stopped === true)) {
+    return { kind: "deactivated", ...lifecycle };
+  }
+  if (["statewright_transition", "statewright_force_state"].includes(tool)) {
+    const state = value?.state_snapshot ?? value?.state ?? value;
+    if (state?.is_final === true) return { kind: "terminal", ...lifecycle, state };
+  }
+  return null;
 }
 
 /**
@@ -57,17 +97,19 @@ function qualifiedRouteModel(model, provider) {
   return namespace ? `${namespace}/${value}` : value;
 }
 
-export function captureWorkflowOrigin(message, { provider = null, model = null } = {}) {
+export function captureWorkflowOrigin(message, { provider = null, model = null, effort = null, service_tier = null } = {}) {
   if (message?.method !== "turn/start") return null;
   const params = message.params ?? {};
   const collaboration = params.collaborationMode?.settings;
   const selectedModel = collaboration?.model ?? params.model ?? model;
   const qualifiedModel = qualifiedRouteModel(selectedModel, provider);
   if (!qualifiedModel) return null;
+  const declaredProvider = qualifiedModel.includes("/") ? qualifiedModel.slice(0, qualifiedModel.indexOf("/")) : null;
   return {
+    provider: String(provider ?? (declaredProvider === "openai-codex" ? "openai" : declaredProvider) ?? "").trim() || null,
     model: qualifiedModel,
-    effort: collaboration?.reasoning_effort ?? params.effort ?? null,
-    service_tier: params.serviceTier ?? "default",
+    effort: collaboration?.reasoning_effort ?? params.effort ?? effort ?? null,
+    service_tier: params.serviceTier ?? service_tier ?? "default",
   };
 }
 
@@ -98,7 +140,8 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
   const selectedRoute = route;
   const identity = routeIdentity(selectedRoute.model, environment);
   const params = { ...(message.params ?? {}), model: identity.model };
-  if (selectedRoute.effort) params.effort = selectedRoute.effort;
+  const effortSpecified = Object.hasOwn(selectedRoute, "effort");
+  if (effortSpecified) params.effort = selectedRoute.effort ?? null;
   const selectedServiceTier = selectedRoute.service_tier ?? selectedRoute.serviceTier;
   if (selectedServiceTier) params.serviceTier = selectedServiceTier;
   // Desktop's collaborationMode.settings takes precedence over the top-level
@@ -113,7 +156,7 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
       settings: {
         ...collaborationSettings,
         model: identity.model,
-        ...(selectedRoute.effort ? { reasoning_effort: selectedRoute.effort } : {}),
+        ...(effortSpecified ? { reasoning_effort: selectedRoute.effort ?? null } : {}),
       },
     };
   }
@@ -127,6 +170,7 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
       effectiveProvider: identity.provider,
       effectiveModel: identity.model,
       effectiveEffort: selectedRoute.effort ?? null,
+      effortSpecified,
       effectiveServiceTier: selectedServiceTier ?? null,
       collaborationModeApplied,
       providerConfig: identity.config,
@@ -159,11 +203,11 @@ export function settingsConfirmRoute(receipt, notification) {
     ...collaborationReceipt,
     confirmed: sameRouteValue(actualModel, receipt.effectiveModel)
       && (!receipt.effectiveProvider || sameRouteValue(actualProvider, receipt.effectiveProvider))
-      && (!receipt.effectiveEffort || sameRouteValue(actualEffort, receipt.effectiveEffort))
+      && (!receipt.effortSpecified || sameRouteValue(actualEffort, receipt.effectiveEffort))
       && (!receipt.effectiveServiceTier || sameRouteValue(actualServiceTier, receipt.effectiveServiceTier))
       && (!receipt.collaborationModeApplied || (
         sameRouteValue(actualCollaborationModel, receipt.effectiveModel)
-        && (!receipt.effectiveEffort || sameRouteValue(actualCollaborationEffort, receipt.effectiveEffort))
+        && (!receipt.effortSpecified || sameRouteValue(actualCollaborationEffort, receipt.effectiveEffort))
       )),
   };
 }
@@ -321,6 +365,8 @@ export async function startCodexAppServerRouteProxy({
   onConnection = async () => {},
   onTransportError = async () => {},
   onProtocolError = async () => {},
+  workflowOriginStore = new WorkflowRouteOriginStore(),
+  routeOwner = async () => ({}),
   compactResume = true,
   resumeHistoryLimit = 4,
   threadListCwd = null,
@@ -407,6 +453,13 @@ export async function startCodexAppServerRouteProxy({
       try {
         await checkOwner();
         const route = reservation.route ?? reservation;
+        const restoreBinding = route?.restore_original === true
+          ? workflowRouteBinding(route, threadId, await routeOwner(threadId))
+          : null;
+        const storedBinding = restoreBinding
+          ? await workflowOriginStore.binding(threadId)
+          : null;
+        const ownedRestore = Boolean(storedBinding && sameWorkflowRouteBinding(storedBinding, restoreBinding));
         const currentStateRoute = authoritative && authoritative.is_final !== true
           && route?.session_id === threadId
           && route.run_id === authoritative.run_id
@@ -414,11 +467,13 @@ export async function startCodexAppServerRouteProxy({
           && route.model === authoritative.model
           && route.effort === authoritative.thinking_level;
         const terminalRestore = authoritative?.is_final === true
+          && ownedRestore
           && route?.restore_original === true
           && route.session_id === threadId
           && route.run_id === authoritative.run_id
           && route.state === authoritative.state;
-        const current = currentStateRoute || terminalRestore;
+        const inactiveRestore = authoritative === null && ownedRestore;
+        const current = currentStateRoute || terminalRestore || inactiveRestore;
         if (current) return reservation;
         if (typeof reservation.ack !== "function") throw new Error("Stale Statewright route cannot be retired safely");
         await reservation.ack();
@@ -430,6 +485,11 @@ export async function startCodexAppServerRouteProxy({
     }
     throw new Error("Statewright stale route queue exceeds bounded retirement");
   };
+  const boundRoute = async (route, threadId) => workflowRouteBinding(
+    route,
+    threadId,
+    await routeOwner(threadId),
+  );
   const activeConnections = new Set();
   const approvalGates = new Set();
   const approvalSafety = new Map();
@@ -468,7 +528,7 @@ export async function startCodexAppServerRouteProxy({
     const activeThreads = new Map();
     const activeProviders = new Map();
     const activeModels = new Map();
-    const workflowOrigins = new Map();
+    const activeSettings = new Map();
     const operatorActivity = new Map();
     const explainedTurns = new Map();
     const turnOrigins = new Map();
@@ -477,8 +537,12 @@ export async function startCodexAppServerRouteProxy({
     const requestMethods = new Map();
     const pendingThreadAuthorizations = new Map();
     const pendingApprovalReleases = new Map();
+    const pendingManualSettings = new Map();
     const internalRequests = new Map();
     const switchingThreads = new Set();
+    const lifecycleRequests = new Map();
+    const restoreInFlight = new Set();
+    const routeConfirmationWaiters = new Map();
     const stateNames = new Map();
     const mcpReadyThreads = new Set();
     const presentation = new HandoffPresentation({onStatus: event => {
@@ -502,6 +566,26 @@ export async function startCodexAppServerRouteProxy({
       await forwardPayload(upstream, JSON.stringify({ jsonrpc: "2.0", id, method, params }));
       return response;
     };
+    const lifecycleKey = (threadId, turnId, itemId) => JSON.stringify([threadId, turnId, itemId]);
+    const bindingKey = binding => JSON.stringify([
+      binding?.thread_id, binding?.run_id, binding?.run_session_id,
+      binding?.client_id, binding?.root_session_id,
+    ]);
+    const waitForRouteConfirmation = (threadId, receipt) => new Promise((resolveConfirmation, rejectConfirmation) => {
+      const existing = routeConfirmationWaiters.get(threadId);
+      if (existing) {
+        rejectConfirmation(new Error("Statewright route confirmation is already pending for this thread."));
+        return;
+      }
+      const timer = setTimeout(() => {
+        routeConfirmationWaiters.delete(threadId);
+        rejectConfirmation(new Error("Codex App Server did not confirm the restored model settings."));
+      }, 12_000);
+      routeConfirmationWaiters.set(threadId, {
+        receipt,
+        resolve: value => { clearTimeout(timer); routeConfirmationWaiters.delete(threadId); resolveConfirmation(value); },
+      });
+    });
     const waitForRequiredMcpTool = async (threadId, checkCurrentRequest) => {
       if (!requiredMcpToolSuffix || requiredMcpReadyTimeoutMs <= 0 || mcpReadyThreads.has(threadId)) return;
       const deadline = Date.now() + requiredMcpReadyTimeoutMs;
@@ -588,6 +672,124 @@ export async function startCodexAppServerRouteProxy({
       } finally {
         switchingThreads.delete(threadId);
         await sendPresentation(presentation.finishSwitch(threadId, verifiedSwitch));
+      }
+    };
+    const restoreTerminalOrigin = async (threadId, terminal, lifecycle) => {
+      const originalBinding = lifecycle?.binding;
+      const key = bindingKey(originalBinding);
+      if (!originalBinding || restoreInFlight.has(key)) return;
+      restoreInFlight.add(key);
+      const activityEpoch = lifecycle.activityEpoch;
+      const release = await acquireRouteLease();
+      try {
+        const assertOwner = async () => {
+          const currentBinding = await workflowOriginStore.binding(threadId);
+          if (!currentBinding || !sameWorkflowRouteBinding(currentBinding, originalBinding)) {
+            throw new Error("Statewright terminal restoration no longer owns the captured workflow route.");
+          }
+          if (operatorActivity.get(threadId) !== activityEpoch) {
+            throw new Error("Statewright terminal restoration was superseded by newer native activity.");
+          }
+          const authoritative = await approvalService?.getState?.(threadId);
+          if (terminal.kind === "terminal") {
+            const state = terminal.state;
+            if (!state?.is_final || state.run_id !== originalBinding.run_id
+                || state.run_session_id && state.run_session_id !== originalBinding.run_session_id
+                || !authoritative?.is_final || authoritative.run_id !== originalBinding.run_id
+                || authoritative.run_session_id && authoritative.run_session_id !== originalBinding.run_session_id) {
+              throw new Error("Statewright terminal restoration does not match the authoritative final run.");
+            }
+          } else if (authoritative !== null) {
+            throw new Error("Statewright deactivation restoration requires authoritative inactive state.");
+          }
+        };
+        await assertOwner();
+        await waitForApprovalIdle(threadId, assertOwner);
+        await assertOwner();
+        const binding = await workflowOriginStore.binding(threadId);
+        if (!binding || !sameWorkflowRouteBinding(binding, originalBinding)) {
+          await onRouteInjected({
+            threadId,
+            route: { session_id: threadId, restore_original: true },
+            restoration: { status: "skipped", reason: "missing_provenance", trigger: terminal.kind },
+            confirmed: false,
+          });
+          return;
+        }
+        const settings = activeSettings.get(threadId) ?? {};
+        const current = {
+          model: qualifiedRouteModel(settings.model ?? activeModels.get(threadId), settings.modelProvider ?? activeProviders.get(threadId)),
+          effort: settings.effort ?? null,
+          service_tier: settings.serviceTier ?? "default",
+        };
+        const restoration = await workflowOriginStore.prepareRestore(binding, current);
+        if (restoration.status === "relinquished") {
+          await onRouteInjected({
+            threadId,
+            origin_binding: binding,
+            route: { session_id: threadId, run_id: binding.run_id, restore_original: true },
+            restoration: { ...restoration, status: "preserved_manual_override", trigger: terminal.kind },
+            confirmed: true,
+          });
+          return;
+        }
+        if (restoration.status !== "ready") {
+          await onRouteInjected({
+            threadId,
+            origin_binding: binding,
+            route: { session_id: threadId, run_id: binding.run_id, restore_original: true },
+            restoration: { status: "skipped", reason: restoration.status, trigger: terminal.kind },
+            confirmed: false,
+          });
+          return;
+        }
+        const marker = {
+          session_id: threadId,
+          run_id: binding.run_id,
+          run_session_id: binding.run_session_id,
+          client_id: binding.client_id,
+          root_session_id: binding.root_session_id,
+          restore_original: true,
+          restored_original: true,
+          restored_axes: restoration.restored,
+          relinquished_axes: restoration.relinquished,
+          restoration_status: restoration.status,
+          ...restoration.route,
+        };
+        const applied = applyRouteToTurnStart({ method: "turn/start", params: { threadId } }, marker, process.env);
+        if (!applied.receipt) throw new Error("Statewright terminal restoration could not construct a bound native settings update.");
+        applied.receipt.origin_binding = binding;
+        applied.receipt.restoration = { ...restoration, trigger: terminal.kind };
+        applied.receipt.route = marker;
+        await assertOwner();
+        await switchProvider(threadId, applied.receipt);
+        await assertOwner();
+        receipts.set(threadId, applied.receipt);
+        const confirmation = waitForRouteConfirmation(threadId, applied.receipt);
+        try {
+          await internalRpc("thread/settings/update", {
+            threadId,
+            model: applied.message.params.model,
+            effort: applied.message.params.effort,
+            serviceTier: applied.message.params.serviceTier,
+          });
+        } catch (error) {
+          receipts.delete(threadId);
+          routeConfirmationWaiters.get(threadId)?.resolve({ confirmed: false, reason: "settings_update_failed" });
+          await confirmation;
+          throw error;
+        }
+        const confirmed = await confirmation;
+        if (!confirmed.confirmed) throw new Error("Codex App Server confirmed different model settings; restoration provenance was retained.");
+        await onRouteInjected(applied.receipt);
+      } catch (error) {
+        await onProtocolError({
+          side: "terminal_route_restore",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        restoreInFlight.delete(key);
+        release();
       }
     };
     const syncActivity = () => {
@@ -764,6 +966,25 @@ export async function startCodexAppServerRouteProxy({
         if (message.method === "turn/start" && message.params?.threadId) {
           await waitForRequiredMcpTool(message.params.threadId, checkCurrentRequest);
         }
+        if (message.method === "thread/settings/update" && message.id !== undefined && message.params?.threadId) {
+          const settingsThreadId = String(message.params.threadId);
+          operatorActivity.set(settingsThreadId, (operatorActivity.get(settingsThreadId) ?? 0) + 1);
+          const collaboration = message.params.collaborationMode?.settings;
+          const axes = [];
+          const changes = {};
+          if (Object.hasOwn(message.params, "model") || collaboration && Object.hasOwn(collaboration, "model")) axes.push("model");
+          if (Object.hasOwn(message.params, "effort") || collaboration && Object.hasOwn(collaboration, "reasoning_effort")) axes.push("effort");
+          if (Object.hasOwn(message.params, "serviceTier")) axes.push("service_tier");
+          if (axes.includes("model")) changes.model = qualifiedRouteModel(
+            collaboration?.model ?? message.params.model,
+            activeProviders.get(String(message.params.threadId)),
+          );
+          if (axes.includes("effort")) changes.effort = collaboration?.reasoning_effort ?? message.params.effort;
+          if (axes.includes("service_tier")) changes.service_tier = message.params.serviceTier;
+          if (axes.length) pendingManualSettings.set(rpcIdKey(message.id), {
+            threadId: String(message.params.threadId), axes, changes,
+          });
+        }
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
         if (message.id !== undefined && message.method) requestMethods.set(rpcIdKey(message.id), message.method);
         message = applyThreadListCwd(message, threadListCwd);
@@ -822,25 +1043,53 @@ export async function startCodexAppServerRouteProxy({
           }
           if (state) await waitForApprovalIdle(threadId, checkReleaseOwner);
           let capturedOrigin = null;
+          let originBinding = null;
+          let restoration = null;
           if (route?.restore_original === true) {
-            route = restoreWorkflowOrigin(route, workflowOrigins.get(threadId));
-            if (!route) throw new Error("Statewright terminal route cannot restore an unknown workflow origin");
-          } else if (route?.run_id && route?.model) {
-            const existingOrigin = workflowOrigins.get(threadId);
-            if (!existingOrigin || existingOrigin.run_id !== route.run_id) {
-              capturedOrigin = captureWorkflowOrigin(
-                message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
-                { provider: activeProviders.get(threadId), model: activeModels.get(threadId) },
-              );
-              if (capturedOrigin) {
-                capturedOrigin = { ...capturedOrigin, run_id: route.run_id };
-                workflowOrigins.set(threadId, capturedOrigin);
-              }
+            originBinding = await boundRoute(route, threadId);
+            const current = captureWorkflowOrigin(
+              message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
+              { provider: activeProviders.get(threadId), model: activeModels.get(threadId),
+                effort: activeSettings.get(threadId)?.effort,
+                service_tier: activeSettings.get(threadId)?.serviceTier },
+            );
+            restoration = await workflowOriginStore.prepareRestore(originBinding, current ?? {});
+            if (["ready", "relinquished"].includes(restoration.status)) {
+              route = {
+                ...route,
+                ...restoration.route,
+                restored_original: true,
+                restored_axes: restoration.restored,
+                relinquished_axes: restoration.relinquished,
+                restoration_status: restoration.status,
+              };
+            } else {
+              // Missing or mismatched provenance must never guess a fallback
+              // route. Forward the user's turn unchanged and retain any
+              // foreign origin record for its real owner.
+              route = null;
             }
+          } else if (route?.run_id && route?.model) {
+            originBinding = await boundRoute(route, threadId);
+            capturedOrigin = captureWorkflowOrigin(
+              message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
+              { provider: activeProviders.get(threadId), model: activeModels.get(threadId),
+                effort: activeSettings.get(threadId)?.effort,
+                service_tier: activeSettings.get(threadId)?.serviceTier },
+            );
+            const capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
+            if (capture.status === "binding_conflict" || capture.status === "unowned_binding") {
+              const error = new Error(`Statewright cannot replace a workflow route origin owned by another execution context (${capture.status}).`);
+              error.code = "STATEWRIGHT_ROUTE_ORIGIN_OWNER";
+              throw error;
+            }
+            capturedOrigin = capture.record?.origin ?? capturedOrigin;
           }
           const applied = applyRouteToTurnStart(message.method === "turn/start" ? message
             : { method: "turn/start", params: { threadId } }, route, process.env);
           if (applied.receipt) {
+            applied.receipt.origin_binding = originBinding;
+            if (restoration) applied.receipt.restoration = restoration;
             presentation.prepare(threadId, requestId, {
               state: route.state, fromState: stateNames.get(threadId), runId: route.run_id,
               model: applied.receipt.effectiveModel, effort: applied.receipt.effectiveEffort,
@@ -860,6 +1109,18 @@ export async function startCodexAppServerRouteProxy({
                 effort: applied.message.params.effort });
               await checkReleaseOwner();
             }
+          } else if (restoration) {
+            routeReceipt = {
+              route: pendingRoute?.route ?? pendingRoute,
+              threadId,
+              origin_binding: originBinding,
+              restoration: {
+                status: "skipped",
+                reason: restoration.status,
+              },
+              confirmed: false,
+            };
+            acknowledgeRoute = pendingRoute?.ack ?? null;
           }
           payload = JSON.stringify(message.method === "turn/start" ? applied.message : message);
           if (provisionalTurn) provisionalTurn.model = routeModel(applied.message.params?.model);
@@ -881,7 +1142,6 @@ export async function startCodexAppServerRouteProxy({
           receipts.set(routeReceipt.threadId, routeReceipt);
           await acknowledgeRoute?.();
           await onRouteInjected(routeReceipt);
-          if (routeReceipt.route?.restored_original === true) workflowOrigins.delete(routeReceipt.threadId);
         }
         releaseRouteLease?.();
       } catch (error) {
@@ -910,7 +1170,8 @@ export async function startCodexAppServerRouteProxy({
         // Closing the WebSocket here makes native Codex lose its session and
         // defeats retry/recovery after a provider configuration mistake.
         if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED"
-            || error.code === "STATEWRIGHT_THREAD_OWNERSHIP" || error.code === "STATEWRIGHT_MCP_NOT_READY")
+            || error.code === "STATEWRIGHT_THREAD_OWNERSHIP" || error.code === "STATEWRIGHT_MCP_NOT_READY"
+            || error.code === "STATEWRIGHT_ROUTE_ORIGIN_OWNER")
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
           void forwardWhenOpen(downstream, JSON.stringify({
             jsonrpc: "2.0",
@@ -923,7 +1184,7 @@ export async function startCodexAppServerRouteProxy({
           return;
         }
         protocolFailed = true;
-        downstream.close(1011, `Statewright route proxy failed: ${error.message}`);
+        downstream.close(1011, `Statewright route proxy failed: ${error.message}`.slice(0, 123));
         return;
       }
     });
@@ -931,6 +1192,7 @@ export async function startCodexAppServerRouteProxy({
     const handleUpstream = async (raw) => {
       let payload = String(raw);
       let approvalHint = null;
+      let terminalRestoreHint = null;
       let attachedThreadId = null;
       const handoffMessages = [];
       const prefaceMessages = [];
@@ -994,6 +1256,15 @@ export async function startCodexAppServerRouteProxy({
         }
         const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
         if (responseTo) requestMethods.delete(responseKey);
+        const manualSettings = responseKey === null ? null : pendingManualSettings.get(responseKey);
+        if (manualSettings) {
+          pendingManualSettings.delete(responseKey);
+          if (!notification.error) await workflowOriginStore.relinquish(
+            manualSettings.threadId,
+            manualSettings.axes,
+            manualSettings.changes,
+          );
+        }
         const threadAuthorization = responseKey === null ? null : pendingThreadAuthorizations.get(responseKey);
         if (threadAuthorization) pendingThreadAuthorizations.delete(responseKey);
         const approvalRelease = responseKey === null ? null : pendingApprovalReleases.get(responseKey);
@@ -1042,6 +1313,13 @@ export async function startCodexAppServerRouteProxy({
           const model = routeModel(notification.result.model ?? notification.result.thread.model);
           if (provider) activeProviders.set(String(notification.result.thread.id), provider);
           if (model) activeModels.set(String(notification.result.thread.id), model);
+          activeSettings.set(String(notification.result.thread.id), {
+            ...(activeSettings.get(String(notification.result.thread.id)) ?? {}),
+            model,
+            modelProvider: provider,
+            effort: notification.result.effort ?? notification.result.thread.effort ?? null,
+            serviceTier: notification.result.serviceTier ?? notification.result.thread.serviceTier ?? "default",
+          });
         }
         const pendingTurn = responseKey === null ? null : pendingTurnStarts.get(responseKey);
         if (pendingTurn) {
@@ -1080,14 +1358,34 @@ export async function startCodexAppServerRouteProxy({
           payload = JSON.stringify(notification);
         }
         const statusThreadId = String(notification?.params?.threadId ?? "");
+        if (notification.method === "item/started" && statusThreadId && notification.params?.turnId
+            && notification.params?.item?.id) {
+          const lifecycle = localStatewrightLifecycle(notification.params.item);
+          if (lifecycle) {
+            const binding = await workflowOriginStore.binding(statusThreadId);
+            if (binding) lifecycleRequests.set(lifecycleKey(
+              statusThreadId, notification.params.turnId, notification.params.item.id,
+            ), { ...lifecycle, binding, activityEpoch: operatorActivity.get(statusThreadId) });
+          }
+        }
         if (notification.method === "item/completed" && statusThreadId && gate) {
           const snapshot = pendingApprovalSnapshot(notification.params.item);
           if (snapshot && turnOrigins.get(statusThreadId)?.turnId === notification.params.turnId) {
             approvalHint = { threadId: statusThreadId, snapshot, turnId: notification.params.turnId };
           }
         }
+        if (notification.method === "item/completed" && statusThreadId) {
+          const terminal = terminalStatewrightCompletion(notification.params.item);
+          const key = lifecycleKey(statusThreadId, notification.params.turnId, notification.params.item?.id);
+          const lifecycle = lifecycleRequests.get(key);
+          lifecycleRequests.delete(key);
+          if (terminal && lifecycle?.tool === terminal.tool) {
+            terminalRestoreHint = { threadId: statusThreadId, terminal, lifecycle };
+          }
+        }
         if (notification.method === "thread/settings/updated" && statusThreadId) {
           const settings = notification.params.threadSettings;
+          if (settings && typeof settings === "object") activeSettings.set(statusThreadId, structuredClone(settings));
           if (settings?.model) activeModels.set(statusThreadId, routeModel(settings.model));
           if (settings?.modelProvider) activeProviders.set(statusThreadId, settings.modelProvider);
         }
@@ -1117,7 +1415,19 @@ export async function startCodexAppServerRouteProxy({
         const receipt = settingsConfirmRoute(receipts.get(String(notification?.params?.threadId ?? "")), notification);
         if (receipt) {
           receipts.delete(receipt.threadId);
+          if (receipt.confirmed && receipt.origin_binding) {
+            if (receipt.route?.restored_original === true) {
+              await workflowOriginStore.confirmRestore(receipt.origin_binding);
+            } else {
+              await workflowOriginStore.confirmRoute(receipt.origin_binding, {
+                model: receipt.route?.model,
+                effort: receipt.route?.effort,
+                service_tier: receipt.route?.service_tier ?? receipt.route?.serviceTier,
+              });
+            }
+          }
           await onRouteConfirmed(receipt);
+          routeConfirmationWaiters.get(receipt.threadId)?.resolve(receipt);
         }
         const summarized = summarizeStatewrightToolCompletion(summarizeStatewrightToolStart(notification));
         if (summarized !== notification) payload = JSON.stringify(summarized);
@@ -1140,6 +1450,11 @@ export async function startCodexAppServerRouteProxy({
         .catch(error => reportParkedApprovalFailure(approvalHint.threadId, error));
       else if (attachedThreadId && gate) void gate.reopen(attachedThreadId)
         .catch(error => reportParkedApprovalFailure(attachedThreadId, error));
+      if (terminalRestoreHint) void restoreTerminalOrigin(
+        terminalRestoreHint.threadId,
+        terminalRestoreHint.terminal,
+        terminalRestoreHint.lifecycle,
+      );
     };
     // Preserve source order while a terminal's display-only route lookup waits.
     upstream.on("message", raw => {
@@ -1153,6 +1468,10 @@ export async function startCodexAppServerRouteProxy({
         request.reject(new Error("Codex App Server connection closed during provider switch."));
       }
       internalRequests.clear();
+      for (const waiter of routeConfirmationWaiters.values()) {
+        waiter.resolve({ confirmed: false, reason: "connection_closed" });
+      }
+      routeConfirmationWaiters.clear();
       for (const authorization of pendingThreadAuthorizations.values()) void authorization.cancel().catch(() => {});
       pendingThreadAuthorizations.clear();
       if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close();

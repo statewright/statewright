@@ -127,7 +127,32 @@ should be included in that acceptance pass. Until then, actual live TUI
 coverage remains unverified and the revised source supersedes the older
 candidate's validation rather than inheriting it.
 
-## Local approval pipeline boundary
+## Praetorian boundary for the local approval pipeline
+
+The ordered policy/evidence/human-approval middleware is conceptually
+**Praetorian**: a client-neutral pre-action governance contract. In the
+Statewright product, its managed enforcement surface is **The Praetorian
+Gate**. This naming describes the intended boundary; it does not mean a
+Praetorian package, repository, build, or generally available product has been
+shipped by this repair.
+
+The earlier Praetorian research program proposed a separate repository “from
+the outset.” Ben's current product-boundary decision supersedes that sequencing
+for this repair: preserve the Praetorian contract boundary now, and consider
+physical extraction only as a later authorized milestone.
+
+The responsibilities divide as follows:
+
+| Boundary | Responsibility |
+| --- | --- |
+| Praetorian-aligned middleware contract | Normalized request classes; ordered handler outcomes and exhaustion semantics; evidence and approval binding; one-use decisions; adapter-neutral conformance fixtures. |
+| Statewright | Supplies authoritative workflow context and workflow-specific policy inputs: workflow/run identity, gateway run session, state and state epoch, capability/transition status, classifier eligibility receipt, and lifecycle reconciliation. Praetorian middleware must consume this context, not recreate or override it. |
+| Native host adapter | Proves exact thread/session ownership, transports the bounded request, renders the host-native prompt, and correlates its response. It does not evaluate workflow truth or broaden approval eligibility. |
+
+The current narrow fix remains in the existing Statewright hook and
+`codex-local-models` native host. Moving it now would create a second packaging
+and deployment problem before the repaired lifecycle has live conformance
+evidence. No parallel “shared approval” plugin or product identity is needed.
 
 The classifier rule remains gateway policy. The gateway alone decides whether
 an uncertain invocation is eligible for separate approval and emits the
@@ -219,16 +244,25 @@ The implemented pipeline is presently in the `codex-local-models` native host,
 which is the mode that owns the reproduced Nomad thread. The standalone
 Statewright managed-client resident still has its own durable transition gate
 and does not yet advertise the classifier endpoint. That is a remaining mode
-gap, not a reason to duplicate the classifier controller in the resident.
+gap, not evidence that Praetorian is shipped and not a reason to duplicate the
+classifier controller in the resident.
 
-The smallest follow-on is to make the local approval pipeline a packaged host
-contract and give each mode a thin ownership adapter. A handler may return
+The smallest follow-on is to stabilize one Praetorian-aligned contract in the
+existing code and give each mode a thin ownership adapter. A handler may return
 `NotHandled` only when it does not own the exact thread or request kind. The
 exact owning mode services the request; a second owner is an error, and an
 unavailable advertised owner fails closed. Source does not justify ranking
 `codex-local-models` ahead of the standalone resident (or vice versa): exact
 thread ownership selects the applicable handler, while the explicit priority
-orders approval kinds within that owner. This follow-on needs a portable
-package boundary and resident discovery receipt; importing a developer checkout
-by absolute path or silently probing connection failures would recreate the
-current deployment problem.
+orders approval kinds within that owner.
+
+Future extraction into Praetorian is a separate, gated milestone. It becomes
+reasonable only after the current Statewright repair has live native-dialogue
+evidence, the standalone resident and local companion pass the same conformance
+fixtures, and the protocol/package boundary can be versioned without importing
+a developer checkout or coupling to Statewright hosting. That extraction may
+move the generic outcomes, ordering/exhaustion rules, request/decision schemas,
+and conformance vectors. Statewright-specific workflow context production,
+classifier eligibility, transition reconciliation, and managed adapters remain
+Statewright responsibilities. This packet neither authorizes nor implements a
+new Praetorian repository, package, build, release, or deployment.

@@ -100,6 +100,13 @@ runtime context. No guessed exact-request cause is treated as fact.
 | Protocol unit | No owner or multiple live owners | Deny | Proxy integration tests |
 | Protocol unit | Wrong method/auth or browser Origin | 404/401; no approval | HTTP surface test |
 | Protocol unit | TTL expiry | Denial tombstone expires; pending request is not pruned | Controller clock test |
+| Pipeline unit | Earlier optional handler does not own/support the request | `NotHandled`; continue serially to the next handler | Ordered pipeline pass-through test |
+| Pipeline unit | Earlier handler returns `ExplicitDeny` | Stop; no later handler may allow | Ordered pipeline short-circuit test |
+| Pipeline unit | Handler returns `AskPending` | Stop and await the exact bound response; no later fallback runs | Ordered pipeline short-circuit plus controller pending tests |
+| Pipeline unit | Applicable required handler is unavailable, times out, throws, or returns malformed output | `Error`; stop and apply the request class's fail-closed terminal policy | Ordered pipeline error tests plus classifier timeout/disconnect tests |
+| Pipeline integration | All optional handlers return `NotHandled` for a pass-through protocol class | Forward the original request/reply unchanged; do not manufacture approval | Provider unclaimed-reply forwarding behavior; dedicated shared-pipeline fixture remains follow-on |
+| Pipeline integration | All handlers return `NotHandled` for protected classifier approval | Deny as `unsupported_approval_request`; never infer approval from silence | Classifier endpoint integration test |
+| Pipeline integration | Required durable transition handler cannot answer | Keep the goal parked and surface an error; do not fall through or resume | Provider transition-barrier behavior; dedicated shared-pipeline fixture remains follow-on |
 | Lifecycle | Interrupted/resumed provider | Pending request denied on disconnect; authority is not persisted | Proxy disconnect test |
 | Lifecycle | Terminal blocked workflow | Approval path does not resume it | Architectural boundary; no automatic recovery claim |
 
@@ -145,9 +152,47 @@ responsibility. Handlers run serially by explicit priority; this is not a race:
 
 Only `NotHandled` advances to the next handler. `Deny`, `Ask`, `Allow`, and
 `Error` short-circuit. An explicit denial therefore cannot fall through to a
-later allowing handler. An error or unavailable required handler is translated
-to a denial. A request unsupported by every handler is `NotHandled` internally
-and becomes `unsupported_approval_request` at the protected HTTP boundary.
+later allowing handler. `Ask` means the request has been handled and is pending;
+it also stops traversal rather than inviting another handler to answer. An
+unavailable applicable handler is `Error`, not `NotHandled`.
+
+### Exhaustion policy by request class
+
+Pipeline outcomes do not themselves define one universal fallback. The entry
+adapter declares whether its request class is optional or required and applies
+the terminal policy after the ordered handlers have either handled the request
+or exhausted the chain:
+
+| Condition | Meaning | Terminal behavior |
+| --- | --- | --- |
+| `NotHandled` | This handler does not own or support the exact request kind and execution context. It is not a policy decision. | Continue to the next handler. If the chain exhausts, apply the entry adapter's request-class policy. |
+| `Unavailable` / timeout | The applicable handler owns this request but cannot complete it. | Return `Error` and stop. Never recast it as `NotHandled` to reach a more permissive handler. |
+| `AskPending` | A matching handler presented or is awaiting one exact context-bound human decision. | Stop the chain and wait within the bounded lifecycle. Dismissal, timeout, disconnect, or silence resolves as non-approval according to that request class. |
+| `ExplicitDeny` | An applicable handler denied the request. | Stop immediately. A denial never falls through. |
+| `Allow` | An applicable handler approved the exact bound request. | Stop immediately and consume the approval at most once. |
+
+For an optional protocol projection, exhaustion may pass the original
+request/reply upstream unchanged; this grants no new authority. The current
+native reply path already has this shape: classifier and workflow approval
+resolvers may decline ownership, after which the reply is forwarded to the
+upstream App Server.
+
+For the protected classifier-approval class, a human answer is required before
+the denied invocation can run. Exhaustion becomes
+`unsupported_approval_request`; an unavailable handler, timeout, dismissal, or
+other unresolved `AskPending` becomes a denial. Only a matching one-use
+`allow_once` releases that invocation.
+
+For a durable workflow-transition class, an unanswered required approval keeps
+the goal parked and surfaces an error. It does not fall through to classifier
+approval, resume automatically, or become an implicit denial that erases the
+pending lifecycle. Unknown or unversioned security-sensitive request classes
+fail closed until their adapter defines a narrower contract.
+
+Thus “no handler answers” is context-sensitive: an optional pass-through class
+falls through unchanged; a required invocation approval denies; a required
+durable transition remains parked with an error. No exhaustion path converts
+silence, unsupported handling, or infrastructure failure into approval.
 
 The existing loopback-authenticated `POST /classifier-approval` endpoint is
 retained as the classifier-specific adapter. Its request and response schemas

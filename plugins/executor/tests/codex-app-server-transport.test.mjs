@@ -15,7 +15,7 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
@@ -545,6 +545,55 @@ test("App Server routing captures and restores the pre-workflow model, effort, a
   assert.equal(restoreWorkflowOrigin({ restore_original: true, run_id: "foreign" }, {
     ...origin, run_id: "run-return",
   }), null);
+});
+
+test("native thread start and resume settings preserve reasoningEffort presence and explicit null", () => {
+  for (const method of ["thread/start", "thread/resume"]) {
+    const native = nativeThreadRouteSettings({
+      thread: { id: "thread-native", effort: "legacy-thread" },
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+      effort: "legacy-top-level",
+      serviceTier: "priority",
+    });
+    assert.deepEqual(native, {
+      model: "gpt-5.6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority",
+    }, method);
+
+    const explicitNull = nativeThreadRouteSettings({
+      thread: { id: "thread-native", reasoningEffort: "legacy-thread" },
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: null,
+      effort: "legacy-top-level",
+      serviceTier: null,
+    });
+    assert.equal(Object.hasOwn(explicitNull, "effort"), true, method);
+    assert.equal(explicitNull.effort, null, method);
+    assert.equal(Object.hasOwn(explicitNull, "serviceTier"), true, method);
+    assert.equal(explicitNull.serviceTier, null, method);
+
+    const unavailable = nativeThreadRouteSettings({
+      thread: { id: "thread-native" }, model: "gpt-5.6-sol", modelProvider: "openai",
+    });
+    assert.equal(Object.hasOwn(unavailable, "effort"), false, method);
+    assert.equal(Object.hasOwn(unavailable, "serviceTier"), false, method);
+  }
+});
+
+test("workflow origin capture keeps explicit null distinct from unavailable native evidence", () => {
+  const message = { method: "turn/start", params: { threadId: "thread-native" } };
+  const explicitNull = captureWorkflowOrigin(message, {
+    provider: "openai", model: "gpt-5.6-sol", effort: null, service_tier: null,
+  });
+  assert.equal(Object.hasOwn(explicitNull, "effort"), true);
+  assert.equal(explicitNull.effort, null);
+  assert.equal(Object.hasOwn(explicitNull, "service_tier"), true);
+  assert.equal(explicitNull.service_tier, null);
+  const unavailable = captureWorkflowOrigin(message, { provider: "openai", model: "gpt-5.6-sol" });
+  assert.equal(Object.hasOwn(unavailable, "effort"), false);
+  assert.equal(Object.hasOwn(unavailable, "service_tier"), false);
 });
 
 test("only successful terminal or deactivate Statewright completions request restoration", () => {

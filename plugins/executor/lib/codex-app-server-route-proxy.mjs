@@ -97,19 +97,43 @@ function qualifiedRouteModel(model, provider) {
   return namespace ? `${namespace}/${value}` : value;
 }
 
-export function captureWorkflowOrigin(message, { provider = null, model = null, effort = null, service_tier = null } = {}) {
+function firstOwn(...candidates) {
+  for (const [source, key] of candidates) {
+    if (source && Object.hasOwn(source, key)) return { available: true, value: source[key] ?? null };
+  }
+  return { available: false, value: undefined };
+}
+
+export function nativeThreadRouteSettings(result) {
+  const response = result ?? {};
+  const thread = response.thread ?? {};
+  const effort = firstOwn([response, "reasoningEffort"], [thread, "reasoningEffort"],
+    [response, "effort"], [thread, "effort"]);
+  const serviceTier = firstOwn([response, "serviceTier"], [thread, "serviceTier"]);
+  return {
+    model: routeModel(response.model ?? thread.model),
+    modelProvider: String(response.modelProvider ?? thread.modelProvider ?? "").trim(),
+    ...(effort.available ? { effort: effort.value } : {}),
+    ...(serviceTier.available ? { serviceTier: serviceTier.value } : {}),
+  };
+}
+
+export function captureWorkflowOrigin(message, fallback = {}) {
   if (message?.method !== "turn/start") return null;
   const params = message.params ?? {};
   const collaboration = params.collaborationMode?.settings;
-  const selectedModel = collaboration?.model ?? params.model ?? model;
+  const provider = fallback.provider ?? null;
+  const selectedModel = collaboration?.model ?? params.model ?? fallback.model;
   const qualifiedModel = qualifiedRouteModel(selectedModel, provider);
   if (!qualifiedModel) return null;
   const declaredProvider = qualifiedModel.includes("/") ? qualifiedModel.slice(0, qualifiedModel.indexOf("/")) : null;
+  const effort = firstOwn([collaboration, "reasoning_effort"], [params, "effort"], [fallback, "effort"]);
+  const serviceTier = firstOwn([params, "serviceTier"], [fallback, "service_tier"]);
   return {
     provider: String(provider ?? (declaredProvider === "openai-codex" ? "openai" : declaredProvider) ?? "").trim() || null,
     model: qualifiedModel,
-    effort: collaboration?.reasoning_effort ?? params.effort ?? effort ?? null,
-    service_tier: params.serviceTier ?? service_tier ?? "default",
+    ...(effort.available ? { effort: effort.value } : {}),
+    ...(serviceTier.available ? { service_tier: serviceTier.value } : {}),
   };
 }
 
@@ -119,8 +143,8 @@ export function restoreWorkflowOrigin(marker, origin) {
   return {
     ...marker,
     model: origin.model,
-    effort: origin.effort ?? null,
-    service_tier: origin.service_tier ?? "default",
+    ...(Object.hasOwn(origin, "effort") ? { effort: origin.effort } : {}),
+    ...(Object.hasOwn(origin, "service_tier") ? { service_tier: origin.service_tier } : {}),
     restored_original: true,
   };
 }
@@ -719,8 +743,8 @@ export async function startCodexAppServerRouteProxy({
         const settings = activeSettings.get(threadId) ?? {};
         const current = {
           model: qualifiedRouteModel(settings.model ?? activeModels.get(threadId), settings.modelProvider ?? activeProviders.get(threadId)),
-          effort: settings.effort ?? null,
-          service_tier: settings.serviceTier ?? "default",
+          ...(Object.hasOwn(settings, "effort") ? { effort: settings.effort } : {}),
+          ...(Object.hasOwn(settings, "serviceTier") ? { service_tier: settings.serviceTier } : {}),
         };
         const restoration = await workflowOriginStore.prepareRestore(binding, current);
         if (restoration.status === "relinquished") {
@@ -1047,11 +1071,12 @@ export async function startCodexAppServerRouteProxy({
           let restoration = null;
           if (route?.restore_original === true) {
             originBinding = await boundRoute(route, threadId);
+            const active = activeSettings.get(threadId);
             const current = captureWorkflowOrigin(
               message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
               { provider: activeProviders.get(threadId), model: activeModels.get(threadId),
-                effort: activeSettings.get(threadId)?.effort,
-                service_tier: activeSettings.get(threadId)?.serviceTier },
+                ...(active && Object.hasOwn(active, "effort") ? { effort: active.effort } : {}),
+                ...(active && Object.hasOwn(active, "serviceTier") ? { service_tier: active.serviceTier } : {}) },
             );
             restoration = await workflowOriginStore.prepareRestore(originBinding, current ?? {});
             if (["ready", "relinquished"].includes(restoration.status)) {
@@ -1071,11 +1096,12 @@ export async function startCodexAppServerRouteProxy({
             }
           } else if (route?.run_id && route?.model) {
             originBinding = await boundRoute(route, threadId);
+            const active = activeSettings.get(threadId);
             capturedOrigin = captureWorkflowOrigin(
               message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
               { provider: activeProviders.get(threadId), model: activeModels.get(threadId),
-                effort: activeSettings.get(threadId)?.effort,
-                service_tier: activeSettings.get(threadId)?.serviceTier },
+                ...(active && Object.hasOwn(active, "effort") ? { effort: active.effort } : {}),
+                ...(active && Object.hasOwn(active, "serviceTier") ? { service_tier: active.serviceTier } : {}) },
             );
             const capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
             if (capture.status === "binding_conflict" || capture.status === "unowned_binding") {
@@ -1309,17 +1335,16 @@ export async function startCodexAppServerRouteProxy({
         }
         if ((responseTo === "thread/start" || responseTo === "thread/resume") && notification?.result?.thread?.id) {
           attachedThreadId = notification.result.thread.id;
-          const provider = String(notification.result.modelProvider ?? notification.result.thread.modelProvider ?? "").trim();
-          const model = routeModel(notification.result.model ?? notification.result.thread.model);
+          const settings = nativeThreadRouteSettings(notification.result);
+          const provider = settings.modelProvider;
+          const model = settings.model;
           if (provider) activeProviders.set(String(notification.result.thread.id), provider);
           if (model) activeModels.set(String(notification.result.thread.id), model);
           activeSettings.set(String(notification.result.thread.id), {
-            ...(activeSettings.get(String(notification.result.thread.id)) ?? {}),
             model,
             modelProvider: provider,
-            effort: notification.result.reasoningEffort ?? notification.result.thread.reasoningEffort
-              ?? notification.result.effort ?? notification.result.thread.effort ?? null,
-            serviceTier: notification.result.serviceTier ?? notification.result.thread.serviceTier ?? "default",
+            ...(Object.hasOwn(settings, "effort") ? { effort: settings.effort } : {}),
+            ...(Object.hasOwn(settings, "serviceTier") ? { serviceTier: settings.serviceTier } : {}),
           });
         }
         const pendingTurn = responseKey === null ? null : pendingTurnStarts.get(responseKey);

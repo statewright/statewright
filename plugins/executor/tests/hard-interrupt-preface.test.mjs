@@ -71,7 +71,9 @@ for (const [from, to] of [[sol, astra], [astra, sol], [sol, qwen], [qwen, astra]
       await until(() => visible.some(value => value.method === "turn/started"));
       // A partial native answer must not be replaced by a synthetic agent item.
       send({method: "item/agentMessage/delta", params: {threadId: "t", turnId: "old", itemId: "answer", delta: "partial"}});
-      pending = {session_id: "t", turn_id: mode === "stale" ? "different" : "old", run_id: "run", state: "validate", model: `${to.provider === "openai" ? "openai-codex" : "casa"}/${to.model}`, effort: "high"};
+      pending = {session_id: "t", root_session_id: "t", client_id: "client-preface",
+        turn_id: mode === "stale" ? "different" : "old", run_id: "run", state: "validate",
+        model: `${to.provider === "openai" ? "openai-codex" : "casa"}/${to.model}`, effort: "high"};
       if (mode === "legacy") delete pending.turn_id;
       if (mode === "operator") {
         client.send(JSON.stringify({id: 2, method: "turn/interrupt", params: {threadId: "t", turnId: "old"}}));

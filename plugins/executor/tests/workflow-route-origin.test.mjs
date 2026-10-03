@@ -92,6 +92,42 @@ test("an interrupted restore remains retryable before or after native settings a
   }
 });
 
+test("a reconstructed pending restoration remains retryable only with current authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-route-origin-pending-"));
+  try {
+    let owned = true;
+    const ownsBinding = async () => owned;
+    const first = new WorkflowRouteOriginStore({ root, clientId: binding.client_id, ownsBinding });
+    const routed = { model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default" };
+    await first.capture(binding, origin);
+    await first.confirmRoute(binding, routed);
+    assert.equal((await first.prepareRestore(binding, routed)).status, "ready");
+
+    const reconnected = new WorkflowRouteOriginStore({ root, clientId: binding.client_id, ownsBinding });
+    assert.equal((await reconnected.prepareRestore(binding, routed)).status, "ready");
+    owned = false;
+    assert.equal((await reconnected.prepareRestore(binding, routed)).status, "unowned_binding");
+    assert.equal((await reconnected.inspect(binding.thread_id)).status, "restore_pending");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unknown native settings retain provenance and explicit null remains known evidence", async () => {
+  const store = new WorkflowRouteOriginStore({ clientId: binding.client_id });
+  const nullableOrigin = { provider: "openai", model: origin.model, effort: null };
+  await store.capture(binding, nullableOrigin);
+  await store.confirmRoute(binding, { model: "openai-codex/gpt-5.6-terra", effort: "medium" });
+  const unknown = await store.prepareRestore(binding, { model: "openai-codex/gpt-5.6-terra" });
+  assert.deepEqual(unknown, { status: "current_settings_unknown", unknown: ["effort"] });
+  assert.ok(await store.inspect(binding.thread_id), "unknown settings must not delete provenance");
+  const ready = await store.prepareRestore(binding, { model: "openai-codex/gpt-5.6-terra", effort: "medium" });
+  assert.equal(ready.status, "ready");
+  assert.equal(Object.hasOwn(ready.route, "effort"), true);
+  assert.equal(ready.route.effort, null);
+  assert.equal(Object.hasOwn(ready.route, "service_tier"), false);
+});
+
 test("an interrupted restore still preserves a later manual route tuple", async () => {
   const store = new WorkflowRouteOriginStore({ clientId: binding.client_id });
   const routed = { model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default" };

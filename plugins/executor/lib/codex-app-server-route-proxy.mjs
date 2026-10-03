@@ -1317,7 +1317,8 @@ export async function startCodexAppServerRouteProxy({
             ...(activeSettings.get(String(notification.result.thread.id)) ?? {}),
             model,
             modelProvider: provider,
-            effort: notification.result.effort ?? notification.result.thread.effort ?? null,
+            effort: notification.result.reasoningEffort ?? notification.result.thread.reasoningEffort
+              ?? notification.result.effort ?? notification.result.thread.effort ?? null,
             serviceTier: notification.result.serviceTier ?? notification.result.thread.serviceTier ?? "default",
           });
         }

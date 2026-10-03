@@ -187,7 +187,9 @@ export class WorkflowRouteOriginStore {
     if (!record) return { status: "missing_provenance" };
     if (!sameWorkflowRouteBinding(record.binding, binding)) return { status: "binding_mismatch" };
     if (!await this.#authorized(binding)) return { status: "unowned_binding" };
-    if (record.status !== "active" || !record.routed?.model) return { status: "route_unconfirmed" };
+    if (!["active", "restore_pending"].includes(record.status) || !record.routed?.model) {
+      return { status: "route_unconfirmed" };
+    }
     const observed = {
       model: value(current.model),
       effort: value(current.effort),
@@ -199,11 +201,6 @@ export class WorkflowRouteOriginStore {
     // Statewright route is therefore the ownership boundary.  If any observed
     // axis diverged, preserve the complete current tuple; mixing an original
     // effort back into a manually selected model is not safe.
-    if (AXES.some(axis => !sameValue(observed[axis], record.routed[axis]))) {
-      await this.#remove(binding.thread_id);
-      return { status: "relinquished", route: observed, restored: [], relinquished: [...AXES],
-        reason: "observed_route_diverged" };
-    }
     const route = {};
     const restored = [];
     const relinquished = [];
@@ -215,6 +212,18 @@ export class WorkflowRouteOriginStore {
         route[axis] = value(record.manual?.[axis]) ?? observed[axis];
         relinquished.push(axis);
       }
+    }
+    // A restore may be interrupted before its settings notification arrives.
+    // Retrying the exact binding is safe while native settings still equal
+    // either the last confirmed Statewright route or the already-applied
+    // restore target. Any third tuple is a later manual override and wins.
+    const observedMatchesRouted = AXES.every(axis => sameValue(observed[axis], record.routed[axis]));
+    const observedMatchesRestore = record.status === "restore_pending"
+      && AXES.every(axis => sameValue(observed[axis], route[axis]));
+    if (!observedMatchesRouted && !observedMatchesRestore) {
+      await this.#remove(binding.thread_id);
+      return { status: "relinquished", route: observed, restored: [], relinquished: [...AXES],
+        reason: "observed_route_diverged" };
     }
     if (!route.model) return { status: "current_model_unknown", restored, relinquished };
     if (restored.length === 0) {

@@ -777,11 +777,12 @@ test("App Server applies a confirmed terminal restoration without waiting for an
     assert.equal((await receive("thread/start")).method, "thread/start");
     upstreamSocket.send(JSON.stringify({ id: 1, result: {
       thread: { id: route.session_id }, modelProvider: "openai", model: "gpt-5.6-sol",
+      reasoningEffort: "high", serviceTier: "priority",
     } }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
 
     client.send(JSON.stringify({ id: 2, method: "turn/start", params: {
-      threadId: route.session_id, input: [], model: "gpt-5.6-sol", effort: "high", serviceTier: "priority",
+      threadId: route.session_id, input: [], model: "gpt-5.6-sol",
     } }));
     const routed = await receive("routed turn").catch(error => {
       assert.fail(`${error.message}; protocol=${JSON.stringify(errors)}`);

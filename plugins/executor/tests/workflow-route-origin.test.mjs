@@ -69,6 +69,42 @@ test("captured origins survive store reconstruction and clear only after confirm
   }
 });
 
+test("an interrupted restore remains retryable before or after native settings apply", async () => {
+  for (const observed of [
+    { model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default" },
+    origin,
+  ]) {
+    const store = new WorkflowRouteOriginStore({ clientId: binding.client_id });
+    await store.capture(binding, origin);
+    await store.confirmRoute(binding, {
+      model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default",
+    });
+    assert.equal((await store.prepareRestore(binding, {
+      model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default",
+    })).status, "ready");
+    const retried = await store.prepareRestore(binding, observed);
+    assert.equal(retried.status, "ready");
+    assert.deepEqual(retried.route, {
+      model: origin.model, effort: origin.effort, service_tier: origin.service_tier,
+    });
+    assert.equal((await store.inspect(binding.thread_id)).status, "restore_pending");
+    assert.equal((await store.confirmRestore(binding)).status, "restored");
+  }
+});
+
+test("an interrupted restore still preserves a later manual route tuple", async () => {
+  const store = new WorkflowRouteOriginStore({ clientId: binding.client_id });
+  const routed = { model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default" };
+  await store.capture(binding, origin);
+  await store.confirmRoute(binding, routed);
+  await store.prepareRestore(binding, routed);
+  const manual = { model: "openai-codex/gpt-6-astra", effort: "xhigh", service_tier: "flex" };
+  const result = await store.prepareRestore(binding, manual);
+  assert.equal(result.status, "relinquished");
+  assert.deepEqual(result.route, manual);
+  assert.equal(await store.inspect(binding.thread_id), null);
+});
+
 test("manual model-only, effort-only, and pair changes preserve the complete observed tuple", async () => {
   for (const current of [
     { model: "openai-codex/gpt-6-astra", effort: "medium", service_tier: "default" },

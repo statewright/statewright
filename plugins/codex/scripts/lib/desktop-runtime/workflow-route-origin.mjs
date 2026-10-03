@@ -36,8 +36,8 @@ function normalizeOrigin(origin) {
   return {
     provider: value(origin.provider),
     model,
-    effort: value(origin.effort),
-    service_tier: value(origin.service_tier) ?? "default",
+    ...(Object.hasOwn(origin, "effort") ? { effort: value(origin.effort) } : {}),
+    ...(Object.hasOwn(origin, "service_tier") ? { service_tier: value(origin.service_tier) } : {}),
   };
 }
 
@@ -45,8 +45,9 @@ function normalizeAxes(axes) {
   return [...new Set((axes ?? []).filter(axis => AXES.includes(axis)))];
 }
 
-function sameValue(left, right) {
-  return value(left) === value(right);
+function sameAxis(left, right, axis) {
+  return Object.hasOwn(left, axis) === Object.hasOwn(right, axis)
+    && (!Object.hasOwn(left, axis) || value(left[axis]) === value(right[axis]));
 }
 
 function validBinding(binding) {
@@ -139,7 +140,7 @@ export class WorkflowRouteOriginStore {
       version: 1,
       binding: structuredClone(binding),
       origin: normalized,
-      ownership: Object.fromEntries(AXES.map(axis => [axis, true])),
+      ownership: Object.fromEntries(AXES.map(axis => [axis, axis === "model" || Object.hasOwn(normalized, axis)])),
       manual: {},
       routed: null,
       status: "captured",
@@ -156,8 +157,8 @@ export class WorkflowRouteOriginStore {
     if (!await this.#authorized(binding)) return { status: "unowned_binding" };
     const routed = {
       model: value(route?.model),
-      effort: value(route?.effort),
-      service_tier: value(route?.service_tier) ?? "default",
+      ...(Object.hasOwn(route ?? {}, "effort") ? { effort: value(route.effort) } : {}),
+      ...(Object.hasOwn(route ?? {}, "service_tier") ? { service_tier: value(route.service_tier) } : {}),
     };
     if (!routed.model) return { status: "invalid_route" };
     record.routed = routed;
@@ -174,8 +175,7 @@ export class WorkflowRouteOriginStore {
     if (!await this.#authorized(record.binding)) return { status: "unowned_binding" };
     for (const axis of selected) {
       record.ownership[axis] = false;
-      const changed = value(changes[axis]);
-      if (changed) record.manual[axis] = changed;
+      if (Object.hasOwn(changes, axis)) record.manual[axis] = value(changes[axis]);
     }
     record.updated_at = this.now();
     await this.#write(record);
@@ -192,10 +192,12 @@ export class WorkflowRouteOriginStore {
     }
     const observed = {
       model: value(current.model),
-      effort: value(current.effort),
-      service_tier: value(current.service_tier) ?? "default",
+      ...(Object.hasOwn(current, "effort") ? { effort: value(current.effort) } : {}),
+      ...(Object.hasOwn(current, "service_tier") ? { service_tier: value(current.service_tier) } : {}),
     };
     if (!observed.model) return { status: "current_model_unknown" };
+    const unknown = AXES.filter(axis => Object.hasOwn(record.routed, axis) && !Object.hasOwn(observed, axis));
+    if (unknown.length) return { status: "current_settings_unknown", unknown };
     // A settings callback is not the only way a human can change the native
     // route (for example, across a reconnect).  The last settings-confirmed
     // Statewright route is therefore the ownership boundary.  If any observed
@@ -206,10 +208,13 @@ export class WorkflowRouteOriginStore {
     const relinquished = [];
     for (const axis of AXES) {
       if (record.ownership[axis]) {
-        route[axis] = record.origin[axis];
-        restored.push(axis);
+        if (Object.hasOwn(record.origin, axis)) {
+          route[axis] = record.origin[axis];
+          restored.push(axis);
+        }
       } else {
-        route[axis] = value(record.manual?.[axis]) ?? observed[axis];
+        if (Object.hasOwn(record.manual ?? {}, axis)) route[axis] = value(record.manual[axis]);
+        else if (Object.hasOwn(observed, axis)) route[axis] = observed[axis];
         relinquished.push(axis);
       }
     }
@@ -217,9 +222,10 @@ export class WorkflowRouteOriginStore {
     // Retrying the exact binding is safe while native settings still equal
     // either the last confirmed Statewright route or the already-applied
     // restore target. Any third tuple is a later manual override and wins.
-    const observedMatchesRouted = AXES.every(axis => sameValue(observed[axis], record.routed[axis]));
+    const observedMatchesRouted = AXES.every(axis => !Object.hasOwn(record.routed, axis)
+      || sameAxis(observed, record.routed, axis));
     const observedMatchesRestore = record.status === "restore_pending"
-      && AXES.every(axis => sameValue(observed[axis], route[axis]));
+      && AXES.every(axis => !Object.hasOwn(route, axis) || sameAxis(observed, route, axis));
     if (!observedMatchesRouted && !observedMatchesRestore) {
       await this.#remove(binding.thread_id);
       return { status: "relinquished", route: observed, restored: [], relinquished: [...AXES],

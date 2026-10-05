@@ -1,9 +1,32 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import test from "node:test";
+import { setGatewayCredential } from "../lib/credential-store.mjs";
+
+async function installCredentialHelper(root, environment) {
+  const helper = join(root, "credential-helper.mjs");
+  const database = join(root, "credential-database.json");
+  await writeFile(helper, `#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+let values = {};
+try { values = JSON.parse(readFileSync(process.env.STATEWRIGHT_TEST_CREDENTIAL_DATABASE, "utf8")); } catch {}
+const account = "v1:" + createHash("sha256").update(request.gateway).digest("hex");
+if (request.operation === "set") { values[account] = request.secret; writeFileSync(process.env.STATEWRIGHT_TEST_CREDENTIAL_DATABASE, JSON.stringify(values)); console.log(JSON.stringify({ok:true,status:"ok",account})); }
+else if (request.operation === "get" && values[account]) console.log(JSON.stringify({ok:true,status:"ok",account,secret:values[account]}));
+else console.log(JSON.stringify({ok:false,status:"missing",account}));
+`);
+  await chmod(helper, 0o700);
+  environment.STATEWRIGHT_CREDENTIAL_HELPER = helper;
+  environment.STATEWRIGHT_TEST_CREDENTIAL_DATABASE = database;
+  return database;
+}
 
 function runProxy(proxy, environment) {
   const requests = [
@@ -194,6 +217,7 @@ esac
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
+    const credentialDatabase = await installCredentialHelper(root, environment);
 
     const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
@@ -202,12 +226,11 @@ esac
     assert.equal(result.code, 0, result.stderr);
     assert.match(responseById(result.stdout, 2).result.content[0].text, /device code BCDF-GHJK-MNPQ/);
 
-    const keyPath = join(home, ".statewright", "api_key");
     await waitForOutput(async () => {
-      try { return await readFile(keyPath, "utf8"); } catch { return ""; }
+      try { return await readFile(credentialDatabase, "utf8"); } catch { return ""; }
     }, /sw_live_/);
-    assert.equal(await readFile(keyPath, "utf8"), `${rawKey}\n`);
-    assert.equal((await stat(keyPath)).mode & 0o777, 0o600);
+    assert.match(await readFile(credentialDatabase, "utf8"), new RegExp(rawKey));
+    await assert.rejects(readFile(join(home, ".statewright", "api_key")));
     const curlArguments = await readFile(capture, "utf8");
     assert.match(curlArguments, /\/api\/oauth\/device\/code/);
     assert.match(curlArguments, /\/api\/oauth\/device\/token/);
@@ -311,31 +334,18 @@ esac
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
 
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
-    await waitForOutput(() => stdout, /"id":1/);
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
-    const invalidMarker = join(home, ".statewright", "invalid_api_key");
-    await waitForOutput(async () => {
-      try { return await readFile(invalidMarker, "utf8"); } catch { return ""; }
-    }, /[0-9a-f]{64}/, 10_000);
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
-    await waitForOutput(() => stdout, /"id":2/);
     child.stdin.end();
     const code = await new Promise((resolveClose, rejectClose) => {
       child.once("error", rejectClose);
       child.once("close", resolveClose);
     });
 
-    assert.equal(code, 0, stderr);
-    assert.match(await readFile(curlCapture, "utf8"), /\/api\/client-tools/);
+    assert.equal(code, 1);
+    await assert.rejects(readFile(curlCapture));
     await assert.rejects(readFile(browserCapture));
-    assert.match(stderr, /credential from STATEWRIGHT_API_KEY was rejected/);
-    assert.match(stderr, /the configured Statewright gateway/);
+    assert.match(stderr, /could not resolve the selected gateway profile/);
     assert.doesNotMatch(stderr, /secret|token=|private|statewright\.ai\/keys/);
-    const invalidResponse = responseById(stdout, 2);
-    assert.equal(invalidResponse.error.code, -1);
-    assert.match(invalidResponse.error.message, /Browser setup was not started/);
-    assert.doesNotMatch(invalidResponse.error.message, /secret|token=|private|keys/);
+    assert.equal(stdout, "");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -405,6 +415,7 @@ test("codex refreshes its catalog after a local credential is provisioned withou
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
+    await installCredentialHelper(root, environment);
 
     const child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
       env: environment,
@@ -427,7 +438,7 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
     await waitForOutput(() => stdout, /\"id\":3/);
     assert.equal(responseById(stdout, 3).error.code, -32001);
-    await writeFile(join(home, ".statewright", "api_key"), "sw_live_new_key\n", { mode: 0o600 });
+    await setGatewayCredential("https://mcp.statewright.ai", "sw_live_new_key", { environment, home });
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} })}\n`);
     child.stdin.end();
     const code = await new Promise((resolveClose, rejectClose) => {

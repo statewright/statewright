@@ -113,6 +113,12 @@ test("plugin release workflow resolves distinct names and curated notes", async 
   assert.match(workflow, /require\("\.\/\.github\/scripts\/require-plugin-canaries\.cjs"\)/);
   assert.match(workflow, /await requirePluginCanaries\(/);
   assert.match(workflow, /artifact-smoke:\n\s+needs: package/);
+  assert.match(workflow, /credential-helper:\n/);
+  assert.match(workflow, /statewright-credentials-linux-x64/);
+  assert.match(workflow, /statewright-credentials-darwin-arm64/);
+  assert.match(workflow, /statewright-credentials-windows-x64\.exe/);
+  assert.match(workflow, /cargo test --target "\$\{\{ matrix\.target \}\}" -p statewright-credentials/);
+  assert.match(workflow, /pattern: credential-helper-\*/);
   assert.match(workflow, /name: Smoke packaged plugin against production/);
   assert.match(workflow, /name: Submit packaged plugin adoption telemetry event/);
   assert.match(workflow, /uses: actions\/attest@v4/);

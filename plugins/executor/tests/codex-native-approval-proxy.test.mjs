@@ -536,7 +536,8 @@ for (const boundary of ["reservation", "provider"]) {
     await f.rpc("thread/start");
     f.armPending();
     let acknowledgements = 0, releases = 0;
-    f.setRoute({ route: { session_id: threadId, run_id: destination.run_id, state: destination.state,
+    f.setRoute({ route: { session_id: threadId, run_id: destination.run_id,
+      run_session_id: destination.run_session_id, state: destination.state,
       model: destination.model,
       effort: destination.thinking_level },
     ack: async () => { acknowledgements++; }, release: async () => { releases++; } });

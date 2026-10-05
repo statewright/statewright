@@ -51,14 +51,45 @@ After installation, call `statewright_connect`. Statewright creates a short-live
 device request and opens an authenticated approval page in your browser. Confirm
 that the browser shows the same device code as the tool response, then approve.
 The plugin polls in the background, verifies the returned Statewright gateway
-key against a read-only endpoint, and writes it atomically to
-`~/.statewright/api_key` with mode `0600`. It never asks you to paste the key into
-a Codex or ChatGPT conversation.
+key against a read-only endpoint, and stores it in macOS Keychain, Windows
+Credential Manager, or Linux Secret Service. The native helper keys each entry
+by canonical gateway URL, so production, staging, and development credentials
+remain independent. It never asks you to paste the key into a Codex or ChatGPT
+conversation.
+
+The old `~/.statewright/api_key` file is consulted only for the exact production
+gateway and copied into the OS credential store. It is preserved for rollback
+and is never used for another gateway. Headless Linux installations without an
+unlocked Secret Service fail closed; automation can still use the process-scoped
+`STATEWRIGHT_API_KEY` override.
+
+Gateway aliases use non-secret configuration in
+`~/.statewright/environments.json`:
+
+```json
+{
+  "gateways": {
+    "staging": {
+      "gateway_url": "https://staging-gateway.example/mcp",
+      "auth_url": "https://staging-accounts.example"
+    },
+    "dev1": {
+      "gateway_url": "https://dev1-gateway.example/mcp",
+      "auth_url": "https://dev1-accounts.example"
+    }
+  }
+}
+```
+
+Set `STATEWRIGHT_GATEWAY_URL` to select a configured URL directly, or
+`STATEWRIGHT_ENV=dev1` to select a named profile. Unknown named environments and
+gateways without an authorization-service mapping fail closed instead of
+falling back to production.
 
 If browser launch is disabled, `statewright_connect` returns the complete
 approval URL and device code. `https://statewright.ai/keys` remains the manual
 recovery path when device enrollment cannot be started. The tool catalog reads
-the credential file for every request, so authenticated tools become available
+the OS credential store for every request, so authenticated tools become available
 in the same MCP process after approval.
 
 ### Exact native token telemetry

@@ -11,7 +11,50 @@ permissions:
   contents: read
 
 jobs:
+  credential-helper:
+    name: Credential helper (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: statewright-credentials-linux-x64
+            source: target/x86_64-unknown-linux-gnu/release/statewright-credentials
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: statewright-credentials-darwin-arm64
+            source: target/aarch64-apple-darwin/release/statewright-credentials
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            asset: statewright-credentials-windows-x64.exe
+            source: target/x86_64-pc-windows-msvc/release/statewright-credentials.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux Secret Service headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Test native credential helper
+        run: cargo test --target "${{ matrix.target }}" -p statewright-credentials
+      - name: Build native credential helper
+        run: cargo build --release --target "${{ matrix.target }}" -p statewright-credentials
+      - name: Prepare credential helper asset
+        shell: bash
+        run: |
+          mkdir -p credential-helper
+          cp '${{ matrix.source }}' 'credential-helper/${{ matrix.asset }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: credential-helper-${{ matrix.asset }}
+          path: credential-helper/${{ matrix.asset }}
+          if-no-files-found: error
+
   package:
+    needs: credential-helper
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -85,6 +128,14 @@ jobs:
       - name: Install plugin dependencies
         if: steps.plugin.outputs.directory == 'plugins/codex'
         run: npm ci --ignore-scripts --prefix plugins/codex
+      - name: Download native credential helpers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: credential-helper-*
+          path: ${{ steps.plugin.outputs.directory }}/bin
+          merge-multiple: true
+      - name: Mark Unix credential helpers executable
+        run: chmod 0755 "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-linux-x64" "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-darwin-arm64"
       - name: Install Task
         run: |
           go install github.com/go-task/task/v3/cmd/task@v3.39.2

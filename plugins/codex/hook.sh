@@ -68,10 +68,18 @@ if ! command -v jq &>/dev/null; then
 fi
 
 STATEWRIGHT_DIR="${HOME}/.statewright"
-API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$STATEWRIGHT_DIR/api_key" 2>/dev/null || true)}"
+# shellcheck source=gateway-profile.sh
+source "${SCRIPT_DIR}/gateway-profile.sh"
+if statewright_gateway_profile; then
+  GW_URL="$STATEWRIGHT_GATEWAY_URL"
+  PB_URL="$STATEWRIGHT_PB_URL"
+  API_KEY="$(statewright_load_api_key 2>/dev/null || true)"
+else
+  GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
+  PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
+  API_KEY="${STATEWRIGHT_API_KEY:-}"
+fi
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
-GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
-PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 LOCAL_TELEMETRY_URL="${STATEWRIGHT_LOCAL_TELEMETRY_URL:-http://127.0.0.1:${STATEWRIGHT_TELEMETRY_PORT:-4318}}"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"

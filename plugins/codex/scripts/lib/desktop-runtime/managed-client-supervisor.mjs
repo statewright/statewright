@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -950,14 +950,36 @@ export async function installManagedClientShim({ host, launcherPath, home = home
   const shimDirectory = join(home, ".statewright", "bin");
   const binary = realBinary ?? resolveRealBinary(host, { shimDirectory, platform });
   await mkdir(shimDirectory, { recursive: true });
+  let durableLauncherPath = launcherPath;
+  if (host === "codex") {
+    const pluginRoot = resolve(dirname(launcherPath), "..");
+    const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const version = String(manifest.version ?? "unknown").replace(/[^A-Za-z0-9._+-]/g, "_");
+      const durableRoot = join(home, ".statewright", "runtime", "codex", version);
+      durableLauncherPath = join(durableRoot, "scripts", "statewright-managed-client.mjs");
+      if (!existsSync(durableLauncherPath)) {
+        const temporary = `${durableRoot}.install-${process.pid}-${randomUUID()}`;
+        await mkdir(dirname(temporary), { recursive: true });
+        await cp(pluginRoot, temporary, { recursive: true, force: false, errorOnExist: true });
+        try {
+          await rename(temporary, durableRoot);
+        } catch (error) {
+          await rm(temporary, { recursive: true, force: true });
+          if (!existsSync(durableLauncherPath)) throw error;
+        }
+      }
+    }
+  }
   const shimPath = join(shimDirectory, windowsPlatform(platform) ? `${host}.cmd` : host);
   const contents = windowsPlatform(platform)
-    ? `@echo off\r\nif /I \"%~1\"==\"--kill-app-server\" (\r\n  \"${process.execPath}\" \"${launcherPath}\" %*\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\"${process.execPath}\" \"${launcherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
-    : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(launcherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
+    ? `@echo off\r\nif /I \"%~1\"==\"--kill-app-server\" (\r\n  \"${process.execPath}\" \"${durableLauncherPath}\" %*\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\"${process.execPath}\" \"${durableLauncherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
+    : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(durableLauncherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(durableLauncherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
   await writeFile(shimPath, contents, { mode: windowsPlatform(platform) ? undefined : 0o755 });
   if (!windowsPlatform(platform)) await chmod(shimPath, 0o755);
   await installGitCloseoutShim({ home, platform });
-  return { shimDirectory, shimPath, realBinary: binary };
+  return { shimDirectory, shimPath, realBinary: binary, launcherPath: durableLauncherPath };
 }
 
 export async function installGitCloseoutShim({ home = homedir(), platform = process.platform } = {}) {

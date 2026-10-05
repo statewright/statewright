@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { bootstrapManagedClients, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
+import { resolveGatewayApiKey } from "./lib/credential-store.mjs";
+import { resolvedGatewayEnvironment } from "./lib/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/error-reporting.mjs";
 
 const launcherPath = fileURLToPath(import.meta.url);
@@ -129,13 +131,23 @@ async function main() {
     return;
   }
   if (!options.realBin) throw new Error("--real-bin is required when launching a managed client.");
+  const environment = await resolvedGatewayEnvironment();
   if (await managedClientEnabled(options.host)) {
-    process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter });
-    return;
+    try {
+      environment.STATEWRIGHT_API_KEY = await resolveGatewayApiKey(environment);
+      process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });
+      return;
+    } catch (error) {
+      if (error?.code !== "CREDENTIAL_MISSING") throw error;
+      if (!environment.STATEWRIGHT_PB_URL) {
+        throw new Error("No credential is stored for this gateway and its authorization service is not configured in ~/.statewright/environments.json.");
+      }
+      process.stderr.write("[statewright] no credential is stored for this gateway; launching the client so statewright_connect can complete browser approval. Restart after approval to enable managed routing.\n");
+    }
   }
   const child = spawn(options.realBin, options.args, {
     stdio: "inherit",
-    env: managedClientChildEnvironment({ host: options.host }),
+    env: managedClientChildEnvironment({ host: options.host, environment }),
     cwd: process.cwd(),
     shell: process.platform === "win32",
   });

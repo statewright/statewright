@@ -103,13 +103,8 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   exit 0
 fi
 
-GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
-PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 RAW_CAPTURE_DESTINATION="${STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION:-}"
-KEY_FILE="${HOME}/.statewright/api_key"
 STATEWRIGHT_DIR="${HOME}/.statewright"
-INVALID_KEY_SENTINEL="${STATEWRIGHT_DIR}/invalid_api_key"
-MISSING_KEY_SENTINEL="${STATEWRIGHT_DIR}/missing_api_key_prompted"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
@@ -121,6 +116,22 @@ DESKTOP_APP_EXECUTABLE="${STATEWRIGHT_DESKTOP_APP_EXECUTABLE:-/Applications/Chat
 DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
+# shellcheck source=gateway-profile.sh
+source "${SCRIPT_DIR}/gateway-profile.sh"
+
+if ! statewright_gateway_profile; then
+  echo "[statewright] could not resolve the selected gateway profile" >&2
+  exit 1
+fi
+GW_URL="$STATEWRIGHT_GATEWAY_URL"
+PB_URL="$STATEWRIGHT_PB_URL"
+GATEWAY_STATE_DIR="${STATEWRIGHT_DIR}/gateways/${STATEWRIGHT_GATEWAY_IDENTITY}"
+INVALID_KEY_SENTINEL="${GATEWAY_STATE_DIR}/invalid_api_key"
+MISSING_KEY_SENTINEL="${GATEWAY_STATE_DIR}/missing_api_key_prompted"
+
+load_api_key() {
+  statewright_load_api_key 2>/dev/null || true
+}
 
 key_fingerprint() {
   if command -v shasum >/dev/null 2>&1; then
@@ -188,7 +199,7 @@ request_device_authorization() {
 }
 
 persist_verified_device_key() {
-  local key="$1" body status temp_key
+  local key="$1" body status
   [[ "$key" =~ ^sw_live_[0-9a-f]{32}$ ]] || return 1
 
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
@@ -199,16 +210,7 @@ persist_verified_device_key() {
   rm -f "$body"
   [ "$status" = "200" ] || return 1
 
-  umask 077
-  mkdir -p "$STATEWRIGHT_DIR" || return 1
-  chmod 700 "$STATEWRIGHT_DIR" || return 1
-  temp_key=$(mktemp "$STATEWRIGHT_DIR/api_key.device.XXXXXX") || return 1
-  if ! printf '%s\n' "$key" > "$temp_key"; then
-    rm -f "$temp_key"
-    return 1
-  fi
-  chmod 600 "$temp_key" || { rm -f "$temp_key"; return 1; }
-  mv -f "$temp_key" "$KEY_FILE"
+  printf '%s' "$key" | statewright_store_api_key >/dev/null || return 1
   rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
 }
 
@@ -248,7 +250,8 @@ poll_device_authorization() {
 mark_invalid_key() {
   local fingerprint service source
   fingerprint=$(key_fingerprint "$1")
-  mkdir -p "$STATEWRIGHT_DIR" 2>/dev/null || return 0
+  mkdir -p "$GATEWAY_STATE_DIR" 2>/dev/null || return 0
+  chmod 700 "$GATEWAY_STATE_DIR" 2>/dev/null || true
   if [ "$(cat "$INVALID_KEY_SENTINEL" 2>/dev/null || true)" != "$fingerprint" ]; then
     printf '%s\n' "$fingerprint" > "$INVALID_KEY_SENTINEL"
     chmod 600 "$INVALID_KEY_SENTINEL"
@@ -271,7 +274,7 @@ credential_source_label() {
   if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
     printf '%s' 'STATEWRIGHT_API_KEY'
   else
-    printf '%s' '~/.statewright/api_key'
+    printf '%s' 'the OS credential store'
   fi
 }
 
@@ -389,7 +392,7 @@ start_local_telemetry_agent() {
   chmod 700 "$TELEMETRY_DIR"
   acquire_telemetry_lock || return 0
 
-  key="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  key="$(load_api_key)"
   key="${key%"${key##*[![:space:]]}"}"
   if [ -z "$key" ]; then
     stop_managed_telemetry_agent || true
@@ -586,7 +589,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  API_KEY="$(load_api_key)"
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 
   # Handle statewright_search_docs locally (no gateway round-trip)

@@ -9,7 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { approvalJournal } from "../lib/approval-journal.mjs";
-import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 function fakeBridgeFactory() {
   return {
@@ -1027,6 +1027,29 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Codex installation copies cache-owned runtime to a durable versioned location", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-durable-runtime-"));
+  const home = join(root, "home");
+  const sourceLauncher = resolve("plugins/codex/scripts/statewright-managed-client.mjs");
+  try {
+    const installed = await installManagedClientShim({
+      host: "codex",
+      launcherPath: sourceLauncher,
+      home,
+      realBinary: "/opt/example/codex",
+    });
+    assert.match(installed.launcherPath, /\.statewright\/runtime\/codex\//);
+    assert.notEqual(installed.launcherPath, sourceLauncher);
+    await access(installed.launcherPath);
+    await access(join(dirname(installed.launcherPath), "lib", "desktop-runtime", "credential-store.mjs"));
+    const shim = await readFile(installed.shimPath, "utf8");
+    assert.match(shim, new RegExp(installed.launcherPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(shim, /plugins\/cache/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const TEST_ROOT = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_AGENT = resolve(TEST_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
 
@@ -1052,23 +1075,33 @@ async function pollHealth(port, attempts = 80) {
   return null;
 }
 
-test("keyless managed client resolves the on-disk telemetry key instead of reporting a false identity conflict", async () => {
+test("keyless managed client resolves the OS-store telemetry key instead of reporting a false identity conflict", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-telemetry-key-"));
   const home = join(root, "home");
   const cwd = join(root, "cwd");
   try {
     await mkdir(join(home, ".statewright"), { recursive: true });
     await mkdir(cwd, { recursive: true });
-    await writeFile(join(home, ".statewright", "api_key"), "file-telemetry-key\n", { mode: 0o600 });
+    const credentialHelper = join(root, "credential-helper.mjs");
+    await writeFile(credentialHelper, `#!/usr/bin/env node
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+if (request.operation === "get") console.log(JSON.stringify({ok:true,status:"ok",account:"fixture",secret:"file-telemetry-key"}));
+else console.log(JSON.stringify({ok:true,status:"ok",account:"fixture"}));
+`);
+    await chmod(credentialHelper, 0o700);
     await writeFile(join(home, ".statewright", "config.json"), `${JSON.stringify({ telemetry: { codex: { native_tokens: true } } })}\n`);
     const port = await freeLoopbackPort();
     const listenerEnv = {
+      PATH: process.env.PATH,
       STATEWRIGHT_TELEMETRY_DIR: join(home, ".statewright", "telemetry", "native-codex"),
       STATEWRIGHT_TELEMETRY_PORT: String(port),
       STATEWRIGHT_API_KEY: "file-telemetry-key",
       STATEWRIGHT_PB_URL: "http://127.0.0.1:9",
       STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:9",
       STATEWRIGHT_CODEX_SESSIONS_DIR: join(root, "sessions"),
+      STATEWRIGHT_CREDENTIAL_HELPER: credentialHelper,
     };
     const listener = spawn(process.execPath, [TELEMETRY_AGENT], { env: listenerEnv, stdio: "ignore", detached: process.platform !== "win32" });
     listener.unref();
@@ -1076,7 +1109,7 @@ test("keyless managed client resolves the on-disk telemetry key instead of repor
     assert.equal(healthy?.listener_status, "healthy", "test listener became healthy");
     try {
       // A client shell that does not export STATEWRIGHT_API_KEY must resolve the
-      // key from the on-disk file and accept the already-healthy listener.
+      // key through the OS credential helper and accept the healthy listener.
       const telemetry = await acquireManagedTelemetry({
         environment: { ...listenerEnv, STATEWRIGHT_API_KEY: undefined },
         home,

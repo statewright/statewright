@@ -19,6 +19,8 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/managed-client-identity.mjs", "executor/lib/managed-client-identity.mjs"],
   ["lib/managed-mcp-bridge.mjs", "executor/lib/managed-mcp-bridge.mjs"],
   ["lib/tool-annotations.mjs", "executor/lib/tool-annotations.mjs"],
+  ["lib/credential-store.mjs", "executor/lib/credential-store.mjs"],
+  ["lib/gateway-profile.mjs", "executor/lib/gateway-profile.mjs"],
   ["lib/remote-client.mjs", "executor/lib/remote-client.mjs"],
   ["lib/windows-command-resolution.mjs", "executor/lib/windows-command-resolution.mjs"],
 ];

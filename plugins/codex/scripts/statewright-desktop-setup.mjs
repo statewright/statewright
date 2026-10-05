@@ -8,6 +8,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { invokeCredentialHelper } from "./lib/desktop-runtime/credential-store.mjs";
+import { canonicalGateway } from "./lib/desktop-runtime/gateway-profile.mjs";
 
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_VENDOR_CODEX_CANDIDATES = Object.freeze([
@@ -31,7 +33,6 @@ const DESKTOP_PROFILES = Object.freeze({
     shimName: "statewright-desktop-codex",
     launcherName: "statewright-desktop-launch.mjs",
     gatewayUrl: "https://mcp.statewright.ai",
-    apiKeyFile: "api_key",
   }),
   staging: Object.freeze({
     name: "staging",
@@ -43,7 +44,6 @@ const DESKTOP_PROFILES = Object.freeze({
     shimName: "statewright-desktop-codex-staging",
     launcherName: "statewright-desktop-staging-launch.mjs",
     gatewayUrl: null,
-    apiKeyFile: "staging_api_key",
   }),
   development: Object.freeze({
     name: "development",
@@ -55,7 +55,6 @@ const DESKTOP_PROFILES = Object.freeze({
     shimName: "statewright-desktop-codex-development",
     launcherName: "statewright-desktop-development-launch.mjs",
     gatewayUrl: null,
-    apiKeyFile: "dev_api_key",
   }),
 });
 const execFile = promisify(execFileCallback);
@@ -179,17 +178,15 @@ try {
   const state = JSON.parse(await readFile(statePath, "utf8"));
   await access(state.desktop_executable, constants.X_OK);
   await access(state.shim_path, constants.X_OK);
-  const apiKey = (await readFile(state.api_key_path, "utf8")).trim();
-  if (!apiKey) throw new Error(\`Statewright API key is empty: \${state.api_key_path}\`);
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
-  const { startDesktopMcpBridge } = await import(runtimeUrl);
-  const bridgeEnvironment = { ...process.env, STATEWRIGHT_GATEWAY_URL: state.gateway_url, STATEWRIGHT_API_KEY: apiKey };
-  const bridge = await startDesktopMcpBridge({ environment: bridgeEnvironment, clientId: state.client_id });
+  const { desktopProfileEnvironment, startProfileDesktopMcpBridge } = await import(runtimeUrl);
+  const profileEnvironment = await desktopProfileEnvironment(state, process.env);
+  const bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment });
   const child = spawn(state.desktop_executable, [], {
     detached: false,
     stdio: "ignore",
     env: {
-      ...process.env,
+      ...profileEnvironment,
       CODEX_CLI_PATH: state.shim_path,
       STATEWRIGHT_NODE_BIN: state.node_executable,
       STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,
@@ -285,7 +282,7 @@ export function parseDesktopArgs(argv) {
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
   const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
@@ -296,9 +293,9 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
   const launcherAppPath = join(desktopApplicationsDirectory, profile.appName);
   const shim = join(dirname(resolvedState), "bin", profile.shimName);
-  const gatewayUrl = gatewayUrlOverride ?? profile.gatewayUrl;
+  const gatewayUrl = (preserveGateway ? existing?.gateway_url : null) ?? gatewayUrlOverride ?? profile.gatewayUrl;
   if (!gatewayUrl) throw new Error(`Desktop profile ${profile.name} requires an explicit --gateway-url.`);
-  const apiKeyPath = join(dirname(resolvedState), profile.apiKeyFile);
+  canonicalGateway(gatewayUrl); // Reject malformed endpoint metadata before any setup writes.
   if (!await executable(vendor)) throw new Error(`Desktop vendor executable is not executable: ${vendor}`);
   if (!await executable(desktopExecutable)) throw new Error(`ChatGPT Desktop executable is not executable: ${desktopExecutable}`);
   if (!await executable(nodeExecutable)) throw new Error(`Node executable is not executable: ${nodeExecutable}`);
@@ -311,8 +308,10 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
   if (existing && existing.version !== 2 && (existing.version !== 3 || (existing.profile ?? "production") !== profile.name || existing.shim_path !== shim || (existing.original_codex !== vendor && !bundledVendorMigration) || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
   const legacyPath = await legacyLaunchdPath(existing, { launchctlExecFile, launchctlPath });
   const state = existing?.version === 3
-    ? { ...existing, profile: profile.name, original_codex: vendor, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, api_key_path: apiKeyPath }
-    : { version: 3, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, api_key_path: apiKeyPath, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+    ? { ...existing, profile: profile.name, original_codex: vendor, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
+    : { version: 3, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+  delete state.api_key_path; // Leave legacy files untouched; they are not launch credentials.
+  state.credential_store = "gateway_keyring";
   await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
   await writeAtomicFn(shim, `#!/bin/sh\nSTATEWRIGHT_DESKTOP_STATE_PATH=${shellQuote(resolvedState)} exec ${shellQuote(nodeExecutable)} ${shellQuote(runtime)} "$@"\n`, 0o700);
   if (legacyPath) {
@@ -347,6 +346,26 @@ export async function provisionDesktop(options = {}) {
     if (await readable(desktopDisabledPath(resolvedState))) return { skipped: "disabled", state_path: resolvedState };
     return enableDesktopUnlocked({ ...options, statePath: resolvedState });
   });
+}
+
+// Refresh every already-configured surface from the same installed package.
+// Only production is provisioned on first use; private endpoints are never
+// invented, disabled profiles stay disabled, and each profile keeps its owner.
+export async function provisionDesktopProfiles({ home = homedir(), ...options } = {}) {
+  const results = [];
+  for (const profile of Object.keys(DESKTOP_PROFILES)) {
+    const statePath = defaultDesktopStatePath(home, profile);
+    try {
+      const existing = await readOptionalJson(statePath);
+      if (profile !== "production" && !existing) continue;
+      results.push(await provisionDesktop({ ...options, profile, statePath, preserveGateway: true,
+        app: existing?.desktop_executable ?? options.app,
+      }));
+    } catch {
+      results.push({ profile, state_path: statePath, skipped: "setup_requires_attention" });
+    }
+  }
+  return results;
 }
 
 export async function launchDesktop({ statePath, profile: profileName = "production", spawn = spawnCallback, environment = process.env } = {}) {
@@ -401,7 +420,7 @@ export async function disableDesktop({ statePath, profile: profileName = "produc
   });
 }
 
-export async function desktopDoctor({ statePath, profile: profileName = "production" } = {}) {
+export async function desktopDoctor({ statePath, profile: profileName = "production", credentialStatus = gateway => invokeCredentialHelper({ operation: "status", gateway }) } = {}) {
   const resolvedState = resolve(statePath ?? defaultDesktopStatePath(homedir(), profileName));
   if (await readable(desktopDisabledPath(resolvedState))) return { ok: false, reason: "disabled", state_path: resolvedState };
   const state = await readOptionalJson(resolvedState);
@@ -409,8 +428,14 @@ export async function desktopDoctor({ statePath, profile: profileName = "product
   if (state.version !== 3) return { ok: false, reason: "legacy_setup_requires_enable", state_path: resolvedState };
   const profile = desktopProfile(state.profile ?? profileName);
   const launcherPath = state.launcher_app_path && join(state.launcher_app_path, "Contents", "MacOS", profile.executableName);
-  const credentialPresent = Boolean(state.api_key_path) && await readable(state.api_key_path);
-  return { ok: await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath) && credentialPresent, profile: profile.name, state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, api_key_path: state.api_key_path ?? null, credential_present: credentialPresent, client_id: state.client_id, launch_mode: "explicit_process_environment" };
+  let credentialPresent = false;
+  let credentialReason = "missing";
+  try {
+    const status = await credentialStatus(canonicalGateway(state.gateway_url));
+    credentialPresent = status?.ok === true && status?.status === "configured";
+    credentialReason = credentialPresent ? "available" : "missing_or_unavailable";
+  } catch { credentialReason = "store_unavailable"; }
+  return { ok: state.credential_store === "gateway_keyring" && await executable(state.original_codex) && await executable(state.desktop_executable) && await executable(state.node_executable) && await executable(state.shim_path) && await readable(state.wrapper) && Boolean(launcherPath) && await executable(launcherPath) && credentialPresent, profile: profile.name, state_path: resolvedState, shim_path: state.shim_path, original_codex: state.original_codex, desktop_executable: state.desktop_executable, node_executable: state.node_executable, launcher_app_path: state.launcher_app_path ?? null, gateway_url: state.gateway_url ?? null, credential_store: state.credential_store ?? "legacy_setup_requires_enable", credential_present: credentialPresent, credential_status: credentialReason, client_id: state.client_id, launch_mode: "explicit_process_environment" };
 }
 
 export async function readDesktopState(path = defaultDesktopStatePath()) {
@@ -429,6 +454,7 @@ if (await invokedAsEntryPoint()) {
   const options = parseDesktopArgs(process.argv.slice(2));
   let result;
   if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app });
+  else if (options.command === "provision-all") result = await provisionDesktopProfiles({ app: options.app });
   else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app });
   else if (options.command === "launch") result = await launchDesktop({ statePath: options.state, profile: options.profile });
   else if (options.command === "disable") result = await disableDesktop({ statePath: options.state, profile: options.profile });

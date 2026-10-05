@@ -118,7 +118,9 @@ setInterval(() => {
 `);
   await Promise.all([chmod(primary, 0o755), chmod(peer, 0o755)]);
   const makeBridge = bridgeFactory();
-  const environment = { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_SENTRY_DISABLED: "true" };
+  // This canary's fake native executable implements the legacy restart protocol.
+  // App Server default/routing coverage lives in codex-app-server-transport.test.mjs.
+  const environment = { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_SENTRY_DISABLED: "true", STATEWRIGHT_CODEX_TRANSPORT: "restart" };
   const peerResultPromise = runManagedClient({
     host: "codex", command: peer,
     args: ["-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="medium"', "--full-auto"],

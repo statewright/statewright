@@ -7,7 +7,10 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { desktopDoctor, disableDesktop, enableDesktop, launchDesktop, provisionDesktop, withDesktopLock } from "../scripts/statewright-desktop-setup.mjs";
+import { defaultDesktopStatePath, desktopDoctor as actualDesktopDoctor, disableDesktop, enableDesktop, launchDesktop, provisionDesktop, provisionDesktopProfiles, withDesktopLock } from "../scripts/statewright-desktop-setup.mjs";
+
+// Setup filesystem tests never consult the user's actual OS credential store.
+const desktopDoctor = options => actualDesktopDoctor({ credentialStatus: async () => ({ ok: true, status: "configured" }), ...options });
 
 const execFile = promisify(execFileCallback);
 async function executable(path) { await writeFile(path, "#!/bin/sh\nexit 0\n"); await chmod(path, 0o700); }
@@ -40,7 +43,7 @@ async function fixture(prefix) {
     writeFile(join(dirname(state), "api_key"), "test-production-key\n", { mode: 0o600 }),
     writeFile(join(dirname(state), "staging_api_key"), "test-staging-key\n", { mode: 0o600 }),
     writeFile(join(dirname(state), "dev_api_key"), "test-development-key\n", { mode: 0o600 }),
-    writeFile(desktopRuntime, `export async function startDesktopMcpBridge({ environment }) { return { url: "http://127.0.0.1:43123", token: \`${"${environment.STATEWRIGHT_GATEWAY_URL}"}|${"${environment.STATEWRIGHT_API_KEY}"}\`, close: async () => {} }; }\n`),
+    writeFile(desktopRuntime, `export { desktopProfileEnvironment } from ${JSON.stringify(new URL("../../executor/lib/codex-desktop-app-server-launcher.mjs", import.meta.url).href)};\nexport async function startProfileDesktopMcpBridge({ state, environment }) { if (environment.STATEWRIGHT_API_KEY) throw new Error("inherited credential leak"); return { url: "http://127.0.0.1:43123", token: state.gateway_url + "|fixture-keyring", close: async () => {} }; }\n`),
   ]);
   return { root, state, vendor, app, applications, wrapper };
 }
@@ -56,6 +59,45 @@ test("Desktop setup CLI executes through an installed-plugin symlink", async () 
     catch (error) { failure = error; }
     assert.ok(failure, "doctor should execute and report an unconfigured state");
     assert.deepEqual(JSON.parse(failure.stdout), { ok: false, reason: "not_configured", state_path: state });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Desktop doctor checks gateway-keyed status, never legacy file presence or secret output", async () => {
+  const { root, state, vendor, app, applications, wrapper } = await fixture("desktop-doctor-keyring-");
+  try {
+    await enableDesktop({ statePath: state, profile: "staging", gatewayUrl: "https://stage.example", original: vendor, app, applicationsDirectory: applications, wrapper });
+    for (const response of [{ ok: false, status: "missing" }, { ok: false, status: "unavailable", secret: "must-not-render" }, { ok: true, status: "configured", secret: "must-not-render" }]) {
+      const result = await actualDesktopDoctor({ statePath: state, credentialStatus: async gateway => { assert.equal(gateway, "https://stage.example/mcp"); return response; } });
+      assert.equal(result.ok, response.ok);
+      assert.equal(result.credential_present, response.ok);
+      assert.doesNotMatch(JSON.stringify(result), /must-not-render|api_key_path/);
+    }
+    const unavailable = await actualDesktopDoctor({ statePath: state, credentialStatus: async () => { throw new Error("private-helper-diagnostic"); } });
+    assert.equal(unavailable.ok, false);
+    assert.equal(unavailable.credential_status, "store_unavailable");
+    assert.doesNotMatch(JSON.stringify(unavailable), /private-helper-diagnostic/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("one package refresh updates existing Desktop profiles without retargeting, provisioning dev, or reenabling disabled profiles", async () => {
+  const { root, vendor, app, applications, wrapper } = await fixture("desktop-refresh-profiles-");
+  const stagingPath = defaultDesktopStatePath(root, "staging");
+  const productionPath = defaultDesktopStatePath(root);
+  const nextWrapper = join(root, "new-package-wrapper.mjs");
+  try {
+    await moduleFile(nextWrapper);
+    const staging = await enableDesktop({ statePath: stagingPath, profile: "staging", gatewayUrl: "https://stage.example", original: vendor, app, applicationsDirectory: applications, wrapper });
+    await disableDesktop({ statePath: productionPath });
+    const outcomes = await provisionDesktopProfiles({ home: root, original: vendor, app, applicationsDirectory: applications, wrapper: nextWrapper });
+    assert.equal(outcomes.length, 2);
+    assert.equal(outcomes[0].skipped, "disabled");
+    const refreshed = JSON.parse(await readFile(stagingPath, "utf8"));
+    assert.equal(refreshed.client_id, staging.client_id);
+    assert.equal(refreshed.gateway_url, staging.gateway_url);
+    assert.equal(refreshed.wrapper, nextWrapper);
+    assert.equal(refreshed.credential_store, "gateway_keyring");
+    await assert.rejects(readFile(defaultDesktopStatePath(root, "development")), { code: "ENOENT" });
+    await assert.rejects(readFile(productionPath), { code: "ENOENT" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -110,7 +152,8 @@ test("Desktop setup creates an explicit-launch shim without mutating launchd", a
     assert.equal(record.desktop_executable, app);
     assert.equal(record.profile, "production");
     assert.equal(record.gateway_url, "https://mcp.statewright.ai");
-    assert.equal(record.api_key_path, join(dirname(state), "api_key"));
+    assert.equal(record.api_key_path, undefined);
+    assert.equal(record.credential_store, "gateway_keyring");
     assert.match(record.client_id, /^swc_[a-f0-9]{32}$/);
     assert.equal(launchctl.value, "/prior/codex");
     assert.equal(launchctl.calls.length, 0);
@@ -323,12 +366,12 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-generated-app-");
   const recordPath = join(root, "recorded-codex-cli-path");
   try {
-    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" > "$RECORD_PATH"\nsleep 1\n`);
+    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
-    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", RECORD_PATH: recordPath } });
-    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|test-production-key`);
+    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example" } });
+    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|fixture-keyring||https://mcp.statewright.ai/mcp`);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -357,8 +400,8 @@ test("Production, staging, and development Desktop profiles install independentl
     assert.equal(production.launcher_app_path, join(applications, "ChatGPT + Statewright.app"));
     assert.equal(staging.launcher_app_path, join(applications, "ChatGPT + Statewright Staging.app"));
     assert.equal(development.launcher_app_path, join(applications, "ChatGPT + Statewright Dev.app"));
-    assert.equal(staging.api_key_path, join(dirname(state), "staging_api_key"));
-    assert.equal(development.api_key_path, join(dirname(state), "dev_api_key"));
+    assert.equal(staging.api_key_path, undefined);
+    assert.equal(development.api_key_path, undefined);
     assert.equal((await desktopDoctor({ statePath: state, profile: "production" })).ok, true);
     assert.equal((await desktopDoctor({ statePath: stagingState, profile: "staging" })).ok, true);
     assert.equal((await desktopDoctor({ statePath: developmentState, profile: "development" })).ok, true);

@@ -190,8 +190,10 @@ from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
 shim only for that process tree; normal ChatGPT launches are unchanged.
 
 The installed plugin always binds this standard launcher to the production
-gateway (`https://mcp.statewright.ai`). A pre-provisioned credential stays in
-local Statewright storage and is never requested in chat. The first Desktop turn is held briefly
+gateway (`https://mcp.statewright.ai`). Desktop reads the credential for its exact
+gateway from the OS keyring, not a plaintext key file or an inherited shell key.
+Missing or unavailable credentials stop launch non-interactively; connect that
+gateway explicitly before retrying. The first Desktop turn is held briefly
 until the native App Server reports Statewright's tools as ready, so a fast
 first prompt cannot race MCP registration.
 
@@ -217,10 +219,20 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs en
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;
-otherwise it refuses to overwrite the user's setting. Re-run `enable` after
-updating the plugin so its private shim points at the newly installed runtime.
+otherwise it refuses to overwrite the user's setting. Plugin startup refreshes
+production and already-configured staging/development launchers together, keeping
+their gateway, client identity, and disabled status. It does not create private
+profiles or start OAuth. `doctor` reports redacted keyring status; an old
+plaintext key file is not evidence that the Desktop profile is ready.
 A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
 chat remain required before this is release-ready.
+
+Managed interactive Codex uses the App Server transport by default, independently
+of which configured gateway the launch shortcut selects. `exec` and `review`
+remain one-shot; an explicitly bare Codex launch stays outside this wrapper.
+`STATEWRIGHT_CODEX_TRANSPORT=restart` retains the legacy compatibility transport
+when deliberately selected. Invalid transport values are rejected. A resident
+from another gateway/auth profile is never silently reused or terminated.
 
 ChatGPT/mobile acceptance is separate: register the deployed HTTPS `/mcp`
 endpoint in ChatGPT developer mode, complete its OAuth flow, then verify direct

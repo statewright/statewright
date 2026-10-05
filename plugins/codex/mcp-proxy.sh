@@ -323,7 +323,7 @@ elif command -v node >/dev/null 2>&1; then
   DESKTOP_NODE=$(command -v node)
 fi
 if [ "$DESKTOP_PLATFORM" = "Darwin" ] && [ -x "$DESKTOP_APP_EXECUTABLE" ] && [ -f "$DESKTOP_SETUP" ] && [ -n "$DESKTOP_NODE" ]; then
-  "$DESKTOP_NODE" "$DESKTOP_SETUP" provision --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
+  "$DESKTOP_NODE" "$DESKTOP_SETUP" provision-all --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
 fi
 
 CLIENT_ID=$(statewright_client_id codex)

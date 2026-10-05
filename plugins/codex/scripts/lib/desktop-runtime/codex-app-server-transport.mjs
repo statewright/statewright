@@ -60,8 +60,10 @@ async function reserveLoopbackPort() {
 
 export function codexAppServerTransportEnabled({ environment = process.env, config = {} } = {}) {
   const override = environment.STATEWRIGHT_CODEX_TRANSPORT?.trim();
-  if (override) return override === "app-server";
-  return config?.routing?.managed_clients?.codex_transport === "app-server";
+  const transport = override || config?.routing?.managed_clients?.codex_transport || "app-server";
+  if (transport === "app-server") return true;
+  if (transport === "restart") return false;
+  throw new Error("Unsupported Codex transport. Expected app-server or the explicit legacy restart transport.");
 }
 
 export function appServerHomePrefixForClient(clientId) {

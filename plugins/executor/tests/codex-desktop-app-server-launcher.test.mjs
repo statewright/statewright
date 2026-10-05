@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { WebSocketServer } from "ws";
-import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
+import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopProfileEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge, startProfileDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
 import { adoptCodexRootSession, claimCodexRootSession, readCodexRootSession, resetCodexRootSession } from "../lib/managed-client-identity.mjs";
 
 function fakeMcpBridge(onClose = () => {}) {
@@ -16,6 +16,57 @@ function fakeMcpBridge(onClose = () => {}) {
     close: async () => onClose(),
   });
 }
+
+test("Desktop profile binds gateway and keyring independently of inherited shell credentials", async () => {
+  const home = await mkdtemp(join(tmpdir(), "desktop-keyring-profile-"));
+  try {
+    await mkdir(join(home, ".statewright"));
+    await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({ gateways: { staging: { gateway_url: "https://stage.example/mcp", auth_url: "https://stage-auth.example" } } }));
+    for (const gateway of ["https://mcp.statewright.ai", "https://stage.example", "https://dev.example"]) {
+      const state = { gateway_url: gateway, client_id: "swc_0123456789abcdef0123456789abcdef" };
+      const inherited = { STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "unconfigured", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", STATEWRIGHT_PB_URL: "https://foreign-auth.example", PATH: "/usr/bin" };
+      const selected = await desktopProfileEnvironment(state, inherited, home);
+      assert.equal(selected.STATEWRIGHT_API_KEY, undefined);
+      assert.equal(selected.STATEWRIGHT_ENV, undefined);
+      assert.equal(selected.STATEWRIGHT_GATEWAY_URL, `${gateway}/mcp`);
+      assert.notEqual(selected.STATEWRIGHT_PB_URL, inherited.STATEWRIGHT_PB_URL);
+      if (gateway === "https://stage.example") assert.equal(selected.STATEWRIGHT_PB_URL, "https://stage-auth.example");
+      let lookups = 0;
+      const result = await startProfileDesktopMcpBridge({ state, environment: inherited, home,
+        getCredential: async (requested, options) => {
+          lookups++;
+          assert.equal(requested, `${gateway}/mcp`);
+          assert.equal(options.environment.STATEWRIGHT_API_KEY, undefined);
+          return "selected-fixture-key";
+        },
+        startBridge: async ({ environment, clientId }) => {
+          assert.equal(environment.STATEWRIGHT_API_KEY, "selected-fixture-key");
+          assert.equal(environment.STATEWRIGHT_GATEWAY_URL, `${gateway}/mcp`);
+          assert.equal(clientId, state.client_id);
+          return "started";
+        },
+      });
+      assert.equal(result, "started");
+      assert.equal(lookups, 1);
+      assert.equal(inherited.STATEWRIGHT_API_KEY, "foreign-key");
+    }
+    await assert.rejects(desktopProfileEnvironment({}, {}, home), /no gateway/);
+    await assert.rejects(desktopProfileEnvironment({ gateway_url: "https://user:secret@stage.example" }, {}, home));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop keyring absence or failure never falls back to inherited keys or starts an auth flow", async () => {
+  for (const code of ["CREDENTIAL_MISSING", "CREDENTIAL_STORE_UNAVAILABLE", "CREDENTIAL_HELPER_TIMEOUT"]) {
+    let starts = 0;
+    await assert.rejects(startProfileDesktopMcpBridge({
+      state: { gateway_url: "https://stage.example", client_id: "fixture" }, home: "/nonexistent-desktop-fixture",
+      environment: { STATEWRIGHT_API_KEY: "wrong-gateway" },
+      getCredential: async () => { throw Object.assign(new Error(code), { code }); },
+      startBridge: async () => { starts++; },
+    }), { code });
+    assert.equal(starts, 0);
+  }
+});
 
 test("Desktop broker is explicit, app-server-only, isolated, and client scoped", () => {
   const environment = {

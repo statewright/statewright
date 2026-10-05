@@ -14,7 +14,7 @@ import {
   runCodexAppServerTransport,
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
-import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
+import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
 import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
 import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
@@ -24,9 +24,12 @@ function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
 }
 
-test("Codex App Server transport remains opt-in and supports an explicit environment override", () => {
-  assert.equal(codexAppServerTransportEnabled({ environment: {} }), false);
+test("managed Codex defaults to App Server across gateway profiles and preserves explicit legacy opt-out", () => {
+  for (const profile of [undefined, "production", "staging", "dev1", "dev2"]) {
+    assert.equal(codexAppServerTransportEnabled({ environment: { STATEWRIGHT_ENV: profile } }), true);
+  }
   assert.equal(codexAppServerTransportEnabled({
+    environment: {},
     config: { routing: { managed_clients: { codex_transport: "app-server" } } },
   }), true);
   assert.equal(codexAppServerTransportEnabled({
@@ -35,7 +38,11 @@ test("Codex App Server transport remains opt-in and supports an explicit environ
   }), false);
   assert.equal(codexAppServerTransportEnabled({
     environment: { STATEWRIGHT_CODEX_TRANSPORT: "app-server" },
+    config: { routing: { managed_clients: { codex_transport: "restart" } } },
   }), true);
+  assert.equal(codexAppServerTransportEnabled({ environment: {}, config: { routing: { managed_clients: { codex_transport: "restart" } } } }), false);
+  assert.throws(() => codexAppServerTransportEnabled({ environment: { STATEWRIGHT_CODEX_TRANSPORT: "typo" } }), /Unsupported Codex transport/);
+  assert.throws(() => codexAppServerTransportEnabled({ environment: {}, config: { routing: { managed_clients: { codex_transport: "typo" } } } }), /Unsupported Codex transport/);
 });
 
 test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
@@ -43,6 +50,21 @@ test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.bat", "win32"), { shell: true });
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.exe", "win32"), { shell: false });
   assert.deepEqual(appServerCommandOptions("/usr/local/bin/codex", "darwin"), { shell: false });
+});
+
+test("resident reuse requires the same canonical gateway and auth profile, never merely the same thread", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-resident-profile-"));
+  try {
+    const prod = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://mcp.statewright.ai" }, home);
+    assert.equal(prod, await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://mcp.statewright.ai/mcp" }, home));
+    const staging = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://stage.example", STATEWRIGHT_PB_URL: "https://stage-auth.example" }, home);
+    const changedAuth = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://stage.example", STATEWRIGHT_PB_URL: "https://other-auth.example" }, home);
+    const manifest = { runtimeRevision: "fixture", profileIdentity: staging, threadListCwd: null };
+    assert.equal(residentMatchesRuntime(manifest, "fixture", null, staging), true);
+    for (const target of [prod, changedAuth]) assert.equal(residentMatchesRuntime(manifest, "fixture", null, target), false);
+    assert.equal(residentMatchesRuntime({ runtimeRevision: "fixture" }, "fixture", null, staging), false);
+    await assert.rejects(residentProfileIdentity({ STATEWRIGHT_ENV: "dev1" }, home), /not configured/);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test("Windows npm Codex shims launch Node directly and preserve argv boundaries", async () => {

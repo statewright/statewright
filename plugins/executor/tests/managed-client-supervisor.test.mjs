@@ -9,7 +9,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { approvalJournal } from "../lib/approval-journal.mjs";
-import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+
+// These legacy supervisor fixtures emit restart files, not the native App Server
+// protocol. Select that compatibility transport explicitly; default admission is
+// exercised separately below, and one-shot calls retain the production default.
+const runManagedClient = options => runActualManagedClient({ ...options, environment: {
+  ...(!codexOneShotInvocation(options.host, options.args) ? { STATEWRIGHT_CODEX_TRANSPORT: "restart" } : {}),
+  ...options.environment,
+} });
 
 function fakeBridgeFactory() {
   return {
@@ -321,7 +329,7 @@ test("managed Codex resume runs the history guard before spawning the native cli
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("resident App Server preflights Codex history before starting resident infrastructure", async () => {
+test("default resident App Server preflights Codex history before starting resident infrastructure", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-resident-history-guard-"));
   const fake = join(home, "fake-codex.mjs");
   const spawned = join(home, "resident-started");
@@ -329,11 +337,11 @@ test("resident App Server preflights Codex history before starting resident infr
     await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(spawned)}, "yes");\n`);
     await chmod(fake, 0o755);
     await assert.rejects(
-      runManagedClient({
+      runActualManagedClient({
         host: "codex",
         command: fake,
         args: ["resume", "durable-thread"],
-        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_CODEX_TRANSPORT: "app-server" },
+        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
         home,
         pollMs: 5,
         bridgeFactory: fakeBridgeFactory,

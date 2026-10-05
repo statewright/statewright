@@ -10,6 +10,7 @@ import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mj
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
+import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
 import { WorkflowRouteOriginStore } from "./workflow-route-origin.mjs";
@@ -32,6 +33,8 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
   join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
   join(EXECUTOR_ROOT, "workflow-route-origin.mjs"),
+  join(EXECUTOR_ROOT, "gateway-profile.mjs"),
+  join(EXECUTOR_ROOT, "credential-store.mjs"),
 ];
 
 function safeName(value) {
@@ -68,13 +71,19 @@ export async function residentRuntimeRevision() {
   return createHash("sha256").update(sources.join("\n--- statewright resident module ---\n")).digest("hex").slice(0, 16);
 }
 
-export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined) {
+export async function residentProfileIdentity(environment = process.env, home = homedir()) {
+  const profile = await resolveGatewayProfile(environment, home);
+  return createHash("sha256").update(JSON.stringify([profile.gatewayUrl, profile.authUrl])).digest("hex");
+}
+
+export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined, profileIdentity = undefined) {
   if (manifest?.runtimeRevision !== runtimeRevision) return false;
+  if (profileIdentity !== undefined && manifest.profileIdentity !== profileIdentity) return false;
   return threadListCwd === undefined || (manifest.threadListCwd ?? null) === threadListCwd;
 }
 
-async function ready(manifest, runtimeRevision, threadListCwd) {
-  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
+async function ready(manifest, runtimeRevision, threadListCwd, profileIdentity) {
+  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd, profileIdentity) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
   try {
     return (await fetch(`${manifest.proxyUrl.replace(/^ws/, "http")}/readyz`, { signal: AbortSignal.timeout(400) })).ok;
   } catch { return false; }
@@ -182,11 +191,12 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   const root = residentRoot(home, clientId);
   const manifestPath = join(root, "manifest.json");
   const runtimeRevision = await residentRuntimeRevision();
+  const profileIdentity = await residentProfileIdentity(environment, home);
   const existing = await readManifest(manifestPath);
-  if (await ready(existing, runtimeRevision, threadListCwd)) return existing;
+  if (await ready(existing, runtimeRevision, threadListCwd, profileIdentity)) return existing;
   if (existing?.pid && processAlive(existing.pid)) {
     throw new Error(
-      `Statewright Codex App Server resident ${existing.pid} is still running with a different runtime or resume scope. `
+      `Statewright Codex App Server resident ${existing.pid} is still running with a different runtime, gateway profile, or resume scope. `
       + "It may be preserving detached work; exit it or wait for it to become idle, then retry.",
     );
   }
@@ -211,7 +221,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
-    if (await ready(manifest, runtimeRevision, threadListCwd)) return manifest;
+    if (await ready(manifest, runtimeRevision, threadListCwd, profileIdentity)) return manifest;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   const log = await readFile(join(root, "resident.log"), "utf8").catch(() => "");
@@ -300,6 +310,7 @@ async function main() {
     clientId,
     proxyUrl: runtime.proxyUrl,
     runtimeRevision: await residentRuntimeRevision(),
+    profileIdentity: await residentProfileIdentity(process.env, home),
     threadListCwd,
     startedAt: new Date().toISOString(),
   });

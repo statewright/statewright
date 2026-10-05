@@ -9,6 +9,26 @@ import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { adoptCodexRootSession, claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
 import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
+import { getGatewayCredential } from "./credential-store.mjs";
+import { resolveGatewayProfile } from "./gateway-profile.mjs";
+
+// The selected Desktop record owns the endpoint. A shell's profile or explicit
+// API key must never redirect it or supply a credential from another gateway.
+export async function desktopProfileEnvironment(state, environment = process.env, home = homedir()) {
+  if (!state?.gateway_url) throw new Error("Desktop profile has no gateway; rerun Desktop setup.");
+  const isolated = { ...environment };
+  for (const name of ["STATEWRIGHT_ENV", "STATEWRIGHT_GATEWAY_URL", "STATEWRIGHT_PB_URL", "STATEWRIGHT_API_KEY"]) delete isolated[name];
+  const profile = await resolveGatewayProfile({ ...isolated, STATEWRIGHT_GATEWAY_URL: state.gateway_url }, home);
+  return { ...isolated, STATEWRIGHT_GATEWAY_URL: profile.gatewayUrl, ...(profile.authUrl ? { STATEWRIGHT_PB_URL: profile.authUrl } : {}) };
+}
+
+export async function startProfileDesktopMcpBridge({ state, environment = process.env, home = homedir(),
+  getCredential = getGatewayCredential, startBridge = startDesktopMcpBridge }) {
+  const selected = await desktopProfileEnvironment(state, environment, home);
+  // Do not trigger legacy migration or interactive OAuth from a GUI launch.
+  const apiKey = await getCredential(selected.STATEWRIGHT_GATEWAY_URL, { environment: selected, home });
+  return startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId: state.client_id });
+}
 
 // A Desktop broker is a separate managed client. These names carry process
 // handles owned by a parent TUI/session and must not escape into Desktop.

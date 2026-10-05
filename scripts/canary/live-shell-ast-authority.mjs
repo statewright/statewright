@@ -251,7 +251,8 @@ const cases = [
     decision: 'deny',
     source: 'shell_ast',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Unknown',
+    reformulationAllowed: true
   },
   {
     name: 'malformed_shell',
@@ -259,7 +260,8 @@ const cases = [
     decision: 'deny',
     source: 'shell',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Unknown',
+    reformulationAllowed: true
   },
   {
     name: 'opaque_executable',
@@ -267,7 +269,8 @@ const cases = [
     decision: 'deny',
     source: 'shell_ast',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Unknown',
+    reformulationAllowed: true
   }
 ]
 
@@ -391,10 +394,11 @@ try {
     if (entry.decision === 'deny') {
       assert(typeof risk.final_denial_basis === 'string', `${entry.name}: missing final_denial_basis`)
     }
-    assert(
-      risk.equivalent_retry_allowed === (entry.decision === 'allow'),
-      `${entry.name}: retry guidance did not match the decision`
-    )
+    const reformulationAllowed = entry.reformulationAllowed === true
+    const equivalentRetryAllowed = entry.decision === 'allow' || reformulationAllowed
+    assert(risk.equivalent_retry_allowed === equivalentRetryAllowed, `${entry.name}: equivalent retry guidance did not match the decision`)
+    assert(risk.reformulation_allowed === reformulationAllowed, `${entry.name}: reformulation guidance did not match the decision`)
+    assert(risk.exact_invocation_retry_allowed === (entry.decision === 'allow'), `${entry.name}: exact retry guidance did not match the decision`)
     results.push({
       name: entry.name,
       decision: result.decision,

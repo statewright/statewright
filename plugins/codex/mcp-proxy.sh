@@ -643,11 +643,18 @@ while IFS= read -r line; do
   fi
 
   if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
-    if [ "$METHOD" != "notifications/initialized" ]; then
-      INVALID_KEY_MESSAGE="Statewright credential from $(credential_source_label) was rejected by $(gateway_service_label "$GW_URL"). Browser setup was not started."
-      jq -cn --arg text "$INVALID_KEY_MESSAGE" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-1,message:$text},id:$id}'
+    if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
+      # An explicit environment credential is intentionally non-interactive.
+      # A rejected OS-stored credential instead behaves as disconnected so the
+      # setup catalog can offer statewright_connect and replace only this slot.
+      if [ "$METHOD" != "notifications/initialized" ]; then
+        INVALID_KEY_MESSAGE="Statewright credential from $(credential_source_label) was rejected by $(gateway_service_label "$GW_URL"). Browser setup was not started."
+        jq -cn --arg text "$INVALID_KEY_MESSAGE" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-1,message:$text},id:$id}'
+      fi
+      continue
+    else
+      API_KEY=""
     fi
-    continue
   fi
 
   if [ -z "$API_KEY" ]; then

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -399,6 +400,7 @@ test("codex refreshes its catalog after a local credential is provisioned withou
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
   );
+  let child;
   try {
     await mkdir(bin, { recursive: true });
     const fakeCurl = join(bin, "curl");
@@ -417,7 +419,7 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     });
     await installCredentialHelper(root, environment);
 
-    const child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
+    child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -427,16 +429,16 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
 
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
-    await waitForOutput(() => stdout, /\"id\":1/);
+    await waitForOutput(() => stdout, /\"id\":1/, 10_000);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
-    await waitForOutput(() => stdout, /\"id\":2/);
+    await waitForOutput(() => stdout, /\"id\":2/, 10_000);
     assert.deepEqual(responseById(stdout, 2).result.tools.map((tool) => tool.name), [
       "statewright_search_docs",
       "statewright_list_workflows",
       "statewright_connect",
     ]);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
-    await waitForOutput(() => stdout, /\"id\":3/);
+    await waitForOutput(() => stdout, /\"id\":3/, 10_000);
     assert.equal(responseById(stdout, 3).error.code, -32001);
     await setGatewayCredential("https://mcp.statewright.ai", "sw_live_new_key", { environment, home });
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} })}\n`);
@@ -450,6 +452,52 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     assert.ok(responseById(stdout, 4).result.tools.some((tool) => tool.name === "statewright_get_state"));
     assert.match(await readFile(curlCapture, "utf8"), /Authorization: Bearer sw_live_new_key/);
     await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const closed = new Promise((resolveClose) => child.once("close", resolveClose));
+      child.kill();
+      await closed;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("codex offers OAuth reconnect after an OS-stored gateway credential is rejected", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-rejected-key-"));
+  const home = join(root, "home");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  const gateway = "https://mcp.statewright.ai/mcp";
+  const rejectedKey = "sw_live_rejected_key";
+  try {
+    Object.assign(environment, {
+      HOME: home,
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+    await installCredentialHelper(root, environment);
+    await setGatewayCredential(gateway, rejectedKey, { environment, home });
+
+    const gatewayIdentity = createHash("sha256").update(gateway).digest("hex");
+    const rejectedFingerprint = createHash("sha256").update(rejectedKey).digest("hex");
+    const gatewayState = join(home, ".statewright", "gateways", gatewayIdentity);
+    await mkdir(gatewayState, { recursive: true });
+    await writeFile(join(gatewayState, "invalid_api_key"), `${rejectedFingerprint}\n`);
+
+    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } },
+    ]);
+
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(responseById(result.stdout, 2).result.tools.map((tool) => tool.name), [
+      "statewright_search_docs",
+      "statewright_list_workflows",
+      "statewright_connect",
+    ]);
+    assert.equal(responseById(result.stdout, 3).error.code, -32001);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

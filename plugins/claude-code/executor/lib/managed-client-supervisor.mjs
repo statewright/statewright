@@ -29,6 +29,8 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID",
   "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER",
+  "STATEWRIGHT_ADAPTER_URL",
+  "STATEWRIGHT_ADAPTER_TOKEN",
 ];
 const WINDOWS_PROCESS_TREE_ENV = new Set([
   "comspec",
@@ -420,6 +422,29 @@ export function codexOneShotInvocation(host, args) {
   if (host !== "codex") return false;
   const index = codexTopLevelCommandIndex(args);
   return index >= 0 && ["exec", "e", "review"].includes(args[index]);
+}
+
+// Native destination/control operations belong to their selected server, not
+// to a new local resident created by this shim. Do not rewrite remote argv.
+export function codexNativeDestinationInvocation(host, args) {
+  if (host !== "codex") return false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") break;
+    if (["--remote", "--help", "-h", "--version", "-V"].includes(arg) || arg.startsWith("--remote=")) return true;
+    if (CODEX_OPTIONS_WITH_VALUE.has(arg)) index += 1;
+  }
+  const index = codexTopLevelCommandIndex(args);
+  return index >= 0 && !["resume", "fork", "exec", "e", "review"].includes(args[index]);
+}
+
+export function nativeDestinationEnvironment(environment = process.env) {
+  const child = managedClientChildEnvironment({ host: "codex", environment });
+  // The destination resolves its own credential. Never seed a shared daemon
+  // with the invoking server's in-memory key or approval/control capability.
+  delete child.STATEWRIGHT_API_KEY;
+  delete child.STATEWRIGHT_CODEX_RESIDENT_ROOT;
+  return child;
 }
 
 function permissionConfigOverride(value) {

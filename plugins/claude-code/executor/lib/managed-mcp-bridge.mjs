@@ -1,6 +1,8 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { annotateToolsListResponse } from "./tool-annotations.mjs";
+import { canonicalGateway } from "./gateway-profile.mjs";
+import { normalizeMcpHttpResponse } from "./mcp-recovery.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -39,7 +41,7 @@ async function readBody(request) {
 
 export class ManagedMcpBridge {
   constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), fetch = globalThis.fetch }) {
-    this.gatewayUrl = gatewayUrl.replace(/\/+$/, "") || gatewayUrl;
+    this.gatewayUrl = canonicalGateway(gatewayUrl);
     this.apiKey = apiKey;
     this.clientId = clientId;
     this.token = token;
@@ -59,6 +61,13 @@ export class ManagedMcpBridge {
           response.writeHead(401).end();
           return;
         }
+        // Token ownership is mandatory. An additional asserted client identity
+        // must agree too; never route a foreign proxy using this owner's key.
+        if (request.headers["x-statewright-client-id"]
+            && request.headers["x-statewright-client-id"] !== this.clientId) {
+          response.writeHead(403).end();
+          return;
+        }
         const body = await readBody(request);
         const forwardedHeaders = {
           "Content-Type": request.headers["content-type"] ?? "application/json",
@@ -75,6 +84,12 @@ export class ManagedMcpBridge {
           signal: AbortSignal.timeout(timeoutForManagedMcpRequest(body)),
         });
         const responseBody = await upstream.arrayBuffer();
+        if (!upstream.ok) {
+          const rpc = JSON.parse(body.toString("utf8"));
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(JSON.stringify(normalizeMcpHttpResponse(rpc, upstream.status, "", { catalog: false })));
+          return;
+        }
         const responseHeaders = {
           "Content-Type": upstream.headers.get("content-type") ?? "application/json",
         };

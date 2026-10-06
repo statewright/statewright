@@ -18,6 +18,7 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/codex-history-integrity.mjs", "executor/lib/codex-history-integrity.mjs"],
   ["lib/managed-client-identity.mjs", "executor/lib/managed-client-identity.mjs"],
   ["lib/managed-mcp-bridge.mjs", "executor/lib/managed-mcp-bridge.mjs"],
+  ["lib/mcp-recovery.mjs", "executor/lib/mcp-recovery.mjs"],
   ["lib/tool-annotations.mjs", "executor/lib/tool-annotations.mjs"],
   ["lib/credential-store.mjs", "executor/lib/credential-store.mjs"],
   ["lib/gateway-profile.mjs", "executor/lib/gateway-profile.mjs"],

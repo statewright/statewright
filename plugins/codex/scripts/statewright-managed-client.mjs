@@ -5,7 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { bootstrapManagedClients, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/desktop-runtime/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, codexNativeDestinationInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/desktop-runtime/managed-client-supervisor.mjs";
 import { resolveGatewayApiKey } from "./lib/desktop-runtime/credential-store.mjs";
 import { resolvedGatewayEnvironment } from "./lib/desktop-runtime/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/desktop-runtime/error-reporting.mjs";
@@ -131,8 +131,9 @@ async function main() {
     return;
   }
   if (!options.realBin) throw new Error("--real-bin is required when launching a managed client.");
-  const environment = await resolvedGatewayEnvironment();
-  if (await managedClientEnabled(options.host)) {
+  const nativeDestination = codexNativeDestinationInvocation(options.host, options.args);
+  const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
+  if (!nativeDestination && await managedClientEnabled(options.host)) {
     try {
       environment.STATEWRIGHT_API_KEY = await resolveGatewayApiKey(environment);
       process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });

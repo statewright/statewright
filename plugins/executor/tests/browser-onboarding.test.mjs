@@ -406,7 +406,7 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     const fakeCurl = join(bin, "curl");
     await writeFile(
       fakeCurl,
-      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"statewright_get_state\"}]},\"id\":4}'\n",
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"statewright_get_state\"}]},\"id\":4}'\nprintf '200'\n",
     );
     await chmod(fakeCurl, 0o755);
     Object.assign(environment, {

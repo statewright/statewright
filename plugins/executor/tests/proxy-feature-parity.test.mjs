@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { resolve } from "node:path";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 const clients = [
@@ -32,10 +34,19 @@ async function startUpstream() {
 }
 
 async function invokeProxy(proxy, message, environment) {
-  return await new Promise((resolveResult, rejectResult) => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-proxy-parity-"));
+  await mkdir(join(home, ".statewright"));
+  await writeFile(join(home, ".statewright", "config.json"), JSON.stringify({ telemetry: { codex: { native_tokens: false } } }));
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(STATEWRIGHT_|CODEX_)/i.test(key)));
+  try { return await new Promise((resolveResult, rejectResult) => {
     const child = spawn("bash", [proxy], {
       env: {
-        ...process.env,
+        ...inherited,
+        HOME: home,
+        STATEWRIGHT_DESKTOP_PLATFORM: "Linux",
+        STATEWRIGHT_SENTRY_DISABLED: "true",
+        STATEWRIGHT_NO_BROWSER: "true",
+        STATEWRIGHT_NO_UPDATE_CHECK: "1",
         STATEWRIGHT_API_KEY: "test-key",
         STATEWRIGHT_CLIENT_ID: "swc_0123456789abcdef0123456789abcdef",
         STATEWRIGHT_MANAGED_MCP_URL: "",
@@ -57,7 +68,7 @@ async function invokeProxy(proxy, message, environment) {
       resolveResult(response);
     });
     child.stdin.end(`${JSON.stringify(message)}\n`);
-  });
+  }); } finally { await rm(home, { recursive: true, force: true }); }
 }
 
 async function listTools(proxy, environment) {
@@ -89,7 +100,7 @@ for (const client of clients) {
     });
   }
 
-  test(`${client.name} recovers when its managed bridge is gone`, async () => {
+  test(`${client.name} retains its declared recovery contract when the managed bridge is gone`, async () => {
     const upstream = await startUpstream();
     try {
       const names = await listTools(client.proxy, {
@@ -98,7 +109,10 @@ for (const client of clients) {
         STATEWRIGHT_MANAGED_MCP_URL: "http://127.0.0.1:1",
         STATEWRIGHT_MANAGED_MCP_TOKEN: "stale-token",
       });
-      assert.ok(names.includes("statewright_get_state"));
+      // Codex owner loss is not authority to establish a different session.
+      // Claude's existing fallback contract is outside this Codex repair.
+      assert.equal(names.includes("statewright_get_state"), client.name !== "codex");
+      if (client.name === "codex") assert.ok(names.includes("statewright_connect"));
       for (const local of client.local) assert.ok(names.includes(local));
     } finally {
       await upstream.close();

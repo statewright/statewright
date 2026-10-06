@@ -29,6 +29,7 @@ export const RUNTIME_FILES = [
   "executor/lib/codex-history-integrity.mjs",
   "executor/lib/managed-client-identity.mjs",
   "executor/lib/managed-mcp-bridge.mjs",
+  "executor/lib/mcp-recovery.mjs",
   "executor/lib/tool-annotations.mjs",
   "executor/lib/credential-store.mjs",
   "executor/lib/gateway-profile.mjs",

@@ -92,6 +92,27 @@ recovery path when device enrollment cannot be started. The tool catalog reads
 the OS credential store for every request, so authenticated tools become available
 in the same MCP process after approval.
 
+### Connection faults and multiple servers
+
+The proxy uses the canonical `/mcp` endpoint without appending a slash. HTTP
+401 exposes explicit `statewright_connect` recovery; HTTP 403 remains a permission
+denial. Other HTTP errors, network failures, and invalid replies are reported
+separately rather than all appearing as “Gateway unreachable.” Documentation and
+connection tools remain discoverable during recovery. No failed action is replayed
+after login and no browser opens merely because a request failed.
+
+A lost managed-server binding requires reconnecting that owner through its normal
+lifecycle. The proxy must not move its workflow calls to a different server or
+session. An explicit environment credential still takes precedence over a newly
+stored key; refresh its owning launcher normally after changing that override.
+
+Explicit Codex `--remote` destinations and native server/control commands pass
+through unchanged instead of creating another local resident server. They do not
+inherit the invoking managed session's thread/bridge identity or in-memory
+Statewright key. Each destination supplies its own Statewright integration and
+credential. This does not rebind an already-running shared daemon or enable
+Statewright on an unconfigured remote server.
+
 ### Exact native token telemetry
 
 Native Codex hooks expose tool metadata but not provider token totals. Exact

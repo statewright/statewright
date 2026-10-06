@@ -9,7 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { approvalJournal } from "../lib/approval-journal.mjs";
-import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, codexResumeHasExplicitPermissionOverride, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 // These legacy supervisor fixtures emit restart files, not the native App Server
 // protocol. Select that compatibility transport explicitly; default admission is
@@ -353,6 +353,35 @@ test("default resident App Server preflights Codex history before starting resid
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test("explicit Codex resume permissions select the compatibility transport", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-explicit-resume-permissions-"));
+  const fake = join(home, "fake-codex.mjs");
+  const captured = join(home, "args.json");
+  const stderr = [];
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(captured)}, JSON.stringify(process.argv.slice(2)));\n`);
+    await chmod(fake, 0o755);
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk, ...rest) => { stderr.push(String(chunk)); return true; };
+    try {
+      assert.equal(await runActualManagedClient({
+        host: "codex",
+        command: fake,
+        args: ["--dangerously-bypass-approvals-and-sandbox", "resume", "durable-thread"],
+        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+        home,
+        pollMs: 5,
+        bridgeFactory: fakeBridgeFactory,
+        historyGuard: async () => ({ status: "healthy" }),
+      }), 0);
+    } finally { process.stderr.write = originalWrite; }
+    assert.deepEqual(JSON.parse(await readFile(captured, "utf8")), [
+      "--dangerously-bypass-approvals-and-sandbox", "resume", "durable-thread",
+    ]);
+    assert.match(stderr.join(""), /explicit permission overrides.*restart transport/i);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("Codex resume selectors are not mistaken for durable session IDs", () => {
   assert.equal(resumedSessionId("codex", ["resume", "--last"]), null);
   assert.equal(resumedSessionId("codex", ["resume", "--all"]), null);
@@ -363,6 +392,35 @@ test("Codex resume selectors are not mistaken for durable session IDs", () => {
   assert.equal(resumedSessionId("codex", ["--profile", "resume", "fix-it"]), null);
   assert.equal(resumedSessionId("codex", ["-m", "resume", "fix-it"]), null);
   assert.equal(resumedSessionId("codex", ["-m", "gpt-5.6-sol", "resume", "durable-thread"]), "durable-thread");
+});
+
+test("Codex classifies only explicit resume permission overrides", () => {
+  for (const args of [
+    ["--dangerously-bypass-approvals-and-sandbox", "resume", "thread-1"],
+    ["--yolo", "resume", "thread-1"],
+    ["resume", "thread-1", "--approve-for-me"],
+    ["resume", "--last", "-a", "never"],
+    ["-s=workspace-write", "resume", "thread-1"],
+    ["resume", "thread-1", "--add-dir=/workspace/cache"],
+    ["-C", "/workspace/project", "resume", "thread-1"],
+    ["resume", "thread-1", "-c", 'approval_policy="never"'],
+    ["resume", "thread-1", '-capproval_policy="never"'],
+    ["resume", "thread-1", "-cnetwork.enabled=false"],
+    ["resume", "thread-1", '--config=permissions.network_access="restricted"'],
+    ["--profile", "locked-down", "resume", "thread-1"],
+    ["--profile=locked-down", "resume", "thread-1"],
+    ["-plocked-down", "resume", "thread-1"],
+    ["--config=sandbox_workspace_write.writable_roots=[\"/workspace/cache\"]", "resume", "thread-1"],
+  ]) assert.equal(codexResumeHasExplicitPermissionOverride("codex", args), true, args.join(" "));
+
+  for (const args of [
+    ["resume", "thread-1"],
+    ["-m", "gpt-6-astra", "resume", "thread-1"],
+    ["-c", 'model_reasoning_effort="high"', "resume", "thread-1"],
+    ["resume", "thread-1", "--", "--sandbox", "danger-full-access"],
+    ["exec", "--dangerously-bypass-approvals-and-sandbox", "echo", "ok"],
+  ]) assert.equal(codexResumeHasExplicitPermissionOverride("codex", args), false, args.join(" "));
+  assert.equal(codexResumeHasExplicitPermissionOverride("claude", ["resume", "thread-1", "-a", "never"]), false);
 });
 
 test("Codex global resume scope is explicit and ignores prompt text after --", () => {
@@ -608,7 +666,7 @@ test("disabled managed-client wrapper does not leak its parent Codex writer iden
 });
 
 test("Codex restart preserves non-route args and applies the requested route", () => {
-  assert.deepEqual(buildRoutedArgs({ host: "codex", originalArgs: ["--full-auto", "-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="low"'], request: { session_id: "session-1", model: "openai-codex/gpt-5.6-sol", effort: "high" } }), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--full-auto", "resume", "session-1", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
+  assert.deepEqual(buildRoutedArgs({ host: "codex", originalArgs: ["--yolo", "-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="low"'], request: { session_id: "session-1", model: "openai-codex/gpt-5.6-sol", effort: "high" } }), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--yolo", "resume", "session-1", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
 });
 
 test("Codex restart replaces an existing resume invocation", () => {
@@ -620,6 +678,38 @@ test("Codex restart replaces an existing resume invocation", () => {
   assert.deepEqual(args, [
     "-m", "gpt-5.6-terra", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"', "--full-auto",
     "resume", "new-session", "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+});
+
+test("Codex routed restart retains explicit permission flags placed after resume", () => {
+  const args = buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["resume", "old-session", "continue", "--sandbox", "workspace-write", "-a", "on-request", "--add-dir=/workspace/cache", "-cnetwork.enabled=false", '--config=permissions.network_access="restricted"'],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  });
+  assert.deepEqual(args, [
+    "-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"',
+    "--sandbox", "workspace-write", "-a", "on-request", "--add-dir=/workspace/cache", "-cnetwork.enabled=false", '--config=permissions.network_access="restricted"',
+    "resume", "old-session", "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+});
+
+test("Codex routed restart distinguishes the resume command from option values", () => {
+  assert.deepEqual(buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["--profile", "resume", "resume", "old-session", "--yolo"],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  }).slice(6), [
+    "--profile", "resume", "--yolo", "resume", "old-session",
+    "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+  assert.deepEqual(buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["--add-dir", "resume", "resume", "old-session", "-a", "on-request", "--profile=locked"],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  }).slice(6), [
+    "--add-dir", "resume", "-a", "on-request", "--profile=locked", "resume", "old-session",
+    "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
   ]);
 });
 

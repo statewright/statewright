@@ -234,6 +234,16 @@ remain one-shot; an explicitly bare Codex launch stays outside this wrapper.
 when deliberately selected. Invalid transport values are rejected. A resident
 from another gateway/auth profile is never silently reused or terminated.
 
+On `resume`, Statewright preserves the destination thread's last effective
+approval, permission-profile/sandbox, and workspace-root settings from its
+canonical Codex rollout. Explicit CLI permission or root flags take precedence;
+those invocations use the compatibility transport because native Codex rejects
+permission overrides before sending a remote `thread/resume`. A legacy custom
+profile that cannot be represented losslessly is rejected rather than widened.
+A named profile preserves its ID and resolves against the currently installed
+definition of that profile. Fork locations come from the fork's own settings or
+session metadata, never a copied parent turn context.
+
 ChatGPT/mobile acceptance is separate: register the deployed HTTPS `/mcp`
 endpoint in ChatGPT developer mode, complete its OAuth flow, then verify direct
 Statewright tool visibility in an ordinary ChatGPT conversation that originated

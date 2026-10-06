@@ -280,6 +280,30 @@ export function applyCompactResumeRequest(message, enabled = true, historyLimit 
   return { ...message, params };
 }
 
+export function applyRestoredResumePermissions(message, restored) {
+  if (message?.method !== "thread/resume" || !restored || typeof restored !== "object") return message;
+  const params = { ...(message.params ?? {}) };
+  for (const key of ["approvalPolicy", "approvalsReviewer"]) {
+    if (params[key] == null && restored[key] != null) params[key] = structuredClone(restored[key]);
+  }
+  // These fields are mutually exclusive in the native protocol. Preserve an
+  // explicit native selector as a group; otherwise restore exactly one saved
+  // selector rather than synthesizing an invalid pair.
+  if (params.permissions == null && params.sandbox == null) {
+    if (restored.permissions != null) params.permissions = structuredClone(restored.permissions);
+    else if (restored.sandbox != null) params.sandbox = structuredClone(restored.sandbox);
+  }
+  // cwd retargets omitted runtime roots inside Codex. Never mix an explicit
+  // native cwd/root group with roots recorded for an older cwd.
+  if (params.cwd == null && params.runtimeWorkspaceRoots == null) {
+    if (restored.cwd != null) params.cwd = structuredClone(restored.cwd);
+    if (restored.runtimeWorkspaceRoots != null) {
+      params.runtimeWorkspaceRoots = structuredClone(restored.runtimeWorkspaceRoots);
+    }
+  }
+  return { ...message, params };
+}
+
 export function applyThreadListCwd(message, cwd = null) {
   if (message?.method !== "thread/list" || !cwd || message.params?.cwd != null) return message;
   return {
@@ -404,6 +428,7 @@ export async function startCodexAppServerRouteProxy({
   threadLabels = {},
   getThreadLabels = async () => threadLabels,
   getThreadCwds = async () => ({}),
+  resolveResumePermissions = async () => null,
   onThreadStarted = async () => {},
   onThreadResumed = async () => {},
   // Optional host-specific ownership guard. It may return a typed lifecycle
@@ -975,6 +1000,12 @@ export async function startCodexAppServerRouteProxy({
         if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
           throw new Error("Statewright rejected a duplicate in-flight native JSON-RPC request ID.");
         }
+        if (message.method === "thread/resume" && message.params?.threadId) {
+          message = applyRestoredResumePermissions(
+            message,
+            await resolveResumePermissions(String(message.params.threadId)),
+          );
+        }
         if (message.method === "thread/start" || message.params?.threadId) {
           threadAuthorization = await authorizeThread({
             method: message.method,
@@ -1232,7 +1263,9 @@ export async function startCodexAppServerRouteProxy({
         // defeats retry/recovery after a provider configuration mistake.
         if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED"
             || error.code === "STATEWRIGHT_THREAD_OWNERSHIP" || error.code === "STATEWRIGHT_MCP_NOT_READY"
-            || error.code === "STATEWRIGHT_ROUTE_ORIGIN_OWNER")
+            || error.code === "STATEWRIGHT_ROUTE_ORIGIN_OWNER"
+            || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_INVALID"
+            || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_UNREPRESENTABLE")
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
           void forwardWhenOpen(downstream, JSON.stringify({
             jsonrpc: "2.0",

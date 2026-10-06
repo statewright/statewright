@@ -393,16 +393,12 @@ const CODEX_TOP_LEVEL_COMMANDS = new Set([
   "unarchive", "update",
 ]);
 
-export function codexOneShotInvocation(host, args) {
-  if (host !== "codex") return false;
+function codexTopLevelCommandIndex(args) {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    // `--` ends option/subcommand parsing; any following `exec` is prompt text.
-    if (argument === "--") return false;
+    if (argument === "--") return -1;
     if (argument.startsWith("-") && argument.includes("=")) continue;
     if (argument === "-i" || argument === "--image") {
-      // Clap accepts one or more image paths. Stop only when the next token is
-      // another option or a real top-level Codex command.
       while (index + 1 < args.length) {
         const candidate = args[index + 1];
         if (candidate === "--" || candidate.startsWith("-") || CODEX_TOP_LEVEL_COMMANDS.has(candidate)) break;
@@ -415,12 +411,73 @@ export function codexOneShotInvocation(host, args) {
       continue;
     }
     if (argument.startsWith("-")) continue;
-    // Codex advertises `e` as the exec alias and `review` as a separate
-    // non-interactive top-level command. Any other first positional token is
-    // either an interactive command (including resume) or its prompt.
-    return argument === "exec" || argument === "e" || argument === "review";
+    return CODEX_TOP_LEVEL_COMMANDS.has(argument) ? index : -1;
   }
-  return false;
+  return -1;
+}
+
+export function codexOneShotInvocation(host, args) {
+  if (host !== "codex") return false;
+  const index = codexTopLevelCommandIndex(args);
+  return index >= 0 && ["exec", "e", "review"].includes(args[index]);
+}
+
+function permissionConfigOverride(value) {
+  const key = String(value ?? "").split("=", 1)[0].trim().replaceAll(/["'\s]/g, "");
+  const exact = [
+    "approval_policy",
+    "approvals_reviewer",
+    "default_permissions",
+    "sandbox_mode",
+  ];
+  return exact.includes(key) || ["network", "permissions", "sandbox_workspace_write"]
+    .some(root => key === root || key.startsWith(`${root}.`));
+}
+
+function codexExplicitPermissionArgs(args = []) {
+  const result = [];
+  const valueOptions = new Set(["-a", "--ask-for-approval", "-C", "--cd", "-p", "--profile", "-s", "--sandbox", "--add-dir"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--") break;
+    if (["--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"].includes(argument)
+        || /^--(?:ask-for-approval|cd|profile|sandbox|add-dir)=/.test(argument)
+        || /^-(?:a|C|p|s)(?:=)?.+/.test(argument)) {
+      result.push(argument);
+      continue;
+    }
+    if (valueOptions.has(argument)) {
+      result.push(argument);
+      if (index + 1 < args.length) result.push(args[++index]);
+      continue;
+    }
+    if (argument === "-c" || argument === "--config") {
+      const value = args[index + 1];
+      if (permissionConfigOverride(value)) result.push(argument, value);
+      index += 1;
+      continue;
+    }
+    if (/^(?:-c|--config)=/.test(argument)
+        && permissionConfigOverride(argument.slice(argument.indexOf("=") + 1))) result.push(argument);
+    else if (argument.startsWith("-c") && argument.length > 2
+        && permissionConfigOverride(argument.slice(2))) result.push(argument);
+  }
+  return result;
+}
+
+/**
+ * Native Codex intentionally omits permission fields on a flag-free remote
+ * resume. Statewright restores those fields from the canonical rollout in its
+ * App Server proxy, including legacy threads whose raw profile would otherwise
+ * resolve against current defaults. Explicit permission/session-root flags are
+ * rejected before Codex sends the remote RPC, so those invocations retain the
+ * restart transport where the original CLI arguments remain authoritative.
+ */
+export function codexResumeHasExplicitPermissionOverride(host, args = []) {
+  if (host !== "codex") return false;
+  const commandIndex = codexTopLevelCommandIndex(args);
+  if (commandIndex < 0 || args[commandIndex] !== "resume") return false;
+  return codexExplicitPermissionArgs(args).length > 0;
 }
 
 function forwardManagedTermination(child, exit, { command, platform = process.platform, environment = process.env } = {}) {
@@ -492,12 +549,16 @@ function stripRouteArgs(args, host) {
     return /(?:^|\.)\s*(?:["'](?:model|model_reasoning_effort|model_provider)["']|model|model_reasoning_effort|model_provider)\s*$/.test(key);
   };
   const result = [];
+  const codexCommandIndex = host === "codex" ? codexTopLevelCommandIndex(args) : -1;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     // A routed restart always creates its own `resume <session> <prompt>`
     // invocation. Keeping a prior resume subcommand would leave Codex with
     // two positional session identifiers.
-    if (host === "codex" && arg === "resume") break;
+    if (host === "codex" && index === codexCommandIndex && arg === "resume") {
+      result.push(...codexExplicitPermissionArgs(args.slice(index + 1)));
+      break;
+    }
     if (arg === "-m" || arg === "--model") {
       index += 1;
       continue;
@@ -643,10 +704,12 @@ export async function runManagedClient({ host, command, args, environment = proc
       // Claude receives a compact copy of this shared supervisor. Keep the
       // optional Codex-only transport out of its module-load graph.
       const { codexAppServerTransportEnabled } = await import("./codex-app-server-transport.mjs");
-      if (codexAppServerTransportEnabled({
+      const appServerEnabled = codexAppServerTransportEnabled({
         environment,
         config,
-      })) {
+      });
+      const explicitResumePermissionOverride = codexResumeHasExplicitPermissionOverride(host, args);
+      if (appServerEnabled && !explicitResumePermissionOverride) {
         const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
         if (identity.sessionId) {
           await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home, cwd });
@@ -691,6 +754,9 @@ export async function runManagedClient({ host, command, args, environment = proc
         } finally {
           await stopForwarding();
         }
+      }
+      if (appServerEnabled && explicitResumePermissionOverride) {
+        process.stderr.write("[statewright] explicit permission overrides on Codex resume require the supported restart transport; preserving the original CLI arguments.\n");
       }
     }
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });

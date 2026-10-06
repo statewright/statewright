@@ -60,6 +60,12 @@ has not been tagged or published.
   controller atomically replaces the stable receipt filename. Queued
   non-blocking human questions and the historical-thread picker remain
   available through the shared Desktop/TUI shim.
+- Managed remote resume now restores the destination thread's last effective
+  approval, permission-profile/sandbox, and workspace-root settings from its
+  canonical rollout. Explicit CLI permission or root flags take precedence via
+  the compatibility transport and survive later model-route restarts. Forks
+  retain their own saved location, while unrepresentable raw profiles fail
+  closed instead of being widened.
 
 ## Safety boundary
 

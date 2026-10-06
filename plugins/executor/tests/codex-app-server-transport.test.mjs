@@ -15,9 +15,9 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
 import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
-import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
+import { readCodexResumePermissions, readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
 function once(socket, event) {
@@ -1321,6 +1321,157 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     await writeFile(history, JSON.stringify({session_id: sessionId, ts: 2, text: "Please use statewright_get_state"}) + "\n{partial", {flag: "a"});
     assert.equal((await read())[sessionId].lastUserMessage, "Please use statewright_get_state", "cached cwd must not freeze the latest submitted input");
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Codex rollout metadata restores the latest effective resume permissions", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-permissions-"));
+  try {
+    const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+    const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
+    await mkdir(sessions, { recursive: true });
+    const records = [
+      { type: "session_meta", payload: { id: sessionId, cwd: "/workspace/original" } },
+      { type: "turn_context", payload: { approval_policy: "on-request", approvals_reviewer: "user", sandbox_policy: { type: "read-only" }, cwd: "/workspace/original", workspace_roots: ["/workspace/original"] } },
+      { type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: { approval_policy: "never", approvals_reviewer: "user", permission_profile: { type: "disabled" }, cwd: "/workspace/current", runtime_workspace_roots: ["/workspace/current", "/workspace/shared"] } } },
+    ];
+    await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      cwd: "/workspace/current",
+      runtimeWorkspaceRoots: ["/workspace/current", "/workspace/shared"],
+      sandbox: "danger-full-access",
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Codex rollout permission restore uses named profiles and rejects lossy legacy projection", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-profile-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  const path = join(home, ".codex", "sessions", "2026", "09", "02", `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`);
+  try {
+    await mkdir(join(path, ".."), { recursive: true });
+    const write = settings => writeFile(path, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/workspace/project" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: settings } })}\n`);
+    await write({ approval_policy: "on-request", active_permission_profile: { id: ":workspace" }, permission_profile: { type: "managed" }, cwd: "/workspace/project" });
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", cwd: "/workspace/project", permissions: ":workspace",
+    });
+    await write({ approval_policy: "on-request", permission_profile: { type: "managed", network: "restricted", file_system: { type: "restricted", entries: [] } }, sandbox_policy: { type: "workspace-write" }, cwd: "/workspace/project" });
+    await assert.rejects(readCodexResumePermissions({ home, threadId: sessionId }), /cannot losslessly restore this legacy Codex permission profile/);
+    await write({ approval_policy: "on-request", sandbox_policy: { type: "external-sandbox", network_access: true }, cwd: "/workspace/project" });
+    await assert.rejects(readCodexResumePermissions({ home, threadId: sessionId }), /cannot losslessly restore this legacy Codex permission profile/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("restored resume permissions fill only omitted native request fields", () => {
+  const request = { id: 4, method: "thread/resume", params: {
+    threadId: "thread-1", approvalPolicy: null, approvalsReviewer: null,
+    permissions: null, sandbox: null, cwd: null, runtimeWorkspaceRoots: null,
+  } };
+  assert.deepEqual(applyRestoredResumePermissions(request, {
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+    sandbox: "danger-full-access",
+    cwd: "/workspace/project",
+    runtimeWorkspaceRoots: ["/workspace/project"],
+  }), {
+    id: 4,
+    method: "thread/resume",
+    params: {
+      threadId: "thread-1",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: null,
+      sandbox: "danger-full-access",
+      cwd: "/workspace/project",
+      runtimeWorkspaceRoots: ["/workspace/project"],
+    },
+  });
+  assert.deepEqual(applyRestoredResumePermissions({
+    id: 5, method: "thread/resume", params: {
+      threadId: "thread-1", approvalPolicy: "on-request", permissions: ":read-only",
+      sandbox: null, cwd: "/workspace/new", runtimeWorkspaceRoots: null,
+    },
+  }, {
+    approvalPolicy: "never", permissions: ":workspace", sandbox: "danger-full-access",
+    cwd: "/workspace/old", runtimeWorkspaceRoots: ["/workspace/old"],
+  }).params, {
+    threadId: "thread-1", approvalPolicy: "on-request", permissions: ":read-only",
+    sandbox: null, cwd: "/workspace/new", runtimeWorkspaceRoots: null,
+  });
+  assert.deepEqual(applyRestoredResumePermissions({
+    id: 6, method: "thread/resume", params: { threadId: "thread-1", permissions: null, sandbox: "read-only" },
+  }, { permissions: ":workspace" }).params, {
+    threadId: "thread-1", permissions: null, sandbox: "read-only",
+  });
+  const other = { id: 5, method: "thread/read", params: { threadId: "thread-1" } };
+  assert.equal(applyRestoredResumePermissions(other, { sandbox: "read-only" }), other);
+});
+
+test("Codex resume location ignores copied parent turn contexts", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-fork-location-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  const path = join(home, ".codex", "sessions", "2026", "09", "02", `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`);
+  try {
+    await mkdir(join(path, ".."), { recursive: true });
+    const records = [
+      { type: "session_meta", payload: { id: sessionId, cwd: "/workspace/child", runtime_workspace_roots: ["/workspace/child"] } },
+      { type: "turn_context", payload: { approval_policy: "on-request", sandbox_policy: { type: "read-only" }, cwd: "/workspace/parent", workspace_roots: ["/workspace/parent"] } },
+    ];
+    await writeFile(path, `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", sandbox: "read-only", cwd: "/workspace/child",
+      runtimeWorkspaceRoots: ["/workspace/child"],
+    });
+    records.push(
+      { type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: { approval_policy: "never", permission_profile: { type: "disabled" }, cwd: "/workspace/child-next", runtime_workspace_roots: ["/workspace/child-next"] } } },
+      { type: "turn_context", payload: { approval_policy: "on-request", sandbox_policy: { type: "read-only" }, cwd: "/workspace/parent-next", workspace_roots: ["/workspace/parent-next"] } },
+    );
+    await writeFile(path, `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", sandbox: "read-only", cwd: "/workspace/child-next",
+      runtimeWorkspaceRoots: ["/workspace/child-next"],
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("App Server proxy restores saved permissions before forwarding resume", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let socket;
+  const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    resolveResumePermissions: async threadId => {
+      assert.equal(threadId, "historical-thread");
+      return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" };
+    },
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    await connected;
+    const forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: {
+      threadId: "historical-thread", approvalPolicy: null, approvalsReviewer: null,
+      permissions: null, sandbox: null, cwd: null, runtimeWorkspaceRoots: null,
+    } }));
+    assert.deepEqual(JSON.parse(String(await forwarded)).params, {
+      threadId: "historical-thread",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: null,
+      sandbox: "danger-full-access",
+      cwd: null,
+      runtimeWorkspaceRoots: null,
+      excludeTurns: true,
+      initialTurnsPage: { limit: 4, sortDirection: "desc", itemsView: "summary" },
+    });
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
+  }
 });
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
-import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
+import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
@@ -28,6 +28,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "runtime-approval-service.mjs"),
   join(EXECUTOR_ROOT, "approval-evidence.mjs"),
   join(EXECUTOR_ROOT, "codex-session-metadata.mjs"),
+  join(EXECUTOR_ROOT, "codex-history-integrity.mjs"),
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
@@ -234,6 +235,7 @@ async function main() {
   const command = values.command;
   const cwd = values.cwd;
   const home = values.home ?? homedir();
+  const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
   const threadListCwd = values["thread-list-cwd"] || null;
   const terminalLabel = values["terminal-label"] || null;
   const reporter = createErrorReporter({ plugin: "codex", version: "0.3.4" });
@@ -284,7 +286,8 @@ async function main() {
     peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
-    getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, metadataCache: knownThreadCwds }),
+    getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, codexHome, metadataCache: knownThreadCwds }),
+    resolveResumePermissions: (threadId) => readCodexResumePermissions({ threadId, home, codexHome }),
     onThreadStarted: async ({ threadId }) => {
       await claimCodexRootSession(controlDir, { sessionId: threadId, clientId });
       await bindManagedClientIdentity({ host: "codex", sessionId: threadId, clientId, home, cwd });

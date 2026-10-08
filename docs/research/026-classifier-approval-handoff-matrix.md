@@ -280,12 +280,16 @@ Its native rendering can later become another thin pipeline adapter, but this
 repair does not merge its persistence semantics into invocation approval or
 create a second recovery implementation.
 
-The implemented pipeline is presently in the `codex-local-models` native host,
-which is the mode that owns the reproduced Nomad thread. The standalone
-Statewright managed-client resident still has its own durable transition gate
-and does not yet advertise the classifier endpoint. That is a remaining mode
-gap, not evidence that Praetorian is shipped and not a reason to duplicate the
-classifier controller in the resident.
+The pipeline was first proven in the `codex-local-models` native host, which
+owned the reproduced Nomad thread. The Statewright staging candidate now keeps
+the same v2 controller and ordered pipeline in the shared Codex App Server
+proxy. Both the standalone resident and direct Desktop launcher publish a
+private process-scoped endpoint receipt, while the direct Desktop adapter reads
+authoritative state only through its selected authenticated managed bridge.
+Exact initialized connection and durable thread ownership select the handler;
+zero or multiple owners deny. This closes the source/package mode gap, but it
+does not by itself establish visible Desktop behavior: packaged native-dialogue
+accept, cancel, restart, and one-use release remain a live acceptance gate.
 
 The smallest follow-on is to stabilize one Praetorian-aligned contract in the
 existing code and give each mode a thin ownership adapter. A handler may return

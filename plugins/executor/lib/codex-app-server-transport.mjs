@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -259,6 +260,7 @@ export async function startCodexAppServerRuntime({
   clientId,
   nextRouteRequest = async () => null,
   approvalService = null,
+  classifierApprovalService = approvalService,
   peekRouteRequest = async () => null,
   stderr = process.stderr,
   telemetry = async () => {},
@@ -282,6 +284,7 @@ export async function startCodexAppServerRuntime({
   const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
+  const classifierApprovalToken = classifierApprovalService ? randomUUID() : null;
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
   const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
 
@@ -314,6 +317,8 @@ export async function startCodexAppServerRuntime({
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
       approvalService,
+      classifierApprovalService,
+      classifierApprovalToken,
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
       resumeHistoryLimit: resumeHistoryLimit(environment),
       threadListCwd,
@@ -363,6 +368,7 @@ export async function startCodexAppServerRuntime({
     stderr.write(`[statewright] App Server ready at ${routeProxy.url}; upstream ${url}.\n`);
     return {
       proxyUrl: routeProxy.url,
+      proxyToken: classifierApprovalToken,
       upstreamUrl: url,
       async close() {
         closing = true;

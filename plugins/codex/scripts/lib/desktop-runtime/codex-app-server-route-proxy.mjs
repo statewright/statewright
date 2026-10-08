@@ -1,13 +1,61 @@
 import { WebSocket, WebSocketServer } from "../../../vendor/ws/wrapper.mjs";
+import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.mjs";
 import { summarizeStatewrightToolCompletion, summarizeStatewrightToolStart } from "./statewright-tool-summary.mjs";
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
+import { ClassifierApprovalController, classifierApprovalRequest } from "./classifier-approval-controller.mjs";
+import { ApprovalOutcome, ApprovalPipeline, approvalDeny, approvalError,
+  approvalNotHandled } from "./approval-pipeline.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
 import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
+
+const WORKFLOW_APPROVAL_PRIORITY = 100;
+const CLASSIFIER_APPROVAL_PRIORITY = 200;
+
+function localClassifierApprovalPipeline({controller, getState}) {
+  return new ApprovalPipeline([
+    {
+      name: "workflow-transition-barrier",
+      priority: WORKFLOW_APPROVAL_PRIORITY,
+      async handle(value) {
+        if (value?.schema !== "statewright/classifier-approval-request/v2") {
+          return approvalNotHandled();
+        }
+        const request = classifierApprovalRequest(value);
+        if (!request) return approvalNotHandled();
+        let state;
+        try {
+          if (typeof getState !== "function") return approvalError("approval_state_unavailable");
+          state = await getState(request.threadId);
+        } catch {
+          return approvalError("approval_state_unavailable");
+        }
+        if (!state || state.is_final === true
+            || state.run_id !== request.runId
+            || state.run_session_id !== request.runSessionId
+            || state.state !== request.state
+            || state.state_epoch !== request.stateEpoch) {
+          return approvalDeny(controller.result(request, "deny",
+            {reason: "approval_state_changed"}));
+        }
+        if (state.pending_approval) {
+          return approvalDeny(controller.result(request, "deny",
+            {reason: "workflow_approval_pending"}));
+        }
+        return approvalNotHandled();
+      },
+    },
+    {
+      name: "classifier-invocation",
+      priority: CLASSIFIER_APPROVAL_PRIORITY,
+      handle: (value, options) => controller.begin(value, options),
+    },
+  ]);
+}
 function routeModel(model) {
   return String(model ?? "").replace(/^[^/]+\//, "").trim();
 }
@@ -413,6 +461,9 @@ export async function startCodexAppServerRouteProxy({
   upstreamUrl,
   takePendingRoute = async () => null,
   approvalService = null,
+  classifierApprovalService = approvalService,
+  classifierApprovalToken = null,
+  classifierApprovalTimeoutMs = 10 * 60_000,
   peekPendingRoute = async () => null,
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
@@ -440,10 +491,80 @@ export async function startCodexAppServerRouteProxy({
   idleMs = 500,
   onIdle = async () => {},
 }) {
-  const healthServer = createServer((request, response) => {
+  const classifierOwners = new Set();
+  const classifierAuthorized = request => {
+    if (!classifierApprovalToken || request.headers.origin) return false;
+    const actual = Buffer.from(String(request.headers.authorization ?? ""));
+    const expected = Buffer.from(`Bearer ${classifierApprovalToken}`);
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  };
+  const healthServer = createServer(async (request, response) => {
     if (request.url === "/readyz" || request.url === "/healthz") {
       response.writeHead(200, { "Content-Type": "text/plain" });
       response.end("ok\n");
+      return;
+    }
+    if (request.url === "/classifier-approval" && request.method === "POST"
+        && classifierApprovalService && classifierApprovalToken) {
+      if (!classifierAuthorized(request)) {
+        response.writeHead(401).end();
+        return;
+      }
+      let approvalController;
+      let abortApproval;
+      let closeApproval;
+      try {
+        let body = "";
+        for await (const chunk of request) {
+          body += chunk;
+          if (Buffer.byteLength(body) > 32 * 1024) {
+            throw new Error("Classifier approval receipt is too large");
+          }
+        }
+        const value = JSON.parse(body);
+        const owners = [];
+        for (const candidate of classifierOwners) {
+          if (!candidate.initialized) continue;
+          if (!candidate.threads.has(value?.thread_id)) continue;
+          if (await classifierApprovalService.ownsThread?.(value.thread_id)) owners.push(candidate);
+        }
+        if (owners.length !== 1) throw new Error(owners.length
+          ? "Classifier approval has multiple owning native connections"
+          : "Classifier approval has no owning native connection");
+        approvalController = new AbortController();
+        abortApproval = () => approvalController.abort(new Error("Classifier approval request aborted"));
+        closeApproval = () => {
+          if (!response.writableEnded) abortApproval();
+        };
+        request.once("aborted", abortApproval);
+        response.once("close", closeApproval);
+        const decision = await owners[0].pipeline.service(value,
+          {signal: approvalController.signal});
+        let result;
+        if (decision.outcome === ApprovalOutcome.ASK) result = await decision.completion;
+        else if ([ApprovalOutcome.ALLOW, ApprovalOutcome.DENY].includes(decision.outcome)) {
+          result = decision.response;
+        } else {
+          const parsed = classifierApprovalRequest(value);
+          result = decision.outcome === ApprovalOutcome.ERROR && parsed
+            ? owners[0].controller.result(parsed, "deny", {reason: decision.reason})
+            : {schema: "statewright/classifier-approval/v2", action: "deny",
+              reason: decision.outcome === ApprovalOutcome.ERROR
+                ? decision.reason : "unsupported_approval_request"};
+        }
+        request.off("aborted", abortApproval);
+        response.off("close", closeApproval);
+        if (response.destroyed) return;
+        response.writeHead(200, {"Content-Type": "application/json"});
+        response.end(JSON.stringify(result));
+      } catch (error) {
+        if (abortApproval) request.off("aborted", abortApproval);
+        if (closeApproval) response.off("close", closeApproval);
+        if (response.destroyed) return;
+        response.writeHead(400, {"Content-Type": "application/json"});
+        response.end(JSON.stringify({schema: "statewright/classifier-approval/v2",
+          action: "deny", reason: String(error?.message ?? error).slice(0, 256)}));
+      }
       return;
     }
     response.writeHead(404);
@@ -582,6 +703,7 @@ export async function startCodexAppServerRouteProxy({
 
   server.on("connection", (downstream) => {
     const connection = Symbol("app-server-connection");
+    const classifierThreads = new Set();
     let parkingCount = 0;
     const activeThreads = new Map();
     const activeProviders = new Map();
@@ -603,6 +725,41 @@ export async function startCodexAppServerRouteProxy({
     const routeConfirmationWaiters = new Map();
     const stateNames = new Map();
     const mcpReadyThreads = new Set();
+    const readClassifierState = async threadId => {
+      if (!await classifierApprovalService?.ownsThread?.(threadId)) return null;
+      return classifierApprovalService.getState(threadId);
+    };
+    const classifierController = classifierApprovalService ? new ClassifierApprovalController({
+      send: value => {
+        if (downstream.readyState !== WebSocket.OPEN) {
+          throw new Error("Native Desktop connection is unavailable");
+        }
+        downstream.send(JSON.stringify(value));
+      },
+      getState: readClassifierState,
+      approvalTimeoutMs: classifierApprovalTimeoutMs,
+      record: event => onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event}),
+    }) : null;
+    const classifierOwner = classifierController ? {
+      initialized: false,
+      threads: classifierThreads,
+      controller: classifierController,
+      pipeline: localClassifierApprovalPipeline({
+        controller: classifierController,
+        getState: readClassifierState,
+      }),
+    } : null;
+    let classifierAttachedThreadId = null;
+    const bindClassifierThread = threadId => {
+      const next = String(threadId);
+      if (classifierAttachedThreadId && classifierAttachedThreadId !== next) {
+        classifierController?.close("native_owner_transferred");
+      }
+      classifierThreads.clear();
+      classifierThreads.add(next);
+      classifierAttachedThreadId = next;
+    };
+    if (classifierOwner) classifierOwners.add(classifierOwner);
     const presentation = new HandoffPresentation({onStatus: event => {
       if (event.phase === "running") stateNames.set(event.thread_id, event.state);
       return onHandoffStatus(event);
@@ -996,6 +1153,7 @@ export async function startCodexAppServerRouteProxy({
       };
       try {
         message = JSON.parse(payload);
+        if (classifierController?.handleReply(message)) return;
         if (gate?.handleReply(message)) return;
         if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
           throw new Error("Statewright rejected a duplicate in-flight native JSON-RPC request ID.");
@@ -1350,6 +1508,9 @@ export async function startCodexAppServerRouteProxy({
         }
         const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
         if (responseTo) requestMethods.delete(responseKey);
+        if (responseTo === "initialize" && !notification.error && classifierOwner) {
+          classifierOwner.initialized = true;
+        }
         const manualSettings = responseKey === null ? null : pendingManualSettings.get(responseKey);
         if (manualSettings) {
           pendingManualSettings.delete(responseKey);
@@ -1377,6 +1538,7 @@ export async function startCodexAppServerRouteProxy({
             // an opaque managed client ID can be bound to a durable thread.
             // Do not report success if that ownership record cannot be saved.
             await onThreadStarted({ threadId: notification.result.thread.id });
+            bindClassifierThread(notification.result.thread.id);
           } catch (error) {
             notification = { jsonrpc: "2.0", id: notification.id, error: { code: -32603,
               message: `Statewright could not bind the new Codex thread: ${error.message}` } };
@@ -1442,6 +1604,7 @@ export async function startCodexAppServerRouteProxy({
           // Pane labels are display-only. A local metadata write must never
           // turn a valid upstream resume into a failed native interaction.
           if (threadId) await onThreadResumed({ threadId }).catch(() => {});
+          if (threadId && !notification.error) bindClassifierThread(threadId);
           if (threadId && !notification.error) {
             const activityEpoch = operatorActivity.get(threadId);
             const binding = await workflowOriginStore.binding(threadId);
@@ -1594,6 +1757,8 @@ export async function startCodexAppServerRouteProxy({
       upstreamDelivery = upstreamDelivery.then(() => handleUpstream(raw)).catch(() => {});
     });
     const closePeer = () => {
+      classifierController?.close();
+      if (classifierOwner) classifierOwners.delete(classifierOwner);
       gate?.close();
       approvalGates.delete(gate);
       for (const request of internalRequests.values()) {

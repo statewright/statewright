@@ -46,3 +46,16 @@ The semantic provider becomes availability-sensitive only for otherwise opaque o
 Roll out behind the explicit denylist/heuristic policy mode. First validate the typed decision and redaction contract, then wire gateway enforcement, then replace standalone opaque denial with gateway delegation. Reinstall the plugin and managed launcher from one clean committed SHA before a live canary.
 
 Rollback by disabling semantic authorization and returning opaque operations to fail-closed denial. Do not restore command-specific exceptions.
+
+## Deferred workflow control pin (2026-10-08)
+
+The process-wide environment switch is temporary rollout control, not the
+intended long-term authoring surface. A follow-on design should add a workflow
+metadata setting that enables or disables authoritative System One fallthrough,
+with an explicit narrower override where workflow policy already supports
+scoped metadata. The eventual compatibility default is expected to be enabled,
+but that default must not change until native human fallthrough has packaged
+Desktop acceptance evidence. This pin does not add schema, change defaults, or
+alter `classifier_policy.risk_tolerance`; risk tolerance selects what may be
+assessed, while the deferred setting controls whether the semantic provider is
+authoritative at all.

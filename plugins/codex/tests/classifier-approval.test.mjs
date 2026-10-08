@@ -52,7 +52,13 @@ test("classifier approval helper forwards only bounded redacted identity", async
   assert.doesNotMatch(JSON.stringify(observed.body), /private sentinel|secret|raw_command|arguments/);
 
   const routed = await requestClassifierApproval(input, {
-    environment: {STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes")},
+    environment: {STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes"),
+      LOCAL_MODELS_RUN_DIR: join(runDir, "stale-foreign-run")},
+    readFile: async path => {
+      assert.equal(path, join(runDir, "manifest.json"),
+        "the explicit Statewright owner must win without cross-mode fallback");
+      return JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "local-secret"});
+    },
     fetch: async () => new Response(JSON.stringify({
       schema: "statewright/classifier-approval/v2",
       action: "rework",

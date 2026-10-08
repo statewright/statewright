@@ -60,16 +60,21 @@ export function redactedApprovalRequest(value) {
     && request.classifier_receipt.separate_approval_allowed ? request : null;
 }
 
-function runDirectory(environment) {
-  if (printable(environment.LOCAL_MODELS_RUN_DIR, 4096)) return environment.LOCAL_MODELS_RUN_DIR;
-  if (printable(environment.CODEX_HOME, 4096) && /(?:^|\/)codex-home\/?$/.test(environment.CODEX_HOME)) {
-    return dirname(environment.CODEX_HOME);
-  }
+function runtimeReceiptPath(environment) {
+  // An explicit Statewright route owner wins over any stale companion-process
+  // variables inherited from the shell. Never fall through to another mode
+  // after an owner has advertised its receipt location.
   if (printable(environment.STATEWRIGHT_ROUTE_CONTROL_DIR, 4096)
       && basename(environment.STATEWRIGHT_ROUTE_CONTROL_DIR) === "routes") {
-    return dirname(environment.STATEWRIGHT_ROUTE_CONTROL_DIR);
+    return join(dirname(environment.STATEWRIGHT_ROUTE_CONTROL_DIR), "manifest.json");
   }
-  throw new Error("local_models_runtime_unavailable");
+  if (printable(environment.LOCAL_MODELS_RUN_DIR, 4096)) {
+    return join(environment.LOCAL_MODELS_RUN_DIR, "runtime.json");
+  }
+  if (printable(environment.CODEX_HOME, 4096) && /(?:^|\/)codex-home\/?$/.test(environment.CODEX_HOME)) {
+    return join(dirname(environment.CODEX_HOME), "runtime.json");
+  }
+  throw new Error("classifier_approval_runtime_unavailable");
 }
 
 export async function requestClassifierApproval(value, options = {}) {
@@ -77,14 +82,13 @@ export async function requestClassifierApproval(value, options = {}) {
   if (!request) return {schema: "statewright/classifier-approval/v2",
     action: "deny", reason: "invalid_redacted_classifier_receipt"};
   const environment = options.environment ?? process.env;
-  const runtime = JSON.parse(await (options.readFile ?? readFile)(
-    join(runDirectory(environment), "runtime.json"), "utf8"));
+  const runtime = JSON.parse(await (options.readFile ?? readFile)(runtimeReceiptPath(environment), "utf8"));
   if (!printable(runtime.proxyUrl, 4096) || !printable(runtime.proxyToken, 4096)) {
-    throw new Error("local_models_runtime_receipt_incomplete");
+    throw new Error("classifier_approval_runtime_receipt_incomplete");
   }
   const endpoint = new URL(runtime.proxyUrl);
   if (!/^wss?:$/.test(endpoint.protocol) || !["127.0.0.1", "localhost", "::1"].includes(endpoint.hostname)) {
-    throw new Error("local_models_runtime_not_loopback");
+    throw new Error("classifier_approval_runtime_not_loopback");
   }
   endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
   endpoint.pathname = "/classifier-approval";
@@ -98,10 +102,10 @@ export async function requestClassifierApproval(value, options = {}) {
   });
   const result = await response.json().catch(() => null);
   if (!response.ok || !result || typeof result !== "object") {
-    throw new Error(`local_models_classifier_approval_http_${response.status}`);
+    throw new Error(`classifier_approval_http_${response.status}`);
   }
   if (!["rework", "allow_once", "deny"].includes(result.action)) {
-    throw new Error("local_models_classifier_approval_invalid_action");
+    throw new Error("classifier_approval_invalid_action");
   }
   const expectedIdentity = {
     schema: "statewright/classifier-approval/v2",
@@ -119,7 +123,7 @@ export async function requestClassifierApproval(value, options = {}) {
     separate_approval_allowed: request.classifier_receipt.separate_approval_allowed,
   };
   if (Object.entries(expectedIdentity).some(([key, expected]) => result[key] !== expected)) {
-    throw new Error("local_models_classifier_approval_identity_mismatch");
+    throw new Error("classifier_approval_identity_mismatch");
   }
   return result;
 }

@@ -687,7 +687,12 @@ while IFS= read -r line; do
         *) VERIFY_URL="" ;;
       esac
       if [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ] || [ -z "$VERIFY_URL" ]; then
-        jq -cn --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:"Statewright account connection could not be started. Try again, or use https://statewright.ai/keys as the manual recovery path."},id:$id}'
+        if [ -n "$PB_URL" ]; then
+          CONNECT_ERROR="Statewright account connection could not be started. Try again, or use ${PB_URL%/}/keys as the manual recovery path for this environment."
+        else
+          CONNECT_ERROR="Statewright account connection could not be started because this gateway has no authorization-service mapping. Configure its auth_url in ~/.statewright/environments.json and try again."
+        fi
+        jq -cn --arg message "$CONNECT_ERROR" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:$message},id:$id}'
       else
         (poll_device_authorization "$DEVICE_CODE" "$EXPIRES_IN" "$POLL_INTERVAL") >/dev/null 2>&1 &
         if open_device_approval_page "$VERIFY_URL"; then

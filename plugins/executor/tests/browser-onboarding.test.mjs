@@ -168,6 +168,53 @@ esac
     }
 });
 
+test("codex connection recovery stays bound to the selected environment issuer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-environment-login-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  try {
+    await mkdir(join(home, ".statewright"), { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({ gateways: {
+      staging: { gateway_url: "https://stage-gateway.example/mcp", auth_url: "https://stage-auth.example" },
+      dev1: { gateway_url: "https://dev1-gateway.example/mcp", auth_url: "https://dev1-auth.example" },
+    } }));
+    const fakeCurl = join(bin, "curl");
+    await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  previous="$argument"
+done
+[ -z "$output" ] || printf '{}' > "$output"
+printf '503'
+`);
+    await chmod(fakeCurl, 0o755);
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+    );
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_GATEWAY_URL: "https://stage-gateway.example",
+      STATEWRIGHT_NO_BROWSER: "true",
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    const message = responseById(result.stdout, 2).error.message;
+    assert.match(message, /https:\/\/stage-auth\.example\/keys/);
+    assert.doesNotMatch(message, /dev1-auth|statewright\.ai\/keys/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("codex device approval verifies and atomically stores the returned Statewright key", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-codex-device-login-"));
   const home = join(root, "home");

@@ -87,10 +87,11 @@ gateways without an authorization-service mapping fail closed instead of
 falling back to production.
 
 If browser launch is disabled, `statewright_connect` returns the complete
-approval URL and device code. `https://statewright.ai/keys` remains the manual
-recovery path when device enrollment cannot be started. The tool catalog reads
-the OS credential store for every request, so authenticated tools become available
-in the same MCP process after approval.
+approval URL and device code. The selected environment's `auth_url` plus
+`/keys` is the manual recovery path when device enrollment cannot be started;
+non-production profiles never redirect recovery to production. The tool catalog
+reads the OS credential store for every request, so authenticated tools become
+available in the same MCP process after approval.
 
 ### Connection faults and multiple servers
 

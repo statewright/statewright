@@ -12,6 +12,7 @@ test("gateway profiles resolve explicit URL and named environments without secre
     gateways: {
       staging: { gateway_url: "https://staging.example.test", auth_url: "https://accounts.staging.example.test" },
       dev1: { gateway_url: "https://dev1.example.test/api", pb_url: "https://accounts.dev1.example.test/" },
+      dev2: { gateway_url: "https://dev2.example.test/mcp", auth_url: "https://accounts.dev2.example.test" },
     },
   }));
 
@@ -22,6 +23,10 @@ test("gateway profiles resolve explicit URL and named environments without secre
   assert.equal(dev1.STATEWRIGHT_GATEWAY_URL, "https://dev1.example.test/api/mcp");
   assert.equal(dev1.STATEWRIGHT_PB_URL, "https://accounts.dev1.example.test");
   assert.equal("STATEWRIGHT_API_KEY" in dev1, false);
+  const dev2 = await resolveGatewayProfile({ STATEWRIGHT_GATEWAY_URL: "https://dev2.example.test" }, home);
+  assert.equal(dev2.gatewayUrl, "https://dev2.example.test/mcp");
+  assert.equal(dev2.authUrl, "https://accounts.dev2.example.test");
+  assert.notEqual(dev2.authUrl, staging.authUrl);
 });
 
 test("unknown named environments fail closed", async () => {

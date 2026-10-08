@@ -93,6 +93,11 @@ non-production profiles never redirect recovery to production. The tool catalog
 reads the OS credential store for every request, so authenticated tools become
 available in the same MCP process after approval.
 
+Browser confirmation URLs are constructed from that same `auth_url`, not from
+the origin echoed by the device-code response. This keeps a stale server-side
+public URL from redirecting staging or development confirmation to another
+environment.
+
 ### Connection faults and multiple servers
 
 The proxy uses the canonical `/mcp` endpoint without appending a slash. HTTP

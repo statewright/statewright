@@ -215,6 +215,66 @@ printf '503'
   }
 });
 
+test("codex confirmation ignores a stale server origin and uses the selected issuer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-confirmation-origin-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  try {
+    await mkdir(join(home, ".statewright"), { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({ gateways: {
+      staging: { gateway_url: "https://stage-gateway.example/mcp", auth_url: "https://stage-auth.example" },
+    } }));
+    const fakeSleep = join(bin, "sleep");
+    await writeFile(fakeSleep, "#!/usr/bin/env bash\nexit 0\n");
+    await chmod(fakeSleep, 0o755);
+    const fakeCurl = join(bin, "curl");
+    await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+url=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  case "$argument" in http://*|https://*) url="$argument" ;; esac
+  previous="$argument"
+done
+case "$url" in
+  */api/oauth/device/code)
+    printf '%s' '{"device_code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","user_code":"BCDF-GHJK-MNPQ","verification_uri":"https://stale-public.example/device","verification_uri_complete":"https://stale-public.example/device?user_code=BCDF-GHJK-MNPQ","expires_in":600,"interval":5}' > "$output"
+    printf '200'
+    ;;
+  */api/oauth/device/token)
+    printf '%s' '{"error":"access_denied"}' > "$output"
+    printf '400'
+    ;;
+  *) exit 1 ;;
+esac
+`);
+    await chmod(fakeCurl, 0o755);
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+    );
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_GATEWAY_URL: "https://stage-gateway.example",
+      STATEWRIGHT_NO_BROWSER: "true",
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    const message = responseById(result.stdout, 2).result.content[0].text;
+    assert.match(message, /Open https:\/\/stage-auth\.example\/device\?user_code=BCDF-GHJK-MNPQ/);
+    assert.doesNotMatch(message, /stale-public/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("codex device approval verifies and atomically stores the returned Statewright key", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-codex-device-login-"));
   const home = join(root, "home");

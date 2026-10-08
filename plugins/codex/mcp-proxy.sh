@@ -679,14 +679,13 @@ while IFS= read -r line; do
       DEVICE_AUTHORIZATION=$(request_device_authorization || true)
       DEVICE_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.device_code // empty' 2>/dev/null)
       USER_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.user_code // empty' 2>/dev/null)
-      VERIFY_URL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.verification_uri_complete // empty' 2>/dev/null)
       EXPIRES_IN=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.expires_in // empty' 2>/dev/null)
       POLL_INTERVAL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.interval // empty' 2>/dev/null)
-      case "$VERIFY_URL" in
-        "${PB_URL%/}/device?user_code="*) ;;
-        *) VERIFY_URL="" ;;
-      esac
-      if [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ] || [ -z "$VERIFY_URL" ]; then
+      # The selected profile is authoritative for the browser origin. The
+      # server-supplied complete URI may reflect stale deployment metadata;
+      # never let it redirect a staging or development login to another host.
+      VERIFY_URL="${PB_URL%/}/device?user_code=$USER_CODE"
+      if [ -z "$PB_URL" ] || [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ]; then
         if [ -n "$PB_URL" ]; then
           CONNECT_ERROR="Statewright account connection could not be started. Try again, or use ${PB_URL%/}/keys as the manual recovery path for this environment."
         else

@@ -40,6 +40,7 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
   "STATEWRIGHT_DESKTOP_MCP_URL", "STATEWRIGHT_DESKTOP_MCP_TOKEN",
   "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
+  "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
 ];
 
 export function desktopBrokerEnvironment(environment, { controlDir, clientId }) {
@@ -255,6 +256,7 @@ export async function runDesktopAppServerBroker({
         ...isolatedEnvironment,
         STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
         STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+        STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
       },
       clientId: plan.clientId,
       classifierApprovalService,

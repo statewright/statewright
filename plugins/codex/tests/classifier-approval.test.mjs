@@ -53,6 +53,7 @@ test("classifier approval helper forwards only bounded redacted identity", async
 
   const routed = await requestClassifierApproval(input, {
     environment: {STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes"),
+      STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: join(runDir, "manifest.json"),
       LOCAL_MODELS_RUN_DIR: join(runDir, "stale-foreign-run")},
     readFile: async path => {
       assert.equal(path, join(runDir, "manifest.json"),
@@ -79,6 +80,28 @@ test("classifier approval helper forwards only bounded redacted identity", async
     }), {status: 200}),
   });
   assert.equal(routed.action, "rework");
+
+  let companionReceipt;
+  const companion = await requestClassifierApproval(input, {
+    environment: {LOCAL_MODELS_RUN_DIR: runDir,
+      STATEWRIGHT_ROUTE_CONTROL_DIR: join(runDir, "routes")},
+    readFile: async path => {
+      companionReceipt = path;
+      return JSON.stringify({proxyUrl: "ws://127.0.0.1:3456", proxyToken: "local-secret"});
+    },
+    fetch: async () => new Response(JSON.stringify({
+      schema: "statewright/classifier-approval/v2", action: "rework",
+      thread_id: "thread-one", run_id: "run-one", run_session_id: "session-one",
+      state: "implement", state_epoch: 4, intent_fingerprint: "intent_v1_family",
+      invocation_fingerprint: "invocation_v1_exact", basis: "semantic_threshold_not_met",
+      required_authority: "complete_structural_evidence_or_separate_approval",
+      reformulation_allowed: true, exact_invocation_retry_allowed: false,
+      separate_approval_allowed: true,
+    }), {status: 200}),
+  });
+  assert.equal(companion.action, "rework");
+  assert.equal(companionReceipt, join(runDir, "runtime.json"),
+    "a companion route directory must not be misclassified as a standalone manifest");
 });
 
 test("classifier approval helper rejects ineligible or incomplete gateway receipts", async () => {

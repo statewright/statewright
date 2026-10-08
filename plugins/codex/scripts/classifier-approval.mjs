@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_INPUT_BYTES = 32 * 1024;
@@ -61,12 +61,11 @@ export function redactedApprovalRequest(value) {
 }
 
 function runtimeReceiptPath(environment) {
-  // An explicit Statewright route owner wins over any stale companion-process
-  // variables inherited from the shell. Never fall through to another mode
-  // after an owner has advertised its receipt location.
-  if (printable(environment.STATEWRIGHT_ROUTE_CONTROL_DIR, 4096)
-      && basename(environment.STATEWRIGHT_ROUTE_CONTROL_DIR) === "routes") {
-    return join(dirname(environment.STATEWRIGHT_ROUTE_CONTROL_DIR), "manifest.json");
+  // An owning host may advertise one exact private receipt. Never infer host
+  // mode from a shared route-directory shape or fall through after an explicit
+  // owner fails: the companion and standalone resident both use `routes/`.
+  if (printable(environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT, 4096)) {
+    return environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT;
   }
   if (printable(environment.LOCAL_MODELS_RUN_DIR, 4096)) {
     return join(environment.LOCAL_MODELS_RUN_DIR, "runtime.json");

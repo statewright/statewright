@@ -94,6 +94,7 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
     STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: "parent-root", STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:2000",
     STATEWRIGHT_ADAPTER_TOKEN: "adapter-token", CODEX_SESSION_ID: "parent-writer", CODEX_THREAD_ID: "parent-thread",
     LOCAL_MODELS_RUN_DIR: "/tmp/foreign-local-models-run",
+    STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/tmp/foreign-receipt.json",
   }, { controlDir: "/tmp/desktop-control", clientId: "swc_0123456789abcdef0123456789abcdef" });
   assert.equal(child.STATEWRIGHT_API_KEY, "keep-user-auth");
   assert.equal(child.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
@@ -103,6 +104,7 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
     "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_TELEMETRY_OWNER",
     "STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
     "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
+    "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
   ]) assert.equal(child[name], undefined, `${name} must not escape the parent session`);
 });
 
@@ -192,6 +194,8 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
         assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43123");
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "desktop-bridge-token");
+        assert.equal(options.environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,
+          join(controlDir, "..", "manifest.json"));
         assert.equal(typeof options.classifierApprovalService.getState, "function");
         assert.equal(typeof options.classifierApprovalService.ownsThread, "function");
         await options.onThreadStarted({ threadId: "desktop-thread" });

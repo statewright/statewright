@@ -92,6 +92,10 @@ export class ClassifierApprovalController {
       request.exactInvocationRetryAllowed, request.separateApprovalAllowed]);
   }
 
+  emit(event) {
+    void Promise.resolve().then(() => this.record(event)).catch(() => {});
+  }
+
   result(request, action, details = {}) {
     return Object.freeze({schema: "statewright/classifier-approval/v2", action,
       thread_id: request.threadId, run_id: request.runId,
@@ -136,7 +140,7 @@ export class ClassifierApprovalController {
     entry.updatedAt = timestamp;
     this.entries.set(key, entry);
     if (entry.attempts <= this.maxReworks) {
-      await this.record({type: "classifier_rework_requested", threadId: request.threadId,
+      this.emit({type: "classifier_rework_requested", threadId: request.threadId,
         run_id: request.runId, state: request.state, basis: request.basis,
         attempts: entry.attempts, max_reworks: this.maxReworks});
       return approvalDeny(this.result(request, "rework", {attempts: entry.attempts,
@@ -147,16 +151,16 @@ export class ClassifierApprovalController {
     const pending = {request, requestId, settled: false, presented: false, signal};
     pending.promise = new Promise(resolve => { pending.resolve = resolve; });
     entry.pending = pending;
-    this.requests.set(requestId, {key, entry, pending});
-    await this.record({type: "classifier_human_approval_requested", threadId: request.threadId,
-      run_id: request.runId, state: request.state, basis: request.basis,
-      attempts: entry.attempts, max_reworks: this.maxReworks});
     const container = {key, entry, pending};
+    this.requests.set(requestId, container);
     pending.abort = () => this.finish(container, "deny", "approval_request_aborted");
     signal?.addEventListener("abort", pending.abort, {once: true});
     pending.timer = setTimeout(() => this.finish(container, "deny", "native_approval_timeout"),
       this.approvalTimeoutMs);
     pending.timer.unref?.();
+    this.emit({type: "classifier_human_approval_requested", threadId: request.threadId,
+      run_id: request.runId, state: request.state, basis: request.basis,
+      attempts: entry.attempts, max_reworks: this.maxReworks});
     try {
       this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
@@ -191,10 +195,10 @@ export class ClassifierApprovalController {
         }});
       } catch {}
     }
-    void Promise.resolve(this.record({type: action === "allow_once"
+    this.emit({type: action === "allow_once"
       ? "classifier_human_approval_granted" : "classifier_human_approval_denied",
     threadId: pending.request.threadId, run_id: pending.request.runId,
-    state: pending.request.state, basis: pending.request.basis, reason})).catch(() => {});
+    state: pending.request.state, basis: pending.request.basis, reason});
     pending.resolve(this.result(pending.request, action, {reason,
       approval_request_id: pending.requestId, attempts: entry.attempts,
       max_reworks: this.maxReworks}));

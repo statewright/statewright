@@ -514,6 +514,13 @@ export async function startCodexAppServerRouteProxy({
       let abortApproval;
       let closeApproval;
       try {
+        approvalController = new AbortController();
+        abortApproval = () => approvalController.abort(new Error("Classifier approval request aborted"));
+        closeApproval = () => {
+          if (!response.writableEnded) abortApproval();
+        };
+        request.once("aborted", abortApproval);
+        response.once("close", closeApproval);
         let body = "";
         for await (const chunk of request) {
           body += chunk;
@@ -531,13 +538,6 @@ export async function startCodexAppServerRouteProxy({
         if (owners.length !== 1) throw new Error(owners.length
           ? "Classifier approval has multiple owning native connections"
           : "Classifier approval has no owning native connection");
-        approvalController = new AbortController();
-        abortApproval = () => approvalController.abort(new Error("Classifier approval request aborted"));
-        closeApproval = () => {
-          if (!response.writableEnded) abortApproval();
-        };
-        request.once("aborted", abortApproval);
-        response.once("close", closeApproval);
         const decision = await owners[0].pipeline.service(value,
           {signal: approvalController.signal});
         let result;
@@ -725,9 +725,20 @@ export async function startCodexAppServerRouteProxy({
     const routeConfirmationWaiters = new Map();
     const stateNames = new Map();
     const mcpReadyThreads = new Set();
+    let classifierOwner = null;
+    const ownsClassifierConnection = threadId => {
+      const candidates = [...classifierOwners].filter(candidate => candidate.initialized
+        && candidate.threads.has(threadId));
+      return classifierOwner !== null && classifierOwners.has(classifierOwner)
+        && candidates.length === 1 && candidates[0] === classifierOwner;
+    };
     const readClassifierState = async threadId => {
-      if (!await classifierApprovalService?.ownsThread?.(threadId)) return null;
-      return classifierApprovalService.getState(threadId);
+      if (!ownsClassifierConnection(threadId)
+          || !await classifierApprovalService?.ownsThread?.(threadId)) return null;
+      const state = await classifierApprovalService.getState(threadId);
+      if (!await classifierApprovalService?.ownsThread?.(threadId)
+          || !ownsClassifierConnection(threadId)) return null;
+      return state;
     };
     const classifierController = classifierApprovalService ? new ClassifierApprovalController({
       send: value => {
@@ -740,7 +751,7 @@ export async function startCodexAppServerRouteProxy({
       approvalTimeoutMs: classifierApprovalTimeoutMs,
       record: event => onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event}),
     }) : null;
-    const classifierOwner = classifierController ? {
+    classifierOwner = classifierController ? {
       initialized: false,
       threads: classifierThreads,
       controller: classifierController,
@@ -1780,6 +1791,9 @@ export async function startCodexAppServerRouteProxy({
       if (!downstreamClosed) {
         downstreamClosed = true;
         connectedClients = Math.max(0, connectedClients - 1);
+        classifierController?.close("native_connection_closed");
+        if (classifierOwner) classifierOwners.delete(classifierOwner);
+        classifierThreads.clear();
         for (const authorization of pendingThreadAuthorizations.values()) void authorization.cancel().catch(() => {});
         pendingThreadAuthorizations.clear();
       }

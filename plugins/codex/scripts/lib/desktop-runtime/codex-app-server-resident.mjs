@@ -282,6 +282,7 @@ async function main() {
       STATEWRIGHT_CLIENT_ID: clientId,
       STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
       STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+      STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     approvalService,

@@ -134,6 +134,35 @@ test("native errors, sender failures, abort, and close all deny", async () => {
   assert.equal((await aborting.completion).reason, "approval_request_aborted");
 });
 
+test("abort remains terminal while lifecycle telemetry is still pending", async () => {
+  let releaseRecord;
+  let recordEntered;
+  const entered = new Promise(resolve => { recordEntered = resolve; });
+  const blocked = new Promise(resolve => { releaseRecord = resolve; });
+  const sent = [];
+  const controller = new ClassifierApprovalController({
+    send: value => sent.push(value), getState: currentState, maxReworks: 1,
+    record: async event => {
+      if (event.type !== "classifier_human_approval_requested") return;
+      recordEntered();
+      await blocked;
+    },
+  });
+  await controller.begin(request());
+  const abort = new AbortController();
+  const decision = await controller.begin(request({}, {
+    invocation_fingerprint: "invocation_v1_exact-two",
+  }), { signal: abort.signal });
+  await entered;
+  abort.abort();
+  const modal = sent.find(value => value.method === "mcpServer/elicitation/request");
+  controller.handleReply({ id: modal.id, result: { action: "accept" } });
+  releaseRecord();
+  const result = await decision.completion;
+  assert.equal(result.action, "deny");
+  assert.equal(result.reason, "approval_request_aborted");
+});
+
 test("native acceptance revalidates the authoritative run and state", async () => {
   for (const [getState, reason] of [
     [null, "approval_state_unavailable"],

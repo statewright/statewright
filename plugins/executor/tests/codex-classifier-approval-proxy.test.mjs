@@ -37,6 +37,16 @@ async function until(predicate, label) {
   assert.fail(`Timed out waiting for ${label}`);
 }
 
+function hold() {
+  let enter, release;
+  return {
+    entered: new Promise(resolve => { enter = resolve; }),
+    release: new Promise(resolve => { release = resolve; }),
+    enter: () => enter(),
+    resume: () => release(),
+  };
+}
+
 async function setup(t) {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -47,19 +57,39 @@ async function setup(t) {
         thread: { id: threadId, status: { type: "idle" }, turns: [] },
         modelProvider: "openai", model: "fixture-model",
       } }));
+    } else if (request.method === "turn/start") {
+      const turn = { id: "classifier-active-turn", status: "inProgress", items: [] };
+      socket.send(JSON.stringify({ id: request.id, result: { turn } }));
+      socket.send(JSON.stringify({ method: "turn/started", params: { threadId, turn } }));
     } else if (request.id !== undefined) {
       socket.send(JSON.stringify({ id: request.id, result: {} }));
     }
   }));
   let state = { run_id: "run-one", run_session_id: "session-one", state: "implement", state_epoch: 4 };
   let owned = true;
+  let stateHold = null;
+  let ownerHold = null;
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierApprovalService: {
-      ownsThread: async id => owned && id === threadId,
+      ownsThread: async id => {
+        if (ownerHold) {
+          const pending = ownerHold;
+          ownerHold = null;
+          pending.enter();
+          await pending.release;
+        }
+        return owned && id === threadId;
+      },
       getState: async id => {
         assert.equal(id, threadId);
+        if (stateHold) {
+          const hold = stateHold;
+          stateHold = null;
+          hold.enter();
+          await hold.release;
+        }
         return structuredClone(state);
       },
     },
@@ -93,7 +123,13 @@ async function setup(t) {
   });
   return { connectAndOwn, endpoint, post,
     setState(value) { state = structuredClone(value); },
-    setOwned(value) { owned = value; } };
+    setOwned(value) { owned = value; },
+    holdStateRead() {
+      return stateHold = hold();
+    },
+    holdOwnerLookup() {
+      return ownerHold = hold();
+    } };
 }
 
 test("classifier uncertainty reaches one exact native approval after two rewrites", async t => {
@@ -159,4 +195,82 @@ test("workflow transition approval blocks classifier fallthrough", async t => {
   const result = await response.json();
   assert.equal(result.action, "deny");
   assert.equal(result.reason, "workflow_approval_pending");
+});
+
+test("ownership loss during accepted-state reread denies the held invocation", async t => {
+  const fixture = await setup(t);
+  const { client, messages } = await fixture.connectAndOwn();
+  await fixture.post(approvalRequest("one"));
+  await fixture.post(approvalRequest("two"));
+  const pending = fixture.post(approvalRequest("three"));
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"),
+    "native classifier approval form");
+  const hold = fixture.holdStateRead();
+  client.send(JSON.stringify({ id: modal.id, result: { action: "accept" } }));
+  await hold.entered;
+  fixture.setOwned(false);
+  hold.resume();
+  const result = await (await pending).json();
+  assert.equal(result.action, "deny");
+  assert.equal(result.reason, "approval_state_changed");
+});
+
+test("a duplicate live native owner appearing during state reread denies release", async t => {
+  const fixture = await setup(t);
+  const { client, messages } = await fixture.connectAndOwn();
+  await fixture.post(approvalRequest("one"));
+  await fixture.post(approvalRequest("two"));
+  const pending = fixture.post(approvalRequest("three"));
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"),
+    "native classifier approval form");
+  const stateRead = fixture.holdStateRead();
+  client.send(JSON.stringify({ id: modal.id, result: { action: "accept" } }));
+  await stateRead.entered;
+  await fixture.connectAndOwn();
+  stateRead.resume();
+  const result = await (await pending).json();
+  assert.equal(result.action, "deny");
+  assert.equal(result.reason, "approval_state_changed");
+});
+
+test("HTTP abort during asynchronous owner lookup cannot orphan a native prompt", async t => {
+  const fixture = await setup(t);
+  const { messages } = await fixture.connectAndOwn();
+  await fixture.post(approvalRequest("one"));
+  await fixture.post(approvalRequest("two"));
+  const ownerLookup = fixture.holdOwnerLookup();
+  const abort = new AbortController();
+  const request = fetch(fixture.endpoint, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`},
+    body: JSON.stringify(approvalRequest("three")),
+    signal: abort.signal,
+  });
+  const rejected = assert.rejects(request, /abort/i);
+  await ownerLookup.entered;
+  abort.abort();
+  // Let the server observe the closed response while ownership is still
+  // blocked; the regression is losing that already-delivered close event.
+  await new Promise(resolve => setTimeout(resolve, 20));
+  ownerLookup.resume();
+  await rejected;
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(messages.some(message => message.method === "mcpServer/elicitation/request"), false);
+});
+
+test("native disconnect denies classifier approval even while its turn remains active", async t => {
+  const fixture = await setup(t);
+  const { client, messages } = await fixture.connectAndOwn();
+  client.send(JSON.stringify({ id: "active-turn", method: "turn/start", params: { threadId, input: [] } }));
+  await until(() => messages.find(message => message.method === "turn/started"), "active turn notification");
+  await fixture.post(approvalRequest("one"));
+  await fixture.post(approvalRequest("two"));
+  const pending = fixture.post(approvalRequest("three"));
+  await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"),
+    "native classifier approval form");
+  client.close();
+  await once(client, "close");
+  const result = await (await pending).json();
+  assert.equal(result.action, "deny");
+  assert.equal(result.reason, "native_connection_closed");
 });

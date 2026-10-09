@@ -768,9 +768,8 @@ export async function runManagedClient({ host, command, args, environment = proc
         });
         const residentRoutes = residentControlDir(home, routedClientId);
         await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
-        const remoteUrl = new URL(resident.proxyUrl);
-        if (yoloOverride) remoteUrl.searchParams.set("statewright_resume_yolo_thread", yoloOverride.sessionId);
-        const residentArgs = [...(yoloOverride?.args ?? args), "--remote", remoteUrl.href];
+        const { prepareCodexResidentTui } = await import("./codex-resume-relay.mjs");
+        const residentTui = await prepareCodexResidentTui({ proxyUrl: resident.proxyUrl, args, yoloOverride });
         const tuiEnvironment = {
           ...isolatedEnvironment,
           STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
@@ -779,21 +778,23 @@ export async function runManagedClient({ host, command, args, environment = proc
           ...(codexRootSessionId ? { STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: codexRootSessionId } : {}),
           STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
         };
-        const tui = spawn(command, residentArgs, {
-          cwd,
-          env: tuiEnvironment,
-          stdio: "inherit",
-        });
-        const tuiExit = waitForExit(tui);
-        const stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
+        let stopForwarding;
         try {
+          const tui = spawn(command, residentTui.args, {
+            cwd,
+            env: tuiEnvironment,
+            stdio: "inherit",
+          });
+          const tuiExit = waitForExit(tui);
+          stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
           const result = await tuiExit;
           if (!isExpectedExit(result)) await reporter.report(new Error("Native Codex connected to its resident App Server exited unexpectedly."), {
             mechanism: "child_exit", host, operation: "resident_tui", exit_code: result.code ?? 1, signal: result.signal,
           });
           return result.code ?? 1;
         } finally {
-          await stopForwarding();
+          try { await stopForwarding?.(); }
+          finally { await residentTui.close(); }
         }
       }
       if (appServerEnabled && explicitResumePermissionOverride) {

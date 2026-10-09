@@ -35,7 +35,14 @@ canonical rollout as `turn_context` and `thread_settings_applied` records.
   complete recorded representation is exactly expressible by App Server. A
   custom, external, or enriched raw profile is rejected with an actionable
   error instead of discarding restrictions.
-- An explicit CLI permission or root override selects the supported restart
+- A sole explicit `--yolo` / `--dangerously-bypass-approvals-and-sandbox` override
+  with an exact resume thread ID uses the durable resident. A single-use
+  loopback relay gives native Codex a plain `ws://host:port` address and carries
+  the exact thread binding on the resident-facing connection. Native Codex
+  rejects query parameters in `--remote`; they must never reach the CLI. The
+  resident applies explicit intent to the requested resume (rejecting a foreign
+  thread) and to new threads started in that same native TUI.
+- Other explicit CLI permission or root overrides select the supported restart
   transport before a resident App Server is started. The original CLI arguments
   remain authoritative. Permission arguments after the original `resume`
   subcommand are retained across later Statewright model-route restarts.
@@ -56,8 +63,11 @@ force.
   named profiles retain identity while their installed definition may evolve.
 - Losslessly representable legacy rollouts preserve their prior effective
   settings; richer raw profiles fail closed and require an explicit override.
-- A deliberate CLI override still takes precedence and uses native embedded
-  resume semantics instead of failing at the remote-mode guard.
+- A deliberate CLI override still takes precedence. A sole explicit YOLO resume
+  stays resident-owned; other overrides use native embedded resume semantics.
+- The per-launch relay rejects browser origins and additional connections,
+  preserves frame ordering and type, bounds buffering/handshake time, and closes
+  with the TUI. It does not restart the resident or terminate its detached work.
 - Cross-platform behavior uses Codex's App Server protocol and Node filesystem
   APIs; it does not depend on platform keychain commands or shell aliases.
 - Resume can fail closed when historical permissions cannot be represented by
@@ -71,6 +81,9 @@ native-null grouped merging, named and legacy projection, proxy forwarding,
 explicit flag/config-alias classification, restart-transport selection, flags
 after `resume`, prompt boundaries, and generated runtime parity. Native Codex
 acceptance is required in the release receipt in addition to fixture tests.
+The remote-address regression additionally requires a real native CLI parser
+check and PTY initialization through the relay; a Node WebSocket client alone
+does not exercise native CLI address validation.
 
 ## Rollback
 

@@ -46,23 +46,19 @@ export async function resolveGatewayProfile(environment = process.env, home = ho
   }
 
   const gatewayUrl = canonicalGateway(environment.STATEWRIGHT_GATEWAY_URL || named?.gateway_url || PRODUCTION_GATEWAY);
-  const namedMatchesGateway = named && canonicalGateway(named.gateway_url) === gatewayUrl;
-  let selectedName = namedMatchesGateway ? name : null;
-  let selectedProfile = namedMatchesGateway ? named : null;
-  if (!selectedProfile && gatewayUrl !== PRODUCTION_GATEWAY) {
-    for (const [profileName, profile] of Object.entries(profiles)) {
+  let authUrl = environment.STATEWRIGHT_PB_URL || named?.auth_url || named?.pb_url;
+  if (!authUrl && gatewayUrl === PRODUCTION_GATEWAY) authUrl = PRODUCTION_AUTH_URL;
+  if (!authUrl) {
+    for (const profile of Object.values(profiles)) {
       if (profile && typeof profile.gateway_url === "string" && canonicalGateway(profile.gateway_url) === gatewayUrl) {
-        selectedName = profileName;
-        selectedProfile = profile;
+        authUrl = profile.auth_url || profile.pb_url;
         break;
       }
     }
   }
-  let authUrl = environment.STATEWRIGHT_PB_URL || selectedProfile?.auth_url || selectedProfile?.pb_url;
-  if (!authUrl && gatewayUrl === PRODUCTION_GATEWAY) authUrl = PRODUCTION_AUTH_URL;
 
   return {
-    name: selectedName || (gatewayUrl === PRODUCTION_GATEWAY ? "production" : null),
+    name: name || (gatewayUrl === PRODUCTION_GATEWAY ? "production" : null),
     gatewayUrl,
     authUrl: authUrl ? canonicalServiceUrl(authUrl) : null,
     identity: createHash("sha256").update(gatewayUrl).digest("hex"),

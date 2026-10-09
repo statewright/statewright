@@ -3,14 +3,13 @@ compile_error!("statewright-native-desktop-launcher currently requires Unix exec
 
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const CONFIG_ENV: &str = "STATEWRIGHT_NATIVE_LAUNCHER_CONFIG";
 const STATE_ENV: &str = "STATEWRIGHT_DESKTOP_STATE_PATH";
 
 #[derive(Debug, Eq, PartialEq)]
@@ -60,9 +59,9 @@ fn run() -> Result<(), String> {
 }
 
 fn config_path(current_exe: &Path) -> PathBuf {
-    env::var_os(CONFIG_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("{}.conf", current_exe.display())))
+    // The profile sidecar belongs to this exact launcher. An inherited env
+    // override could mix a production bridge with a staging state record.
+    PathBuf::from(format!("{}.conf", current_exe.display()))
 }
 
 fn read_config(path: &Path) -> Result<Config, String> {
@@ -159,7 +158,80 @@ fn validate_regular_file(name: &str, path: &Path) -> Result<(), String> {
 }
 
 fn is_app_server(args: &[OsString]) -> bool {
-    args.iter().any(|value| value == OsStr::new("app-server"))
+    let mut args = args.iter();
+    while let Some(argument) = args.next() {
+        let Some(argument) = argument.to_str() else {
+            return false;
+        };
+        if argument == "app-server" {
+            return true;
+        }
+        if argument == "--" {
+            return false;
+        }
+        if matches!(
+            argument,
+            "-c" | "--config"
+                | "--enable"
+                | "--disable"
+                | "--remote"
+                | "--remote-auth-token-env"
+                | "-m"
+                | "--model"
+                | "--local-provider"
+                | "-p"
+                | "--profile"
+                | "-s"
+                | "--sandbox"
+                | "-C"
+                | "--cd"
+                | "--add-dir"
+                | "-a"
+                | "--ask-for-approval"
+        ) {
+            if args.next().is_none() {
+                return false;
+            }
+            continue;
+        }
+        if [
+            "--config=",
+            "--enable=",
+            "--disable=",
+            "--remote=",
+            "--remote-auth-token-env=",
+            "--model=",
+            "--local-provider=",
+            "--profile=",
+            "--sandbox=",
+            "--cd=",
+            "--add-dir=",
+            "--ask-for-approval=",
+        ]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix))
+        {
+            continue;
+        }
+        if matches!(
+            argument,
+            "--strict-config"
+                | "--oss"
+                | "--approve-for-me"
+                | "--dangerously-bypass-approvals-and-sandbox"
+                | "--dangerously-bypass-hook-trust"
+                | "--worktree"
+                | "--search"
+                | "--no-alt-screen"
+                | "--no-daemon"
+        ) {
+            continue;
+        }
+        // Any other positional argument is a prompt or another subcommand.
+        // Unknown options also remain the vendor CLI's responsibility.
+        return false;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -167,13 +239,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selects_only_an_exact_app_server_argument() {
+    fn selects_only_the_app_server_subcommand() {
         assert!(is_app_server(&[
             OsString::from("-c"),
+            OsString::from("model=fast"),
+            OsString::from("app-server")
+        ]));
+        assert!(is_app_server(&[OsString::from("app-server")]));
+        assert!(!is_app_server(&[
+            OsString::from("-c"),
+            OsString::from("app-server")
+        ]));
+        assert!(!is_app_server(&[
+            OsString::from("exec"),
+            OsString::from("app-server")
+        ]));
+        assert!(!is_app_server(&[
+            OsString::from("--"),
             OsString::from("app-server")
         ]));
         assert!(!is_app_server(&[OsString::from("exec-server")]));
         assert!(!is_app_server(&[OsString::from("not-app-server")]));
+    }
+
+    #[test]
+    fn config_is_bound_to_the_launcher_not_an_inherited_environment() {
+        assert_eq!(
+            config_path(Path::new("/tmp/profile/dispatcher")),
+            PathBuf::from("/tmp/profile/dispatcher.conf")
+        );
     }
 
     #[test]

@@ -424,6 +424,12 @@ export function codexOneShotInvocation(host, args) {
   return index >= 0 && ["exec", "e", "review"].includes(args[index]);
 }
 
+export function codexResumeInvocation(host, args) {
+  if (host !== "codex") return false;
+  const index = codexTopLevelCommandIndex(args);
+  return index >= 0 && args[index] === "resume";
+}
+
 // Native destination/control operations belong to their selected server, not
 // to a new local resident created by this shim. Do not rewrite remote argv.
 export function codexNativeDestinationInvocation(host, args) {

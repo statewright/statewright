@@ -92,3 +92,30 @@ deployment, resident termination, real conversation replay, or model turn is
 part of this repair. Actual resume and subsequent user interaction remain a
 user-owned acceptance boundary; the native canary proves address parsing and
 initialization transport, not a completed historical-session resume.
+
+## Post-install staging credential finding
+
+A subsequent `scodex resume` did launch the `20261009141014` shim, but its
+child was bare Codex without `--remote`. The managed-client setting was enabled;
+the staging gateway's OS credential lookup independently returned
+`CREDENTIAL_MISSING`. The source launcher intentionally fell back to an
+unmanaged first-launch onboarding path on that error. Thus the relay was not
+reached, and the native canary did not predict this live resume outcome.
+
+The launcher now refuses a managed `resume` with a missing credential before
+spawning a Codex child, while retaining the first-launch browser-onboarding
+path. Credential loss after managed startup also no longer enters the bare
+fallback. The selected gateway URL is shown without any credential material.
+An inherited named environment no longer supplies the OAuth issuer when an
+explicit gateway URL selects a different configured profile; explicit issuer
+overrides remain deliberate.
+
+The advertised native `statewright_connect` was invoked for the configured
+staging profile but did not return within the bounded observation window; the
+call was stopped and the OS store still reported `CREDENTIAL_MISSING`.
+Whether a browser approval page opened is a pending user observation, not an
+approval or a successful OAuth receipt. Acceptance still requires that the
+staging device flow place a key in the OS store, the existing bare Codex TUI
+exit normally, and a fresh `scodex resume` show a resident remote connection
+and a successful local Statewright read. None of those live acceptance steps
+is claimed here.

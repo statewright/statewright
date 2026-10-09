@@ -47,6 +47,10 @@ canonical rollout as `turn_context` and `thread_settings_applied` records.
   remain authoritative. Permission arguments after the original `resume`
   subcommand are retained across later Statewright model-route restarts.
 - Ordinary config defaults are not treated as explicit CLI intent.
+- A missing gateway credential may permit a plain first launch for browser
+  onboarding, but never silently downgrades a managed `resume` to bare Codex.
+  The resume exits with a profile-specific connection instruction; a credential
+  loss after managed startup remains an error rather than a fallback.
 
 ## Security and privacy
 

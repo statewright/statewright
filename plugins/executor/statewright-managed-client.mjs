@@ -5,7 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { bootstrapManagedClients, codexNativeDestinationInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, codexNativeDestinationInvocation, codexResumeInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
 import { resolveGatewayApiKey } from "./lib/credential-store.mjs";
 import { resolvedGatewayEnvironment } from "./lib/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/error-reporting.mjs";
@@ -134,16 +134,25 @@ async function main() {
   const nativeDestination = codexNativeDestinationInvocation(options.host, options.args);
   const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
   if (!nativeDestination && await managedClientEnabled(options.host)) {
+    let apiKey;
     try {
-      environment.STATEWRIGHT_API_KEY = await resolveGatewayApiKey(environment);
-      process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });
-      return;
+      apiKey = await resolveGatewayApiKey(environment);
     } catch (error) {
       if (error?.code !== "CREDENTIAL_MISSING") throw error;
       if (!environment.STATEWRIGHT_PB_URL) {
         throw new Error("No credential is stored for this gateway and its authorization service is not configured in ~/.statewright/environments.json.");
       }
+      if (codexResumeInvocation(options.host, options.args)) {
+        process.stderr.write(`[statewright] Cannot resume a managed Codex thread: no credential is stored for ${environment.STATEWRIGHT_GATEWAY_URL}. Launch this client without resume, call statewright_connect, approve the browser request for this gateway, then retry. No Codex child was started.\n`);
+        process.exitCode = 3;
+        return;
+      }
       process.stderr.write("[statewright] no credential is stored for this gateway; launching the client so statewright_connect can complete browser approval. Restart after approval to enable managed routing.\n");
+    }
+    if (apiKey) {
+      environment.STATEWRIGHT_API_KEY = apiKey;
+      process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });
+      return;
     }
   }
   const child = spawn(options.realBin, options.args, {

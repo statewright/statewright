@@ -15,7 +15,7 @@ import {
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
+import { applyCompactResumeRequest, applyExplicitYoloResumePermissions, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
 import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
@@ -1406,6 +1406,40 @@ test("restored resume permissions fill only omitted native request fields", () =
   });
   const other = { id: 5, method: "thread/read", params: { threadId: "thread-1" } };
   assert.equal(applyRestoredResumePermissions(other, { sandbox: "read-only" }), other);
+});
+
+test("explicit Yolo resume permissions override saved settings only for the bound thread", async () => {
+  const source = { id: 1, method: "thread/resume", params: { threadId: "thread-yolo", approvalPolicy: "on-request", permissions: ":read-only" } };
+  assert.deepEqual(applyExplicitYoloResumePermissions(source, "thread-yolo").params, {
+    threadId: "thread-yolo", approvalPolicy: "never", permissions: null, sandbox: "danger-full-access",
+  });
+  assert.equal(source.params.approvalPolicy, "on-request", "the native input remains unchanged");
+  assert.throws(() => applyExplicitYoloResumePermissions(source, "foreign-thread"), /different thread/);
+  assert.equal(applyExplicitYoloResumePermissions({ method: "thread/start", params: {} }, "thread-yolo").params.sandbox,
+    "danger-full-access", "the original global CLI flag applies to new threads in this TUI");
+
+  const upstream = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await once(upstream, "listening");
+  const connected = new Promise(resolveConnection => upstream.once("connection", resolveConnection));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    compactResume: false,
+    resolveResumePermissions: async () => { throw new Error("saved profile is unrepresentable"); },
+  });
+  const client = new WebSocket(`${proxy.url}/?statewright_resume_yolo_thread=thread-yolo`);
+  try {
+    await once(client, "open");
+    const upstreamSocket = await connected;
+    const forwarded = new Promise(resolveMessage => upstreamSocket.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 2, method: "thread/resume", params: { threadId: "thread-yolo" } }));
+    assert.deepEqual((await forwarded).params, {
+      threadId: "thread-yolo", approvalPolicy: "never", permissions: null, sandbox: "danger-full-access",
+    });
+  } finally {
+    client.terminate();
+    await proxy.close();
+    await new Promise(resolveClose => upstream.close(resolveClose));
+  }
 });
 
 test("Codex resume location ignores copied parent turn contexts", async () => {

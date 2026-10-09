@@ -352,6 +352,19 @@ export function applyRestoredResumePermissions(message, restored) {
   return { ...message, params };
 }
 
+export function applyExplicitYoloResumePermissions(message, expectedThreadId) {
+  if (!expectedThreadId || !["thread/resume", "thread/start"].includes(message?.method)) return message;
+  if (message.method === "thread/resume" && message.params?.threadId !== expectedThreadId) {
+    const error = new Error("Explicit Codex resume permissions belong to a different thread.");
+    error.code = "STATEWRIGHT_THREAD_OWNERSHIP";
+    throw error;
+  }
+  // The flag was global to this native CLI invocation. A new thread created
+  // within that same TUI inherits Yolo, just as it would without --remote.
+  return { ...message, params: { ...(message.params ?? {}),
+    approvalPolicy: "never", permissions: null, sandbox: "danger-full-access" } };
+}
+
 export function applyThreadListCwd(message, cwd = null) {
   if (message?.method !== "thread/list" || !cwd || message.params?.cwd != null) return message;
   return {
@@ -701,7 +714,13 @@ export async function startCodexAppServerRouteProxy({
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Could not allocate a Statewright App Server route proxy port.");
 
-  server.on("connection", (downstream) => {
+  server.on("connection", (downstream, request) => {
+    const yoloThreads = new URL(request?.url ?? "/", "ws://127.0.0.1").searchParams.getAll("statewright_resume_yolo_thread");
+    if (yoloThreads.length > 1 || (yoloThreads.length === 1 && (!yoloThreads[0] || yoloThreads[0].length > 128))) {
+      downstream.close(1008, "Invalid Statewright resume permission binding");
+      return;
+    }
+    const yoloThreadId = yoloThreads[0] ?? null;
     const connection = Symbol("app-server-connection");
     const classifierThreads = new Set();
     let parkingCount = 0;
@@ -1170,11 +1189,12 @@ export async function startCodexAppServerRouteProxy({
           throw new Error("Statewright rejected a duplicate in-flight native JSON-RPC request ID.");
         }
         if (message.method === "thread/resume" && message.params?.threadId) {
-          message = applyRestoredResumePermissions(
-            message,
-            await resolveResumePermissions(String(message.params.threadId)),
-          );
+          // An explicit CLI override must win even when the historical profile
+          // is unreadable or cannot be represented by the remote protocol.
+          if (!yoloThreadId) message = applyRestoredResumePermissions(
+            message, await resolveResumePermissions(String(message.params.threadId)));
         }
+        message = applyExplicitYoloResumePermissions(message, yoloThreadId);
         if (message.method === "thread/start" || message.params?.threadId) {
           threadAuthorization = await authorizeThread({
             method: message.method,

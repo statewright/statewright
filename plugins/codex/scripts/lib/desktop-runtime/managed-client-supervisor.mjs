@@ -505,6 +505,18 @@ export function codexResumeHasExplicitPermissionOverride(host, args = []) {
   return codexExplicitPermissionArgs(args).length > 0;
 }
 
+export function codexYoloResumeOverride(host, args = []) {
+  if (host !== "codex") return null;
+  const explicit = codexExplicitPermissionArgs(args);
+  if (explicit.length !== 1 || !["--dangerously-bypass-approvals-and-sandbox", "--yolo"].includes(explicit[0])) return null;
+  const sessionId = resumedSessionId(host, args);
+  if (!sessionId) return null;
+  // Native --remote rejects permission flags. Carry this explicit CLI choice
+  // on the resident connection and apply it to the forwarded resume RPC.
+  const flagIndex = args.indexOf(explicit[0]);
+  return { sessionId, args: [...args.slice(0, flagIndex), ...args.slice(flagIndex + 1)] };
+}
+
 function forwardManagedTermination(child, exit, { command, platform = process.platform, environment = process.env } = {}) {
   let termination = null;
   const forward = (signal) => {
@@ -734,7 +746,9 @@ export async function runManagedClient({ host, command, args, environment = proc
         config,
       });
       const explicitResumePermissionOverride = codexResumeHasExplicitPermissionOverride(host, args);
-      if (appServerEnabled && !explicitResumePermissionOverride) {
+      const yoloOverride = appServerEnabled && explicitResumePermissionOverride
+        ? codexYoloResumeOverride(host, args) : null;
+      if (appServerEnabled && (!explicitResumePermissionOverride || yoloOverride)) {
         const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
         if (identity.sessionId) {
           await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home, cwd });
@@ -754,7 +768,9 @@ export async function runManagedClient({ host, command, args, environment = proc
         });
         const residentRoutes = residentControlDir(home, routedClientId);
         await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
-        const residentArgs = [...args, "--remote", resident.proxyUrl];
+        const remoteUrl = new URL(resident.proxyUrl);
+        if (yoloOverride) remoteUrl.searchParams.set("statewright_resume_yolo_thread", yoloOverride.sessionId);
+        const residentArgs = [...(yoloOverride?.args ?? args), "--remote", remoteUrl.href];
         const tuiEnvironment = {
           ...isolatedEnvironment,
           STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,

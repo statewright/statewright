@@ -9,7 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { approvalJournal } from "../lib/approval-journal.mjs";
-import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, codexResumeHasExplicitPermissionOverride, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, codexResumeHasExplicitPermissionOverride, codexYoloResumeOverride, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
 
 // These legacy supervisor fixtures emit restart files, not the native App Server
 // protocol. Select that compatibility transport explicitly; default admission is
@@ -353,7 +353,7 @@ test("default resident App Server preflights Codex history before starting resid
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("explicit Codex resume permissions select the compatibility transport", async () => {
+test("non-Yolo explicit Codex resume permissions select the compatibility transport", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-explicit-resume-permissions-"));
   const fake = join(home, "fake-codex.mjs");
   const captured = join(home, "args.json");
@@ -367,7 +367,7 @@ test("explicit Codex resume permissions select the compatibility transport", asy
       assert.equal(await runActualManagedClient({
         host: "codex",
         command: fake,
-        args: ["--dangerously-bypass-approvals-and-sandbox", "resume", "durable-thread"],
+        args: ["--sandbox", "workspace-write", "resume", "durable-thread"],
         environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
         home,
         pollMs: 5,
@@ -376,9 +376,30 @@ test("explicit Codex resume permissions select the compatibility transport", asy
       }), 0);
     } finally { process.stderr.write = originalWrite; }
     assert.deepEqual(JSON.parse(await readFile(captured, "utf8")), [
-      "--dangerously-bypass-approvals-and-sandbox", "resume", "durable-thread",
+      "--sandbox", "workspace-write", "resume", "durable-thread",
     ]);
     assert.match(stderr.join(""), /explicit permission overrides.*restart transport/i);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("an explicit Yolo resume uses the durable resident instead of a disposable bridge", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-equivalent-yolo-resume-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  let bridgeStarts = 0;
+  try {
+    assert.deepEqual(codexYoloResumeOverride("codex", [
+      "--dangerously-bypass-approvals-and-sandbox", "resume", sessionId, "--", "--dangerously-bypass-approvals-and-sandbox",
+    ]), { sessionId, args: ["resume", sessionId, "--", "--dangerously-bypass-approvals-and-sandbox"] });
+    await assert.rejects(runActualManagedClient({
+      host: "codex",
+      command: "/does-not-need-to-start",
+      args: ["--dangerously-bypass-approvals-and-sandbox", "resume", sessionId],
+      environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+      home,
+      bridgeFactory: () => { bridgeStarts += 1; return fakeBridgeFactory(); },
+      historyGuard: async () => { throw new Error("resident preflight reached"); },
+    }), /resident preflight reached/);
+    assert.equal(bridgeStarts, 0, "Yolo resume must not enter restart transport");
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 

@@ -258,3 +258,56 @@ Preserve `/tmp/statewright-desktop-mcp-path-final-20261010.log` as failed eviden
 the second exact-candidate gate is
 `/tmp/statewright-desktop-mcp-path-final2-20261010.log`. This one bounded rerun
 uses recovery reserve; no additional source scope or deployment is authorized.
+
+## Late internal replies and scoped readiness (2026-10-10)
+
+Repair contract, base `f013166`, clean `staging/full-tree-source`: keep internally
+issued RPC IDs private for the connection lifetime, including after timeout or
+completion. Preserve dispatcher rejection of foreign responses and isolate its
+failure to that lane. Native schema generated from the installed Desktop Codex
+confirms `ListMcpServerStatusParams.serverName` reuses the named thread's MCP
+connection and `detail: toolsAndAuthOnly` is supported. Scope required readiness
+to the Statewright server instead of repeatedly discovering all optional servers.
+Do not extend the readiness timeout or admit a turn without the required tool.
+
+Evidence input: controller receipt `499ce9f` records the successful resume/MCP
+startup, subsequent lane error, and isolated delayed-response reproduction. The
+live leaked ID was not recorded; causal matching is an inference, reproduction
+of the leak is observed. No need to repeat live user turns during development.
+
+Owned artifacts: route proxy, generated Codex/Claude copies, focused transport
+and dispatcher-composition tests, native historical canary, plugin version and
+this packet. No signed-host/shim/credential/dispatcher policy change, no third-
+party MCP repair, no gateway/site deployment. PC-01/02/04/07/08/09/13/15 owned by
+this repair and tied to tests/review/receipt; migration controls not applicable.
+Live GUI acceptance stays a gap until the user's normal-launch retest.
+
+Explicit user-authorized no-Statewright fallback continues: only cloud connector
+control advertised, not the requested local binding. Apply engineering/SDLC and
+usage controls with no claim of controller enforcement. Provisional observed-only
+budget: 25 minutes/45 calls normal, 35 minutes/65 calls hard; one independent
+non-editing review, one full package gate, at most one evidence-backed correction.
+Reserve half for validation/install/handoff; stop extra discovery at reserve.
+No model reroute or inferred token/billing accounting; provider usage unavailable.
+Rollback is reinstall/reprovision `0.3.4+codex.20261010171205`, which retains this
+late-reply defect. Exact validation/installation identities belong in the receipt.
+
+Decision: connection-random namespace plus a canonical, contiguous issued sequence
+range retains precise ID ownership with constant memory. Reject downstream reuse
+of that private namespace. Only result/error responses for actually issued IDs
+are consumed after settlement; reverse-direction requests are not responses and
+foreign or unissued IDs remain visible to the unchanged dispatcher. A prefix-only
+drop rule and increasing the 12-second timeout were rejected. Readiness now uses
+the installed native API's server-scoped tools-only query and checks the returned
+server identity plus tool. No dependency or trust/permission changes.
+
+Current-turn red composition test failed at the exact lane-close invariant after
+13 seconds. Initial combined focused run was stopped after a fixture mistake:
+the existing transport file's local `once` helper returns a Buffer, not the array
+from `node:events.once`; corrected the three new fixture reads. This was not a
+product retry or a passed run. Corrected focused transport/composition run passed
+99/99. Additional exact-ID negatives, readiness failure tests and tighter native
+resume-plus-discovery timing run separately before the final package gate.
+Independent non-editing `desktop_late_rpc_review` found no runtime blocker and
+requested these coverage improvements. Candidate `0.3.4+codex.20261010172610`;
+no live acceptance claim until the normal-launch historical-chat turn succeeds.

@@ -1,5 +1,5 @@
 import { WebSocket, WebSocketServer } from "../../../vendor/ws/wrapper.mjs";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
@@ -499,6 +499,7 @@ export async function startCodexAppServerRouteProxy({
   // whose commit runs only after the matching original upstream RPC succeeds.
   authorizeThread = async () => {},
   requiredMcpToolSuffix = null,
+  requiredMcpServerName = "statewright",
   requiredMcpReadyTimeoutMs = 0,
   forwardPayload = forwardWhenOpen,
   idleMs = 500,
@@ -797,14 +798,25 @@ export async function startCodexAppServerRouteProxy({
     const sendPresentation = (messages) => Promise.all(messages.map(message =>
       forwardWhenOpen(downstream, JSON.stringify(message))));
     let internalSequence = 0;
+    const internalPrefix = `statewright-internal:${randomUUID()}:`;
+    // All positive sequences through internalSequence were issued on this
+    // connection. Retain exact ownership after settlement without an unbounded
+    // tombstone set. Canonical spelling excludes guessed/unissued/foreign IDs.
+    const ownsInternalId = id => {
+      if (typeof id !== "string" || !id.startsWith(internalPrefix)) return false;
+      const sequence = Number(id.slice(internalPrefix.length));
+      return Number.isSafeInteger(sequence) && sequence > 0 && sequence <= internalSequence
+        && id === `${internalPrefix}${sequence}`;
+    };
     let protocolFailed = false;
     const internalRpc = async (method, params) => {
-      const id = `statewright-provider-switch-${++internalSequence}`;
+      if (internalSequence >= Number.MAX_SAFE_INTEGER) throw new Error("Internal RPC identity space exhausted; reconnect this client.");
+      const id = `${internalPrefix}${++internalSequence}`;
       const idKey = rpcIdKey(id);
       const response = new Promise((resolveResponse, rejectResponse) => {
         const timer = setTimeout(() => {
           internalRequests.delete(idKey);
-          rejectResponse(new Error(`Codex App Server timed out switching provider during ${method}.`));
+          rejectResponse(new Error(`Codex App Server internal request timed out during ${method}.`));
         }, 12_000);
         internalRequests.set(idKey, { resolve: resolveResponse, reject: rejectResponse, timer });
       });
@@ -841,10 +853,10 @@ export async function startCodexAppServerRouteProxy({
           let cursor = null;
           do {
             const result = await internalRpc("mcpServerStatus/list", {
-              threadId, cursor, limit: 100, detail: "full",
+              threadId, serverName: requiredMcpServerName, cursor, limit: 100, detail: "toolsAndAuthOnly",
             });
             checkCurrentRequest();
-            if ((result?.data ?? []).some(server => Object.keys(server?.tools ?? {})
+            if ((result?.data ?? []).some(server => server.name === requiredMcpServerName && Object.keys(server?.tools ?? {})
               .some(tool => tool.endsWith(requiredMcpToolSuffix)))) {
               mcpReadyThreads.add(threadId);
               return;
@@ -1183,6 +1195,9 @@ export async function startCodexAppServerRouteProxy({
       };
       try {
         message = JSON.parse(payload);
+        if (message.method && typeof message.id === "string" && message.id.startsWith(internalPrefix)) {
+          throw new Error("Statewright internal RPC identities cannot be used for client requests.");
+        }
         if (classifierController?.handleReply(message)) return;
         if (gate?.handleReply(message)) return;
         if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
@@ -1537,6 +1552,9 @@ export async function startCodexAppServerRouteProxy({
           else internal.resolve(notification.result);
           return;
         }
+        // Only responses to our exact issued identities are consumed. Reverse-
+        // direction requests and unknown replies still follow native routing.
+        if (isResponse && ownsInternalId(notification.id)) return;
         const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
         if (responseTo) requestMethods.delete(responseKey);
         if (responseTo === "initialize" && !notification.error && classifierOwner) {

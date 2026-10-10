@@ -50,7 +50,8 @@ try {
   await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n'
     + '[mcp_servers.statewright]\ncommand = "/bin/bash"\n'
     + `args = [${JSON.stringify(join(pluginRoot, "mcp-proxy.sh"))}]\n`
-    + `env_vars = ${JSON.stringify(mcp.env_vars)}\nstartup_timeout_sec = 10\n`);
+    + `env_vars = ${JSON.stringify(mcp.env_vars)}\nstartup_timeout_sec = 10\n`
+    + '[mcp_servers.optional_slow]\ncommand = "/bin/sleep"\nargs = ["30"]\nstartup_timeout_sec = 30\n');
   gateway = createServer(async (request, response) => {
     let raw = ""; for await (const chunk of request) raw += chunk;
     const rpc = JSON.parse(raw);
@@ -89,14 +90,18 @@ try {
   for (const id of ids) {
     const read = await rpc("thread/read", { threadId: id, includeTurns: false });
     assert.equal(read.thread.id, id);
+    const resumeStarted = Date.now();
     const resumed = await rpc("thread/resume", { threadId: id });
     assert.equal(resumed.thread.id, id);
-    const status = await rpc("mcpServerStatus/list", { threadId: id });
+    const statusStarted = Date.now();
+    const status = await rpc("mcpServerStatus/list", { threadId: id, serverName: "statewright", detail: "toolsAndAuthOnly" });
+    assert.ok(Date.now() - statusStarted < 10000, "Statewright discovery must not await the 30-second optional MCP server");
+    assert.ok(Date.now() - resumeStarted < 15000, "Resume plus discovery must finish while optional MCP is still waiting");
     assert.ok(status.data.some(server => Object.keys(server.tools ?? {}).some(name => name.endsWith("statewright_get_state"))),
       `Native MCP discovery failed: ${diagnostics}`);
   }
   assert.equal((await rpc("thread/resume", { threadId: ids[0] })).thread.id, ids[0]);
-  console.log("NATIVE_DESKTOP_TWO_PROJECT_RESUME_AND_MCP_PASS (real shell proxy; restricted PATH; fixture gateway; no model turn)");
+  console.log("NATIVE_DESKTOP_TWO_PROJECT_RESUME_AND_SCOPED_MCP_PASS (real shell proxy; restricted PATH; slow optional MCP; fixture gateway; no model turn)");
 } finally {
   await broker?.close(); await bridge?.close();
   if (gateway) { gateway.closeAllConnections(); await new Promise(resolve => gateway.close(resolve)); }

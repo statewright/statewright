@@ -1996,14 +1996,16 @@ test("App Server route proxy switches an idle OpenAI thread to Casa Qwen before 
     const unsubscribe = new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-qwen", input: [] } }));
     assert.equal(resumeRequest.method, "thread/resume");
-    assert.deepEqual(await unsubscribe, { jsonrpc: "2.0", id: "statewright-provider-switch-1", method: "thread/unsubscribe", params: { threadId: "thread-qwen" } });
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
+    const unsubscribeRequest = await unsubscribe;
+    assert.match(unsubscribeRequest.id, /^statewright-internal:[a-f0-9-]+:1$/);
+    assert.deepEqual(unsubscribeRequest, { jsonrpc: "2.0", id: unsubscribeRequest.id, method: "thread/unsubscribe", params: { threadId: "thread-qwen" } });
+    socket.send(JSON.stringify({ id: unsubscribeRequest.id, result: {} }));
     const localResume = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     assert.equal(localResume.method, "thread/resume");
     assert.equal(localResume.params.modelProvider, "qwen_private");
     assert.equal(localResume.params.model, "qwen3.8-27b");
     assert.equal(localResume.params.config["model_providers.qwen_private"].wire_api, "responses");
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "qwen_private", model: "qwen3.8-27b", thread: { id: "thread-qwen" } } }));
+    socket.send(JSON.stringify({ id: localResume.id, result: { modelProvider: "qwen_private", model: "qwen3.8-27b", thread: { id: "thread-qwen" } } }));
     const routedTurn = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     assert.equal(routedTurn.method, "turn/start");
     assert.equal(routedTurn.params.model, "qwen3.8-27b");
@@ -2035,12 +2037,12 @@ test("App Server route rejection keeps the native connection usable", async () =
     await once(client, "message");
     const reply = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-retry", input: [] } }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-3", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    const unsubscribe = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: unsubscribe.id, result: {} }));
+    const switched = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: switched.id, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    const restored = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: restored.id, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
     const rejected = await reply;
     assert.equal(rejected.id, 2);
     assert.match(rejected.error.message, /route was not applied/i);
@@ -2304,7 +2306,8 @@ test("Desktop MCP readiness gate holds turn/start until Statewright tools are vi
     if (message.method !== "mcpServerStatus/list") return;
     statusCalls += 1;
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
-      data: [{ name: "statewright", tools: statusCalls >= 2 ? { statewright_get_state: {} } : {} }],
+      data: [{ name: "statewright", tools: statusCalls >= 2 ? { statewright_get_state: {} } : {} },
+        { name: "unrelated", tools: { statewright_get_state: {} } }],
       nextCursor: null,
     } }));
   }));
@@ -2323,6 +2326,8 @@ test("Desktop MCP readiness gate holds turn/start until Statewright tools are vi
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.equal(statusCalls, 2);
+    assert.ok(forwarded.filter(message => message.method === "mcpServerStatus/list")
+      .every(message => message.params.serverName === "statewright" && message.params.detail === "toolsAndAuthOnly"));
     assert.deepEqual(forwarded.map(message => message.method), ["mcpServerStatus/list", "mcpServerStatus/list", "turn/start"]);
   } finally {
     client.close();

@@ -1,0 +1,601 @@
+diff --git a/plugins/codex/hook.sh b/plugins/codex/hook.sh
+index effb55b..1413ac3 100755
+--- a/plugins/codex/hook.sh
++++ b/plugins/codex/hook.sh
+@@ -34,6 +34,22 @@ statewright_resolve_node() {
+ 
+ STATEWRIGHT_NODE_RUNTIME=$(statewright_resolve_node || true)
+ 
++# Opt-in native Desktop boundary, independent of the selected gateway. Run
++# before dormant/local-control shortcuts so a finishing turn cannot use them
++# to perform the destination phase's work on its outgoing model.
++if [ "${STATEWRIGHT_CODEX_GRACEFUL_HANDOFF:-0}" = "1" ] && [ "${STATEWRIGHT_HANDOFF_HOOK_INNER:-0}" != "1" ]; then
++  case "$ENDPOINT" in
++    pre-tool|post-tool|stop)
++      if [ -z "$STATEWRIGHT_NODE_RUNTIME" ]; then
++        echo 'Statewright handoff guard requires its JavaScript runtime.' >&2
++        exit 2
++      fi
++      printf '%s' "$HOOK_INPUT" | "$STATEWRIGHT_NODE_RUNTIME" "$SCRIPT_DIR/scripts/graceful-handoff-hook.mjs" "$ENDPOINT"
++      exit $?
++      ;;
++  esac
++fi
++
+ # Executor-owned runs must use the authenticated loopback bridge before any
+ # standalone bootstrap, credential lookup, cache mutation, or telemetry setup.
+ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+diff --git a/plugins/codex/scripts/statewright-desktop-setup.mjs b/plugins/codex/scripts/statewright-desktop-setup.mjs
+index 64de988..8ac731c 100644
+--- a/plugins/codex/scripts/statewright-desktop-setup.mjs
++++ b/plugins/codex/scripts/statewright-desktop-setup.mjs
+@@ -411,16 +411,21 @@ export function parseDesktopArgs(argv) {
+     const value = rest[index];
+     if (!value.startsWith("--")) throw new Error(`Unexpected argument: ${value}`);
+     const key = value.slice(2);
+-    if (!["state", "original", "wrapper", "app", "profile", "gateway-url", "native-launcher"].includes(key)) throw new Error(`Unknown option: ${value}`);
+-    const optionKey = key === "gateway-url" ? "gatewayUrl" : key === "native-launcher" ? "nativeLauncher" : key;
++    if (!["state", "original", "wrapper", "app", "profile", "gateway-url", "native-launcher", "graceful-handoff"].includes(key)) throw new Error(`Unknown option: ${value}`);
++    const optionKey = key === "gateway-url" ? "gatewayUrl" : key === "native-launcher" ? "nativeLauncher" : key === "graceful-handoff" ? "gracefulHandoff" : key;
+     options[optionKey] = rest[++index];
+     if (!options[optionKey]) throw new Error(`${value} requires a value.`);
+   }
+   if (options.profile) desktopProfile(options.profile);
++  if (options.gracefulHandoff !== undefined) {
++    if (!["true", "false"].includes(options.gracefulHandoff)) throw new Error("--graceful-handoff requires true or false");
++    options.gracefulHandoff = options.gracefulHandoff === "true";
++  }
+   return options;
+ }
+ 
+-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
++async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, gracefulHandoff, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
++  if (gracefulHandoff !== undefined && typeof gracefulHandoff !== "boolean") throw new Error("gracefulHandoff must be boolean");
+   const profile = desktopProfile(profileName);
+   const resolvedState = resolve(statePath);
+   const existing = await readOptionalJson(resolvedState);
+@@ -461,6 +466,7 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
+     ? { ...existing, ...launcherState, profile: profile.name, original_codex: vendor, wrapper: runtime, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl }
+     : { version: 3, ...launcherState, profile: profile.name, environment_key: DESKTOP_ENVIRONMENT_KEY, original_codex: vendor, desktop_executable: desktopExecutable, wrapper: runtime, shim_path: shim, node_executable: nodeExecutable, launcher_app_path: launcherAppPath, gateway_url: gatewayUrl, client_id: existing?.client_id ?? `swc_${randomBytes(16).toString("hex")}` };
+   delete state.api_key_path; // Leave legacy files untouched; they are not launch credentials.
++  if (gracefulHandoff !== undefined) state.graceful_handoff = gracefulHandoff;
+   state.credential_store = "gateway_keyring";
+   if (legacyPath) {
+     await setLaunchdEnvironment(launchctlExecFile, legacyPath, existing.previous_launchd_value);
+@@ -607,9 +613,9 @@ async function invokedAsEntryPoint(argument = process.argv[1]) {
+ if (await invokedAsEntryPoint()) {
+   const options = parseDesktopArgs(process.argv.slice(2));
+   let result;
+-  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher });
++  if (options.command === "enable") result = await enableDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher, gracefulHandoff: options.gracefulHandoff });
+   else if (options.command === "provision-all") result = await provisionDesktopProfiles({ app: options.app, nativeLauncher: options.nativeLauncher });
+-  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher });
++  else if (options.command === "provision") result = await provisionDesktop({ statePath: options.state, profile: options.profile, gatewayUrl: options.gatewayUrl, original: options.original, wrapper: options.wrapper, app: options.app, nativeLauncher: options.nativeLauncher, gracefulHandoff: options.gracefulHandoff });
+   else if (options.command === "launch") result = await launchDesktop({ statePath: options.state, profile: options.profile });
+   else if (options.command === "disable") result = await disableDesktop({ statePath: options.state, profile: options.profile });
+   else if (options.command === "doctor") result = await desktopDoctor({ statePath: options.state, profile: options.profile });
+diff --git a/plugins/executor/lib/codex-app-server-resident.mjs b/plugins/executor/lib/codex-app-server-resident.mjs
+index 31a2392..0fbc006 100644
+--- a/plugins/executor/lib/codex-app-server-resident.mjs
++++ b/plugins/executor/lib/codex-app-server-resident.mjs
+@@ -24,6 +24,7 @@ const RESIDENT_RUNTIME_FILES = [
+   join(EXECUTOR_ROOT, "approval-pipeline.mjs"),
+   join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
+   join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
++  join(EXECUTOR_ROOT, "graceful-handoff.mjs"),
+   join(EXECUTOR_ROOT, "human-approval.mjs"),
+   join(EXECUTOR_ROOT, "approval-journal.mjs"),
+   join(EXECUTOR_ROOT, "codex-approval-gate.mjs"),
+diff --git a/plugins/executor/lib/codex-app-server-route-proxy.mjs b/plugins/executor/lib/codex-app-server-route-proxy.mjs
+index be7bdf0..6106e08 100644
+--- a/plugins/executor/lib/codex-app-server-route-proxy.mjs
++++ b/plugins/executor/lib/codex-app-server-route-proxy.mjs
+@@ -5,6 +5,7 @@ import { homedir } from "node:os";
+ import { dirname, relative, resolve } from "node:path";
+ import { isDeepStrictEqual } from "node:util";
+ import { DesktopNativeUsage } from "./desktop-native-usage.mjs";
++import { GracefulHandoffGate } from "./graceful-handoff.mjs";
+ import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.mjs";
+ import { summarizeStatewrightToolCompletion, summarizeStatewrightToolStart } from "./statewright-tool-summary.mjs";
+ import { CodexApprovalGate } from "./codex-approval-gate.mjs";
+@@ -481,6 +482,9 @@ export async function startCodexAppServerRouteProxy({
+   takePendingRoute = async () => null,
+   approvalService = null,
+   workflowService = null,
++  gracefulHandoff = false,
++  gracefulHandoffTimeoutMs = 30_000,
++  gracefulHookTimeoutMs = 3_000,
+   classifierApprovalService = approvalService,
+   classifierApprovalToken = null,
+   classifierApprovalTimeoutMs = 10 * 60_000,
+@@ -514,6 +518,7 @@ export async function startCodexAppServerRouteProxy({
+   onIdle = async () => {},
+ }) {
+   const classifierOwners = new Set();
++  const handoffHookOwners = new Set();
+   const classifierAuthorized = request => {
+     if (!classifierApprovalToken || request.headers.origin) return false;
+     const actual = Buffer.from(String(request.headers.authorization ?? ""));
+@@ -526,6 +531,29 @@ export async function startCodexAppServerRouteProxy({
+       response.end("ok\n");
+       return;
+     }
++    if (request.url === "/workflow-handoff-hook" && request.method === "POST" && gracefulHandoff && workflowService) {
++      if (!classifierAuthorized(request)) { response.writeHead(401).end(); return; }
++      try {
++        let body = "";
++        for await (const chunk of request) {
++          body += chunk;
++          if (Buffer.byteLength(body) > 8192) throw new Error("Handoff hook receipt is too large");
++        }
++        const value = JSON.parse(body);
++        if (!["pre-tool", "post-tool", "stop"].includes(value.event)
++            || typeof value.threadId !== "string" || !value.threadId
++            || typeof value.turnId !== "string" || !value.turnId) throw new Error("Missing handoff hook identity");
++        const owners = [...handoffHookOwners].filter(owner => owner.matches(value));
++        if (owners.length !== 1) throw new Error("Handoff hook has no unique native turn owner");
++        const result = await owners[0].handle(value);
++        response.writeHead(200, {"Content-Type": "application/json"});
++        response.end(JSON.stringify({threadId: value.threadId, turnId: value.turnId, ...result}));
++      } catch (error) {
++        response.writeHead(409, {"Content-Type": "application/json"});
++        response.end(JSON.stringify({error: String(error.message).slice(0, 256)}));
++      }
++      return;
++    }
+     if (request.url === "/classifier-approval" && request.method === "POST"
+         && classifierApprovalService && classifierApprovalToken) {
+       if (!classifierAuthorized(request)) {
+@@ -757,6 +785,32 @@ export async function startCodexAppServerRouteProxy({
+     const terminalCompletions = new Map();
+     const restoreInFlight = new Set();
+     const handoffs = new Map();
++    const graceful = new GracefulHandoffGate();
++    const handoffHookOwner = {
++      matches: ({threadId, turnId}) => !downstreamClosed && !protocolFailed
++        && turnOrigins.get(threadId)?.turnId === turnId && !turnOrigins.get(threadId)?.completed,
++      handle: async value => {
++        const {threadId, turnId} = value;
++        const epoch = operatorActivity.get(threadId);
++        if (!await workflowService.ownsThread(threadId) || !handoffHookOwner.matches(value)
++            || turnOrigins.get(threadId)?.activityEpoch !== epoch) throw new Error("Handoff hook owner changed");
++        if (value.event === "post-tool" && value.destination) {
++          const state = await workflowService.getState(threadId);
++          if (!handoffHookOwner.matches(value) || operatorActivity.get(threadId) !== epoch
++              || !await workflowService.ownsThread(threadId)) throw new Error("Handoff hook was superseded");
++          if (!state || state.is_final || state.pending_approval) return {action: "pass"};
++          if (state.state !== value.destination) throw new Error("Handoff hook destination changed");
++          graceful.acknowledge(threadId, turnId, value.destination);
++          return {action: "finish"};
++        }
++        if (graceful.pending(threadId, turnId)) {
++          if (value.event === "pre-tool") graceful.settle(threadId, turnId, "tool_attempt");
++          return {action: value.event === "pre-tool" ? "deny" : "finish"};
++        }
++        return {action: "pass"};
++      },
++    };
++    if (gracefulHandoff && workflowService) handoffHookOwners.add(handoffHookOwner);
+     const routeConfirmationWaiters = new Map();
+     const stateNames = new Map();
+     const mcpReadyThreads = new Set();
+@@ -1200,6 +1254,7 @@ export async function startCodexAppServerRouteProxy({
+       const epoch = operatorActivity.get(threadId);
+       const operation = {turnId, itemId: item.id};
+       handoffs.set(threadId, operation);
++      let finishing;
+       let release, interrupted = false;
+       const check = async () => {
+         const owned = await workflowService.ownsThread(threadId);
+@@ -1211,6 +1266,7 @@ export async function startCodexAppServerRouteProxy({
+         }
+       };
+       try {
++        finishing = gracefulHandoff ? graceful.begin(threadId, turnId, destination) : null;
+         await check();
+         const state = await workflowService.getState(threadId);
+         await check();
+@@ -1236,8 +1292,26 @@ export async function startCodexAppServerRouteProxy({
+         };
+         release = await acquireRouteLease();
+         await check();
+-        await internalRpc("turn/interrupt", {threadId, turnId});
+-        interrupted = true;
++        let gracefulCompleted = false;
++        if (finishing && !state.pending_approval) {
++          await graceful.wait(finishing, entry => entry.acknowledged || entry.outcome, gracefulHookTimeoutMs);
++          await checkState();
++          if (finishing.acknowledged && !finishing.outcome) {
++            await graceful.wait(finishing, entry => Boolean(entry.outcome), gracefulHandoffTimeoutMs);
++            await checkState();
++          }
++          if (["interrupted", "failed", "cancelled"].includes(finishing.outcome)) {
++            throw new Error(`Workflow phase summary ${finishing.outcome}; no continuation was started`);
++          }
++          gracefulCompleted = finishing.acknowledged && finishing.outcome === "completed";
++          await onHandoffStatus({schema: "statewright/graceful-handoff/v1", source: "statewright",
++            thread_id: threadId, turn_id: turnId, state: destination,
++            outcome: gracefulCompleted ? "completed" : finishing.outcome ?? (finishing.acknowledged ? "timeout" : "hook_unavailable")});
++        }
++        if (!gracefulCompleted) {
++          await internalRpc("turn/interrupt", {threadId, turnId});
++          interrupted = true;
++        }
+         await waitForApprovalIdle(threadId, check);
+         if (state.pending_approval) throw new Error("Workflow approval is pending; no model continuation was started");
+         if (!state.model) throw new Error("Workflow destination has no selected model");
+@@ -1296,6 +1370,7 @@ export async function startCodexAppServerRouteProxy({
+         await forwardWhenOpen(downstream, JSON.stringify({method: "warning", params: {threadId,
+           message: `Statewright Arbiter: model handoff stopped. ${error.message}`}})).catch(() => {});
+       } finally {
++        graceful.clear(threadId, turnId);
+         if (handoffs.get(threadId) === operation) handoffs.delete(threadId);
+         release?.();
+       }
+@@ -1433,6 +1508,8 @@ export async function startCodexAppServerRouteProxy({
+         if ((["turn/start", "turn/interrupt", "turn/steer", "thread/goal/clear"].includes(message.method)
+             || startsGoalExecution) && message.params?.threadId) {
+           gate?.userActivity(message.params.threadId);
++          const finishing = graceful.turns.get(message.params.threadId);
++          if (finishing) graceful.settle(message.params.threadId, finishing.turnId, "cancelled");
+           operatorActivity.set(message.params.threadId, (operatorActivity.get(message.params.threadId) ?? 0) + 1);
+           requestEpoch = operatorActivity.get(message.params.threadId);
+           if (message.method === "turn/interrupt" && message.params.turnId) explainedTurns.set(message.params.threadId, message.params.turnId);
+@@ -1443,6 +1520,8 @@ export async function startCodexAppServerRouteProxy({
+         }
+         if (message.method === "thread/settings/update" && message.id !== undefined && message.params?.threadId) {
+           const settingsThreadId = String(message.params.threadId);
++          const finishing = graceful.turns.get(settingsThreadId);
++          if (finishing) graceful.settle(settingsThreadId, finishing.turnId, "cancelled");
+           operatorActivity.set(settingsThreadId, (operatorActivity.get(settingsThreadId) ?? 0) + 1);
+           const collaboration = message.params.collaborationMode?.settings;
+           const axes = [];
+@@ -1898,6 +1977,8 @@ export async function startCodexAppServerRouteProxy({
+         } else if (notification?.method === "turn/started" && statusThreadId) {
+           nativeUsage.started(notification.params, activeSettings.get(statusThreadId));
+           const turnId = notification.params.turn.id;
++          const previous = graceful.turns.get(statusThreadId);
++          if (previous && previous.turnId !== turnId) graceful.clear(statusThreadId, previous.turnId);
+           if (turnOrigins.get(statusThreadId)?.turnId !== turnId) {
+             const pending = [...pendingTurnStarts.values()].find(entry => entry.threadId === statusThreadId);
+             const activityEpoch = operatorActivity.get(statusThreadId);
+@@ -1974,6 +2055,8 @@ export async function startCodexAppServerRouteProxy({
+       );
+       try {
+         const event = JSON.parse(String(raw));
++        // Resolve only after the untouched terminal has reached the native UI.
++        if (event.method === "turn/completed") graceful.settle(event.params.threadId, event.params.turn?.id, event.params.turn?.status);
+         if (event.method === "item/completed") void handoffWorkflow(event.params);
+       } catch { /* not a lifecycle notification */ }
+     };
+@@ -1982,6 +2065,8 @@ export async function startCodexAppServerRouteProxy({
+       upstreamDelivery = upstreamDelivery.then(() => handleUpstream(raw)).catch(() => {});
+     });
+     const closePeer = () => {
++      graceful.close();
++      handoffHookOwners.delete(handoffHookOwner);
+       classifierController?.close();
+       if (classifierOwner) classifierOwners.delete(classifierOwner);
+       gate?.close();
+@@ -2002,6 +2087,8 @@ export async function startCodexAppServerRouteProxy({
+     };
+     let downstreamClosed = false;
+     const markDownstreamClosed = () => {
++      graceful.close();
++      handoffHookOwners.delete(handoffHookOwner);
+       if (!downstreamClosed) {
+         downstreamClosed = true;
+         connectedClients = Math.max(0, connectedClients - 1);
+diff --git a/plugins/executor/lib/codex-app-server-transport.mjs b/plugins/executor/lib/codex-app-server-transport.mjs
+index 60920b5..49cff7d 100644
+--- a/plugins/executor/lib/codex-app-server-transport.mjs
++++ b/plugins/executor/lib/codex-app-server-transport.mjs
+@@ -320,6 +320,7 @@ export async function startCodexAppServerRuntime({
+       upstreamUrl: url,
+       approvalService,
+       workflowService,
++      gracefulHandoff: environment.STATEWRIGHT_CODEX_GRACEFUL_HANDOFF === "1",
+       classifierApprovalService,
+       classifierApprovalToken,
+       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
+diff --git a/plugins/executor/lib/codex-desktop-app-server-launcher.mjs b/plugins/executor/lib/codex-desktop-app-server-launcher.mjs
+index 0affef1..8003721 100644
+--- a/plugins/executor/lib/codex-desktop-app-server-launcher.mjs
++++ b/plugins/executor/lib/codex-desktop-app-server-launcher.mjs
+@@ -25,7 +25,9 @@ export async function desktopProfileEnvironment(state, environment = process.env
+   const isolated = { ...environment };
+   for (const name of ["STATEWRIGHT_ENV", "STATEWRIGHT_GATEWAY_URL", "STATEWRIGHT_PB_URL", "STATEWRIGHT_API_KEY"]) delete isolated[name];
+   const profile = await resolveGatewayProfile({ ...isolated, STATEWRIGHT_GATEWAY_URL: state.gateway_url }, home);
+-  return { ...isolated, STATEWRIGHT_GATEWAY_URL: profile.gatewayUrl, ...(profile.authUrl ? { STATEWRIGHT_PB_URL: profile.authUrl } : {}) };
++  return { ...isolated, STATEWRIGHT_GATEWAY_URL: profile.gatewayUrl,
++    STATEWRIGHT_CODEX_GRACEFUL_HANDOFF: state.graceful_handoff === true ? "1" : "0",
++    ...(profile.authUrl ? { STATEWRIGHT_PB_URL: profile.authUrl } : {}) };
+ }
+ 
+ export async function startProfileDesktopMcpBridge({ state, environment = process.env, home = homedir(),
+diff --git a/plugins/executor/tests/desktop-workflow-handoff.test.mjs b/plugins/executor/tests/desktop-workflow-handoff.test.mjs
+index e19c920..65c1986 100644
+--- a/plugins/executor/tests/desktop-workflow-handoff.test.mjs
++++ b/plugins/executor/tests/desktop-workflow-handoff.test.mjs
+@@ -16,7 +16,7 @@ async function until(check) {
+   }
+   assert.fail("workflow did not hand off to a new native turn");
+ }
+-async function fixture(t, {nativeSettings = false} = {}) {
++async function fixture(t, {nativeSettings = false, gracefulHandoff = false, gracefulHandoffTimeoutMs = 200, gracefulHookTimeoutMs = 200} = {}) {
+   const server = new WebSocketServer({port: 0, host: "127.0.0.1"});
+   let proxy, client;
+   t.after(async () => {
+@@ -31,7 +31,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
+   const native = nativeSettings ? await (await import("./native-settings-fixture.mjs"))
+     .nativeSettingsFixture(t, threadId, message => socket?.send(JSON.stringify(message))) : null;
+   if (native) settings = native.settings;
+-  const calls = [], confirmed = [], injected = [], frames = [], errors = [], usage = [];
++  const calls = [], confirmed = [], injected = [], frames = [], errors = [], usage = [], handoffStatus = [];
+   server.on("connection", ws => {
+     socket = ws;
+     ws.on("message", async raw => {
+@@ -74,6 +74,8 @@ async function fixture(t, {nativeSettings = false} = {}) {
+     });
+   });
+   proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
++    gracefulHandoff, gracefulHandoffTimeoutMs, gracefulHookTimeoutMs, classifierApprovalToken: "fixture-hook-token",
++    onHandoffStatus: async event => handoffStatus.push(event),
+     workflowService: {ownsThread: async id => {
+       if (heldOwner && sequence > 1) {ownerEntered = true; await heldOwner;}
+       return id === threadId;
+@@ -100,7 +102,16 @@ async function fixture(t, {nativeSettings = false} = {}) {
+   const completeTool = (tool, result, overrides = {}) => socket.send(JSON.stringify({method: "item/completed", params: {
+     threadId, turnId, item: {type: "mcpToolCall", id: `item-${sequence}-${tool}`, server: "statewright", tool,
+       status: "completed", result: {structuredContent: result}, ...overrides}}}));
+-  return {calls, frames, confirmed, injected, errors, usage, rpc, completeTool, setState: v => {state = v;},
++  return {calls, frames, confirmed, injected, errors, usage, handoffStatus, rpc, completeTool, setState: v => {state = v;},
++    hook: async (event, destination, overrides = {}, token = "fixture-hook-token") => {
++      const response = await fetch(`${proxy.url.replace(/^ws/, "http")}/workflow-handoff-hook`, {method: "POST",
++        headers: {Authorization: `Bearer ${token}`, "Content-Type": "application/json"},
++        body: JSON.stringify({event, threadId, turnId, destination, ...overrides})});
++      return {status: response.status, ...await response.json().catch(() => ({}))};
++    },
++    notify: (method, params) => socket.send(JSON.stringify({method, params})),
++    finalAnswer: () => socket.send(JSON.stringify({method: "item/completed", params: {threadId, turnId,
++      item: {type: "agentMessage", id: "native-final", phase: "final_answer", text: "Phase complete."}}})),
+     tokens: (id = turnId) => socket.send(JSON.stringify({method: "thread/tokenUsage/updated", params: {
+       threadId, turnId: id, tokenUsage: {
+         total: {inputTokens: 1000, cachedInputTokens: 50, outputTokens: 100, reasoningOutputTokens: 10, totalTokens: 1100},
+@@ -113,6 +124,79 @@ async function fixture(t, {nativeSettings = false} = {}) {
+     finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
+ }
+ 
++test("graceful handoff preserves a real final answer and terminal before starting the selected model", async t => {
++  const f = await fixture(t, {gracefulHandoff: true});
++  const state = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low");
++  f.setState(state);
++  f.completeTool("statewright_load_workflow", {state_snapshot: state});
++  assert.equal((await f.hook("post-tool", "intake")).action, "finish");
++  assert.equal((await f.hook("stop")).action, "finish");
++  assert.equal(f.calls.filter(c => c.method === "turn/start").length, 1);
++  f.finalAnswer(); f.finish();
++  await until(() => f.injected.length === 1);
++  assert.equal(f.calls.filter(c => c.method === "turn/interrupt").length, 0);
++  assert.equal(f.injected[0].effectiveModel, "gpt-5.6-terra");
++  const final = f.frames.findIndex(frame => frame.params?.item?.id === "native-final");
++  const terminal = f.frames.findIndex(frame => frame.method === "turn/completed" && frame.params.turn.id === "turn-1");
++  const next = f.frames.findIndex(frame => frame.method === "turn/started" && frame.params.turn.id === "turn-2");
++  assert.ok(final >= 0 && terminal > final && next > terminal);
++  assert.ok(f.handoffStatus.some(event => event.schema === "statewright/graceful-handoff/v1" && event.outcome === "completed"));
++  assert.equal((await f.hook("pre-tool")).action, "pass", "new turn must not inherit the old summary gate");
++});
++
++test("hook acknowledgement arriving before native lifecycle notification is retained", async t => {
++  const f = await fixture(t, {gracefulHandoff: true});
++  const state = stateFor("intake", 1, "gpt-6-sol", "high"); f.setState(state);
++  assert.equal((await f.hook("post-tool", "intake")).action, "finish");
++  f.completeTool("statewright_load_workflow", {state_snapshot: state});
++  f.finalAnswer(); f.finish();
++  await until(() => f.injected.length === 1);
++  assert.equal(f.calls.filter(c => c.method === "turn/interrupt").length, 0);
++});
++
++for (const fallback of ["missing-hook", "timeout", "tool-attempt"]) {
++  test(`graceful handoff falls back safely for ${fallback}`, async t => {
++    const f = await fixture(t, {gracefulHandoff: true, gracefulHandoffTimeoutMs: 40, gracefulHookTimeoutMs: 40});
++    const state = stateFor("intake", 1, "gpt-6-sol", "high"); f.setState(state);
++    f.completeTool("statewright_load_workflow", {state_snapshot: state});
++    if (fallback !== "missing-hook") await f.hook("post-tool", "intake");
++    if (fallback === "tool-attempt") assert.equal((await f.hook("pre-tool")).action, "deny");
++    await until(() => f.injected.length === 1);
++    assert.equal(f.calls.filter(c => c.method === "turn/interrupt").length, 1);
++    assert.ok(f.frames.some(frame => frame.method === "turn/completed" && frame.params.turn.status === "interrupted"));
++    assert.ok(f.handoffStatus.some(event => event.outcome === ({"missing-hook": "hook_unavailable", timeout: "timeout", "tool-attempt": "tool_attempt"})[fallback]));
++  });
++}
++
++for (const abort of ["cancel", "failed", "phase-drift", "manual-settings"]) {
++  test(`graceful summary cannot auto-continue after ${abort}`, async t => {
++    const f = await fixture(t, {gracefulHandoff: true});
++    const state = stateFor("intake", 1, "gpt-6-sol", "high"); f.setState(state);
++    f.completeTool("statewright_load_workflow", {state_snapshot: state});
++    await f.hook("post-tool", "intake");
++    if (abort === "cancel") await f.rpc("turn/interrupt", {threadId, turnId: "turn-1"});
++    else if (abort === "manual-settings") await f.rpc("thread/settings/update", {threadId, effort: "low"});
++    else if (abort === "failed") f.notify("turn/completed", {threadId, turn: {id: "turn-1", status: "failed"}});
++    else { f.setState({...state, state_epoch: 2}); f.finish(); }
++    await until(() => f.errors.length > 0);
++    assert.equal(f.calls.filter(c => c.method === "turn/start").length, 1);
++    assert.equal(f.injected.length, 0);
++  });
++}
++
++test("graceful handoff rejects foreign hooks and ignores foreign turn completion", async t => {
++  const f = await fixture(t, {gracefulHandoff: true});
++  assert.equal((await f.hook("pre-tool", null, {}, "bad-token")).status, 401);
++  assert.equal((await f.hook("pre-tool", null, {turnId: "foreign"})).status, 409);
++  const state = stateFor("intake", 1, "gpt-6-sol", "high"); f.setState(state);
++  f.completeTool("statewright_load_workflow", {state_snapshot: state});
++  await f.hook("post-tool", "intake");
++  f.notify("turn/completed", {threadId: "foreign", turn: {id: "turn-1", status: "completed"}});
++  await new Promise(resolve => setTimeout(resolve, 20));
++  assert.equal(f.calls.filter(c => c.method === "turn/start").length, 1);
++  f.finish(); await until(() => f.injected.length === 1);
++});
++
+ test("Desktop native usage stays bound to the actual turn across phase handoff", async t => {
+   const f = await fixture(t);
+   const intake = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low");
+diff --git a/plugins/codex/scripts/graceful-handoff-hook.mjs b/plugins/codex/scripts/graceful-handoff-hook.mjs
+new file mode 100644
+index 0000000..420a192
+--- /dev/null
++++ b/plugins/codex/scripts/graceful-handoff-hook.mjs
+@@ -0,0 +1,90 @@
++#!/usr/bin/env node
++import { readFile } from "node:fs/promises";
++import { spawn } from "node:child_process";
++import { fileURLToPath } from "node:url";
++
++const summary = "Statewright Arbiter owns the next phase. End this turn now with a brief factual final summary of the phase just finished (or acknowledge workflow loading). Do not call any more tools or begin the next phase. The Arbiter will start its selected model after this turn completes.";
++const lifecycle = /^(?:mcp__statewright__|mcp__plugin_statewright_statewright__)(statewright_load_workflow|statewright_start|statewright_transition|statewright_force_state)$/;
++
++export function handoffDestination(input) {
++  const tool = lifecycle.exec(input.tool_name ?? "")?.[1];
++  if (!tool) return null;
++  let result = input.tool_response ?? input.tool_result;
++  try {
++    if (typeof result === "string") result = JSON.parse(result);
++    if (!result || result.isError || result.error || input.is_error) return null;
++    if (result.result) result = result.result;
++    if (result.isError || result.error) return null;
++    result = result.structuredContent ?? (result.content
++      ? JSON.parse(result.content.find(entry => entry.type === "text")?.text) : result);
++    if (["statewright_load_workflow", "statewright_start"].includes(tool)) {
++      return result.state_snapshot?.run_id ? result.state_snapshot.state : null;
++    }
++    return result.transitioned === true ? result.to : null;
++  } catch { return null; }
++}
++
++export async function handoffHookDecision(event, input, {environment = process.env, fetchImpl = fetch, read = readFile} = {}) {
++  const threadId = input.thread_id ?? input.session_id;
++  const turnId = input.turn_id;
++  if (typeof threadId !== "string" || !threadId || typeof turnId !== "string" || !turnId) throw new Error("Native hook turn identity is missing");
++  const path = environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT;
++  if (!path) throw new Error("Native handoff receipt is missing");
++  const receipt = JSON.parse(await read(path, "utf8"));
++  const endpoint = new URL(receipt.proxyUrl);
++  if (!["ws:", "wss:"].includes(endpoint.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname)
++      || endpoint.username || endpoint.password || !receipt.proxyToken) throw new Error("Invalid native handoff receipt");
++  endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
++  endpoint.pathname = "/workflow-handoff-hook"; endpoint.search = ""; endpoint.hash = "";
++  const response = await fetchImpl(endpoint, {method: "POST",
++    headers: {Authorization: `Bearer ${receipt.proxyToken}`, "Content-Type": "application/json"},
++    body: JSON.stringify({threadId, turnId, event,
++      ...(event === "post-tool" ? {destination: handoffDestination(input)} : {})}),
++    signal: AbortSignal.timeout(1500)});
++  const result = await response.json();
++  if (!response.ok || result.threadId !== threadId || result.turnId !== turnId
++      || !["pass", "finish", "deny"].includes(result.action)) throw new Error("Native handoff owner is unavailable");
++  return result.action;
++}
++
++export function handoffHookOutput(event, action, original = "", error = null) {
++  if (event === "pre-tool" && (action === "deny" || error)) return JSON.stringify({hookSpecificOutput: {
++    hookEventName: "PreToolUse", permissionDecision: "deny",
++    permissionDecisionReason: error ? `Statewright handoff guard unavailable: ${error.message}. No tool was executed.` : summary}});
++  if (action !== "finish") return original;
++  if (event === "stop") return ""; // Allow the actual final answer to complete.
++  if (event === "post-tool") return JSON.stringify({hookSpecificOutput: {hookEventName: "PostToolUse", additionalContext: summary}});
++  return original;
++}
++
++async function originalHook(event, input) {
++  const child = spawn("bash", [fileURLToPath(new URL("../hook.sh", import.meta.url)), event], {
++    env: {...process.env, STATEWRIGHT_HANDOFF_HOOK_INNER: "1"}, stdio: ["pipe", "pipe", "inherit"]});
++  let output = "";
++  child.stdout.on("data", chunk => { output += chunk; });
++  const closed = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
++  child.stdin.end(input);
++  const code = await closed;
++  if (code !== 0) throw new Error(`Statewright hook exited ${code}`);
++  return output;
++}
++
++async function main() {
++  const event = process.argv[2];
++  let raw = "";
++  for await (const chunk of process.stdin) raw += chunk;
++  const input = JSON.parse(raw);
++  // Arm before running the ordinary post hook, but retain all of its cache,
++  // routing and telemetry side effects. Only its continuation prose is replaced.
++  let action = "pass", error = null;
++  try { action = await handoffHookDecision(event, input); } catch (caught) { error = caught; }
++  if (event === "pre-tool" && (error || action === "deny") || event === "stop" && action === "finish") {
++    process.stdout.write(handoffHookOutput(event, action, "", error)); return;
++  }
++  const original = await originalHook(event, raw);
++  process.stdout.write(handoffHookOutput(event, action, original, error));
++}
++if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch(error => {
++  process.stderr.write(`[statewright] handoff hook failed: ${error.message}\n`);
++  process.exitCode = 2;
++});
+diff --git a/plugins/executor/lib/graceful-handoff.mjs b/plugins/executor/lib/graceful-handoff.mjs
+new file mode 100644
+index 0000000..5268e38
+--- /dev/null
++++ b/plugins/executor/lib/graceful-handoff.mjs
+@@ -0,0 +1,55 @@
++// A native hook acknowledgement is required before permitting a summary-only
++// tail. Never infer enforcement from a prompt, gateway name, or elapsed time.
++export class GracefulHandoffGate {
++  constructor() { this.turns = new Map(); }
++  entry(threadId, turnId) {
++    const current = this.turns.get(threadId);
++    if (current && current.turnId !== turnId) return null;
++    if (current) return current;
++    const entry = {turnId, acknowledged: false, observed: false, outcome: null, waiters: new Set()};
++    this.turns.set(threadId, entry);
++    return entry;
++  }
++  wake(entry) { for (const wake of entry.waiters) wake(); }
++  acknowledge(threadId, turnId, destination) {
++    const entry = this.entry(threadId, turnId);
++    if (!entry || entry.destination && entry.destination !== destination) throw new Error("Stale handoff hook acknowledgement");
++    entry.destination = destination;
++    entry.acknowledged = true;
++    this.wake(entry);
++  }
++  begin(threadId, turnId, destination) {
++    const entry = this.entry(threadId, turnId);
++    if (!entry || entry.destination && entry.destination !== destination) throw new Error("Conflicting handoff destination");
++    entry.destination = destination;
++    entry.observed = true;
++    return entry;
++  }
++  pending(threadId, turnId) {
++    const entry = this.turns.get(threadId);
++    return entry?.turnId === turnId ? entry : null;
++  }
++  settle(threadId, turnId, outcome) {
++    const entry = this.pending(threadId, turnId);
++    if (!entry || entry.outcome) return;
++    entry.outcome = outcome;
++    this.wake(entry);
++  }
++  async wait(entry, predicate, timeoutMs) {
++    if (predicate(entry)) return true;
++    return new Promise(resolve => {
++      const done = value => { clearTimeout(timer); entry.waiters.delete(wake); resolve(value); };
++      const wake = () => { if (predicate(entry)) done(true); };
++      const timer = setTimeout(() => done(false), timeoutMs);
++      entry.waiters.add(wake);
++      wake();
++    });
++  }
++  clear(threadId, turnId) {
++    const entry = this.pending(threadId, turnId);
++    if (!entry) return;
++    this.settle(threadId, turnId, "cancelled");
++    this.turns.delete(threadId);
++  }
++  close() { for (const [threadId, entry] of this.turns) this.clear(threadId, entry.turnId); }
++}

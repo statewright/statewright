@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -496,7 +497,7 @@ test("Staging Desktop connects a missing gateway credential before starting the 
 let connected = false;
 export async function desktopProfileEnvironment(state, environment) { return environment; }
 export async function startProfileDesktopMcpBridge() { if (!connected) { const error = new Error("No credential is stored for this gateway"); error.code = "CREDENTIAL_MISSING"; throw error; } return { url: "http://127.0.0.1:43123", token: "fixture-token", close: async () => {} }; }
-export async function connectDesktopProfile({ state }) { await writeFile(process.env.CONNECT_PATH, state.gateway_url); connected = true; }
+export async function connectDesktopProfile({ state }) { if (process.env.CONNECT_ERROR) { const error = new Error("redacted sign-in failure"); error.code = process.env.CONNECT_ERROR; throw error; } await writeFile(process.env.CONNECT_PATH, state.gateway_url); connected = true; }
 `);
     const record = await enableDesktop({ statePath: state, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, nativeLauncherCandidate: nativeLauncher });
     await execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: marker, CONNECT_PATH: connection } });
@@ -508,6 +509,38 @@ export async function connectDesktopProfile({ state }) { await writeFile(process
     assert.equal(record.desktop_executable, app);
     const appScript = await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright Staging"), "utf8");
     assert.doesNotMatch(appScript, /Quit ChatGPT completely/);
+    assert.match(appScript, /Statewright returned an unexpected sign-in response/);
+    await assert.rejects(execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, CONNECT_ERROR: "DESKTOP_CONNECT_PROTOCOL" } }), error => {
+      assert.equal(error.code, 28);
+      assert.match(error.stderr, /redacted sign-in failure/);
+      return true;
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Staging Desktop holds ChatGPT startup until the connection finishes", async () => {
+  const { root, state, vendor, app, applications, wrapper, nativeLauncher } = await fixture("statewright-desktop-wait-for-connection-");
+  const marker = join(root, "chatgpt-started");
+  const connection = join(root, "connection-started");
+  const approval = join(root, "connection-approved");
+  try {
+    await writeFile(app, `#!/bin/sh\nprintf started > "$RECORD_PATH"\nsleep 1\n`);
+    await chmod(app, 0o700);
+    await writeFile(join(root, "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"), `import { access, writeFile } from "node:fs/promises";
+let connected = false;
+export async function desktopProfileEnvironment(state, environment) { return environment; }
+export async function startProfileDesktopMcpBridge() { if (!connected) { const error = new Error("No credential is stored for this gateway"); error.code = "CREDENTIAL_MISSING"; throw error; } return { url: "http://127.0.0.1:43123", token: "fixture-token", close: async () => {} }; }
+export async function connectDesktopProfile() { await writeFile(process.env.CONNECT_PATH, "waiting"); while (!connected) { try { await access(process.env.APPROVAL_PATH); connected = true; } catch { await new Promise(resolve => setTimeout(resolve, 20)); } } }
+`);
+    const record = await enableDesktop({ statePath: state, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, nativeLauncherCandidate: nativeLauncher });
+    let settled = false;
+    const launch = execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: marker, CONNECT_PATH: connection, APPROVAL_PATH: approval } }).finally(() => { settled = true; });
+    await waitUntil(() => existsSync(connection), "Desktop connection did not begin");
+    assert.equal(settled, false);
+    assert.equal(existsSync(marker), false);
+    await writeFile(approval, "approved");
+    await launch;
+    assert.equal(await readFile(marker, "utf8"), "started");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

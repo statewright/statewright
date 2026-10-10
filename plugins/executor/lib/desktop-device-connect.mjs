@@ -36,13 +36,13 @@ function authorizationDetails(body) {
   return body;
 }
 
-export function desktopConnectDialogText({ profile, userCode }) {
+export function desktopConnectDialogText({ profile, userCode, verificationUrl }) {
   const app = profile === "staging" ? "ChatGPT + Statewright Staging" : profile === "development" ? "ChatGPT + Statewright Dev" : "ChatGPT + Statewright";
-  return { app, message: `${app} will open Statewright in your browser to connect. Confirm the browser shows code ${userCode} before approving. No key needs to be pasted into chat.` };
+  return { app, message: `Continue opens Statewright in your default browser. If you don't see the page, visit ${verificationUrl}. Confirm code ${userCode} and sign in. ${app} will wait for your approval.` };
 }
 
-async function showConnectDialog({ profile, userCode }) {
-  const { app, message } = desktopConnectDialogText({ profile, userCode });
+async function showConnectDialog({ profile, userCode, verificationUrl }) {
+  const { app, message } = desktopConnectDialogText({ profile, userCode, verificationUrl });
   try {
     await execFile("/usr/bin/osascript", [
       "-e", "on run argv",
@@ -80,7 +80,7 @@ export async function connectDesktopProfile({ state, environment = process.env, 
   const authorization = authorizationDetails(codeRequest.body);
   verificationUrl.searchParams.set("user_code", authorization.user_code);
 
-  await showDialog({ profile: state.profile, userCode: authorization.user_code });
+  await showDialog({ profile: state.profile, userCode: authorization.user_code, verificationUrl: verificationUrl.href });
   await openBrowser(verificationUrl.href);
 
   const deadline = now() + authorization.expires_in * 1000;
@@ -88,14 +88,20 @@ export async function connectDesktopProfile({ state, environment = process.env, 
   while (now() < deadline) {
     await sleep(interval * 1000);
     if (now() >= deadline) break;
-    const tokenRequest = await requestJson(fetchImpl, tokenUrl, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: authorization.device_code, client_id: DEVICE_CLIENT_ID }),
-    });
+    let tokenRequest;
+    try {
+      tokenRequest = await requestJson(fetchImpl, tokenUrl, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:device_code", device_code: authorization.device_code, client_id: DEVICE_CLIENT_ID }),
+      });
+    } catch (error) {
+      if (error.code === "DESKTOP_CONNECT_UNAVAILABLE") continue;
+      throw error;
+    }
     if (tokenRequest.response.ok) {
       const key = tokenRequest.body?.token_type === "Bearer" ? tokenRequest.body.access_token : null;
-      if (!/^sw_live_[0-9a-f]{32}$/.test(key ?? "")) throw connectionError("Statewright returned an invalid gateway credential.", "DESKTOP_CONNECT_PROTOCOL");
+      if (!/^sw_live_(?:[0-9a-f]{32}|[0-9A-Za-z]{64})$/.test(key ?? "")) throw connectionError("Statewright returned an invalid gateway credential.", "DESKTOP_CONNECT_PROTOCOL");
       let verified;
       try {
         verified = await fetchImpl(`${profile.authUrl}/api/gateway/workflows`, {

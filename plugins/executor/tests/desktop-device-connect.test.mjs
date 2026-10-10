@@ -10,7 +10,7 @@ const device = {
   verification_uri_complete: "https://wrong-origin.example/device?user_code=ABCD-EFGH-JKLM",
   expires_in: 600, interval: 5,
 };
-const key = `sw_live_${"b".repeat(32)}`;
+const key = `sw_live_${"Ab3d".repeat(16)}`;
 
 async function fixture(t, withAuth = true) {
   const home = await mkdtemp(join(tmpdir(), "statewright-desktop-oauth-"));
@@ -39,7 +39,7 @@ test("Desktop missing-credential flow shows the device code, uses the selected a
       }
       if (url.endsWith("/api/oauth/device/token")) {
         assert.equal(options.body.get("device_code"), device.device_code);
-        return ++polls === 1 ? Response.json({ error: "authorization_pending" }, { status: 400 })
+        return ++polls <= 8 ? Response.json({ error: "authorization_pending" }, { status: 400 })
           : Response.json({ token_type: "Bearer", access_token: key });
       }
       assert.equal(url, "https://stage-auth.example/api/gateway/workflows");
@@ -50,12 +50,67 @@ test("Desktop missing-credential flow shows the device code, uses the selected a
     readCredential: async gateway => { assert.equal(gateway, "https://stage-gateway.example/mcp"); return stored?.secret; },
   });
   assert.equal(result.gatewayUrl, "https://stage-gateway.example/mcp");
-  assert.deepEqual(events[1], ["dialog", { profile: "staging", userCode: device.user_code }]);
+  assert.deepEqual(events[1], ["dialog", { profile: "staging", userCode: device.user_code,
+    verificationUrl: `https://stage-auth.example/device?user_code=${device.user_code}` }]);
   assert.deepEqual(events[2], ["browser", `https://stage-auth.example/device?user_code=${device.user_code}`]);
   assert.equal(stored.gateway, "https://stage-gateway.example/mcp");
   assert.equal(stored.secret, key);
-  assert.match(desktopConnectDialogText({ profile: "staging", userCode: device.user_code }).message,
-    /will open Statewright in your browser to connect.*ABCD-EFGH-JKLM/);
+  assert.equal(polls, 9);
+  const dialogMessage = desktopConnectDialogText({ profile: "staging", userCode: device.user_code,
+    verificationUrl: `https://stage-auth.example/device?user_code=${device.user_code}` }).message;
+  assert.match(dialogMessage, /Statewright in your default browser.*https:\/\/stage-auth\.example\/device\?user_code=ABCD-EFGH-JKLM.*confirm code ABCD-EFGH-JKLM and sign in.*wait for your approval/i);
+  assert.doesNotMatch(dialogMessage, /key|paste/i);
+});
+
+test("Desktop OAuth does not poll, store, or finish while its wait is unresolved", async t => {
+  const { home, state } = await fixture(t);
+  let enterWait;
+  let releaseWait;
+  const waiting = new Promise(resolve => { enterWait = resolve; });
+  const heldWait = new Promise(resolve => { releaseWait = resolve; });
+  let polls = 0;
+  let stores = 0;
+  let finished = false;
+  const connection = connectDesktopProfile({ state, home, environment: {}, now: () => 0,
+    showDialog: async () => {}, openBrowser: async () => {},
+    sleep: ms => { assert.equal(ms, 5_000); enterWait(); return heldWait; },
+    fetchImpl: async url => {
+      if (url.endsWith("/api/oauth/device/code")) return Response.json(device);
+      if (url.endsWith("/api/oauth/device/token")) { polls++; return Response.json({ token_type: "Bearer", access_token: key }); }
+      return Response.json({ items: [] });
+    },
+    storeCredential: async () => { stores++; }, readCredential: async () => key,
+  }).finally(() => { finished = true; });
+  await waiting;
+  await Promise.resolve();
+  assert.equal(polls, 0);
+  assert.equal(stores, 0);
+  assert.equal(finished, false);
+  releaseWait();
+  await connection;
+  assert.equal(polls, 1);
+  assert.equal(stores, 1);
+  assert.equal(finished, true);
+});
+
+test("Desktop OAuth keeps waiting through a transient token-poll network failure", async t => {
+  const { home, state } = await fixture(t);
+  let polls = 0;
+  let stores = 0;
+  await connectDesktopProfile({ state, home, environment: {}, now: () => 0, sleep: async () => {},
+    showDialog: async () => {}, openBrowser: async () => {},
+    fetchImpl: async url => {
+      if (url.endsWith("/api/oauth/device/code")) return Response.json(device);
+      if (url.endsWith("/api/oauth/device/token")) {
+        if (++polls === 1) throw new Error("brief transport failure");
+        return Response.json({ token_type: "Bearer", access_token: key });
+      }
+      return Response.json({ items: [] });
+    },
+    storeCredential: async () => { stores++; }, readCredential: async () => key,
+  });
+  assert.equal(polls, 2);
+  assert.equal(stores, 1);
 });
 
 test("Desktop OAuth denial does not store a credential", async t => {

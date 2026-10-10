@@ -283,7 +283,7 @@ test("codex device approval verifies and atomically stores the returned Statewri
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
   );
-  const rawKey = `sw_live_${"a".repeat(32)}`;
+  const rawKey = `sw_live_${"Ab3d".repeat(16)}`;
   try {
     await mkdir(bin, { recursive: true });
     const fakeSleep = join(bin, "sleep");

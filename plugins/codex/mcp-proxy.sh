@@ -214,7 +214,7 @@ request_device_authorization() {
 
 persist_verified_device_key() {
   local key="$1" body status
-  [[ "$key" =~ ^sw_live_[0-9a-f]{32}$ ]] || return 1
+  [[ "$key" =~ ^sw_live_([0-9a-f]{32}|[0-9A-Za-z]{64})$ ]] || return 1
 
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
   status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \

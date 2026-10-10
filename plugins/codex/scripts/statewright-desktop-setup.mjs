@@ -257,7 +257,14 @@ try {
     : ["CREDENTIAL_STORE_UNAVAILABLE", "CREDENTIAL_HELPER_MISSING", "CREDENTIAL_HELPER_FAILED", "CREDENTIAL_HELPER_TIMEOUT"].includes(error.code) ? 21
     : error.code === "DESKTOP_CHILD_EXITED" ? 22
     : error.code === "DESKTOP_CONNECT_CANCELLED" ? 23
-    : error.code?.startsWith("DESKTOP_CONNECT_") ? 24 : 1;
+    : error.code === "DESKTOP_CONNECT_UNAVAILABLE" ? 24
+    : error.code === "DESKTOP_CONNECT_UI" ? 25
+    : error.code === "DESKTOP_CONNECT_EXPIRED" ? 26
+    : error.code === "DESKTOP_CONNECT_DENIED" ? 27
+    : error.code === "DESKTOP_CONNECT_PROTOCOL" ? 28
+    : error.code === "DESKTOP_CONNECT_CONFIG" ? 29
+    : error.code === "DESKTOP_CONNECT_REJECTED" ? 30
+    : error.code === "DESKTOP_CONNECT_STORE" ? 31 : 1;
 }
 `;
 }
@@ -277,7 +284,14 @@ case "$status" in
   21) /usr/bin/osascript -e ${alert("Statewright could not read the OS credential store. Check Keychain access, then run the Desktop doctor for this profile.")} >/dev/null 2>&1 || true ;;
   22) /usr/bin/osascript -e ${alert("ChatGPT exited during startup. It may still be running in the background; check Activity Monitor, quit that app only, then retry. Your Codex TUI uses a separate App Server lane.")} >/dev/null 2>&1 || true ;;
   23) exit 0 ;;
-  24) /usr/bin/osascript -e ${alert("The Statewright browser connection did not complete. Reopen this app to retry, or run its launcher in Terminal to see the exact error.")} >/dev/null 2>&1 || true ;;
+  24) /usr/bin/osascript -e ${alert("Statewright sign-in is unreachable. Check your network connection, then reopen this app to retry.")} >/dev/null 2>&1 || true ;;
+  25) /usr/bin/osascript -e ${alert("Statewright could not open the connection page or show its dialog. Reopen this app to retry.")} >/dev/null 2>&1 || true ;;
+  26) /usr/bin/osascript -e ${alert("The connection code expired before approval. Reopen this app for a fresh code.")} >/dev/null 2>&1 || true ;;
+  27) /usr/bin/osascript -e ${alert("The Statewright connection was denied. Reopen this app if you want to try again.")} >/dev/null 2>&1 || true ;;
+  28) /usr/bin/osascript -e ${alert("Statewright returned an unexpected sign-in response. Reopen this app to retry or contact support.")} >/dev/null 2>&1 || true ;;
+  29) /usr/bin/osascript -e ${alert("This Desktop profile has no matching Statewright sign-in service. Check its gateway configuration.")} >/dev/null 2>&1 || true ;;
+  30) /usr/bin/osascript -e ${alert("Statewright did not accept the new connection. Reopen this app to retry.")} >/dev/null 2>&1 || true ;;
+  31) /usr/bin/osascript -e ${alert("Statewright could not save the new connection in Keychain. Check Keychain access, then retry.")} >/dev/null 2>&1 || true ;;
   *) /usr/bin/osascript -e ${alert(`Run ${nodeExecutable} ${launcherPath} in Terminal to see the startup error. Your Codex TUI uses a separate App Server lane.`)} >/dev/null 2>&1 || true ;;
 esac
 exit "$status"

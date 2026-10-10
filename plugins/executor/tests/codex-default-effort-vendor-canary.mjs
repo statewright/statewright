@@ -100,6 +100,20 @@ try {
   assert(routed.collaborationMode?.mode, "native settings must expose the current collaboration mode");
   assert(routed.collaborationMode?.settings, "native settings must expose collaboration settings");
 
+  // A successful no-op has no settings/updated notification. Do not model
+  // every acknowledged update as a new native event in protocol fixtures.
+  const identicalAt = notifications.length;
+  const identicalAck = await rpc("thread/settings/update", {threadId,
+    model: "gpt-5.6-terra", effort: "medium", collaborationMode: routed.collaborationMode});
+  assert.deepEqual(identicalAck, {});
+  const readback = (await rpc("thread/read", {threadId, includeTurns: false})).thread;
+  assert.equal(readback.model, "gpt-5.6-terra");
+  assert.equal(readback.reasoningEffort, "medium");
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const identicalEvents = notifications.slice(identicalAt)
+    .filter(message => message.method === "thread/settings/updated");
+  assert.equal(identicalEvents.length, 0);
+
   const restoreAt = notifications.length;
   const collaborationMode = structuredClone(routed.collaborationMode);
   collaborationMode.settings.model = "gpt-5.6-sol";
@@ -123,6 +137,8 @@ try {
     binary,
     result: "pass",
     inference_started: false,
+    identical_update_acknowledged: true,
+    identical_update_notifications: identicalEvents.length,
     original: { model: original.model, effort_present: Object.hasOwn(original, "effort"), effort: original.effort,
       collaboration_effort_present: Object.hasOwn(original.collaborationMode.settings, "reasoning_effort"),
       collaboration_effort: original.collaborationMode.settings.reasoning_effort },

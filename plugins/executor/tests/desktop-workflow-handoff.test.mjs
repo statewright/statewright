@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 
@@ -15,11 +16,21 @@ async function until(check) {
   }
   assert.fail("workflow did not hand off to a new native turn");
 }
-async function fixture(t) {
+async function fixture(t, {nativeSettings = false} = {}) {
   const server = new WebSocketServer({port: 0, host: "127.0.0.1"});
+  let proxy, client;
+  t.after(async () => {
+    client?.terminate(); await proxy?.close();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise(resolve => server.close(resolve));
+  });
   await once(server, "listening");
   let socket, state = null, active = false, turnId, sequence = 0, heldRead, heldStart, heldOwner, ownerEntered = false, wrongModel = false;
+  let heldSettings, rejectSettings = false, readbackMismatch = false;
   let settings = {model: "gpt-6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority"};
+  const native = nativeSettings ? await (await import("./native-settings-fixture.mjs"))
+    .nativeSettingsFixture(t, threadId, message => socket?.send(JSON.stringify(message))) : null;
+  if (native) settings = native.settings;
   const calls = [], confirmed = [], injected = [], frames = [], errors = [];
   server.on("connection", ws => {
     socket = ws;
@@ -28,15 +39,30 @@ async function fixture(t) {
       if (!r.method || r.id === undefined) return;
       const reply = result => ws.send(JSON.stringify({id: r.id, result}));
       const notify = (method, params) => ws.send(JSON.stringify({method, params}));
+      if (native && r.method === "thread/settings/update") {
+        try { reply(await native.update(r.params)); }
+        catch (error) { ws.send(JSON.stringify({id: r.id, error: {code: -32603, message: error.message}})); }
+        return;
+      }
+      if (native && r.method === "thread/read") return reply(await native.read());
       if (["thread/start", "thread/resume"].includes(r.method)) return reply({...settings, thread: {id: threadId}});
-      if (r.method === "thread/read") return reply({thread: {id: threadId, status: {type: active ? "active" : "idle"}}});
+      if (r.method === "thread/read") return reply({thread: {id: threadId,
+        model: readbackMismatch ? "wrong-model" : settings.model, modelProvider: settings.modelProvider,
+        reasoningEffort: settings.effort, status: {type: active ? "active" : "idle"}}});
       if (r.method === "turn/interrupt") {
         active = false; reply({});
         return notify("turn/completed", {threadId, turn: {id: turnId, status: "interrupted"}});
       }
       if (r.method === "thread/settings/update") {
-        settings = {...settings, ...r.params, ...(wrongModel ? {model: "wrong-model"} : {})}; reply({});
-        return notify("thread/settings/updated", {threadId, threadSettings: settings});
+        if (heldSettings) await heldSettings;
+        if (rejectSettings) return ws.send(JSON.stringify({id: r.id, error: {code: -32603, message: "fixture settings rejected"}}));
+        const {threadId: _, ...updates} = r.params;
+        const next = {...settings, ...updates, ...(wrongModel ? {model: "wrong-model"} : {})};
+        const changed = !isDeepStrictEqual(settings, next);
+        settings = next; reply({});
+        // Native Codex acknowledges identical settings without a notification.
+        if (changed) notify("thread/settings/updated", {threadId, threadSettings: settings});
+        return;
       }
       if (r.method === "turn/start") {
         if (sequence > 0 && heldStart) await heldStart;
@@ -47,7 +73,7 @@ async function fixture(t) {
       reply({});
     });
   });
-  const proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
+  proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
     workflowService: {ownsThread: async id => {
       if (heldOwner && sequence > 1) {ownerEntered = true; await heldOwner;}
       return id === threadId;
@@ -57,7 +83,7 @@ async function fixture(t) {
     routeOwner: async () => ({client_id: "handoff-client", root_session_id: threadId}),
     onRouteInjected: async r => injected.push(r), onRouteConfirmed: async r => confirmed.push(r),
     onProtocolError: async error => errors.push(error)});
-  const client = new WebSocket(proxy.url);
+  client = new WebSocket(proxy.url);
   client.on("message", raw => frames.push(JSON.parse(String(raw))));
   await once(client, "open");
   let id = 0;
@@ -73,10 +99,11 @@ async function fixture(t) {
   const completeTool = (tool, result, overrides = {}) => socket.send(JSON.stringify({method: "item/completed", params: {
     threadId, turnId, item: {type: "mcpToolCall", id: `item-${sequence}-${tool}`, server: "statewright", tool,
       status: "completed", result: {structuredContent: result}, ...overrides}}}));
-  t.after(async () => { client.terminate(); await proxy.close(); for (const s of server.clients) s.terminate(); await new Promise(r => server.close(r)); });
   return {calls, frames, confirmed, injected, errors, rpc, completeTool, setState: v => {state = v;},
     hold: p => {heldRead = p;}, holdStart: p => {heldStart = p;}, mismatch: () => {wrongModel = true;},
     holdOwner: p => {heldOwner = p;}, ownerEntered: () => ownerEntered,
+    holdSettings: p => {heldSettings = p;}, rejectSettings: () => {rejectSettings = true;},
+    mismatchReadback: () => {readbackMismatch = true;},
     finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
 }
 
@@ -99,6 +126,89 @@ test("Desktop load and transition cut over native turns and restore the original
   assert.equal(f.calls.filter(c => c.method === "thread/settings/update").at(-1).params.model, "gpt-6-sol");
   assert.equal(f.calls.filter(c => c.method === "turn/start").length, 3);
 });
+
+test("consecutive phases with unchanged native settings still start distinct turns", async t => {
+  const f = await fixture(t);
+  const localize = stateFor("localize", 1, "openai-codex/gpt-5.6-terra", "medium");
+  f.setState(localize); f.completeTool("statewright_load_workflow", {state_snapshot: localize});
+  await until(() => f.injected.length === 1);
+  f.setState({...localize, state: "baseline", state_epoch: 2});
+  f.completeTool("statewright_transition", {transitioned: true, from: "localize", to: "baseline"});
+  await until(() => f.injected.length === 2);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.calls.filter(c => c.method === "turn/start").length, 3);
+  assert.equal(f.confirmed.at(-1).route.state, "baseline");
+  assert.equal(f.confirmed.at(-1).confirmed, true);
+  assert.equal(f.confirmed.at(-1).confirmation_source, "native_settings_snapshot_and_update_ack");
+  assert.equal(f.frames.filter(c => c.method === "thread/settings/updated").length, 1);
+});
+
+test("real native settings canary: phase handoffs and restoration with a duplicate route", {
+  skip: process.env.STATEWRIGHT_NATIVE_SETTINGS_CANARY !== "1",
+}, async t => {
+  // Only turn lifecycle events are simulated. All settings acknowledgements,
+  // notifications and readbacks come from the actual bundled native binary.
+  const f = await fixture(t, {nativeSettings: true});
+  const states = [stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low"),
+    stateFor("localize", 2, "openai-codex/gpt-5.6-terra", "medium"),
+    stateFor("baseline", 3, "openai-codex/gpt-5.6-terra", "medium"),
+    {...stateFor("frontier_review", 4, "openai-codex/gpt-6-astra", "high"), service_tier: "default"},
+    stateFor("record", 5, "openai-codex/gpt-5.6-terra", "low")];
+  for (const [index, state] of states.entries()) {
+    f.setState(state);
+    f.completeTool(index === 0 ? "statewright_load_workflow" : "statewright_transition",
+      index === 0 ? {state_snapshot: state} : {transitioned: true, from: states[index - 1].state, to: state.state});
+    await until(() => f.injected.length === index + 1 || f.errors.length);
+    assert.deepEqual(f.errors, []);
+    assert.equal(f.confirmed.at(-1).confirmed, true);
+  }
+  assert.equal(f.confirmed[2].confirmation_source, "native_settings_snapshot_and_update_ack");
+  f.setState({...states.at(-1), state: "complete", state_epoch: 6, is_final: true});
+  f.completeTool("statewright_transition", {transitioned: true, to: "complete"});
+  f.finish();
+  await until(() => f.confirmed.some(r => r.confirmed && r.route.restored_original));
+  assert.equal(f.confirmed.at(-1).actualModel, "gpt-6-sol");
+  assert.equal(f.confirmed.at(-1).actualEffort, "high");
+});
+
+test("unchanged native settings can confirm original-route restoration", async t => {
+  const f = await fixture(t);
+  const state = stateFor("intake", 1, "openai-codex/gpt-6-sol", "high");
+  f.setState(state); f.completeTool("statewright_load_workflow", {state_snapshot: state});
+  await until(() => f.injected.length === 1);
+  f.setState({...state, state: "complete", is_final: true, state_epoch: 2});
+  f.completeTool("statewright_transition", {transitioned: true, from: "intake", to: "complete"});
+  f.finish();
+  await until(() => f.confirmed.some(r => r.confirmed && r.route.restored_original));
+  assert.equal(f.confirmed.at(-1).confirmation_source, "native_settings_snapshot_and_update_ack");
+  assert.equal(f.calls.filter(c => c.method === "turn/start").length, 2);
+});
+
+for (const failure of ["rejected-ack", "cancelled-ack", "readback-mismatch", "state-changed"]) {
+  test(`unchanged-settings handoff fails closed for ${failure}`, async t => {
+    const f = await fixture(t);
+    const state = stateFor("localize", 1, "openai-codex/gpt-5.6-terra", "medium");
+    f.setState(state); f.completeTool("statewright_load_workflow", {state_snapshot: state});
+    await until(() => f.injected.length === 1);
+    const next = {...state, state: "baseline", state_epoch: 2};
+    f.setState(next);
+    let release;
+    if (["cancelled-ack", "state-changed"].includes(failure)) f.holdSettings(new Promise(r => {release = r;}));
+    if (failure === "rejected-ack") f.rejectSettings();
+    if (failure === "readback-mismatch") f.mismatchReadback();
+    f.completeTool("statewright_transition", {transitioned: true, from: "localize", to: "baseline"});
+    if (release) {
+      await until(() => f.calls.filter(c => c.method === "thread/settings/update").length === 2);
+      if (failure === "cancelled-ack") await f.rpc("turn/interrupt", {threadId, turnId: "turn-2"});
+      else f.setState({...next, state_epoch: 3});
+      release();
+    }
+    await until(() => f.errors.some(e => e.side === "workflow_handoff"));
+    assert.equal(f.calls.filter(c => c.method === "turn/start").length, 2);
+    assert.equal(f.injected.length, 1);
+    assert.equal(f.confirmed.filter(r => r.confirmed).length, 1);
+  });
+}
 
 test("foreign, failed and duplicate lifecycle completions cannot start extra turns", async t => {
   const f = await fixture(t);

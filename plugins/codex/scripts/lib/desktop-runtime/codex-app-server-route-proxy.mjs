@@ -3,6 +3,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.mjs";
 import { summarizeStatewrightToolCompletion, summarizeStatewrightToolStart } from "./statewright-tool-summary.mjs";
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
@@ -257,7 +258,11 @@ export function settingsConfirmRoute(receipt, notification) {
   if (!receipt || notification?.method !== "thread/settings/updated") return null;
   const params = notification.params ?? {};
   if (String(params.threadId ?? "") !== receipt.threadId) return null;
-  const settings = params.threadSettings ?? {};
+  return nativeSettingsReceipt(receipt, params.threadSettings);
+}
+
+function nativeSettingsReceipt(receipt, settings = {}) {
+  settings ??= {};
   const actualModel = routeModel(settings.model);
   const actualProvider = String(settings.modelProvider ?? "").trim() || null;
   const actualEffort = firstOwn([settings, "effort"]);
@@ -848,6 +853,71 @@ export async function startCodexAppServerRouteProxy({
         resolve: value => { clearTimeout(timer); routeConfirmationWaiters.delete(threadId); resolveConfirmation(value); },
       });
     });
+    const recordRouteConfirmation = async (receipt, checkOwner) => {
+      if (receipt.confirmed && checkOwner) {
+        try { await checkOwner(); }
+        catch { receipt.confirmed = false; receipt.reason = "restoration_owner_changed"; }
+      }
+      if (receipt.confirmed && receipt.origin_binding) {
+        if (receipt.route?.restored_original === true) {
+          const result = await workflowOriginStore.confirmRestore(receipt.origin_binding);
+          receipt.confirmed = result.status === "restored";
+        } else if (!receipt.actualProvider) {
+          receipt.confirmed = false;
+          receipt.reason = "confirmed_route_provider_unknown";
+        } else {
+          const result = await workflowOriginStore.confirmRoute(receipt.origin_binding, {
+            model: qualifiedRouteModel(receipt.actualModel, receipt.actualProvider),
+            ...(Object.hasOwn(receipt, "actualEffort") ? {effort: receipt.actualEffort} : {}),
+            ...(Object.hasOwn(receipt, "actualServiceTier") ? {service_tier: receipt.actualServiceTier} : {}),
+          });
+          receipt.confirmed = result.status === "confirmed";
+          if (!receipt.confirmed) receipt.reason = result.status;
+        }
+      }
+      await onRouteConfirmed(receipt);
+      return receipt;
+    };
+    const updateAndConfirmSettings = async (threadId, receipt, update, checkOwner) => {
+      const isNoop = settings => settings && Object.entries(update).every(([key, value]) =>
+        key === "threadId" || value === undefined || Object.hasOwn(settings, key) && isDeepStrictEqual(settings[key], value));
+      const observed = activeSettings.get(threadId);
+      if (isNoop(observed) && nativeSettingsReceipt(receipt, observed).confirmed) {
+        // Native Codex emits settings/updated only on change. An exact no-op
+        // needs its successful RPC acknowledgement plus the owning connection's
+        // native snapshot, not a fabricated notification or a timeout fallback.
+        await checkOwner();
+        await internalRpc("thread/settings/update", update);
+        await checkOwner();
+        // Read after the acknowledgement: this is both fresh model/effort
+        // evidence and an ordered barrier behind earlier native notifications.
+        const current = (await internalRpc("thread/read", {threadId, includeTurns: false})).thread;
+        await checkOwner();
+        const confirmed = nativeSettingsReceipt(receipt, activeSettings.get(threadId));
+        confirmed.confirmation_source = "native_settings_snapshot_and_update_ack";
+        confirmed.native_readback = "thread/read";
+        if (!isNoop(activeSettings.get(threadId)) || current?.id !== threadId || current.status?.type !== "idle"
+            || !sameRouteValue(current.model, receipt.effectiveModel)
+            || !sameRouteValue(current.modelProvider, confirmed.actualProvider)
+            || receipt.effortSpecified && (!Object.hasOwn(current, "reasoningEffort")
+              || !sameRouteValue(current.reasoningEffort, receipt.effectiveEffort))) {
+          confirmed.confirmed = false;
+          confirmed.reason = "unchanged_settings_readback_mismatch";
+        }
+        return recordRouteConfirmation(confirmed, checkOwner);
+      }
+      receipts.set(threadId, receipt);
+      const confirmation = waitForRouteConfirmation(threadId, receipt, checkOwner);
+      try {
+        await internalRpc("thread/settings/update", update);
+        return await confirmation;
+      } catch (error) {
+        receipts.delete(threadId);
+        routeConfirmationWaiters.get(threadId)?.resolve({confirmed: false, reason: "settings_update_failed"});
+        await confirmation;
+        throw error;
+      }
+    };
     const waitForRequiredMcpTool = async (threadId, checkCurrentRequest) => {
       if (!requiredMcpToolSuffix || requiredMcpReadyTimeoutMs <= 0 || mcpReadyThreads.has(threadId)) return;
       const deadline = Date.now() + requiredMcpReadyTimeoutMs;
@@ -946,7 +1016,8 @@ export async function startCodexAppServerRouteProxy({
       try {
         // A native turn can end without any projected MCP item. The execution
         // boundary is authoritative; tool result formatting is only a hint.
-        if (terminal.kind === "reconcile" || terminal.kind === "reconnect") {
+        if (terminal.kind === "reconcile" || terminal.kind === "reconnect"
+            || terminal.kind === "transition" && !terminal.state) {
           const state = await routeStateService?.getState?.(threadId);
           if (state?.is_final) terminal = {kind: "terminal", state};
           else if (terminal.kind === "reconnect" && state === null
@@ -1042,24 +1113,14 @@ export async function startCodexAppServerRouteProxy({
         await assertOwner();
         await switchProvider(threadId, applied.receipt);
         await assertOwner();
-        receipts.set(threadId, applied.receipt);
-        const confirmation = waitForRouteConfirmation(threadId, applied.receipt, assertOwner);
-        try {
-          await internalRpc("thread/settings/update", {
+        const confirmed = await updateAndConfirmSettings(threadId, applied.receipt, {
             threadId,
             model: applied.message.params.model,
             effort: applied.message.params.effort,
             serviceTier: applied.message.params.serviceTier,
             ...(applied.message.params.collaborationMode
               ? { collaborationMode: applied.message.params.collaborationMode } : {}),
-          });
-        } catch (error) {
-          receipts.delete(threadId);
-          routeConfirmationWaiters.get(threadId)?.resolve({ confirmed: false, reason: "settings_update_failed" });
-          await confirmation;
-          throw error;
-        }
-        const confirmed = await confirmation;
+          }, assertOwner);
         if (!confirmed.confirmed) throw new Error("Codex App Server confirmed different model settings; restoration provenance was retained.");
         await onRouteInjected(applied.receipt);
       } catch (error) {
@@ -1134,7 +1195,7 @@ export async function startCodexAppServerRouteProxy({
       const epoch = operatorActivity.get(threadId);
       const operation = {turnId, itemId: item.id};
       handoffs.set(threadId, operation);
-      let release, confirmation, interrupted = false;
+      let release, interrupted = false;
       const check = async () => {
         const owned = await workflowService.ownsThread(threadId);
         if (protocolFailed || downstreamClosed || downstream.readyState !== WebSocket.OPEN
@@ -1194,11 +1255,8 @@ export async function startCodexAppServerRouteProxy({
         applied.receipt.origin_binding = binding;
         await switchProvider(threadId, applied.receipt);
         await checkState();
-        receipts.set(threadId, applied.receipt);
-        confirmation = waitForRouteConfirmation(threadId, applied.receipt, checkState);
         const {input, ...update} = applied.message.params;
-        await internalRpc("thread/settings/update", update);
-        const confirmed = await confirmation;
+        const confirmed = await updateAndConfirmSettings(threadId, applied.receipt, update, checkState);
         if (!confirmed.confirmed) throw new Error("Native workflow model settings were not confirmed");
         await checkState();
         activeModels.set(threadId, applied.receipt.effectiveModel);
@@ -1870,34 +1928,7 @@ export async function startCodexAppServerRouteProxy({
             receipt.confirmed = false;
             receipt.reason = "restoration_confirmation_expired";
           }
-          if (receipt.confirmed && waiter?.checkOwner) {
-            try { await waiter.checkOwner(); }
-            catch { receipt.confirmed = false; receipt.reason = "restoration_owner_changed"; }
-          }
-          if (receipt.confirmed && receipt.origin_binding) {
-            if (receipt.route?.restored_original === true) {
-              const result = await workflowOriginStore.confirmRestore(receipt.origin_binding);
-              receipt.confirmed = result.status === "restored";
-            } else {
-              // Ownership is of the actual native settings we changed, not
-              // the route request (which may omit provider, effort or tier).
-              // Use the same qualified identity as capture/restore, and do
-              // not turn absent native evidence into an explicit null.
-              if (!receipt.actualProvider) {
-                receipt.confirmed = false;
-                receipt.reason = "confirmed_route_provider_unknown";
-              } else {
-                const result = await workflowOriginStore.confirmRoute(receipt.origin_binding, {
-                  model: qualifiedRouteModel(receipt.actualModel, receipt.actualProvider),
-                  ...(Object.hasOwn(receipt, "actualEffort") ? { effort: receipt.actualEffort } : {}),
-                  ...(Object.hasOwn(receipt, "actualServiceTier") ? { service_tier: receipt.actualServiceTier } : {}),
-                });
-                receipt.confirmed = result.status === "confirmed";
-                if (!receipt.confirmed) receipt.reason = result.status;
-              }
-            }
-          }
-          await onRouteConfirmed(receipt);
+          await recordRouteConfirmation(receipt, waiter?.checkOwner);
           routeConfirmationWaiters.get(receipt.threadId)?.resolve(receipt);
         }
         const summarized = summarizeStatewrightToolCompletion(summarizeStatewrightToolStart(notification));

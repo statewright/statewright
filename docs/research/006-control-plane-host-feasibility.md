@@ -1,5 +1,8 @@
 # Cross-host blocking and in-situ approvals
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 Status: research baseline; production promotion held. Inspected 2026-09-16.
 
 This is the capability investigation for Statewright and The Praetorian Gate,
@@ -21,16 +24,10 @@ remains useful, but measures a different boundary.
 - Deliver the inventory, acceptance cases and next implementation cut. This
   audit does not implement all adapters or certify live desktop/Windows journeys.
 
-Inspected base identities (all working checkouts were dirty):
-
-| Checkout | HEAD |
-| --- | --- |
-| Statewright | `76d156c6feac264394292fc1b2f8728193d599a1` |
-| Auldwyrm | `65025b50952e27b38b215b18905ba1c4770fbdb4` |
-| codex-local-models | `7e05b071cc34d879c04f4e8591e1e07c3f8afa30` |
-
-Source paths refer to inspected worktree content, not a claim that every change
-is in HEAD.
+Inspected public Statewright base: `76d156c6feac264394292fc1b2f8728193d599a1`.
+Source paths referred to inspected working-tree content, not necessarily HEAD.
+Companion revisions and private source locators are omitted from this public
+summary (sanitized 2026-10-10). Historical findings below are not fresh checks.
 
 ## Three capabilities, not one
 
@@ -54,7 +51,7 @@ Every exact-current approval journey remains unverified in this audit.
 | Surface | Policy boundary | Local approval today | Routing / principal gap |
 | --- | --- | --- | --- |
 | Codex TUI, standalone Statewright | Supported hooks/adapter; legacy cache has exemptions | Experimental managed native form, private resolver and journal now wired | Source lifecycle fixtures pass; vendor protocol verified; live staging journey pending |
-| Codex TUI, companion | Managed proxy plus Statewright policy | Experimental native form + private resolver + journal | Current exact-runtime soak needed; not standalone evidence |
+| Codex TUI, companion | Separately owned runtime | Public evidence unavailable for this companion-specific implementation | Not standalone or desktop evidence; independent acceptance required |
 | Codex desktop | Supported hook/MCP scope must be probed | No integrated workflow gate proven | Stock app-server ownership/attach not established |
 | Claude Code TUI | PreToolUse/adapter denial code | Browser evidence review, not a native decision loop | Managed routing exists; native elicitation transport/controller missing |
 | Claude Desktop, local Code tab | Shared hooks documented; integration untested | Native route feasible, not implemented here | Does not inherit CLI shim routing automatically |
@@ -139,10 +136,9 @@ Native elicitation requires an actual duplex dispatcher and negotiated client
 capabilities. Increasing a timeout or returning a pending JSON blob is not that
 fix. Test all direct/proxy/managed/adapter paths that claim this capability.
 
-For managed Codex, the companion already uses a private host resolver and
-synthetic host input request without relying on gateway-side elicitation.
-Port that lifecycle to canonical Statewright first; duplex MCP is a distinct
-adapter milestone, not a prerequisite for extracting the proven Codex path.
+Managed Codex approval ownership belongs in the canonical executor. Duplex MCP
+transport is a distinct adapter capability; one host's private input channel
+does not establish another host's elicitation support.
 
 ## Required approval and request ownership contract
 
@@ -166,19 +162,17 @@ adapter milestone, not a prerequisite for extracting the proven Codex path.
 - Shared reviewer/evidence/retention semantics belong in the client-neutral gate
   contract; Statewright and Praetorian consume it without mandatory website UX.
 
-Spec 114 retains the full artifact, policy, identity, evidence, expiry and
-revocation requirements. This audit does not claim those proposed enterprise
-requirements are already implemented.
+The artifact, policy, identity, evidence, expiry and revocation requirements
+above remain acceptance criteria, not claims of implemented enterprise support.
 
 ## Smallest serial implementation milestones
 
 ### M1: standalone Codex approval controller
 
-Extract companion controller/journal integration into the canonical shared
-executor with injected gateway read/resolve and host send/record functions.
-Do not import the local provider proxy, Python compatibility service or Qwen
-configuration into the core approval package. The companion consumes the same
-shared lifecycle rather than maintaining a divergent second implementation.
+Keep controller/journal integration in the canonical shared executor with
+injected gateway read/resolve and host send/record functions. Optional provider
+integrations should consume the shared lifecycle without introducing their
+private implementation or deployment dependencies into core approval handling.
 
 Acceptance: a clean vendor-model Statewright installation, companion disabled
 and its endpoints absent, blocks a fixture effect; displays evidence/reviewers;
@@ -289,6 +283,5 @@ The audit is an uncommitted draft in shared dirty checkouts; cited pending
 handoff/approval work must be reconciled into a coherent source cut before a
 release or exact-HEAD CI claim. No unrelated changes were staged or reverted.
 
-Packaging and a codex-local-models announcement follow M1 and soak acceptance.
 Keep independent installation paths for core Statewright and optional local
 providers; publish only the support claims established by these receipts.

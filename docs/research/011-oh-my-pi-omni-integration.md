@@ -1,11 +1,14 @@
 # Oh My Pi (OMPI/ohmypi) integration discovery
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 Status: O1 discovery complete; adapter design proposed, not yet built.
 Discovered 2026-06-29 against local `ohmypi` CLI v18.0.11
-(`/Users/ben/.local/bin/omp`) and upstream `can1357/oh-my-pi` (git main,
+(`~/.local/bin/omp`) and upstream `can1357/oh-my-pi` (git main,
 docs at `https://github.com/can1357/oh-my-pi` — README, docs/cli.md,
 docs/extensions.md, docs/hooks.md, docs/approval-mode.md, docs/rpc.md,
-docs/extension-loading.md; snapshots in `/Users/ben/omp-discovery/`).
+docs/extension-loading.md; snapshots in `<local-source-snapshot>/`).
 
 ## What the install is
 
@@ -30,7 +33,7 @@ docs/extension-loading.md; snapshots in `/Users/ben/omp-discovery/`).
 
 | Surface | Evidence |
 | --- | --- |
-| ACP server (`omp acp`) | JSON-RPC 2.0 over stdio. `initialize` → `protocolVersion: 1`, `agentInfo: oh-my-pi 18.0.11`, auth via existing local credentials. `agentCapabilities: { loadSession: true, mcpCapabilities: {http, sse}, promptCapabilities: {embeddedContext, image} }`; `sessionCapabilities: { list, fork, resume, close }`. `session/new` returned `sessionId: 01a0ad43-...` plus `configOptions` including a Mode select (`default`, `plan` — read-only planning mode). Probes 2026-06-29. |
+| ACP server (`omp acp`) | JSON-RPC 2.0 over stdio. `initialize` → `protocolVersion: 1`, `agentInfo: oh-my-pi 18.0.11`, auth via existing local credentials. `agentCapabilities: { loadSession: true, mcpCapabilities: {http, sse}, promptCapabilities: {embeddedContext, image} }`; `sessionCapabilities: { list, fork, resume, close }`. `session/new` returned `sessionId: <session-id>` plus `configOptions` including a Mode select (`default`, `plan` — read-only planning mode). Probes 2026-06-29. |
 | RPC mode (`omp --mode rpc`) | Documented NDJSON protocol v1/v2 over stdio: ready frame, `response` correlation by `id`, session/agent events, `extension_ui_request` frames (methods `select`, `confirm`, `input`, `editor`, `cancel`) answered by `extension_ui_response`, host-tool and host-URI requests. Inbound commands include `prompt`, `steer`, `follow_up`, `abort`, `new_session`, `get_state`, `bash` (+`abort_bash`), `set_model`, `compact`, `switch_session`, `branch`, `handoff`, `get_messages_page`. Bundled TypeScript and Python `RpcClient` classes ship in the npm packages and negotiate v2 chunked framing automatically. |
 | Approval policy | Tiers `read`/`write`/`exec`; modes `always-ask` / `write` / `yolo` (**yolo is the default**; `--auto-approve`/`--yolo` force it). Per-tool user policy `tools.approval.<name>: allow|deny|prompt`; tool-declared `policy` and `override` safety prompts; `bash.patterns` deny/prompt/allow rules; unknown tools default to `exec` tier. In headless/RPC use, UI confirmations surface as `extension_ui_request` frames the host must answer. |
 | Hooks / extensions | TS/JS default-export factory (`pi.on(...)` etc.). Tool interception: `tool_call` (pre; handler may `{block: true, reason}` or replace execution `input`), `tool_result` (post; may override content/details). Discovered from `<cwd>/.omp/hooks/pre|post/*.{ts,js}`, `<agentDir>/hooks/pre|post/`, `.omp/extensions/`, plugin entries, or `--extension`/`--hook` paths. Extensions additionally register tools, commands, renderers, and session injection (`sendMessage`, `appendEntry`). |
@@ -82,7 +85,7 @@ docs/extension-loading.md; snapshots in `/Users/ben/omp-discovery/`).
 - Upstream: `can1357/oh-my-pi` — README, `docs/cli.md`, `docs/extensions.md`,
   `docs/hooks.md`, `docs/approval-mode.md`, `docs/rpc.md`,
   `docs/extension-loading.md` (fetched 2026-06-29 to
-  `/Users/ben/omp-discovery/`).
-- Local: `ohmypi` v18.0.11 at `/Users/ben/.local/bin/omp`; `omp -v`;
+  `<local-source-snapshot>/`).
+- Local: `ohmypi` v18.0.11 at `~/.local/bin/omp`; `omp -v`;
   `~/.omp/agent/settings.json`; `~/.omp/agent/sessions/` layout; live ACP
   `initialize` + `session/new` probes (2026-06-29).

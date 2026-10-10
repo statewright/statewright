@@ -1,8 +1,11 @@
 # Provider-safe context handoff: repair options
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 Date: 2026-09-15. Depth: focused. This is a read-only diagnosis/design follow-up, not a deployed fix.
 
-> Superseded for the intended combined stack by [005-companion-context-handoff.md](005-companion-context-handoff.md). This investigation tested Statewright's standalone proxy against direct model fixtures, omitting codex-local-models' existing compatibility adapter. Its blanket native-patch recommendation was premature. The observations below remain evidence about that bypass path, not proof that the companion stack fails.
+> Superseded for the intended combined stack by [005-companion-context-handoff.md](005-companion-context-handoff.md). This investigation tested Statewright's standalone proxy against direct model fixtures, omitting the optional provider-compatibility adapter. Its blanket native-patch recommendation was premature. The observations below remain evidence about that bypass path, not proof that the companion stack fails.
 
 ## Research summary
 

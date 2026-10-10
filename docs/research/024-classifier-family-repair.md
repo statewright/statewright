@@ -1,12 +1,15 @@
 # Classifier family repair
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 ## Run contract
 
 - Objective: replace command-by-command classifier repairs with one shared,
   provenance-aware intent contract; restore the already-reviewed Bash AST and
   OAuth resource-binding lineage; make denials explain the failed decision
   axis; and prevent another incomplete staging promotion.
-- Repository: `/Users/ben/dev/statewright`
+- Repository: Statewright
 - Worktree: `.agent-worktrees/classifier-family-repair`
 - Branch: `fix/classifier-family-repair`
 - Base: `fff2cd25c7665cfdd019539c23ee010541702824`

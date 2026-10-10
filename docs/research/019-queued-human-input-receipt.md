@@ -1,6 +1,9 @@
 # Queued human input source receipt
 
-Date: 2026-09-27. Repository: `/Users/ben/dev/statewright`.
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
+Date: 2026-09-27. Repository: Statewright.
 Worktree: `.agent-worktrees/queued-human-input`. Branch:
 `feat/queued-human-input`. Base: `138a8a5c47eb20d1e166627e9f0e1d2548aaf616`.
 Statewright workflow: deliberately inactive under the user's current override.

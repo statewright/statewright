@@ -186,6 +186,7 @@ function desktopLauncherContents(statePath) {
 import { access, mkdir, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -225,9 +226,11 @@ try {
   if (!["production", "staging", "development"].includes(profile)) throw new Error("Unknown Desktop profile in launcher state.");
   const laneRoot = join(dirname(statePath), "desktop-lanes", profile);
   const userDataPath = join(laneRoot, "user-data");
-  const codexHome = join(laneRoot, "codex-home");
+  // The broker creates its own private App Server home from this source.
+  // Keep the installed Codex auth and plugins visible to that broker.
+  const codexHome = profileEnvironment.CODEX_HOME || join(homedir(), ".codex");
   await mkdir(laneRoot, { recursive: true, mode: 0o700 });
-  await Promise.all([mkdir(userDataPath, { recursive: true, mode: 0o700 }), mkdir(codexHome, { recursive: true, mode: 0o700 })]);
+  await mkdir(userDataPath, { recursive: true, mode: 0o700 });
   let bridge;
   try { bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment }); }
   catch (error) {

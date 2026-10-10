@@ -477,17 +477,34 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-generated-app-");
   const recordPath = join(root, "recorded-codex-cli-path");
   try {
-    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$1" > "$RECORD_PATH"\nsleep 1\n`);
+    await mkdir(join(root, ".codex", "plugins"), { recursive: true });
+    await writeFile(join(root, ".codex", "auth.json"), "fixture-auth\n");
+    await writeFile(join(root, ".codex", "plugins", "fixture-plugin"), "installed\n");
+    await writeFile(app, `#!/bin/sh\ntest -f "$CODEX_HOME/auth.json" && test -f "$CODEX_HOME/plugins/fixture-plugin" || exit 29\nprintf '%s|%s|%s|%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$1" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
-    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", CODEX_HOME: "/foreign/codex", CODEX_ELECTRON_USER_DATA_PATH: "/foreign/user-data" } });
+    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", CODEX_ELECTRON_USER_DATA_PATH: "/foreign/user-data" } });
     const laneRoot = join(dirname(state), "desktop-lanes", "production");
-    const codexHome = join(laneRoot, "codex-home");
+    const codexHome = join(root, ".codex");
     const userDataPath = join(laneRoot, "user-data");
     assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|fixture-keyring||https://mcp.statewright.ai/mcp|${codexHome}|${userDataPath}|--user-data-dir=${userDataPath}`);
-    assert.equal(existsSync(codexHome), true);
     assert.equal(existsSync(userDataPath), true);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Generated Desktop preserves an explicitly configured Codex home", async () => {
+  const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-custom-home-");
+  const recordPath = join(root, "selected-home");
+  const codexHome = join(root, "tenant-codex");
+  try {
+    await mkdir(codexHome);
+    await writeFile(join(codexHome, "auth.json"), "fixture-auth\n");
+    await writeFile(app, `#!/bin/sh\ntest -f "$CODEX_HOME/auth.json" || exit 29\nprintf '%s' "$CODEX_HOME" > "$RECORD_PATH"\nsleep 1\n`);
+    await chmod(app, 0o700);
+    const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
+    await execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, CODEX_HOME: codexHome, RECORD_PATH: recordPath } });
+    assert.equal(await readFile(recordPath, "utf8"), codexHome);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -509,7 +526,7 @@ export async function connectDesktopProfile({ state }) { if (process.env.CONNECT
     assert.equal(await readFile(connection, "utf8"), "https://staging.example.test");
     const laneRoot = join(dirname(state), "desktop-lanes", "staging");
     const userDataPath = join(laneRoot, "user-data");
-    assert.equal(await readFile(marker, "utf8"), `${join(laneRoot, "codex-home")}|${userDataPath}|--user-data-dir=${userDataPath}`);
+    assert.equal(await readFile(marker, "utf8"), `${join(root, ".codex")}|${userDataPath}|--user-data-dir=${userDataPath}`);
     assert.equal(record.launcher_kind, "native_dispatcher");
     assert.equal(await readFile(record.shim_path, "utf8"), "native-launcher-fixture\n");
     assert.match(await readFile(record.launcher_path, "utf8"), /spawn\(state\.desktop_executable/);

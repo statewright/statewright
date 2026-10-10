@@ -11,6 +11,8 @@ import { adoptCodexRootSession, claimCodexRootSession, claimManagedControlIdenti
 import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
 import { getGatewayCredential } from "./credential-store.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
+import { startDesktopBridgePool } from "./desktop-bridge-pool.mjs";
+import { runDesktopMultichatRuntime } from "./desktop-multichat-runtime.mjs";
 export { connectDesktopProfile } from "./desktop-device-connect.mjs";
 
 // The selected Desktop record owns the endpoint. A shell's profile or explicit
@@ -24,11 +26,18 @@ export async function desktopProfileEnvironment(state, environment = process.env
 }
 
 export async function startProfileDesktopMcpBridge({ state, environment = process.env, home = homedir(),
-  getCredential = getGatewayCredential, startBridge = startDesktopMcpBridge }) {
+  getCredential = getGatewayCredential, startBridge = startDesktopMcpBridge, withLanePool = false }) {
   const selected = await desktopProfileEnvironment(state, environment, home);
   // Do not trigger legacy migration or interactive OAuth from a GUI launch.
   const apiKey = await getCredential(selected.STATEWRIGHT_GATEWAY_URL, { environment: selected, home });
-  return startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId: state.client_id });
+  const createBridge = clientId => startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId });
+  const bridge = await createBridge(state.client_id);
+  if (!withLanePool) return bridge;
+  let pool;
+  try { pool = await startDesktopBridgePool({ profileClientId: state.client_id, legacyBridge: bridge, createBridge }); }
+  catch (error) { await bridge.close(); throw error; }
+  return { url: bridge.url, token: bridge.token, poolUrl: pool.url, poolToken: pool.token,
+    close: async () => { try { await pool.close(); } finally { await bridge.close(); } } };
 }
 
 // A Desktop broker is a separate managed client. These names carry process
@@ -40,6 +49,7 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
   "STATEWRIGHT_DESKTOP_MCP_URL", "STATEWRIGHT_DESKTOP_MCP_TOKEN",
+  "STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL", "STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN",
   "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
   "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
 ];
@@ -228,6 +238,14 @@ export async function runDesktopAppServerBroker({
   WebSocketImpl = WebSocket, home = homedir(), setExitCode = code => { process.exitCode = code; },
 } = {}) {
   const plan = desktopAppServerLaunchPlan(argv, environment, home);
+  if (environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL || environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN) {
+    if (!environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL || !environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN) {
+      throw new Error("Desktop lane allocator identity is incomplete.");
+    }
+    return runDesktopMultichatRuntime({ plan, environment, home, stdin, stdout, stderr,
+      startRuntime, isolateEnvironment: desktopBrokerEnvironment, classifierState: desktopClassifierState,
+      WebSocketImpl, setExitCode });
+  }
   // A Desktop install may be the first Statewright client on this machine.
   // Establish the same private control boundary as the resident TUI before a
   // route reader can observe it.

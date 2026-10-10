@@ -198,9 +198,23 @@ that want to name the workflow and bootstrap route up front.
 ### ChatGPT Desktop routing (experimental, macOS)
 
 The same `statewright` Codex plugin can optionally route Desktop App Server
-turns. It is a single-thread experimental broker: it does not patch or
-redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
-chats, approvals, or generated-answer correctness.
+turns. The normal launcher allocates an isolated managed workflow and App Server
+for each selected local chat, including historical chats in different project
+directories. Browsing history does not claim a workflow. It does not patch or
+redistribute ChatGPT.app. Native Desktop acceptance remains a release gate;
+protocol tests alone do not prove end-to-end approvals or answer correctness.
+
+Each lane preserves the native thread's saved permissions unless explicitly
+overridden, and refuses a second managed writer to that exact thread. The broker
+retains the prior registered chat's workflow identity. It currently caps resident
+lanes at 16 (including discovery), with no eviction of active work; restart after
+closing idle work if the cap is reached. Forking a chat is explicitly unsupported.
+Direct broker invocations without the launcher's lane allocator retain the legacy
+single-thread behavior.
+Profile-wide settings writes are explicitly rejected rather than updating only
+the discovery process. Set those defaults outside this launcher before restarting;
+per-chat settings continue to route to the owning lane. Synchronizing global
+settings across active lanes remains a release limitation.
 
 This launcher applies to **Codex/Work chats backed by Codex App Server**. A
 cloud ChatGPT conversation, including one started on mobile and later opened in

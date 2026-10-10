@@ -232,11 +232,11 @@ try {
   await mkdir(laneRoot, { recursive: true, mode: 0o700 });
   await mkdir(userDataPath, { recursive: true, mode: 0o700 });
   let bridge;
-  try { bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment }); }
+  try { bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment, withLanePool: true }); }
   catch (error) {
     if (error.code !== "CREDENTIAL_MISSING") throw error;
     await connectDesktopProfile({ state, environment: profileEnvironment });
-    bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment });
+    bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment, withLanePool: true });
   }
   const child = spawn(state.desktop_executable, ["--user-data-dir=" + userDataPath], {
     detached: false,
@@ -249,6 +249,8 @@ try {
       STATEWRIGHT_NODE_BIN: state.node_executable,
       STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,
       STATEWRIGHT_DESKTOP_MCP_TOKEN: bridge.token,
+      STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL: bridge.poolUrl,
+      STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN: bridge.poolToken,
     },
   });
   const childOutcome = new Promise(resolve => {

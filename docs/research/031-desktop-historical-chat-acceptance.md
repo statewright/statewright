@@ -77,3 +77,78 @@ Rollback is the prior plugin version `0.3.4+codex.20261010152222` and its profil
 reprovisioning, which restores the known empty-home defect. Do not erase either
 profile user-data or the user's existing Codex home. Do not terminate active chats
 to obtain a test result.
+
+## Cross-project resume triage and next repair
+
+User restart reply resolved the previous question: executor connected to rendezvous
+at 16:25:09Z, but XPath thread `01a11c72-6004-7303-8999-594498866e80` was rejected
+at 16:28:38Z by the local same-root guard. Both immutable cwd values are available:
+the registered September 25 list-workflows thread and October 8 XPath thread have
+different generated task folders. Installed bundle/source parity was checked.
+This is a proven directory restriction, not evidence of another active writer.
+The earlier remote chat's eventual success path remains unverified.
+
+Ownership inspection: runtime environment, MCP bridge client ID, route directory,
+and classifier controller are all single-thread scoped. Removing only the cwd
+comparison is unsafe. Decision: preserve the existing per-thread controls behind
+a Desktop protocol dispatcher; discovery reads never adopt or consume a workflow.
+Each selected historical thread receives its own managed identity/runtime/bridge,
+native-confirmed claim, and shared Codex writer lease. Legacy registered thread
+keeps its identity. New threads receive a provisional identity persisted after
+native confirmation. Bridge allocation stays in the pre-sandbox launcher, bound
+to its selected gateway; no credential or public ingress changes.
+
+Scope: new dispatcher and authenticated bridge-pool modules/tests; launcher
+integration; generated Codex bundle and release metadata. Exclude TUI routing,
+shared same-root transfer semantics, server/site/gateway deployments and GUI
+automation. Independent bounded architecture review supplied source constraints;
+independent diff review is still required before install. Validate two different
+projects, failed resumes, exact native response identity, writer contention,
+cross-lane request IDs/approvals, restart mapping, and cleanup. Runtime cap rejects
+new admission explicitly rather than evicting active work.
+
+Budget: provisional observed-only 45 minutes/60 tool calls, one full package gate,
+one independent review plus focused repairs; reserve final third for validation,
+installation and honest handoff. If the protocol boundary cannot be validated,
+leave the last installed repair unchanged and record the failing evidence. No
+live workflow control is available; explicit user fallback remains in force.
+
+## Per-chat repair evidence (2026-10-10)
+
+Implemented a gateway-bound loopback bridge allocator and Desktop stdio dispatcher,
+with isolated runtime, route directory, classifier controller and managed writer
+lease per chat. Discovery does not claim a writer. Historical identities are
+deterministic; provisional new-chat bindings persist before root ownership is
+committed. The previously registered legacy chat retains its identity.
+
+Independent test authors exercised two project roots, failed native resume,
+foreign writer contention, restart binding, approval ID collisions, concurrent
+lane initialization and shutdown. The first dispatcher run exposed a late-success
+shutdown race; the repair checks closure after binding persistence. Independent
+review also identified provisional-binding commit order and silent discovery-only
+global settings writes; both were corrected before installation. These are source
+and protocol checks, not live Desktop acceptance.
+
+The actual bundled signed-app Codex executable passed the opt-in native canary:
+two disposable historical rollouts in different project directories resumed,
+then the first resumed again. No model turn, credentials, user's history or
+active chats were used. Reproduce with `STATEWRIGHT_DESKTOP_CODEX_BIN` pointing to
+the vendor executable and `node plugins/executor/tests/desktop-historical-vendor-canary.mjs`.
+It proves native transport/resume compatibility, not Statewright tool visibility,
+workflow routing, human prompting or computer-use identity in the live GUI.
+
+Bounded limitations: at most 16 resident lanes including discovery; the bridge
+pool retains distinct allocated identities until Desktop exits, so save work and
+restart to reclaim capacity. Thread forks and profile-wide `config/value/write`
+or `config/batchWrite` reject explicitly until supported; per-chat settings remain
+routed to their owner. Native/global configuration synchronization is a remaining
+release limitation, not an accepted silent no-op. Direct legacy broker launches
+without a pool retain the original single-thread contract.
+
+Current candidate: `0.3.4+codex.20261010164648`. Final package gate, installation
+parity and live acceptance status are recorded in the release controller receipt.
+One additional full package rerun was authorized within the same 45-minute
+observed budget because review corrections postdated the first successful run.
+Rollback: reinstall `0.3.4+codex.20261010162105` and reprovision existing profiles;
+preserve the new binding receipts and all user data. That version retains the
+known cross-project resume restriction. No gateway/site/server deployment applies.

@@ -3,9 +3,9 @@ index effb55b..1413ac3 100755
 --- a/plugins/codex/hook.sh
 +++ b/plugins/codex/hook.sh
 @@ -34,6 +34,22 @@ statewright_resolve_node() {
- 
+
  STATEWRIGHT_NODE_RUNTIME=$(statewright_resolve_node || true)
- 
+
 +# Opt-in native Desktop boundary, independent of the selected gateway. Run
 +# before dormant/local-control shortcuts so a finishing turn cannot use them
 +# to perform the destination phase's work on its outgoing model.
@@ -47,7 +47,7 @@ index 64de988..8ac731c 100644
 +  }
    return options;
  }
- 
+
 -async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
 +async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, gracefulHandoff, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
 +  if (gracefulHandoff !== undefined && typeof gracefulHandoff !== "boolean") throw new Error("gracefulHandoff must be boolean");
@@ -311,7 +311,7 @@ index 0affef1..8003721 100644
 +    STATEWRIGHT_CODEX_GRACEFUL_HANDOFF: state.graceful_handoff === true ? "1" : "0",
 +    ...(profile.authUrl ? { STATEWRIGHT_PB_URL: profile.authUrl } : {}) };
  }
- 
+
  export async function startProfileDesktopMcpBridge({ state, environment = process.env, home = homedir(),
 diff --git a/plugins/executor/tests/desktop-workflow-handoff.test.mjs b/plugins/executor/tests/desktop-workflow-handoff.test.mjs
 index e19c920..65c1986 100644
@@ -365,7 +365,7 @@ index e19c920..65c1986 100644
 @@ -113,6 +124,79 @@ async function fixture(t, {nativeSettings = false} = {}) {
      finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
  }
- 
+
 +test("graceful handoff preserves a real final answer and terminal before starting the selected model", async t => {
 +  const f = await fixture(t, {gracefulHandoff: true});
 +  const state = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low");

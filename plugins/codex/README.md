@@ -212,9 +212,11 @@ separate host integrations over the same Statewright service.
 
 On macOS, open a chat that uses the installed Statewright plugin once. Its MCP
 startup quietly provisions **ChatGPT + Statewright** in your user Applications
-folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
-from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
-shim only for that process tree; normal ChatGPT launches are unchanged.
+folder. Open **ChatGPT + Statewright** from Applications, Spotlight, or the
+Dock. Each Statewright Desktop profile has its own ChatGPT user data and Codex
+home, so it can run beside regular ChatGPT without sharing its app-server lane.
+The separate lane may require its own ChatGPT sign-in. Normal ChatGPT launches
+are unchanged.
 
 The macOS plugin artifact includes architecture-specific native dispatchers for
 Apple Silicon and Intel. The dispatcher sends only an exact `app-server`
@@ -267,8 +269,8 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs en
 ```
 
 Production, staging, and development keep separate state, shim, configuration,
-receipt, rollback, credential, and launcher-app paths. Disabling one profile
-removes only artifacts recorded by that profile.
+receipt, rollback, credential, launcher-app, user-data, and Codex-home paths.
+Disabling one profile removes only artifacts recorded by that profile.
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;

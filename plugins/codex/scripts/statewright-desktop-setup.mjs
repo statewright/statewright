@@ -183,7 +183,7 @@ export async function withDesktopLock(statePath, action, { ticketName = `${proce
 function shellQuote(value) { return `'${String(value).replaceAll("'", "'\\''")}'`; }
 function desktopLauncherContents(statePath) {
   return `#!/usr/bin/env node
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -221,6 +221,13 @@ try {
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
   const { connectDesktopProfile, desktopProfileEnvironment, startProfileDesktopMcpBridge } = await import(runtimeUrl);
   const profileEnvironment = await desktopProfileEnvironment(state, process.env);
+  const profile = state.profile ?? "production";
+  if (!["production", "staging", "development"].includes(profile)) throw new Error("Unknown Desktop profile in launcher state.");
+  const laneRoot = join(dirname(statePath), "desktop-lanes", profile);
+  const userDataPath = join(laneRoot, "user-data");
+  const codexHome = join(laneRoot, "codex-home");
+  await mkdir(laneRoot, { recursive: true, mode: 0o700 });
+  await Promise.all([mkdir(userDataPath, { recursive: true, mode: 0o700 }), mkdir(codexHome, { recursive: true, mode: 0o700 })]);
   let bridge;
   try { bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment }); }
   catch (error) {
@@ -228,11 +235,13 @@ try {
     await connectDesktopProfile({ state, environment: profileEnvironment });
     bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment });
   }
-  const child = spawn(state.desktop_executable, [], {
+  const child = spawn(state.desktop_executable, ["--user-data-dir=" + userDataPath], {
     detached: false,
     stdio: "ignore",
     env: {
       ...profileEnvironment,
+      CODEX_HOME: codexHome,
+      CODEX_ELECTRON_USER_DATA_PATH: userDataPath,
       CODEX_CLI_PATH: state.shim_path,
       STATEWRIGHT_NODE_BIN: state.node_executable,
       STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,

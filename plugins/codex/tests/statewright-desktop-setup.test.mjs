@@ -477,12 +477,17 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-generated-app-");
   const recordPath = join(root, "recorded-codex-cli-path");
   try {
-    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" > "$RECORD_PATH"\nsleep 1\n`);
+    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s|%s' "$CODEX_CLI_PATH" "$STATEWRIGHT_DESKTOP_MCP_URL" "$STATEWRIGHT_DESKTOP_MCP_TOKEN" "$STATEWRIGHT_API_KEY" "$STATEWRIGHT_GATEWAY_URL" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$1" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     const record = await enableDesktop({ statePath: state, original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath });
     const launcher = join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright");
-    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example" } });
-    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|fixture-keyring||https://mcp.statewright.ai/mcp`);
+    await execFile(launcher, [], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: recordPath, STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "foreign", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", CODEX_HOME: "/foreign/codex", CODEX_ELECTRON_USER_DATA_PATH: "/foreign/user-data" } });
+    const laneRoot = join(dirname(state), "desktop-lanes", "production");
+    const codexHome = join(laneRoot, "codex-home");
+    const userDataPath = join(laneRoot, "user-data");
+    assert.equal(await readFile(recordPath, "utf8"), `${record.shim_path}|http://127.0.0.1:43123|https://mcp.statewright.ai|fixture-keyring||https://mcp.statewright.ai/mcp|${codexHome}|${userDataPath}|--user-data-dir=${userDataPath}`);
+    assert.equal(existsSync(codexHome), true);
+    assert.equal(existsSync(userDataPath), true);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -491,7 +496,7 @@ test("Staging Desktop connects a missing gateway credential before starting the 
   const marker = join(root, "chatgpt-started");
   const connection = join(root, "connection-started");
   try {
-    await writeFile(app, `#!/bin/sh\nprintf started > "$RECORD_PATH"\nsleep 1\n`);
+    await writeFile(app, `#!/bin/sh\nprintf '%s|%s|%s' "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH" "$1" > "$RECORD_PATH"\nsleep 1\n`);
     await chmod(app, 0o700);
     await writeFile(join(root, "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"), `import { writeFile } from "node:fs/promises";
 let connected = false;
@@ -502,7 +507,9 @@ export async function connectDesktopProfile({ state }) { if (process.env.CONNECT
     const record = await enableDesktop({ statePath: state, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, nativeLauncherCandidate: nativeLauncher });
     await execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: marker, CONNECT_PATH: connection } });
     assert.equal(await readFile(connection, "utf8"), "https://staging.example.test");
-    assert.equal(await readFile(marker, "utf8"), "started");
+    const laneRoot = join(dirname(state), "desktop-lanes", "staging");
+    const userDataPath = join(laneRoot, "user-data");
+    assert.equal(await readFile(marker, "utf8"), `${join(laneRoot, "codex-home")}|${userDataPath}|--user-data-dir=${userDataPath}`);
     assert.equal(record.launcher_kind, "native_dispatcher");
     assert.equal(await readFile(record.shim_path, "utf8"), "native-launcher-fixture\n");
     assert.match(await readFile(record.launcher_path, "utf8"), /spawn\(state\.desktop_executable/);

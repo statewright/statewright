@@ -492,8 +492,9 @@ export class BindingLedger {
 }
 
 export class DurableOutbox {
-  constructor(path) {
+  constructor(path, { onUsageAppended = () => {} } = {}) {
     this.path = path;
+    this.onUsageAppended = onUsageAppended;
     this.events = new Map();
     this.acked = new Set();
     this.seenEventIds = new Set();
@@ -610,6 +611,7 @@ export class DurableOutbox {
     appendDurably(this.path, { kind: "event", event });
     this.events.set(event.event_id, event);
     this.#remember(event.event_id);
+    this.onUsageAppended(event);
     return { event, duplicate: false };
   }
 
@@ -728,6 +730,7 @@ export class DurableOutbox {
 export class DurableLogOutbox {
   constructor(path) {
     this.path = path;
+    this.sourceSequence = 0;
     this.events = new Map();
     this.acked = new Set();
     this.seenEventIds = new Set();
@@ -735,10 +738,12 @@ export class DurableLogOutbox {
     for (const record of readJsonLines(path)) {
       if (record?.kind === "event" && record.event?.event_id) {
         this.events.set(record.event.event_id, record.event);
+        this.sourceSequence = Math.max(this.sourceSequence, count(record.event.sequence));
         this.#remember(record.event.event_id);
       } else if (record?.kind === "ack" && record.event_id) {
         this.acked.add(record.event_id);
       } else if (record?.kind === "checkpoint") {
+        this.sourceSequence = Math.max(this.sourceSequence, count(record.source_sequence));
         for (const eventId of record.seen_event_ids ?? []) this.#remember(eventId);
       }
     }
@@ -756,6 +761,7 @@ export class DurableLogOutbox {
   append(event) {
     if (this.seenEventIds.has(event.event_id)) return { event: this.events.get(event.event_id) ?? null, duplicate: true };
     appendDurably(this.path, { kind: "event", event });
+    this.sourceSequence = Math.max(this.sourceSequence, count(event.sequence));
     this.events.set(event.event_id, event);
     this.#remember(event.event_id);
     return { event, duplicate: false };
@@ -788,7 +794,7 @@ export class DurableLogOutbox {
   compact() {
     const pending = this.pending();
     const records = [
-      { kind: "checkpoint", seen_event_ids: this.recentEventIds },
+      { kind: "checkpoint", seen_event_ids: this.recentEventIds, source_sequence: this.sourceSequence },
       ...pending.map((event) => ({ kind: "event", event })),
     ];
     const temporary = `${this.path}.tmp-${process.pid}`;
@@ -1084,9 +1090,21 @@ export class LocalTelemetryService {
     mkdirSync(scopedDataDir, { recursive: true, mode: 0o700 });
     this.scopedDataDir = scopedDataDir;
     this.bindings = new BindingLedger(join(scopedDataDir, "bindings.jsonl"));
-    this.outbox = new DurableOutbox(join(scopedDataDir, "outbox.jsonl"));
+    this.liveProjectionCandidates = new Map();
+    this.outbox = new DurableOutbox(join(scopedDataDir, "outbox.jsonl"), {
+      onUsageAppended: event => {
+        if (gatewayUrl) this.liveProjectionCandidates.set(event.event_id, event);
+      },
+    });
     this.logOutbox = new DurableLogOutbox(join(scopedDataDir, "tool-logs.jsonl"));
     this.liveUsageOutbox = new DurableLogOutbox(join(scopedDataDir, "live-usage-outbox.jsonl"));
+    // One recovery pass at startup; subsequent drains only inspect a bounded
+    // page, including when primary delivery remains unavailable indefinitely.
+    for (const event of this.outbox.events.values()) {
+      if (gatewayUrl && !this.outbox.acked.has(event.event_id) && event.sequence > this.liveUsageOutbox.sourceSequence) {
+        this.liveProjectionCandidates.set(event.event_id, event);
+      }
+    }
     this.liveUsageQuarantine = new BoundedDiagnosticLog(join(scopedDataDir, "live-usage-quarantine.jsonl"));
     this.pendingBindings = new PendingBindingLedger(
       join(scopedDataDir, "pending-bindings.jsonl"),
@@ -1283,11 +1301,16 @@ export class LocalTelemetryService {
 
   async flush() {
     const pending = this.outbox.pendingCount() + this.logOutbox.pendingCount();
-    if (this.primaryFlushing || !this.apiKey) return { delivered: 0, pending };
+    if (!this.apiKey) return { delivered: 0, pending };
+    if (this.primaryFlushing) {
+      await this.flushLive();
+      return { delivered: 0, pending };
+    }
     const nextAttemptAt = this.delivery.next_attempt_at
       ? new Date(this.delivery.next_attempt_at).getTime()
       : 0;
     if (nextAttemptAt > Date.now()) {
+      await this.flushLive();
       return { delivered: 0, pending, deferred: true };
     }
     this.primaryFlushing = true;
@@ -1310,6 +1333,7 @@ export class LocalTelemetryService {
           // Queue the live projection before acknowledging PocketBase so a
           // crash between the two destinations cannot lose the live update.
           this.liveUsageOutbox.append(event);
+          this.liveProjectionCandidates.delete(event.event_id);
         }
         try {
           const response = await fetchWithTimeout(
@@ -1348,6 +1372,7 @@ export class LocalTelemetryService {
           break;
         }
         this.outbox.acknowledge(event.event_id);
+        this.liveProjectionCandidates.delete(event.event_id);
         delivered += 1;
       }
       for (const log of this.logOutbox.pending(this.maxDrainEvents - attempted)) {
@@ -1407,6 +1432,21 @@ export class LocalTelemetryService {
 
   async flushLive() {
     if (this.liveFlushing || !this.apiKey || !this.gatewayUrl) return;
+    // Recover/project independently of PocketBase progress, in source order.
+    // The watermark is persisted with the live outbox (including compaction),
+    // so an indefinitely failing primary cannot repeatedly refill old batches.
+    let inspected = 0;
+    const projectionDeadline = Date.now() + this.maxDrainMs;
+    for (const event of this.liveProjectionCandidates.values()) {
+      if (inspected++ >= this.maxDrainEvents || Date.now() >= projectionDeadline) break;
+      if (event.sequence > this.liveUsageOutbox.sourceSequence &&
+          event.event === "provider_token_usage" && event.run_id && event.run_session_id &&
+          event.state_budget?.state && event.state_budget?.state_epoch &&
+          event.state_budget?.precision !== "unavailable") {
+        this.liveUsageOutbox.append(event);
+      }
+      this.liveProjectionCandidates.delete(event.event_id);
+    }
     const nextAttemptAt = this.liveDelivery.next_attempt_at
       ? new Date(this.liveDelivery.next_attempt_at).getTime()
       : 0;

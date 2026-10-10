@@ -2,9 +2,15 @@
   "schema": "statewright-model-repair-candidate/v1",
   "artifact_id": "model-observed-route-20261003-210723",
   "producer": "existing Statewright model-repair owner",
-  "classification": "internal",
-  "repo": {"path": "/Users/ben/dev/statewright", "branch": "main"},
-  "run": {"workflow": null, "status": "inactive", "session_id": "01a0e95c-3993-7eb1-a562-0b3991eb2858"},
+  "classification": "public",
+  "repo": {
+    "path": ".",
+    "branch": "main"
+  },
+  "run": {
+    "workflow": null,
+    "status": "inactive"
+  },
   "prepared_at": "2026-10-03T21:07:23Z",
   "package_version": "0.3.4+codex.20261003210723",
   "base": "85bc601e9c3f87865e9040cf450df78ec53221b0",
@@ -33,13 +39,6 @@
   ],
   "package_input_count": 117,
   "package_inputs_sha256": "c35bc8a60b02e2e822f6932e04ac1b7565391c3688d0b20fb45722303df9106d",
-  "companion_unchanged": {
-    "head": "2c70fed89a3badccd54692862c885dc6bb886c87",
-    "index_tree": "f3949617b8df002139819e44152dd4a95467b4d3",
-    "staged_diff_sha256": "3c6bbc15a9a0f086c051088a251ab813cb042a5029f2ad4f2ea79e50acbffe50",
-    "tracked_diff_sha256": "8923d9510b504292bdf61114f7ba69a1b15f151ca96ced4ed4347065569264e8",
-    "provider_sha256": "0b17f4b0d8968a9dee6d612eec5ea113b0ef68f7a5a54353a9f497b388ffb85c"
-  },
   "installed_version": "0.3.4+codex.20261003153800",
   "installed_files": [
     {
@@ -78,5 +77,6 @@
     "bundle_check": "passed",
     "diff_check": "passed",
     "live_acceptance": "pending_install_and_exact_review"
-  }
+  },
+  "redaction_note": "Public copy omits personal session identity and unrelated repository fingerprints; source/package validation values are historical and unchanged."
 }

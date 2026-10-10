@@ -4,11 +4,15 @@ Prepared 2026-10-03, existing model-repair owner. Canonical Statewright `main`, 
 
 ## Observed failure and causal reproduction
 
-The preceding real `ascodex` canary in pane `death-rebirth:10.1` / thread `01a1022d-52ed-7241-ba95-b257074019a5` failed on installed `0.3.4+codex.20261003153800`. Run `5505eb4e-6387-4b33-b8e6-304c62a89546` actually executed Terra/medium and reached `complete`. The following native turn still executed Terra/medium. This is prior live evidence, not a live execution of this repair.
+A preceding installed-client canary executed the workflow on Terra/medium,
+reached its terminal state, then incorrectly retained Terra/medium for the next
+ordinary turn. This is historical evidence, not live execution of this repair.
 
-Route confirmation event `ae20cff8-12ca-4a10-94a1-33d05c015df4` at 20:44:45.046Z recorded actual provider `openai`, model `gpt-5.6-terra`, effort `medium`, tier `priority`. The durable ownership store instead received the request: bare model and a manufactured null tier. Restore event `2e181505-f2bc-4338-ad01-d94368c9ec99` at 20:45:12.591Z compared qualified `openai-codex/gpt-5.6-terra` / actual priority against that record, falsely reported `preserved_manual_override`, and relinquished the origin. No manual selection occurred until cleanup after the failed next turn.
-
-Sources: `~/.statewright/telemetry/codex-routing.jsonl`, the QA thread's 2026-10-03 rollout, and the preserved [live failure receipt](../../../.agent-worktrees/model-terminal-fallback-20261003/docs/research/027-model-rebound/pane10-restoration-20261003-2047.md). The QA session was manually returned to Sol/high afterward; that is cleanup, not an automatic-restoration pass.
+Native confirmation recorded the actual qualified provider/model/effort/tier.
+The ownership store instead retained the requested bare model and a manufactured
+null tier. Restoration treated that representation mismatch as a manual override
+and relinquished the original route. The later manual model reset was cleanup,
+not a successful automatic-restoration test.
 
 Fresh discriminant before the fix: 15 existing cases passed; **bare-model**, **inherited-tier**, and the combined **native-canary** failed. Actual versus expected stored routes:
 
@@ -24,8 +28,6 @@ The only runtime logic change is in the shared TUI/Desktop App Server proxy's `t
 
 No string-equality guard, manual override rule, lifecycle/finality proof, owner/thread/run/session binding, epoch, lease, or native settings-confirmation requirement was weakened. No forced Sol selection or fallback was added. The original tuple remains the captured user's tuple, not a hardcoded model.
 
-Companion audit: `scripts/provider-proxy.mjs` already qualifies the pending route and pins its tier before matching native confirmation (lines685–689 and1387–1402 in inspected canonical source). It does not exhibit these two representation mismatches. Its dirty canonical source and index were not edited. This is not a claim of a comprehensive companion audit.
-
 Owned delivery paths:
 
 - `plugins/executor/lib/codex-app-server-route-proxy.mjs`
@@ -33,11 +35,11 @@ Owned delivery paths:
 - generated `plugins/codex/scripts/lib/desktop-runtime/codex-app-server-route-proxy.mjs`
 - `plugins/codex/.codex-plugin/plugin.json`, prepared identity `0.3.4+codex.20261003210723`
 
-[candidate.json](candidate.json) contains all four preimage/postimage SHA256 values, binary-safe code diff SHA256 `09878cc56e23fd01c0535b55c940aa54ff4722c0a96a110941575bbb21aabe0b`, the 117 **tracked** package-input fingerprint (not a claim about ignored dependency bytes), installed old-package hashes, and untouched companion index/source fingerprints. Packet documentation is separate from that four-path code digest. No new worktree was created.
+[candidate.json](candidate.json) contains all four preimage/postimage SHA256 values, binary-safe code diff SHA256 `09878cc56e23fd01c0535b55c940aa54ff4722c0a96a110941575bbb21aabe0b`, the 117 **tracked** package-input fingerprint (not a claim about ignored dependency bytes), and installed old-package hashes. Packet documentation is separate from that four-path code digest. No new worktree was created.
 
 ## Fresh validation
 
-All cwd values below: `/Users/ben/dev/statewright`. These are local unit/WebSocket protocol/launcher fixtures, not actual native UI acceptance.
+All cwd values below: `<statewright-checkout>`. These are local unit/WebSocket protocol/launcher fixtures, not actual native UI acceptance.
 
 1. Red: `node --test --test-name-pattern='App Server restores the original native settings at turn end' plugins/executor/tests/codex-app-server-transport.test.mjs` — exit1, 15 passed / 3 failed, exact discriminants above.
 2. Same focused command after correction — exit0, 18 passed. Tests subsequently expanded.
@@ -51,8 +53,8 @@ No full repository/executor suite claim. Earlier full-suite onboarding/scrub fai
 
 ## Review and single delivery boundary
 
-This is a new exact candidate; earlier candidate approvals do not authorize silently substituting these bytes. Required review: this four-path diff and prepared package, then one coordinated supported install and normal `ascodex` acceptance. No installation, restart, release, or deployment occurred in this turn. Fresh disk hashes still show installed153800 with the faulty proxy; pane10 remains the same QA pane. No current gateway change or verification is claimed.
+This is a new exact candidate; earlier candidate approvals do not authorize silently substituting these bytes. Required review: this four-path diff and prepared package, then one coordinated supported install and normal `ascodex` acceptance. No installation, restart, release, or deployment occurred in this turn. Fresh disk hashes still show installed153800 with the faulty proxy; the original QA session was preserved. No current gateway change or verification is claimed.
 
 After approval: revalidate frozen source/package hashes, perform the normal one-shot package installation, verify installed bytes, then normal idle quit/resume through **ascodex only** in the bound QA pane. Preserve unrelated active sessions; handle any native hook trust at its actual human gate. Load the existing small workflow while QA is idle, start a genuinely new routed turn, and record native original → Terra → original settings plus a subsequent original-model turn. Repeat deactivation and manual/pause preservation as scoped; test staging Desktop with the same shared package. An in-turn workflow load or fixture receipt cannot substitute for a real routed turn.
 
-Rollback before installation: revert only this isolated model-repair commit, not companion data. After installation, use the supported version/lifecycle path; never fabricate old-cache paths or delete origin markers. The prior version has a demonstrated defect and is not a known-good acceptance target. No automatic recovery of already-relinquished old provenance is attempted; such an origin must not be invented.
+Rollback before installation: revert only this isolated model-repair commit. After installation, use the supported version/lifecycle path; never fabricate old-cache paths or delete origin markers. The prior version has a demonstrated defect and is not a known-good acceptance target. No automatic recovery of already-relinquished old provenance is attempted; such an origin must not be invented.

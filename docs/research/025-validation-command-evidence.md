@@ -2,7 +2,7 @@
 
 ## Contract
 
-Canonical `/Users/ben/dev/statewright`, `main`, base `2498471b191c03cf6f04edd7e565204334d4a74e`; initial tree clean. The user explicitly authorized working without Statewright while repairing its classifier. The preceding run `e8bc067c-53d7-419a-a431-3e4e82d05f5f` ended blocked at design. No denied Nomad command is to be replayed before repaired admission. Production, credentials, approval-policy expansion, and Nomad edits are excluded.
+Canonical `<statewright-checkout>`, `main`, base `2498471b191c03cf6f04edd7e565204334d4a74e`; initial tree clean. The user explicitly authorized working without Statewright while repairing its classifier. A preceding run ended blocked at design. No denied command is to be replayed before repaired admission. Production, credentials, approval-policy expansion, and other-project edits are excluded.
 
 Use the existing native adapter boundary to collect fresh local structural evidence, expand static Taskfile/package-script commands, verify project-local runner resolution, and classify every resulting execution unit. Never infer locality from task names. Never execute a manifest to inspect it. Unsupported dynamic configuration, cycles, paths outside the workspace, missing runners, malformed evidence, and untrusted tool provenance remain unresolved. The local OS account and managed plugin remain trusted, as with the existing Git closeout helper; this is not attestation against a malicious same-user process.
 
@@ -11,9 +11,10 @@ Evidence is bound to the original command and working directory, collected for e
 ## Findings
 
 - The prior shim-only `task test:unit` check did not exercise gateway classification.
-- Nomad's `test:unit` wraps `npx vitest run {{.CLI_ARGS}}`.
-- Nomad's global `VERSION` shell variable can create `.version`; global environment values reference it. A static task-body-only resolver would miss this effect.
-- Nomad currently has `node_modules/.bin/vitest` and `node_modules/vitest/package.json`.
+- Regression fixtures cover task wrappers around package-script commands.
+- Task-global shell/environment evaluation can add effects absent from the
+  task body; a static task-body-only resolver must leave those cases unresolved.
+- Verified project-local runner resolution is required.
 - ADR 018 explicitly deferred opaque Taskfile resolution pending manifest inspection.
 - Prior local history counts identify task wrappers, npx runners, package scripts, Cargo options, and Python/Go/Make/Just wrappers as recurring families. Counts are frequency signals, not authority; raw history remains private and uncommitted.
 
@@ -51,7 +52,7 @@ in the executor lockfile, bundled with pinned `esbuild@0.28.2` and upstream ISC
 license. npm local-bin precedence was checked against the installed
 `/opt/homebrew/lib/node_modules/npm/node_modules/libnpmexec/lib/index.js`.
 
-Read-only collection against the actual Nomad checkout found complete local
+Read-only collection against a project checkout (name omitted) found complete local
 evidence for the exact focused `npx vitest run` command (one execution unit,
 three file hashes). `task test:unit` remains incomplete with
 `task_global_effects_unresolved` (one manifest hash). Neither command was
@@ -67,7 +68,7 @@ Implementation commit: `f04e96a` on canonical `main`. Candidate bundle:
 `0.3.4+codex.20261002033943`. At 2026-10-02T03:39Z onward, the supported
 `codex plugin add statewright@personal --json` control returned success for
 that version. Its source is the existing personal marketplace entry pointing
-to `/Users/ben/dev/statewright/plugins/codex`. No credentials were supplied or
+to `<statewright-checkout>/plugins/codex`. No credentials were supplied or
 printed, no OAuth flow was invoked, and no resident process was restarted.
 
 Independent SHA-256 calculation confirmed source and installed-cache matches:
@@ -88,16 +89,6 @@ directly from the committed plugin subtree; SHA-256:
 The first shasum attempt failed due to the inherited invalid locale; the same
 command succeeded with `LC_ALL=C`. This was not a policy denial.
 
-The cache is shared with the desktop, but successful installation does not
-prove any already-running app server loaded these bytes. Live staging still
-reports gateway `release-2498471`, application/server `release-4608248`, all
-with one ready replica. No new staging pass, runtime swap or deployment is
-claimed. A gateway-only staging replacement is prohibited: the next deployment
-must use the full-tree release lane, followed by affected-session refresh and
-actual admission verification. Do not treat this source/install receipt as
-authority to interrupt unrelated sessions.
-
-Read-only pane inspection confirms `death-rebirth:3.1`, pane `%4`, cwd
-`/Users/ben/dev/nomad`, pane PID `6437`. The pane records run
-`27405ade-a33d-49e3-8381-d25b339d7a75` terminal blocked after the two test
-denials. No keys were sent, workflow loaded, test replayed, or Nomad file edited.
+The cache is shared with Desktop, but installation does not prove that an
+already-running App Server loaded these bytes. Source/install evidence is not
+staging acceptance or authority to interrupt unrelated sessions.

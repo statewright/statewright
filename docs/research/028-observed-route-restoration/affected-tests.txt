@@ -1,5 +1,6 @@
+Public excerpt: local checkout path and infrastructure-specific test labels redacted; historical counts unchanged.
 Command: node --test plugins/executor/tests/codex-app-server-transport.test.mjs plugins/executor/tests/workflow-route-origin.test.mjs plugins/executor/tests/app-server-handoff-proxy.test.mjs plugins/executor/tests/app-server-handoff.test.mjs plugins/executor/tests/codex-desktop-app-server-launcher.test.mjs plugins/codex/tests/statewright-codex-tui.test.mjs plugins/codex/tests/desktop-runtime-bundle.test.mjs
-Cwd: /Users/ben/dev/statewright
+Cwd: <statewright-checkout>
 Exit: 0
 Captured continuation output; first four passing test lines were returned in the initial execution result. Counts below are the runner's complete summary, not an inferred sum.
 ✔ transition refresh publishes the next managed route under a hostile inherited locale (1801.203292ms)
@@ -64,7 +65,7 @@ Captured continuation output; first four passing test lines were returned in the
 [statewright] App Server ready at ws://127.0.0.1:62673; upstream ws://127.0.0.1:62666.
 ✔ Standalone App Server starts without any local-model configuration (214.520667ms)
 [statewright] App Server ready at ws://127.0.0.1:62681; upstream ws://127.0.0.1:62675.
-✔ App Server starts with the installed Casa Qwen provider and merged catalog (211.147375ms)
+✔ App Server starts with the installed configured Qwen provider and merged catalog (211.147375ms)
 ✔ resident App Server state is stable per managed client and keeps routes outside the transient launcher (0.126459ms)
 ✔ resident App Server accepts routes only for the attached root session (9.231917ms)
 ✔ resident App Server keeps retry route filenames bounded across repeated releases (7.635833ms)
@@ -118,7 +119,7 @@ Captured continuation output; first four passing test lines were returned in the
 ✔ a terminal marker without matching provenance is a receipt-backed no-op (1.223541ms)
 ✔ App Server routing synchronizes Desktop collaboration mode without crossing threads (0.127583ms)
 ✔ App Server routing preserves the Statewright-selected provider route (0.05325ms)
-✔ App Server routing converts the Casa workflow route into the installed Qwen provider (0.049875ms)
+✔ App Server routing converts a configured workflow route into the installed Qwen provider (0.049875ms)
 ✔ App Server expands the plugin root only for trusted plugin hook commands (0.107084ms)
 ✔ App Server preserves an explicit thread/list cwd but global discovery passes no scope (0.059833ms)
 ✔ resume rows replace stale titles with only the original directory and last submitted input (0.201583ms)
@@ -136,7 +137,7 @@ Captured continuation output; first four passing test lines were returned in the
 ✔ App Server route proxy reserves a pending route until forwarding acknowledges it (28.187417ms)
 ✔ App Server route proxy quarantines a route after post-forward acknowledgement failure (25.521959ms)
 ✔ App Server route proxy injects one pending route and records the server receipt (53.548709ms)
-✔ App Server route proxy switches an idle OpenAI thread to Casa Qwen before forwarding the next turn (14.831791ms)
+✔ App Server route proxy switches an idle OpenAI thread to configured Qwen before forwarding the next turn (14.831791ms)
 ✔ App Server route rejection keeps the native connection usable (8.291833ms)
 ✔ App Server route proxy binds a bare-picker selection and refreshes labels on subsequent lists (2.646916ms)
 ✔ App Server thread/start binds ownership before reporting native success and fails closed on conflict (1.903209ms)

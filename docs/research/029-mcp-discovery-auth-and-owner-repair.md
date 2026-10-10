@@ -33,7 +33,7 @@ Observed-only budget: 90 minutes preparation/validation, 60 bounded calls before
 
 ## Test ledger (executed here, not inherited release evidence)
 
-All commands ran in `/Users/ben/dev/statewright/.agent-worktrees/staging-full-tree-source`.
+All commands ran in `<statewright-checkout>`.
 
 1. Initial focused run: 16 passed / 1 failed. Existing bridge test expected upstream HTTP 500 passthrough; changed contract returns a JSON-RPC error over a successful bridge HTTP transport, retaining upstream status and forbidding replay. Assertion updated to that explicit contract.
 2. Expanded focused run: 82 passed / 1 failed. Existing fake curl omitted the newly consumed HTTP status writeout, producing transport-unavailable. Fixture now emits body plus status. Subsequent focused run: 87/87 passed.
@@ -49,7 +49,7 @@ node --test plugins/executor/tests/*.test.mjs plugins/codex/tests/*.test.mjs plu
 
 **922 passed, 0 failed, 0 skipped/cancelled; exit 0; 57.292 seconds.** This includes the final typed-auth discriminator and isolated parity fixture. Generated Codex and Claude bundle checks and shell syntax passed again afterward. This is the affected-suite gate, not the entire multi-platform release gate.
 
-Canonical Statewright's tracked binary diff independently remains SHA256 `1e78270c160a69f1be21c54181441e5e798313ff6594249ce719b9e5e1dc8dc9`; cached diff remains empty (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`), matching the earlier installation receipt. Existing canonical untracked files and Auldwyrm documents/receipts were not edited. No companion or Nomad edits.
+Canonical Statewright's tracked binary diff independently remains SHA256 `1e78270c160a69f1be21c54181441e5e798313ff6594249ce719b9e5e1dc8dc9`; cached diff remains empty (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`), matching the earlier installation receipt. Unrelated files and other checkouts were not edited.
 
 ## Test isolation incident and containment
 

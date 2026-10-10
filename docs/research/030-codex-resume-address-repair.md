@@ -87,7 +87,7 @@ Model-token usage is unavailable; no provider-execution evidence is inferred
 from routing or local fixtures.
 
 The source worktree was clean at the base. Unrelated changes in the canonical
-Statewright checkout and Auldwyrm were preserved. No push, tag, production
+Statewright checkout and other repositories were preserved. No push, tag, production
 deployment, resident termination, real conversation replay, or model turn is
 part of this repair. Actual resume and subsequent user interaction remain a
 user-owned acceptance boundary; the native canary proves address parsing and

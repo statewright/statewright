@@ -22,8 +22,8 @@ scope instead of speculative broker rewrites. No provider-token counter availabl
 
 ## Evidence and corrected diagnosis
 
-- Desktop log `codex-desktop-a1c62371-1721-417a-bfc6-fe68f1b348ec-69341-t0-i1-152813-0.log`
-  on aerith, 2026-10-10: thread `01a121d2-efaf-7037-be00-25ff2f9610fa`
+- Desktop log `codex-desktop-[redacted-id]-69341-t0-i1-152813-0.log`
+  on the test workstation, 2026-10-10: thread `[redacted-id]`
   successfully resumed on `hostId=durable` at 16:07:37Z; `turn/start` succeeded
   at 16:07:46Z. Local denials concerned `thread/attachment/list`, not that resume.
 - The same log repeatedly reports local Work executor registration failure due to
@@ -33,9 +33,8 @@ scope instead of speculative broker rewrites. No provider-token counter availabl
   `-32603 Internal error` during the preceding audit; `list_workflows` reproduced
   that error in this repair turn. No workflow mutation was attempted. Underlying
   connector cause is still unproven; local-home repair does not establish its fix.
-- Live staging has both an internal MCP ingress and a public plugin ingress
-  routing `/mcp` to the gateway. Do not assume private-only reachability explains
-  the connector error, and do not modify ingress based on that assumption.
+- Connector reachability must be verified independently. The local-home repair
+  does not diagnose or authorize changes to server ingress.
 
 ## Launcher correction
 
@@ -81,9 +80,9 @@ to obtain a test result.
 ## Cross-project resume triage and next repair
 
 User restart reply resolved the previous question: executor connected to rendezvous
-at 16:25:09Z, but XPath thread `01a11c72-6004-7303-8999-594498866e80` was rejected
+at 16:25:09Z, but a historical thread `[redacted-id]` was rejected
 at 16:28:38Z by the local same-root guard. Both immutable cwd values are available:
-the registered September 25 list-workflows thread and October 8 XPath thread have
+the registered original thread and later historical thread have
 different generated task folders. Installed bundle/source parity was checked.
 This is a proven directory restriction, not evidence of another active writer.
 The earlier remote chat's eventual success path remains unverified.
@@ -156,8 +155,8 @@ known cross-project resume restriction. No gateway/site/server deployment applie
 ## Handshake regression triage (2026-10-10)
 
 User's next normal-launch test reported `Desktop initialization has not completed`.
-Signed Desktop PID 41707 logged successful native initialization at 16:56:05.334Z
-in `codex-desktop-51e8531f-b1ab-4cc6-b3d3-3802ab9dba63-41707-t0-i1-165604-0.log`.
+Signed Desktop PID [redacted] logged successful native initialization at 16:56:05.334Z
+in `codex-desktop-[redacted-id]-41707-t0-i1-165604-0.log`.
 The installed app's `AppServerConnection.completeInitialization` proceeds on that
 response without sending the separate `initialized` notification. The dispatcher
 instead unlocked only on that notification. Prior canary explicitly sent it,
@@ -205,8 +204,8 @@ normal-launch test still determines live acceptance.
 
 ## MCP discovery PATH failure (2026-10-10)
 
-The next user test resolved the pending question: XPath resume succeeded. Desktop
-PID 97502 logged successful `thread/resume` at 17:05:24.456Z, but `turn/start`
+The next user test resolved the pending question: historical-chat resume succeeded. Desktop
+PID [redacted] logged successful `thread/resume` at 17:05:24.456Z, but `turn/start`
 failed at 17:06:29Z because Statewright MCP discovery never became ready. The
 decisive read-only Codex SQLite log rows (17:05:25Z and 17:05:54Z, target
 `codex_rmcp_client::stdio_server_launcher`) contain
@@ -270,7 +269,7 @@ connection and `detail: toolsAndAuthOnly` is supported. Scope required readiness
 to the Statewright server instead of repeatedly discovering all optional servers.
 Do not extend the readiness timeout or admit a turn without the required tool.
 
-Evidence input: controller receipt `499ce9f` records the successful resume/MCP
+Evidence input: the historical acceptance receipt records the successful resume/MCP
 startup, subsequent lane error, and isolated delayed-response reproduction. The
 live leaked ID was not recorded; causal matching is an inference, reproduction
 of the leak is observed. No need to repeat live user turns during development.

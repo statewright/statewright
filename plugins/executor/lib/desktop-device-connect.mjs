@@ -8,6 +8,8 @@ const execFile = promisify(execFileCallback);
 const DEVICE_CLIENT_ID = "statewright-codex";
 const DEVICE_SCOPE = "mcp";
 const FETCH_TIMEOUT_MS = 15_000;
+// A modal dialog may land on a monitor the user cannot see. It must not gate device polling.
+const CONNECT_DIALOG_SECONDS = 12;
 
 function connectionError(message, code) {
   const error = new Error(message);
@@ -46,10 +48,10 @@ async function showConnectDialog({ profile, userCode, verificationUrl }) {
   try {
     await execFile("/usr/bin/osascript", [
       "-e", "on run argv",
-      "-e", "display dialog (item 1 of argv) buttons {\"Cancel\", \"Continue\"} default button \"Continue\" with title (item 2 of argv)",
+      "-e", `display dialog (item 1 of argv) buttons {"Cancel", "Continue"} default button "Continue" with title (item 2 of argv) giving up after ${CONNECT_DIALOG_SECONDS}`,
       "-e", "end run",
       message, app,
-    ], { timeout: 120_000 });
+    ], { timeout: (CONNECT_DIALOG_SECONDS + 8) * 1000 });
   } catch (error) {
     if (error?.code === 1) throw connectionError("Statewright connection was cancelled.", "DESKTOP_CONNECT_CANCELLED");
     throw connectionError("Statewright could not show the connection dialog.", "DESKTOP_CONNECT_UI");
@@ -80,7 +82,13 @@ export async function connectDesktopProfile({ state, environment = process.env, 
   const authorization = authorizationDetails(codeRequest.body);
   verificationUrl.searchParams.set("user_code", authorization.user_code);
 
-  await showDialog({ profile: state.profile, userCode: authorization.user_code, verificationUrl: verificationUrl.href });
+  try {
+    await showDialog({ profile: state.profile, userCode: authorization.user_code, verificationUrl: verificationUrl.href });
+  } catch (error) {
+    // The informational dialog is not authorization. If macOS cannot show it,
+    // keep the real browser approval path available; only an explicit Cancel stops us.
+    if (error.code !== "DESKTOP_CONNECT_UI") throw error;
+  }
   await openBrowser(verificationUrl.href);
 
   const deadline = now() + authorization.expires_in * 1000;

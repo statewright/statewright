@@ -113,6 +113,35 @@ test("Desktop OAuth keeps waiting through a transient token-poll network failure
   assert.equal(stores, 1);
 });
 
+test("an unavailable informational dialog does not block browser approval or polling", async t => {
+  const { home, state } = await fixture(t);
+  const events = [];
+  let polls = 0;
+  await connectDesktopProfile({ state, home, environment: {}, now: () => 0, sleep: async () => {},
+    showDialog: async () => { const error = new Error("dialog unavailable"); error.code = "DESKTOP_CONNECT_UI"; throw error; },
+    openBrowser: async () => { events.push("browser"); },
+    fetchImpl: async url => {
+      if (url.endsWith("/api/oauth/device/code")) return Response.json(device);
+      if (url.endsWith("/api/oauth/device/token")) { polls++; return Response.json({ token_type: "Bearer", access_token: key }); }
+      return Response.json({ items: [] });
+    },
+    storeCredential: async () => { events.push("stored"); }, readCredential: async () => key,
+  });
+  assert.deepEqual(events, ["browser", "stored"]);
+  assert.equal(polls, 1);
+});
+
+test("explicitly cancelling the informational dialog stops before browser approval", async t => {
+  const { home, state } = await fixture(t);
+  let browserOpened = false;
+  await assert.rejects(connectDesktopProfile({ state, home, environment: {},
+    showDialog: async () => { const error = new Error("cancelled"); error.code = "DESKTOP_CONNECT_CANCELLED"; throw error; },
+    openBrowser: async () => { browserOpened = true; },
+    fetchImpl: async url => { assert.ok(url.endsWith("/api/oauth/device/code")); return Response.json(device); },
+  }), { code: "DESKTOP_CONNECT_CANCELLED" });
+  assert.equal(browserOpened, false);
+});
+
 test("Desktop OAuth denial does not store a credential", async t => {
   const { home, state } = await fixture(t);
   let stores = 0;

@@ -126,6 +126,35 @@ test("Desktop bridge owns gateway authentication outside the App Server sandbox"
   assert.ok(bridge);
 });
 
+test("Desktop canonical MCP profile delivers live usage to the gateway API base", async t => {
+  const home = await mkdtemp(join(tmpdir(), "desktop-usage-endpoint-"));
+  t.after(() => rm(home, {recursive: true, force: true}));
+  await mkdir(join(home, ".statewright"));
+  await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({gateways: {
+    staging: {gateway_url: "https://gateway.test/prefix/mcp", auth_url: "https://site.test"},
+  }}));
+  let service;
+  await startProfileDesktopMcpBridge({home, state: {gateway_url: "https://gateway.test/prefix/mcp", client_id: "lane"},
+    environment: {}, getCredential: async () => "fixture-key",
+    startBridge: options => startDesktopMcpBridge({...options, bridgeFactory: config => {
+      service = config.nativeUsage; return {start: async () => {}};
+    }}),
+  });
+  assert.equal(service.gatewayUrl, "https://gateway.test/prefix");
+  const urls = [];
+  service.fetchImpl = async (url, options) => {
+    urls.push(url);
+    const body = JSON.parse(options.body);
+    return url.endsWith("/api/runtime-usage") ? new Response(null, {status: 204})
+      : Response.json({accepted_event_ids: body.events.map(e => e.event_id)});
+  };
+  service.outbox.appendUsage({event_id: "endpoint-fixture", conversation_id: "thread", provider: "openai",
+    model: "gpt-6-sol", effort: "high", precision: "exact", token_usage_delta: {total_tokens: 1}},
+  {run_id: "run", run_session_id: "session", state: "baseline", state_epoch: 1});
+  await service.flush();
+  assert.ok(urls.includes("https://gateway.test/prefix/api/runtime-usage"));
+});
+
 test("Desktop classifier state uses only the selected authenticated bridge", async () => {
   let observed;
   const state = { run_id: "run-one", state: "implement", state_epoch: 2 };

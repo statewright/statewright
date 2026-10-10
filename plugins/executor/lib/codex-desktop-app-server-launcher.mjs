@@ -14,6 +14,8 @@ import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { startDesktopBridgePool } from "./desktop-bridge-pool.mjs";
 import { runDesktopMultichatRuntime } from "./desktop-multichat-runtime.mjs";
 import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
+import { LocalTelemetryService } from "./local-telemetry-agent.mjs";
+import { projectDesktopUsage } from "./desktop-native-usage.mjs";
 export { connectDesktopProfile } from "./desktop-device-connect.mjs";
 
 // The selected Desktop record owns the endpoint. A shell's profile or explicit
@@ -31,7 +33,7 @@ export async function startProfileDesktopMcpBridge({ state, environment = proces
   const selected = await desktopProfileEnvironment(state, environment, home);
   // Do not trigger legacy migration or interactive OAuth from a GUI launch.
   const apiKey = await getCredential(selected.STATEWRIGHT_GATEWAY_URL, { environment: selected, home });
-  const createBridge = clientId => startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId });
+  const createBridge = clientId => startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId, home });
   const bridge = await createBridge(state.client_id);
   if (!withLanePool) return bridge;
   let pool;
@@ -66,11 +68,18 @@ export function desktopBrokerEnvironment(environment, { controlDir, clientId }) 
   };
 }
 
-export async function startDesktopMcpBridge({ environment, clientId, bridgeFactory = options => new ManagedMcpBridge(options) }) {
+export async function startDesktopMcpBridge({ environment, clientId, home = homedir(), bridgeFactory = options => new ManagedMcpBridge(options) }) {
+  const apiKey = await resolveApiKey(environment);
+  const nativeUsage = environment.STATEWRIGHT_PB_URL ? new LocalTelemetryService({
+    dataDir: join(home, ".statewright", "telemetry", "desktop", clientId),
+    gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai").replace(/\/mcp\/?$/, ""),
+    pocketbaseUrl: environment.STATEWRIGHT_PB_URL, apiKey,
+  }) : null;
   const bridge = bridgeFactory({
     gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"),
-    apiKey: await resolveApiKey(environment),
+    apiKey,
     clientId,
+    ...(nativeUsage ? {nativeUsage, projectUsage: projectDesktopUsage} : {}),
   });
   await bridge.start();
   return bridge;
@@ -262,7 +271,7 @@ export async function runDesktopAppServerBroker({
   // ChatGPT process. Direct CLI callers retain the in-process fallback.
   const bridge = inheritedBridge
     ?? await startMcpBridge({ environment: isolatedEnvironment, clientId: plan.clientId });
-  let runtime;
+  let runtime, services;
   const manifestPath = join(dirname(plan.controlDir), "manifest.json");
   let manifestIdentity = null;
   try {
@@ -270,6 +279,8 @@ export async function runDesktopAppServerBroker({
       ownsThread: async threadId => (await readCodexRootSession(plan.controlDir, plan.clientId))?.sessionId === threadId,
       getState: () => desktopClassifierState({ bridge, clientId: plan.clientId }),
     };
+    services = desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId, bridge,
+      ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState});
     runtime = await startRuntime({
       command: plan.command,
       environment: {
@@ -280,8 +291,7 @@ export async function runDesktopAppServerBroker({
       },
       clientId: plan.clientId,
       classifierApprovalService,
-      ...desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId,
-        ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState}),
+      ...services,
       nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
       getThreadCwds: (threadIds) => readThreadMetadata({ threadIds }),
       onThreadStarted: claimThread,
@@ -300,6 +310,7 @@ export async function runDesktopAppServerBroker({
       startedAt: new Date().toISOString(),
     });
   } catch (error) {
+    services?.closeNativeUsage();
     await runtime?.close().catch(() => {});
     await bridge.close().catch(() => {});
     throw error;
@@ -321,6 +332,7 @@ export async function runDesktopAppServerBroker({
   const signalHandlers = new Map();
   const onEnd = () => { void close(); };
   const close = async ({ abnormal = false } = {}) => {
+    services?.closeNativeUsage();
     if (abnormal) setExitCode(1);
     return closing ??= (async () => {
     stdin.off?.("data", onData);

@@ -64,7 +64,7 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
       await claimManagedControlIdentity(controlDir, { host: "codex", clientId });
       const isolated = isolateEnvironment(environment, { controlDir, clientId });
       const codexHome = isolated.CODEX_HOME ?? join(home, ".codex");
-      let runtime, socket, lease, expected = threadId, confirmed = null, pending = false, closed = false;
+      let runtime, socket, lease, services, expected = threadId, confirmed = null, pending = false, closed = false;
       const manifest = join(controlDir, "..", "manifest.json");
       const owner = randomUUID();
       const release = async () => {
@@ -89,6 +89,7 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
       const close = async () => {
         if (closed) return;
         closed = true;
+        services?.closeNativeUsage();
         socket?.close();
         try { await runtime?.close(); }
         finally {
@@ -98,11 +99,12 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
         }
       };
       try {
+        services = !discovery ? desktopWorkflowServices({home, controlDir, clientId, bridge,
+          ownsThread: async id => confirmed === id && !pending && !closed,
+          getState: () => classifierState({bridge, clientId}),
+        }) : null;
         runtime = await startRuntime({ command: plan.command, clientId,
-          ...(!discovery ? desktopWorkflowServices({home, controlDir, clientId,
-            ownsThread: async id => confirmed === id && !pending && !closed,
-            getState: () => classifierState({bridge, clientId}),
-          }) : {}),
+          ...services,
           environment: { ...isolated, STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
             STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token, STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifest },
           nextRouteRequest: id => nextCodexResidentRouteRequest(controlDir, clientId, id),

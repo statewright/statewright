@@ -40,7 +40,8 @@ async function readBody(request) {
 }
 
 export class ManagedMcpBridge {
-  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), fetch = globalThis.fetch }) {
+  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), fetch = globalThis.fetch, nativeUsage = null, projectUsage }) {
+    if (nativeUsage && typeof projectUsage !== "function") throw new Error("Native usage requires a payload projector");
     this.gatewayUrl = canonicalGateway(gatewayUrl);
     this.apiKey = apiKey;
     this.clientId = clientId;
@@ -48,16 +49,18 @@ export class ManagedMcpBridge {
     this.fetch = fetch;
     this.server = null;
     this.url = null;
+    this.nativeUsage = nativeUsage;
+    this.projectUsage = projectUsage;
   }
 
   async start() {
     this.server = createServer(async (request, response) => {
       try {
-        if (request.method !== "POST" || request.url !== "/mcp") {
+        if (request.method !== "POST" || !["/mcp", ...(this.nativeUsage ? ["/native-usage"] : [])].includes(request.url)) {
           response.writeHead(404).end();
           return;
         }
-        if (!authorized(request, this.token)) {
+        if (request.headers.origin || !authorized(request, this.token)) {
           response.writeHead(401).end();
           return;
         }
@@ -69,6 +72,15 @@ export class ManagedMcpBridge {
           return;
         }
         const body = await readBody(request);
+        if (request.url === "/native-usage") {
+          let event;
+          try { event = this.projectUsage(JSON.parse(body.toString("utf8"))); }
+          catch { response.writeHead(400).end(); return; }
+          this.nativeUsage.outbox.appendUsage(event, event.binding);
+          response.writeHead(202).end();
+          void this.nativeUsage.flush().catch(() => {});
+          return;
+        }
         const forwardedHeaders = {
           "Content-Type": request.headers["content-type"] ?? "application/json",
           Authorization: `Bearer ${this.apiKey}`,
@@ -112,10 +124,15 @@ export class ManagedMcpBridge {
     });
     const address = this.server.address();
     this.url = `http://127.0.0.1:${address.port}`;
+    if (this.nativeUsage) {
+      this.usageTimer = setInterval(() => { void this.nativeUsage.flush().catch(() => {}); }, 2_000);
+      this.usageTimer.unref();
+    }
     return this;
   }
 
   async close() {
+    clearInterval(this.usageTimer);
     if (!this.server) return;
     await new Promise((resolveClose, rejectClose) => {
       this.server.close((error) => error ? rejectClose(error) : resolveClose());

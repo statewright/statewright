@@ -31,7 +31,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
   const native = nativeSettings ? await (await import("./native-settings-fixture.mjs"))
     .nativeSettingsFixture(t, threadId, message => socket?.send(JSON.stringify(message))) : null;
   if (native) settings = native.settings;
-  const calls = [], confirmed = [], injected = [], frames = [], errors = [];
+  const calls = [], confirmed = [], injected = [], frames = [], errors = [], usage = [];
   server.on("connection", ws => {
     socket = ws;
     ws.on("message", async raw => {
@@ -82,6 +82,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
     }},
     routeOwner: async () => ({client_id: "handoff-client", root_session_id: threadId}),
     onRouteInjected: async r => injected.push(r), onRouteConfirmed: async r => confirmed.push(r),
+    onNativeUsage: async event => usage.push(event),
     onProtocolError: async error => errors.push(error)});
   client = new WebSocket(proxy.url);
   client.on("message", raw => frames.push(JSON.parse(String(raw))));
@@ -99,13 +100,49 @@ async function fixture(t, {nativeSettings = false} = {}) {
   const completeTool = (tool, result, overrides = {}) => socket.send(JSON.stringify({method: "item/completed", params: {
     threadId, turnId, item: {type: "mcpToolCall", id: `item-${sequence}-${tool}`, server: "statewright", tool,
       status: "completed", result: {structuredContent: result}, ...overrides}}}));
-  return {calls, frames, confirmed, injected, errors, rpc, completeTool, setState: v => {state = v;},
+  return {calls, frames, confirmed, injected, errors, usage, rpc, completeTool, setState: v => {state = v;},
+    tokens: (id = turnId) => socket.send(JSON.stringify({method: "thread/tokenUsage/updated", params: {
+      threadId, turnId: id, tokenUsage: {
+        total: {inputTokens: 1000, cachedInputTokens: 50, outputTokens: 100, reasoningOutputTokens: 10, totalTokens: 1100},
+        last: {inputTokens: 100, cachedInputTokens: 50, outputTokens: 10, reasoningOutputTokens: 2, totalTokens: 110},
+      }}})),
     hold: p => {heldRead = p;}, holdStart: p => {heldStart = p;}, mismatch: () => {wrongModel = true;},
     holdOwner: p => {heldOwner = p;}, ownerEntered: () => ownerEntered,
     holdSettings: p => {heldSettings = p;}, rejectSettings: () => {rejectSettings = true;},
     mismatchReadback: () => {readbackMismatch = true;},
     finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
 }
+
+test("Desktop native usage stays bound to the actual turn across phase handoff", async t => {
+  const f = await fixture(t);
+  const intake = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low");
+  f.setState(intake); f.completeTool("statewright_load_workflow", {loaded: true, state_snapshot: intake});
+  await until(() => f.injected.some(r => r.turnId === "turn-2"));
+  f.tokens();
+  await until(() => f.usage.length === 1);
+  assert.equal(f.usage[0].binding.state, "intake");
+  assert.equal(f.usage[0].model, "gpt-5.6-terra");
+  assert.equal(f.usage[0].effort, "low");
+  assert.equal(f.usage[0].token_usage_delta.total_tokens, 110);
+  const review = stateFor("frontier_review", 2, "openai-codex/gpt-6-astra", "high");
+  f.setState(review); f.completeTool("statewright_transition", {transitioned: true, from: "intake", to: "frontier_review"});
+  await until(() => f.injected.some(r => r.turnId === "turn-3"));
+  f.tokens("turn-2"); f.tokens("foreign"); f.tokens();
+  await until(() => f.usage.length === 2);
+  assert.equal(f.usage[1].binding.state_epoch, 2);
+  assert.equal(f.usage[1].model, "gpt-6-astra");
+  assert.equal(f.usage[1].effort, "high");
+  // No queued route remains: an ordinary user turn must use the current
+  // authoritative phase binding without losing its epoch.
+  f.finish();
+  await f.rpc("turn/start", {threadId, model: "gpt-6-astra", effort: "high"});
+  f.tokens();
+  await until(() => f.usage.length === 3);
+  assert.equal(f.usage[2].turn_id, "turn-4");
+  assert.equal(f.usage[2].binding.state_epoch, 2);
+  assert.equal(f.usage[2].binding.state, "frontier_review");
+  assert.equal(f.usage[2].token_usage_delta.total_tokens, 110);
+});
 
 test("Desktop load and transition cut over native turns and restore the original route", async t => {
   const f = await fixture(t);

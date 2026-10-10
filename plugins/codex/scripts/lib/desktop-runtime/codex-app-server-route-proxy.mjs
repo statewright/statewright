@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { DesktopNativeUsage } from "./desktop-native-usage.mjs";
 import { HandoffPresentation, hardInterruptNotice } from "./app-server-handoff.mjs";
 import { summarizeStatewrightToolCompletion, summarizeStatewrightToolStart } from "./statewright-tool-summary.mjs";
 import { CodexApprovalGate } from "./codex-approval-gate.mjs";
@@ -486,6 +487,7 @@ export async function startCodexAppServerRouteProxy({
   peekPendingRoute = async () => null,
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
+  onNativeUsage = async () => {},
   onHandoffStatus = async () => {},
   onConnection = async () => {},
   onTransportError = async () => {},
@@ -613,7 +615,8 @@ export async function startCodexAppServerRouteProxy({
         const route = reservation?.route ?? reservation;
         if (!route) return { route: { session_id: threadId, run_id: state.run_id,
           ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
-          state: state.state, model: state.model, effort: state.thinking_level } };
+          state: state.state, state_epoch: state.state_epoch, workflow: state.workflow,
+          model: state.model, effort: state.thinking_level } };
         // A route queued before the human decision cannot override the approved
         // destination. Retire only this exact run's known origin; all other
         // mismatches still fail closed in the caller's identity check.
@@ -647,7 +650,8 @@ export async function startCodexAppServerRouteProxy({
         if (!authoritative || authoritative.is_final === true) return null;
         return { route: { session_id: threadId, run_id: authoritative.run_id,
           ...(authoritative.run_session_id ? {run_session_id: authoritative.run_session_id} : {}),
-          state: authoritative.state, model: authoritative.model, effort: authoritative.thinking_level,
+          state: authoritative.state, state_epoch: authoritative.state_epoch, workflow: authoritative.workflow,
+          model: authoritative.model, effort: authoritative.thinking_level,
           ...(authoritative.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER
             ? {service_tier: authoritative.env_overrides.STATEWRIGHT_CODEX_SERVICE_TIER} : {}),
           ...(Array.isArray(authoritative.model_ladder) ? { model_ladder: authoritative.model_ladder } : {}) } };
@@ -741,6 +745,7 @@ export async function startCodexAppServerRouteProxy({
     const operatorActivity = new Map();
     const explainedTurns = new Map();
     const turnOrigins = new Map();
+    const nativeUsage = new DesktopNativeUsage();
     const pendingTurnStarts = new Map();
     const receipts = new Map();
     const requestMethods = new Map();
@@ -1260,6 +1265,7 @@ export async function startCodexAppServerRouteProxy({
         if (!confirmed.confirmed) throw new Error("Native workflow model settings were not confirmed");
         await checkState();
         activeModels.set(threadId, applied.receipt.effectiveModel);
+        nativeUsage.prepare(threadId, route);
         const started = await internalRpc("turn/start", applied.message.params);
         if (!started?.turn?.id) throw new Error("Workflow continuation returned no native turn identity");
         // A user can cancel while the native start RPC is outstanding. Never
@@ -1598,6 +1604,7 @@ export async function startCodexAppServerRouteProxy({
           }
           payload = JSON.stringify(message.method === "turn/start" ? applied.message : message);
           if (provisionalTurn) {
+            nativeUsage.prepare(threadId, route);
             provisionalTurn.model = routeModel(applied.message.params?.model);
             provisionalTurn.binding = originBinding ?? await workflowOriginStore.binding(threadId);
             provisionalTurn.activityEpoch = requestEpoch;
@@ -1889,6 +1896,7 @@ export async function startCodexAppServerRouteProxy({
           if (notification.params?.status?.type === "active") addActivity(statusThreadId, "server-active");
           else activeThreads.delete(statusThreadId);
         } else if (notification?.method === "turn/started" && statusThreadId) {
+          nativeUsage.started(notification.params, activeSettings.get(statusThreadId));
           const turnId = notification.params.turn.id;
           if (turnOrigins.get(statusThreadId)?.turnId !== turnId) {
             const pending = [...pendingTurnStarts.values()].find(entry => entry.threadId === statusThreadId);
@@ -1912,6 +1920,13 @@ export async function startCodexAppServerRouteProxy({
           }
         }
         syncActivity();
+        if (notification.method === "thread/tokenUsage/updated" && workflowService
+            && await workflowService.ownsThread(statusThreadId)) {
+          const event = nativeUsage.event(notification.params);
+          if (event) await onNativeUsage(event).catch(error => onProtocolError({
+            side: "usage_telemetry", message: error.message,
+          }));
+        }
         if (downstreamClosed && activeThreads.size === 0 && parkingCount === 0 && upstream.readyState === WebSocket.OPEN) upstream.close();
         scheduleIdle();
         void onConnection({

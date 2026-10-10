@@ -2,7 +2,9 @@
 // user's transcript. Exercises the installed vendor parser, not a fake server.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -18,7 +20,7 @@ const sessions = join(codexHome, "sessions", "2026", "10", "10");
 const ids = [randomUUID(), randomUUID()];
 const clientId = `swc_${randomUUID().replaceAll("-", "")}`;
 const input = new PassThrough(), output = new PassThrough(), errors = new PassThrough();
-let buffer = "", diagnostics = "", sequence = 0, broker, bridge;
+let buffer = "", diagnostics = "", sequence = 0, broker, bridge, gateway;
 const pending = new Map();
 output.on("data", chunk => {
   buffer += String(chunk);
@@ -43,7 +45,20 @@ function rpc(method, params = {}) {
 }
 try {
   await mkdir(sessions, { recursive: true });
-  await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n');
+  const pluginRoot = fileURLToPath(new URL("../../codex/", import.meta.url));
+  const mcp = JSON.parse(await readFile(join(pluginRoot, ".mcp.json"), "utf8")).mcpServers.statewright;
+  await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n'
+    + '[mcp_servers.statewright]\ncommand = "/bin/bash"\n'
+    + `args = [${JSON.stringify(join(pluginRoot, "mcp-proxy.sh"))}]\n`
+    + `env_vars = ${JSON.stringify(mcp.env_vars)}\nstartup_timeout_sec = 10\n`);
+  gateway = createServer(async (request, response) => {
+    let raw = ""; for await (const chunk of request) raw += chunk;
+    const rpc = JSON.parse(raw);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id,
+      result: rpc.method === "tools/list" ? { tools: [{ name: "statewright_get_state", inputSchema: { type: "object" } }] } : {} }));
+  });
+  await new Promise(resolve => gateway.listen(0, "127.0.0.1", resolve));
   for (const [index, id] of ids.entries()) {
     const cwd = join(home, `project-${index}`);
     await mkdir(cwd);
@@ -55,11 +70,12 @@ try {
     await writeFile(join(sessions, `rollout-2026-10-10T00-00-00-${id}.jsonl`), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   }
   bridge = await startProfileDesktopMcpBridge({
-    state: { client_id: clientId, gateway_url: "https://fixture.invalid/mcp" }, home,
+    state: { client_id: clientId, gateway_url: `http://127.0.0.1:${gateway.address().port}/mcp` }, home,
     environment: { HOME: home }, getCredential: async () => "fixture-only", withLanePool: true,
   });
   broker = await runDesktopAppServerBroker({ argv: ["app-server"], home, stdin: input, stdout: output, stderr: errors,
-    environment: { PATH: process.env.PATH, HOME: home, CODEX_HOME: codexHome,
+    environment: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, CODEX_HOME: codexHome,
+      STATEWRIGHT_NODE_BIN: process.execPath,
       STATEWRIGHT_DESKTOP_ORIGINAL_CODEX: process.env.STATEWRIGHT_DESKTOP_CODEX_BIN,
       STATEWRIGHT_DESKTOP_CLIENT_ID: clientId,
       STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL: bridge.poolUrl, STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN: bridge.poolToken },
@@ -75,11 +91,15 @@ try {
     assert.equal(read.thread.id, id);
     const resumed = await rpc("thread/resume", { threadId: id });
     assert.equal(resumed.thread.id, id);
+    const status = await rpc("mcpServerStatus/list", { threadId: id });
+    assert.ok(status.data.some(server => Object.keys(server.tools ?? {}).some(name => name.endsWith("statewright_get_state"))),
+      `Native MCP discovery failed: ${diagnostics}`);
   }
   assert.equal((await rpc("thread/resume", { threadId: ids[0] })).thread.id, ids[0]);
-  console.log("NATIVE_DESKTOP_TWO_PROJECT_RESUME_PASS (disposable history; no model turn)");
+  console.log("NATIVE_DESKTOP_TWO_PROJECT_RESUME_AND_MCP_PASS (real shell proxy; restricted PATH; fixture gateway; no model turn)");
 } finally {
   await broker?.close(); await bridge?.close();
+  if (gateway) { gateway.closeAllConnections(); await new Promise(resolve => gateway.close(resolve)); }
   for (const request of pending.values()) clearTimeout(request.timer);
   await rm(home, { recursive: true, force: true });
 }

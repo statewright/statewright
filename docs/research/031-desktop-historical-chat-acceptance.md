@@ -202,3 +202,59 @@ Its additional read-only probes covered notification-send failure, discovery
 disconnect and late initialization after disconnect. Exact final full-gate and
 installation results remain in the release controller receipt; the user's next
 normal-launch test still determines live acceptance.
+
+## MCP discovery PATH failure (2026-10-10)
+
+The next user test resolved the pending question: XPath resume succeeded. Desktop
+PID 97502 logged successful `thread/resume` at 17:05:24.456Z, but `turn/start`
+failed at 17:06:29Z because Statewright MCP discovery never became ready. The
+decisive read-only Codex SQLite log rows (17:05:25Z and 17:05:54Z, target
+`codex_rmcp_client::stdio_server_launcher`) contain
+`./mcp-proxy.sh: line 12: node: command not found`. The shell proxy initialized
+successfully, then produced no `tools/list` response when normalization could
+not find Node in Desktop's restricted PATH. Independent live staging bridge
+discovery returned HTTP 200 in 255 ms with 12 tools including get-state.
+Neither auth failure nor gateway unavailability explains this observed timeout.
+
+Bounded repair on clean base `322d3c3`: propagate the existing launcher's pinned
+`STATEWRIGHT_NODE_BIN` through the plugin MCP environment allowlist; use that
+executable consistently for proxy helpers. Unpinned terminal PATH and existing
+bundled Desktop fallback remain supported. An unavailable explicit runtime must
+return a correlated MCP error, not silently select another executable or emit
+an empty reply. Signed ChatGPT, native dispatcher, thread ownership and readiness
+deadline remain unchanged. Do not change other failing third-party integrations.
+
+Red baseline: restricted-PATH proxy tests failed 3/4; the working terminal PATH
+case passed. After correction the four cases plus manifest contract passed 6/6.
+The real bundled native canary now resumes both fixture chats and verifies native
+MCP tool discovery through the actual shell proxy and manifest env allowlist,
+under restricted PATH. It passed with a disposable fixture gateway and no model
+turns/credentials/user-history writes. Live gateway readiness is separate read-only
+evidence; neither replaces live Desktop Statewright/human-prompt acceptance.
+
+Scope: shell proxy, MCP manifest, regression tests/canary, version and receipt;
+no backend deployment. Apply agentic-SDLC review/install controls under the same
+explicit no-Statewright fallback (only cloud get-state advertised, not local).
+Provisional observed-only remaining budget: 20 minutes/30 calls; one independent
+review, one full gate, reserve half for validation/install/handoff. Stop breadth
+at reserve and report gaps rather than skipping native evidence. Candidate
+`0.3.4+codex.20261010171205`; final validation and install in controller receipt.
+
+Independent `desktop_mcp_path_review` found no blocker and reran 6/6 focused
+tests. It noted missing focused coverage of bundled-Node fallback success and
+did not independently verify the unchanged launcher export; parent inspection
+confirmed `STATEWRIGHT_NODE_BIN: state.node_executable` in the generated launch
+path. A current-turn read-only end-to-end proxy call with the real staging
+credential, pinned interpreter and restricted PATH returned 15 advertised tools
+in 370 ms, including get-state. No workflow tool was invoked. This proves the
+corrected helper-to-gateway discovery path, not live Desktop turn execution.
+
+Final-gate reconciliation: first full run failed the existing standalone 401
+recovery test because captured normalizer output lost its terminating newline.
+Restored that newline (direct output needs it; command substitutions strip it).
+Independent bounded re-review found no blocker. Focused recovery/runtime/manifest
+tests passed 21/21; added bundled-fallback coverage then passed 5/5 runtime tests.
+Preserve `/tmp/statewright-desktop-mcp-path-final-20261010.log` as failed evidence;
+the second exact-candidate gate is
+`/tmp/statewright-desktop-mcp-path-final2-20261010.log`. This one bounded rerun
+uses recovery reserve; no additional source scope or deployment is authorized.

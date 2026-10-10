@@ -7,18 +7,34 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_RESPONSE_SUMMARIZER="${SCRIPT_DIR}/scripts/summarize-mcp-response.mjs"
 MCP_RECOVERY="${SCRIPT_DIR}/scripts/lib/desktop-runtime/mcp-recovery.mjs"
+DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
+# GUI MCP launches do not inherit the terminal PATH. Keep the launcher's pinned
+# interpreter authoritative; this helper does not replace the signed host app.
+PROXY_NODE_BIN="${STATEWRIGHT_NODE_BIN:-}"
+if [ -z "$PROXY_NODE_BIN" ]; then
+  PROXY_NODE_BIN=$(command -v node 2>/dev/null || true)
+  if [ -z "$PROXY_NODE_BIN" ] && [ -x "$DESKTOP_BUNDLED_NODE" ]; then
+    PROXY_NODE_BIN="$DESKTOP_BUNDLED_NODE"
+  fi
+fi
 
 normalize_transport_response() {
-  printf '%s\n%s' "$1" "$2" | node "$MCP_RECOVERY" "${3:-}"
+  local normalized
+  if [ -x "$PROXY_NODE_BIN" ] && normalized=$(printf '%s\n%s' "$1" "$2" | "$PROXY_NODE_BIN" "$MCP_RECOVERY" "${3:-}") && [ -n "$normalized" ]; then
+    printf '%s\n' "$normalized"
+  else
+    # A missing helper must produce a response, not a two-minute MCP timeout.
+    printf '%s' "$1" | jq -c '{jsonrpc:"2.0",id:.id,error:{code:-32603,message:"Statewright Node response helper is unavailable. Repair the selected runtime and restart this client."}}'
+  fi
 }
 
 summarize_transition_response() {
   local tool_name="$1" response="$2" summarized
-  if [ "$tool_name" != "statewright_transition" ] || [ ! -f "$MCP_RESPONSE_SUMMARIZER" ] || ! command -v node >/dev/null 2>&1; then
+  if [ "$tool_name" != "statewright_transition" ] || [ ! -f "$MCP_RESPONSE_SUMMARIZER" ] || [ ! -x "$PROXY_NODE_BIN" ]; then
     printf '%s' "$response"
     return 0
   fi
-  summarized=$(printf '%s' "$response" | node "$MCP_RESPONSE_SUMMARIZER" "$tool_name" 2>/dev/null) || summarized=""
+  summarized=$(printf '%s' "$response" | "$PROXY_NODE_BIN" "$MCP_RESPONSE_SUMMARIZER" "$tool_name" 2>/dev/null) || summarized=""
   if [ -n "$summarized" ]; then printf '%s' "$summarized"; else printf '%s' "$response"; fi
 }
 
@@ -127,7 +143,6 @@ MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/scripts/statewright-managed-client.mjs"
 DESKTOP_SETUP="${SCRIPT_DIR}/scripts/statewright-desktop-setup.mjs"
 DESKTOP_PLATFORM="${STATEWRIGHT_DESKTOP_PLATFORM:-$(uname -s)}"
 DESKTOP_APP_EXECUTABLE="${STATEWRIGHT_DESKTOP_APP_EXECUTABLE:-/Applications/ChatGPT.app/Contents/MacOS/ChatGPT}"
-DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 # shellcheck source=gateway-profile.sh
@@ -296,11 +311,11 @@ credential_source_label() {
 # its OTel configuration at startup, so a newly created exporter applies after
 # the next Codex restart. Existing user-owned [otel] configuration is untouched.
 bootstrap_native_token_telemetry() {
-  command -v node >/dev/null 2>&1 || return 0
+  [ -x "$PROXY_NODE_BIN" ] || return 0
   [ -f "$TELEMETRY_BOOTSTRAP" ] || return 0
   mkdir -p "$TELEMETRY_DIR"
   local result action
-  result=$(node "$TELEMETRY_BOOTSTRAP" 2>/dev/null || true)
+  result=$("$PROXY_NODE_BIN" "$TELEMETRY_BOOTSTRAP" 2>/dev/null || true)
   action=$(printf '%s' "$result" | jq -r '.action // empty' 2>/dev/null || true)
   case "$action" in
     created)
@@ -323,8 +338,8 @@ bootstrap_native_token_telemetry
 
 # This prepares transparent shims for the next terminal launch. It is quiet,
 # idempotent, and only touches a shell profile when a supported client exists.
-if command -v node >/dev/null 2>&1 && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
-  node "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
+if [ -x "$PROXY_NODE_BIN" ] && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
+  "$PROXY_NODE_BIN" "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
 fi
 
 # Desktop routing is an opt-in application surface.  Provision its stable
@@ -333,8 +348,8 @@ fi
 DESKTOP_NODE=""
 if [ -x "$DESKTOP_BUNDLED_NODE" ]; then
   DESKTOP_NODE="$DESKTOP_BUNDLED_NODE"
-elif command -v node >/dev/null 2>&1; then
-  DESKTOP_NODE=$(command -v node)
+elif [ -x "$PROXY_NODE_BIN" ]; then
+  DESKTOP_NODE="$PROXY_NODE_BIN"
 fi
 if [ "$DESKTOP_PLATFORM" = "Darwin" ] && [ -x "$DESKTOP_APP_EXECUTABLE" ] && [ -f "$DESKTOP_SETUP" ] && [ -n "$DESKTOP_NODE" ]; then
   "$DESKTOP_NODE" "$DESKTOP_SETUP" provision-all --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
@@ -400,7 +415,7 @@ health_matches_telemetry_identity() {
 
 start_local_telemetry_agent() {
   local key expected current pid candidate_pid started=false
-  command -v node >/dev/null 2>&1 || return 0
+  [ -x "$PROXY_NODE_BIN" ] || return 0
   [ -f "$TELEMETRY_AGENT" ] || return 0
   mkdir -p "$TELEMETRY_DIR"
   chmod 700 "$TELEMETRY_DIR"
@@ -418,7 +433,7 @@ start_local_telemetry_agent() {
     STATEWRIGHT_GATEWAY_URL="$GW_URL" \
     STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
-    node "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
+    "$PROXY_NODE_BIN" "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
   if [ -z "$expected" ]; then
     release_telemetry_lock
     return 0
@@ -450,7 +465,7 @@ start_local_telemetry_agent() {
     STATEWRIGHT_GATEWAY_URL="$GW_URL" \
     STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
-    nohup node "$TELEMETRY_AGENT" \
+    nohup "$PROXY_NODE_BIN" "$TELEMETRY_AGENT" \
       >>"$TELEMETRY_DIR/agent.log" 2>&1 &
   candidate_pid=$!
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -724,7 +739,7 @@ while IFS= read -r line; do
     ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
     QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
     LIMIT=$(echo "$line" | jq -r '.params.arguments.limit // 8' 2>/dev/null)
-    RESULT=$(node "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
+    RESULT=$("$PROXY_NODE_BIN" "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
     if [ -n "$RESULT" ]; then
       RESULT_TEXT=$(echo "$RESULT" | jq -r 'if .error then .error else (.results | if length == 0 then "No provenance-addressable references found." else .[] | "## [\(.source_kind)] \(.path):\(.line_start)-\(.line_end)\ncommit: \(.commit_sha // "uncommitted")\nhash: \(.source_hash)\nrank: \(.rank) [\(.rank_reasons | join(", "))]\n\(.excerpt)\n" end) end' 2>/dev/null)
       jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'$ID'}'

@@ -8,6 +8,7 @@ import { claimCodexRootSession, claimManagedControlIdentity, claimManagedSession
   readCodexRootSession, releaseManagedSessionOwner } from "./managed-client-identity.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
+import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
 
 const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const discoveryReads = new Set(["thread/read", "thread/attachment/list", "thread/goal/get"]);
@@ -98,6 +99,10 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
       };
       try {
         runtime = await startRuntime({ command: plan.command, clientId,
+          ...(!discovery ? desktopWorkflowServices({home, controlDir, clientId,
+            ownsThread: async id => confirmed === id && !pending && !closed,
+            getState: () => classifierState({bridge, clientId}),
+          }) : {}),
           environment: { ...isolated, STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
             STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token, STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifest },
           nextRouteRequest: id => nextCodexResidentRouteRequest(controlDir, clientId, id),

@@ -599,7 +599,7 @@ test("native approval forwards completed evidence before interrupt and consumes 
   assert.ok(completionIndex >= 0 && interruptIndex > completionIndex);
   const visibleCompletion = f.visible.find(message => message.method === "item/completed");
   assert.equal(visibleCompletion.params.item.result.content[0].text,
-    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+    "Statewright Arbiter: review · fixture-origin-model / high · approval pending → implement");
   assert.deepEqual(completion.params.item.result.structuredContent, pending, "approval parsing retained the upstream payload");
   assert.equal(request.params.mode, "form");
   assert.equal(request.params.threadId, threadId);
@@ -892,7 +892,7 @@ test("without an approval service normal traffic and native server-request repli
   await f.rpc("initialize");
   const visibleCompletion = f.visible.find(message => message.method === "item/completed");
   assert.equal(visibleCompletion.params.item.result.content[0].text,
-    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+    "Statewright Arbiter: review · fixture-origin-model / high · approval pending → implement");
   assert.deepEqual(completion.params.item.result.structuredContent, pending, "upstream completion remains intact");
   assert.deepEqual(f.visible.find(message => message.method === formMethod), nativeRequest);
   assert.deepEqual(f.calls.find(message => message.id === nativeRequest.id), { id: nativeRequest.id, result: { action: "accept" } });

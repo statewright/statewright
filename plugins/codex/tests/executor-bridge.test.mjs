@@ -346,8 +346,8 @@ test("native Codex hook unwraps structured MCP workflow-load results", async () 
     [{ type: "text", text: JSON.stringify(loadedState) }],
     { content: [{ type: "text", text: JSON.stringify(loadedState) }] },
     { result: { content: [{ type: "text", text: JSON.stringify(loadedState) }] } },
-    { structuredContent: loadedState, content: [{ type: "text", text: "Statewright supervisor: loaded" }] },
-    { result: { structuredContent: loadedState, content: [{ type: "text", text: "Statewright supervisor: loaded" }] } },
+    { structuredContent: loadedState, content: [{ type: "text", text: "Statewright Arbiter: loaded" }] },
+    { result: { structuredContent: loadedState, content: [{ type: "text", text: "Statewright Arbiter: loaded" }] } },
   ];
 
   for (const [index, tool_response] of responses.entries()) {
@@ -852,7 +852,7 @@ test("Codex hooks and MCP join the executor-owned bridge", async () => {
     assert.equal(transition.status, 0, transition.stderr);
     const transitionResponse = JSON.parse(transition.stdout);
     assert.equal(transitionResponse.result.content[0].text,
-      "Statewright supervisor: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
+      "Statewright Arbiter: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
     assert.equal(transitionResponse.result.structuredContent.transitioned, true);
 
     assert.deepEqual(bridge.requests.map((item) => item.url), [

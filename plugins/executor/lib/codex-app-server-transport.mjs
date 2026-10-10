@@ -260,6 +260,7 @@ export async function startCodexAppServerRuntime({
   clientId,
   nextRouteRequest = async () => null,
   approvalService = null,
+  workflowService = null,
   classifierApprovalService = approvalService,
   peekRouteRequest = async () => null,
   stderr = process.stderr,
@@ -317,6 +318,7 @@ export async function startCodexAppServerRuntime({
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
       approvalService,
+      workflowService,
       classifierApprovalService,
       classifierApprovalToken,
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",

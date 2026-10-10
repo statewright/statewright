@@ -138,7 +138,7 @@ export function summarizeStatewrightMcpResponse(tool, response) {
     result: {
       ...response.result,
       structuredContent: value,
-      content: [{ type: "text", text: `Statewright supervisor: ${summary}` }],
+      content: [{ type: "text", text: `Statewright Arbiter: ${summary}` }],
     },
   };
 }
@@ -149,7 +149,7 @@ export function summarizeStatewrightToolCompletion(message) {
   if (!summary) return message;
   const item = message.params.item;
   return { ...message, params: { ...message.params, item: { ...item,
-    result: { content: [{ type: "text", text: `Statewright supervisor: ${summary}` }],
+    result: { content: [{ type: "text", text: `Statewright Arbiter: ${summary}` }],
       ...(item.result?.isError === true ? { isError: true } : {}) },
   } } };
 }
@@ -173,6 +173,6 @@ export function summarizeStatewrightToolStart(message) {
     id: item.id,
     type: 'agentMessage',
     phase: 'commentary',
-    text: `Statewright supervisor: ${text}`,
+    text: `Statewright Arbiter: ${text}`,
   } } };
 }

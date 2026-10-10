@@ -83,7 +83,7 @@ export function localStatewrightLifecycle(item) {
     || server === "statewright" || server === "plugin_statewright_statewright";
   if (!localTool || !localServer) return null;
   const tool = rawTool.slice(rawTool.lastIndexOf("statewright_"));
-  if (!["statewright_deactivate", "statewright_stop", "statewright_transition", "statewright_force_state"].includes(tool)) return null;
+  if (!["statewright_load_workflow", "statewright_start", "statewright_deactivate", "statewright_stop", "statewright_transition", "statewright_force_state"].includes(tool)) return null;
   return { tool, server: server || rawTool.slice(0, rawTool.lastIndexOf("__statewright_")) };
 }
 
@@ -474,6 +474,7 @@ export async function startCodexAppServerRouteProxy({
   upstreamUrl,
   takePendingRoute = async () => null,
   approvalService = null,
+  workflowService = null,
   classifierApprovalService = approvalService,
   classifierApprovalToken = null,
   classifierApprovalTimeoutMs = 10 * 60_000,
@@ -629,10 +630,11 @@ export async function startCodexAppServerRouteProxy({
       }
     }
   };
+  const routeStateService = workflowService ?? approvalService;
   const takeCurrentRoute = async (threadId, checkOwner = async () => {}) => {
-    if (!approvalService?.getState) return takePendingRoute(threadId);
+    if (!routeStateService?.getState) return takePendingRoute(threadId);
     await checkOwner();
-    const authoritative = await approvalService.getState(threadId);
+    const authoritative = await routeStateService.getState(threadId);
     await checkOwner();
     for (let retired = 0; retired <= 256; retired += 1) {
       const reservation = await takePendingRoute(threadId);
@@ -641,6 +643,8 @@ export async function startCodexAppServerRouteProxy({
         return { route: { session_id: threadId, run_id: authoritative.run_id,
           ...(authoritative.run_session_id ? {run_session_id: authoritative.run_session_id} : {}),
           state: authoritative.state, model: authoritative.model, effort: authoritative.thinking_level,
+          ...(authoritative.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER
+            ? {service_tier: authoritative.env_overrides.STATEWRIGHT_CODEX_SERVICE_TIER} : {}),
           ...(Array.isArray(authoritative.model_ladder) ? { model_ladder: authoritative.model_ladder } : {}) } };
       }
       try {
@@ -742,6 +746,7 @@ export async function startCodexAppServerRouteProxy({
     const switchingThreads = new Set();
     const terminalCompletions = new Map();
     const restoreInFlight = new Set();
+    const handoffs = new Map();
     const routeConfirmationWaiters = new Map();
     const stateNames = new Map();
     const mcpReadyThreads = new Set();
@@ -830,7 +835,7 @@ export async function startCodexAppServerRouteProxy({
     const waitForRouteConfirmation = (threadId, receipt, checkOwner) => new Promise(resolveConfirmation => {
       const existing = routeConfirmationWaiters.get(threadId);
       if (existing) {
-        rejectConfirmation(new Error("Statewright route confirmation is already pending for this thread."));
+        resolveConfirmation({confirmed: false, reason: "settings_confirmation_already_pending"});
         return;
       }
       const timer = setTimeout(() => {
@@ -942,7 +947,7 @@ export async function startCodexAppServerRouteProxy({
         // A native turn can end without any projected MCP item. The execution
         // boundary is authoritative; tool result formatting is only a hint.
         if (terminal.kind === "reconcile" || terminal.kind === "reconnect") {
-          const state = await approvalService?.getState?.(threadId);
+          const state = await routeStateService?.getState?.(threadId);
           if (state?.is_final) terminal = {kind: "terminal", state};
           else if (terminal.kind === "reconnect" && state === null
               && (await workflowOriginStore.inspect(threadId))?.status === "restore_pending") {
@@ -960,7 +965,7 @@ export async function startCodexAppServerRouteProxy({
           if (lifecycle.turnId ? turnOrigins.get(threadId)?.turnId !== lifecycle.turnId : activeThreads.has(threadId)) {
             throw new Error("Statewright terminal restoration belongs to a superseded native turn.");
           }
-          const authoritative = await approvalService?.getState?.(threadId);
+          const authoritative = await routeStateService?.getState?.(threadId);
           if (terminal.kind === "terminal" || terminal.kind === "transition") {
             const state = terminal.state;
             if ((state && (!state.is_final || state.run_id !== originalBinding.run_id
@@ -1109,6 +1114,126 @@ export async function startCodexAppServerRouteProxy({
         if (Date.now() >= deadline) throw new Error("Approval continuation requires the owning idle thread");
         await new Promise(resolve => setTimeout(resolve, 50));
         await check();
+      }
+    };
+    // A workflow loaded inside an ordinary Desktop turn needs an execution
+    // boundary, not just a route file for the next user message. Only a local,
+    // successful lifecycle completion may request this cutover. Revalidate
+    // ownership and authoritative state around every asynchronous boundary.
+    const handoffWorkflow = async ({threadId, turnId, item}) => {
+      const lifecycle = localStatewrightLifecycle(item);
+      if (!workflowService || !lifecycle || item.status !== "completed"
+          || item.error || item.result?.isError || !item.id) return;
+      const result = structuredToolResult(item.result);
+      const loaded = ["statewright_load_workflow", "statewright_start"].includes(lifecycle.tool);
+      const destination = loaded ? result?.state_snapshot?.state : result?.to;
+      if (!destination || (loaded ? !result?.state_snapshot?.run_id : result?.transitioned !== true)) return;
+      const origin = turnOrigins.get(threadId);
+      if (!origin || origin.turnId !== turnId || origin.completed || handoffs.has(threadId)
+          || origin.activityEpoch !== operatorActivity.get(threadId)) return;
+      const epoch = operatorActivity.get(threadId);
+      const operation = {turnId, itemId: item.id};
+      handoffs.set(threadId, operation);
+      let release, confirmation, interrupted = false;
+      const check = async () => {
+        const owned = await workflowService.ownsThread(threadId);
+        if (protocolFailed || downstreamClosed || downstream.readyState !== WebSocket.OPEN
+            || handoffs.get(threadId) !== operation || operatorActivity.get(threadId) !== epoch
+            || turnOrigins.get(threadId)?.turnId !== turnId
+            || !owned) {
+          throw new Error("Workflow handoff was superseded or lost its native owner");
+        }
+      };
+      try {
+        await check();
+        const state = await workflowService.getState(threadId);
+        await check();
+        if (!state || state.state !== destination || !state.run_id || !state.run_session_id
+            || !Number.isInteger(state.state_epoch)
+            || loaded && (state.run_id !== result.state_snapshot.run_id
+              || state.run_session_id !== result.state_snapshot.run_session_id)
+            || origin.binding && (state.run_id !== origin.binding.run_id
+              || state.run_session_id !== origin.binding.run_session_id)) {
+          throw new Error("Workflow handoff lacks a matching authoritative destination");
+        }
+        if (state.is_final) return; // Restore after this real turn completes.
+        const checkState = async () => {
+          await check();
+          const current = await workflowService.getState(threadId);
+          await check();
+          if (!current || current.run_id !== state.run_id || current.run_session_id !== state.run_session_id
+              || current.state !== state.state || current.state_epoch !== state.state_epoch
+              || current.model !== state.model || current.thinking_level !== state.thinking_level
+              || (current.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER ?? current.service_tier)
+                !== (state.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER ?? state.service_tier)
+              || current.is_final || current.pending_approval) throw new Error("Workflow handoff state changed or requires approval");
+        };
+        release = await acquireRouteLease();
+        await check();
+        await internalRpc("turn/interrupt", {threadId, turnId});
+        interrupted = true;
+        await waitForApprovalIdle(threadId, check);
+        if (state.pending_approval) throw new Error("Workflow approval is pending; no model continuation was started");
+        if (!state.model) throw new Error("Workflow destination has no selected model");
+        await checkState();
+        const route = {session_id: threadId, run_id: state.run_id, run_session_id: state.run_session_id,
+          state: state.state, state_epoch: state.state_epoch, model: state.model, effort: state.thinking_level,
+          service_tier: state.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER ?? state.service_tier};
+        const binding = await boundRoute(route, threadId);
+        const settings = activeSettings.get(threadId) ?? {};
+        const capture = await workflowOriginStore.capture(binding, captureWorkflowOrigin({method: "turn/start", params: {threadId}}, {
+          provider: activeProviders.get(threadId), model: activeModels.get(threadId),
+          ...(Object.hasOwn(settings, "effort") ? {effort: settings.effort} : {}),
+          ...(Object.hasOwn(settings, "serviceTier") ? {service_tier: settings.serviceTier} : {}),
+        }));
+        if (!["captured", "existing"].includes(capture.status)) throw new Error(`Workflow origin capture failed: ${capture.status}`);
+        const applied = applyRouteToTurnStart({method: "turn/start", params: {threadId,
+          input: [{type: "text", text: `Statewright entered '${state.state}'. Call the local statewright_get_state tool first, then follow the current phase's tools and transitions.`}],
+          ...(settings.collaborationMode ? {collaborationMode: settings.collaborationMode} : {}),
+        }}, route);
+        applied.receipt.origin_binding = binding;
+        await switchProvider(threadId, applied.receipt);
+        await checkState();
+        receipts.set(threadId, applied.receipt);
+        confirmation = waitForRouteConfirmation(threadId, applied.receipt, checkState);
+        const {input, ...update} = applied.message.params;
+        await internalRpc("thread/settings/update", update);
+        const confirmed = await confirmation;
+        if (!confirmed.confirmed) throw new Error("Native workflow model settings were not confirmed");
+        await checkState();
+        activeModels.set(threadId, applied.receipt.effectiveModel);
+        const started = await internalRpc("turn/start", applied.message.params);
+        if (!started?.turn?.id) throw new Error("Workflow continuation returned no native turn identity");
+        // A user can cancel while the native start RPC is outstanding. Never
+        // claim that returned turn or overwrite a newer manual turn's origin.
+        const stillOwned = await workflowService.ownsThread(threadId);
+        if (!stillOwned || operatorActivity.get(threadId) !== epoch || downstreamClosed || protocolFailed
+            || handoffs.get(threadId) !== operation
+            || ![turnId, started.turn.id].includes(turnOrigins.get(threadId)?.turnId)) {
+          await internalRpc("turn/interrupt", {threadId, turnId: started.turn.id}).catch(() => {});
+          throw new Error("Workflow continuation was cancelled during native turn start");
+        }
+        turnOrigins.set(threadId, {turnId: started.turn.id, binding, activityEpoch: epoch,
+          provider: activeProviders.get(threadId), model: applied.receipt.effectiveModel});
+        applied.receipt.turnId = started.turn.id;
+        applied.receipt.previousTurnId = turnId;
+        await onRouteInjected(applied.receipt);
+        await sendPresentation(presentation.running(threadId, started.turn.id, {
+          state: route.state, model: applied.receipt.effectiveModel, effort: route.effort,
+          serviceTier: route.service_tier, runId: route.run_id,
+        }));
+      } catch (error) {
+        // Never silently continue phase work on the previous model after a
+        // failed handoff. Do not interrupt a newer/manual user turn.
+        try { await check(); if (!interrupted) await internalRpc("turn/interrupt", {threadId, turnId}); } catch {}
+        receipts.delete(threadId);
+        routeConfirmationWaiters.get(threadId)?.resolve({confirmed: false, reason: "workflow_handoff_failed"});
+        await onProtocolError({side: "workflow_handoff", message: error.message});
+        await forwardWhenOpen(downstream, JSON.stringify({method: "warning", params: {threadId,
+          message: `Statewright Arbiter: model handoff stopped. ${error.message}`}})).catch(() => {});
+      } finally {
+        if (handoffs.get(threadId) === operation) handoffs.delete(threadId);
+        release?.();
       }
     };
     const gate = approvalService ? new CodexApprovalGate({ service: approvalService, safety: approvalSafety,
@@ -1720,9 +1845,10 @@ export async function startCodexAppServerRouteProxy({
           const origin = turnOrigins.get(statusThreadId);
           const hint = terminalCompletions.get(statusThreadId);
           terminalCompletions.delete(statusThreadId);
-          if (origin?.binding && !origin.completed && origin.turnId === notification.params.turn?.id
+          const wasCompleted = origin?.completed;
+          if (origin && origin.turnId === notification.params.turn?.id) origin.completed = true;
+          if (origin?.binding && !wasCompleted && origin.turnId === notification.params.turn?.id
               && origin.activityEpoch === operatorActivity.get(statusThreadId)) {
-            origin.completed = true;
             terminalRestoreHint = {threadId: statusThreadId, lifecycle: {...origin},
               terminal: hint?.turnId === origin.turnId ? hint.terminal : {kind: "reconcile"}};
           }
@@ -1800,6 +1926,10 @@ export async function startCodexAppServerRouteProxy({
         terminalRestoreHint.terminal,
         terminalRestoreHint.lifecycle,
       );
+      try {
+        const event = JSON.parse(String(raw));
+        if (event.method === "item/completed") void handoffWorkflow(event.params);
+      } catch { /* not a lifecycle notification */ }
     };
     // Preserve source order while a terminal's display-only route lookup waits.
     upstream.on("message", raw => {

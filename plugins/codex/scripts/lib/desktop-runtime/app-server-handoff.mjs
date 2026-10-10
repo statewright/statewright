@@ -102,7 +102,7 @@ export class HandoffPresentation {
     // finalize an answer already streaming under a synthetic status item.
     if (!this.turns.get(threadId)?.nativeSafe) return [];
     const item = {id: `statewright_status_${randomUUID()}`, type: "agentMessage",
-      phase: "commentary", text: `Statewright supervisor: ${text}`};
+      phase: "commentary", text: `Statewright Arbiter: ${text}`};
     const now = Date.now();
     return ["item/started", "item/completed"].map(method => ({method, params: {threadId, turnId, item,
       [method === "item/started" ? "startedAtMs" : "completedAtMs"]: now}}));

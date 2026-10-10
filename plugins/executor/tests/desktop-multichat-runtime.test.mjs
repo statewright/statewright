@@ -175,6 +175,12 @@ test("pool broker resumes two different projects with isolated workflow identiti
       join(f.home, ".statewright", "codex-desktop-app-server", clientId, "routes"));
     assert.equal(await options.classifierApprovalService.ownsThread(threadId), true);
     assert.equal(await options.classifierApprovalService.ownsThread(index ? A : B), false);
+    assert.equal(await options.workflowService.ownsThread(threadId), true);
+    assert.equal(await options.workflowService.ownsThread(index ? A : B), false);
+    assert.deepEqual(await options.routeOwner(threadId), {client_id: clientId, root_session_id: threadId});
+    assert.equal((await options.routeOwner(index ? A : B)).root_session_id, null);
+    assert.equal(typeof options.peekRouteRequest, "function");
+    assert.equal(typeof options.telemetry, "function");
   }
   assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR)).size, 2);
   assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN)).size, 2);

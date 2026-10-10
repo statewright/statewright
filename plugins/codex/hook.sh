@@ -133,10 +133,20 @@ fi
 # is an authoritative active state, an explicit inactive state, or a transport
 # failure.  Flattening it here used to turn all three into the same empty text.
 mcp_raw_call() {
-  local response
-  response=$(printf '%s' "$1" | curl -sf --max-time 5 -X POST "$GW_URL/" \
+  local response endpoint authorization
+  endpoint="$GW_URL/"
+  authorization="$API_KEY"
+  # Managed Desktop and TUI hooks must share the MCP bridge's authenticated
+  # gateway session. Never fall back to a direct gateway when it is configured.
+  if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ]; then
+    [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 0
+    [[ "$STATEWRIGHT_MANAGED_MCP_URL" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+/?$ ]] || return 0
+    endpoint="${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp"
+    authorization="$STATEWRIGHT_MANAGED_MCP_TOKEN"
+  fi
+  response=$(printf '%s' "$1" | curl -sf --max-time 4 -X POST "$endpoint" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -H "Authorization: Bearer $authorization" \
     "${SESSION_HEADER_ARGS[@]}" \
     --data-binary @- 2>/dev/null) || return 0
   printf '%s' "$response"
@@ -967,7 +977,7 @@ case "$ENDPOINT" in
 
       # Keep the complete, already-redacted receipt available to the agent in
       # additionalContext, but make the native permission surface read like a
-      # Statewright supervisor event rather than a JSON/probability dump.
+      # Statewright Arbiter event rather than a JSON/probability dump.
       ADAPTER_REASON=$(printf '%s' "$ADAPTER_RESULT" | jq -r '.reason // "Blocked by Statewright gateway policy."' 2>/dev/null || true)
       [ -n "$ADAPTER_REASON" ] || ADAPTER_REASON="Blocked by Statewright gateway policy."
       UNMANAGED_DELEGATION=$(printf '%s' "$ADAPTER_RESULT" | jq -r \

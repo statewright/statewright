@@ -13,6 +13,7 @@ import { getGatewayCredential } from "./credential-store.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { startDesktopBridgePool } from "./desktop-bridge-pool.mjs";
 import { runDesktopMultichatRuntime } from "./desktop-multichat-runtime.mjs";
+import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
 export { connectDesktopProfile } from "./desktop-device-connect.mjs";
 
 // The selected Desktop record owns the endpoint. A shell's profile or explicit
@@ -279,6 +280,8 @@ export async function runDesktopAppServerBroker({
       },
       clientId: plan.clientId,
       classifierApprovalService,
+      ...desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId,
+        ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState}),
       nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
       getThreadCwds: (threadIds) => readThreadMetadata({ threadIds }),
       onThreadStarted: claimThread,

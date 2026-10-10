@@ -30,7 +30,7 @@ for (const order of ["response-first", "notification-first"]) test(`correlated s
   }
   assert.deepEqual(raw, original);
   assert.equal(statuses.length, 2);
-  assert.match(statuses[1].params.item.text, /^Statewright supervisor: intake · gpt-6-astra \/ high · running$/);
+  assert.match(statuses[1].params.item.text, /^Statewright Arbiter: intake · gpt-6-astra \/ high · running$/);
   assert(Number.isSafeInteger(statuses[0].params.startedAtMs));
   assert(Number.isSafeInteger(statuses[1].params.completedAtMs));
   assert.equal(events[0].schema, "statewright/app-server-handoff/v1");

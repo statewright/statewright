@@ -19,7 +19,7 @@ test("get_state presentation is one bounded supervisor line without raw workflow
   const summarized = summarizeStatewrightToolCompletion(raw);
   assert.notEqual(summarized, raw);
   assert.equal(summarized.params.item.result.content[0].text,
-    "Statewright supervisor: baseline · gpt-5.6-sol / high · 1 transition");
+    "Statewright Arbiter: baseline · gpt-5.6-sol / high · 1 transition");
   assert.equal(summarized.params.item.result.structuredContent, undefined);
   assert.deepEqual(raw.params.item.result.structuredContent.allowed_tools, ["Read", "Bash"], "upstream item is untouched");
 });
@@ -40,7 +40,7 @@ test("native MCP transition response becomes a concise line without losing machi
   const raw = { jsonrpc: "2.0", id: 17, result: { content: [{ type: "text", text: JSON.stringify(value) }] } };
   const summarized = summarizeStatewrightMcpResponse("statewright_transition", raw);
   assert.equal(summarized.result.content[0].text,
-    "Statewright supervisor: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
+    "Statewright Arbiter: baseline → implement · transitioned · 2/2500 transitions · 2498 remaining");
   assert.deepEqual(summarized.result.structuredContent, value);
   assert.equal(raw.result.structuredContent, undefined, "upstream response is untouched");
 });
@@ -125,7 +125,7 @@ test("transition starts become a bounded supervisor status without invocation JS
   assert.notEqual(summarized, raw);
   assert.deepEqual(summarized.params.item, {
     id: "transition-1", type: "agentMessage", phase: "commentary",
-    text: "Statewright supervisor: transition requested",
+    text: "Statewright Arbiter: transition requested",
   });
   assert.match(JSON.stringify(raw), /private path/, "upstream notification is untouched");
   assert.doesNotMatch(JSON.stringify(summarized), /IMPLEMENTED|rationale|private path|token/);

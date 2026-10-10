@@ -25,6 +25,7 @@ export function createDesktopThreadDispatcher({ openLane, readBinding, saveBindi
   async function retire(lane, reason) {
     if (lane.closed) return;
     lane.closed = true;
+    if (lane.key === "discovery") initialized = false;
     lane.initReject?.(new Error(reason));
     clearTimeout(lane.initTimer);
     for (const [id, pending] of requests) if (pending.lane === lane) {
@@ -61,6 +62,21 @@ export function createDesktopThreadDispatcher({ openLane, readBinding, saveBindi
         await retire(lane, "Native response did not belong to its lane."); return;
       }
       requests.delete(key);
+      if (pending.method === "initialize" && !message.error) {
+        if (!message.result || typeof message.result !== "object" || Array.isArray(message.result)) {
+          fail(message.id, "Native initialization returned an invalid result.");
+          await retire(lane, "Invalid native initialization result."); return;
+        }
+        // Desktop's AppServerConnection proceeds directly on this result. The
+        // broker owns downstream handshake completion; a client's optional
+        // initialized notification is not evidence of native readiness.
+        try { lane.connection.send({ method: "initialized" }); }
+        catch {
+          fail(message.id, "Native initialization could not be completed.");
+          await retire(lane, "Native initialization transport failed."); return;
+        }
+        initialized = true;
+      }
       if (["thread/start", "thread/resume"].includes(pending.method)) lane.attaching = false;
       if (!message.error && ["thread/start", "thread/resume"].includes(pending.method)) {
         const threadId = message.result?.thread?.id;
@@ -133,7 +149,9 @@ export function createDesktopThreadDispatcher({ openLane, readBinding, saveBindi
       initialization = message;
     } else if (message.method === "initialized") {
       if (!initialization) throw new Error("Desktop initialize is required.");
-      initialized = true;
+      // Accept clients using the documented two-message sequence without
+      // duplicating the downstream notification or unlocking a pending init.
+      return;
     } else if (!initialized) throw new Error("Desktop initialization has not completed.");
 
     if (["config/value/write", "config/batchWrite"].includes(message.method)) {

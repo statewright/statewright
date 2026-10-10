@@ -65,7 +65,11 @@ try {
       STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL: bridge.poolUrl, STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN: bridge.poolToken },
   });
   await rpc("initialize", { clientInfo: { name: "statewright-history-canary", version: "1" }, capabilities: { experimentalApi: true } });
-  input.write(`${JSON.stringify({ method: "initialized" })}\n`);
+  // The signed Desktop AppServerConnection proceeds on the initialize result
+  // without this optional client notification. Test that path by default.
+  if (process.env.STATEWRIGHT_CANARY_SEND_INITIALIZED === "1") {
+    input.write(`${JSON.stringify({ method: "initialized" })}\n`);
+  }
   for (const id of ids) {
     const read = await rpc("thread/read", { threadId: id, includeTurns: false });
     assert.equal(read.thread.id, id);

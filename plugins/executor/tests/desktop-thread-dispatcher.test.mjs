@@ -7,7 +7,7 @@ const SECOND = "22222222-2222-4222-8222-222222222222";
 const THIRD = "33333333-3333-4333-8333-333333333333";
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
-async function fixture(t, { bindings = new Map(), autoInitialize = () => true, ...options } = {}) {
+async function fixture(t, { bindings = new Map(), autoInitialize = () => true, sendInitialized = true, ...options } = {}) {
   const opened = [];
   const output = [];
   const reads = [];
@@ -34,7 +34,7 @@ async function fixture(t, { bindings = new Map(), autoInitialize = () => true, .
   });
   t.after(() => dispatcher.close());
   await dispatcher.handle({ id: "initialize", method: "initialize", params: { clientInfo: { name: "fixture" } } });
-  await dispatcher.handle({ method: "initialized" });
+  if (sendInitialized) await dispatcher.handle({ method: "initialized" });
   await settle();
   output.length = 0;
   return {
@@ -49,6 +49,33 @@ async function fixture(t, { bindings = new Map(), autoInitialize = () => true, .
       return lane;
     },
   };
+}
+
+test("Desktop can resume after native initialize succeeds without sending initialized", async t => {
+  const f = await fixture(t, { sendInitialized: false });
+  await f.resume(FIRST, "desktop-resume");
+  assert.equal(f.output.at(-1).result.thread.id, FIRST);
+  assert.equal(f.opened[0].sent.filter(message => message.method === "initialized").length, 1);
+  await f.dispatcher.handle({ method: "initialized" });
+  await f.dispatcher.handle({ method: "initialized" });
+  assert.equal(f.opened[0].sent.filter(message => message.method === "initialized").length, 1);
+});
+
+for (const [label, response] of [
+  ["pending", null],
+  ["failed", { error: { code: -32000, message: "Native initialize failed" } }],
+  ["malformed", {}],
+]) {
+  test(`client initialized notification cannot unlock ${label} native initialization`, async t => {
+    const f = await fixture(t, { autoInitialize: () => false });
+    if (response) { f.opened[0].emit({ id: "initialize", ...response }); await settle(); }
+    await f.dispatcher.handle({ method: "initialized" });
+    await f.dispatcher.handle({ id: "early-resume", method: "thread/resume", params: { threadId: FIRST } });
+    assert.match(f.output.at(-1).error.message, /initialization has not completed/);
+    assert.equal(f.opened.length, 1);
+    assert.equal(f.saved.length, 0);
+    assert.equal(f.opened[0].sent.filter(message => message.method === "initialized").length, 0);
+  });
 }
 
 test("historical chats from distinct projects get isolated owners and mutations", async t => {

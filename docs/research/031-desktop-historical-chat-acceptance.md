@@ -152,3 +152,53 @@ observed budget because review corrections postdated the first successful run.
 Rollback: reinstall `0.3.4+codex.20261010162105` and reprovision existing profiles;
 preserve the new binding receipts and all user data. That version retains the
 known cross-project resume restriction. No gateway/site/server deployment applies.
+
+## Handshake regression triage (2026-10-10)
+
+User's next normal-launch test reported `Desktop initialization has not completed`.
+Signed Desktop PID 41707 logged successful native initialization at 16:56:05.334Z
+in `codex-desktop-51e8531f-b1ab-4cc6-b3d3-3802ab9dba63-41707-t0-i1-165604-0.log`.
+The installed app's `AppServerConnection.completeInitialization` proceeds on that
+response without sending the separate `initialized` notification. The dispatcher
+instead unlocked only on that notification. Prior canary explicitly sent it,
+so its success did not cover this actual client sequence. Native init failure or
+an OAuth failure is not supported by this successful handshake log.
+
+Narrow repair contract from clean `f1d4e40`: dispatcher readiness follows its
+correlated successful native initialize response, with exactly one downstream
+initialized notification; redundant client notification is consumed. Failed,
+pending and malformed native responses must stay unready. Preserve ownership,
+auth, permissions and gateway boundaries. Update tests and vendor canary for both
+client sequences, regenerate package, independent review, one final full plugin
+gate and local install. No server/site/gateway deployment or GUI automation.
+
+Continue the user-authorized no-Statewright fallback: native local get-state is
+still unadvertised; the cloud connector is not a substitute for that binding.
+Budget is provisional/observed-only: normal 20, hard 30 minutes; 40 remaining tool
+calls; one scoped review and one full gate, reserving the final third for install
+and handoff. Contraction stops optional exploration; hard stop records evidence
+and leaves installation unchanged. PC-01 live acceptance remains a gap; PC-04/10
+identity controls unchanged; PC-07/08/15 require exact package/review evidence.
+
+Characterized baseline: the four new dispatcher cases failed on the prior source
+(18 prior tests passed), and the real bundled vendor canary without the client
+notification exited 1 with the user's exact error. After the scoped repair,
+dispatcher plus runtime tests passed 28/28; the real vendor canary passed both
+without and with the explicit client notification. Neither run used model turns
+or user history. This supersedes the earlier canary's incomplete handshake
+coverage, not its narrowly successful historical-resume result.
+
+Official protocol reference, retrieved 2026-10-10:
+https://learn.chatgpt.com/docs/app-server#initialization describes the two-message
+sequence. The broker now owns that downstream sequence while accepting the
+observed signed Desktop behavior upstream. Readiness still requires the actual
+native response; no timer, retry or client assertion substitutes for it.
+Candidate `0.3.4+codex.20261010165943`; install, final package gate and live
+acceptance outcome belong in the controller receipt. The prior restart question
+is resolved as a failed Desktop acceptance, not left pending or counted as pass.
+
+Independent non-editing `desktop_handshake_review` found no blocker in this diff.
+Its additional read-only probes covered notification-send failure, discovery
+disconnect and late initialization after disconnect. Exact final full-gate and
+installation results remain in the release controller receipt; the user's next
+normal-launch test still determines live acceptance.

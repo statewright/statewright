@@ -485,6 +485,32 @@ test("Generated ChatGPT + Statewright app runs with a minimal GUI-like PATH", as
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("Staging Desktop connects a missing gateway credential before starting the configured app with its native Codex dispatcher intact", async () => {
+  const { root, state, vendor, app, applications, wrapper, nativeLauncher } = await fixture("statewright-desktop-missing-staging-credential-");
+  const marker = join(root, "chatgpt-started");
+  const connection = join(root, "connection-started");
+  try {
+    await writeFile(app, `#!/bin/sh\nprintf started > "$RECORD_PATH"\nsleep 1\n`);
+    await chmod(app, 0o700);
+    await writeFile(join(root, "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"), `import { writeFile } from "node:fs/promises";
+let connected = false;
+export async function desktopProfileEnvironment(state, environment) { return environment; }
+export async function startProfileDesktopMcpBridge() { if (!connected) { const error = new Error("No credential is stored for this gateway"); error.code = "CREDENTIAL_MISSING"; throw error; } return { url: "http://127.0.0.1:43123", token: "fixture-token", close: async () => {} }; }
+export async function connectDesktopProfile({ state }) { await writeFile(process.env.CONNECT_PATH, state.gateway_url); connected = true; }
+`);
+    const record = await enableDesktop({ statePath: state, profile: "staging", gatewayUrl: "https://staging.example.test", original: vendor, app, applicationsDirectory: applications, wrapper, node: process.execPath, nativeLauncherCandidate: nativeLauncher });
+    await execFile(process.execPath, [record.launcher_path], { env: { PATH: "/usr/bin:/bin", HOME: root, RECORD_PATH: marker, CONNECT_PATH: connection } });
+    assert.equal(await readFile(connection, "utf8"), "https://staging.example.test");
+    assert.equal(await readFile(marker, "utf8"), "started");
+    assert.equal(record.launcher_kind, "native_dispatcher");
+    assert.equal(await readFile(record.shim_path, "utf8"), "native-launcher-fixture\n");
+    assert.match(await readFile(record.launcher_path, "utf8"), /spawn\(state\.desktop_executable/);
+    assert.equal(record.desktop_executable, app);
+    const appScript = await readFile(join(record.launcher_app_path, "Contents", "MacOS", "ChatGPT + Statewright Staging"), "utf8");
+    assert.doesNotMatch(appScript, /Quit ChatGPT completely/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Production, staging, and development Desktop profiles install independently", async () => {
   const { root, state, vendor, app, applications, wrapper } = await fixture("statewright-desktop-profiles-");
   const stagingState = join(dirname(state), "codex-desktop-staging.json");

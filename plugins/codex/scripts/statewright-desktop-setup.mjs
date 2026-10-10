@@ -203,7 +203,11 @@ const waitForStartup = child => new Promise((resolve, reject) => {
     callback(value);
   };
   child.once("error", error => settle(reject, error));
-  child.once("exit", (code, signal) => settle(reject, new Error(\`ChatGPT exited \${spawned ? "during startup" : "before startup"} (code \${code ?? "none"}, signal \${signal ?? "none"}).\`)));
+  child.once("exit", (code, signal) => {
+    const error = new Error(\`ChatGPT exited \${spawned ? "during startup" : "before startup"} (code \${code ?? "none"}, signal \${signal ?? "none"}).\`);
+    error.code = "DESKTOP_CHILD_EXITED";
+    settle(reject, error);
+  });
   child.once("spawn", () => {
     spawned = true;
     graceTimer = setTimeout(() => settle(resolve), 250);
@@ -215,9 +219,15 @@ try {
   await access(state.desktop_executable, constants.X_OK);
   await access(state.shim_path, constants.X_OK);
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
-  const { desktopProfileEnvironment, startProfileDesktopMcpBridge } = await import(runtimeUrl);
+  const { connectDesktopProfile, desktopProfileEnvironment, startProfileDesktopMcpBridge } = await import(runtimeUrl);
   const profileEnvironment = await desktopProfileEnvironment(state, process.env);
-  const bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment });
+  let bridge;
+  try { bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment }); }
+  catch (error) {
+    if (error.code !== "CREDENTIAL_MISSING") throw error;
+    await connectDesktopProfile({ state, environment: profileEnvironment });
+    bridge = await startProfileDesktopMcpBridge({ state, environment: profileEnvironment });
+  }
   const child = spawn(state.desktop_executable, [], {
     detached: false,
     stdio: "ignore",
@@ -243,19 +253,42 @@ try {
   }
 } catch (error) {
   process.stderr.write(\`ChatGPT + Statewright could not start: \${error.message}\\n\`);
-  process.exitCode = 1;
+  process.exitCode = error.code === "CREDENTIAL_MISSING" ? 20
+    : ["CREDENTIAL_STORE_UNAVAILABLE", "CREDENTIAL_HELPER_MISSING", "CREDENTIAL_HELPER_FAILED", "CREDENTIAL_HELPER_TIMEOUT"].includes(error.code) ? 21
+    : error.code === "DESKTOP_CHILD_EXITED" ? 22
+    : error.code === "DESKTOP_CONNECT_CANCELLED" ? 23
+    : error.code?.startsWith("DESKTOP_CONNECT_") ? 24 : 1;
 }
 `;
 }
-function desktopAppContents(launcherPath, nodeExecutable, displayName) {
-  return `#!/bin/sh\nif ! ${shellQuote(nodeExecutable)} ${shellQuote(launcherPath)}; then\n  /usr/bin/osascript -e 'display alert "${displayName} could not start" message "Quit ChatGPT completely, then open ${displayName} again."' >/dev/null 2>&1 || true\n  exit 1\nfi\n`;
+function appleScriptQuote(value) { return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`; }
+function desktopAppContents(launcherPath, nodeExecutable, profile) {
+  const alert = message => shellQuote(`display alert ${appleScriptQuote(`${profile.displayName} could not start`)} message ${appleScriptQuote(message)}`);
+  const connectHost = profile.name === "staging" ? "scodex" : profile.name === "production" ? "codex" : null;
+  const missingCredential = connectHost
+    ? `No ${profile.name} gateway credential is stored in Keychain. Open ${connectHost}, call statewright_connect, approve in your browser, then reopen this app.`
+    : "No development gateway credential is stored in Keychain. Connect that gateway from its matching Codex CLI profile, then reopen this app.";
+  return `#!/bin/sh
+${shellQuote(nodeExecutable)} ${shellQuote(launcherPath)}
+status=$?
+if [ "$status" -eq 0 ]; then exit 0; fi
+case "$status" in
+  20) /usr/bin/osascript -e ${alert(missingCredential)} >/dev/null 2>&1 || true ;;
+  21) /usr/bin/osascript -e ${alert("Statewright could not read the OS credential store. Check Keychain access, then run the Desktop doctor for this profile.")} >/dev/null 2>&1 || true ;;
+  22) /usr/bin/osascript -e ${alert("ChatGPT exited during startup. It may still be running in the background; check Activity Monitor, quit that app only, then retry. Your Codex TUI uses a separate App Server lane.")} >/dev/null 2>&1 || true ;;
+  23) exit 0 ;;
+  24) /usr/bin/osascript -e ${alert("The Statewright browser connection did not complete. Reopen this app to retry, or run its launcher in Terminal to see the exact error.")} >/dev/null 2>&1 || true ;;
+  *) /usr/bin/osascript -e ${alert(`Run ${nodeExecutable} ${launcherPath} in Terminal to see the startup error. Your Codex TUI uses a separate App Server lane.`)} >/dev/null 2>&1 || true ;;
+esac
+exit "$status"
+`;
 }
 async function installDesktopApp({ statePath, applicationsDirectory, nodeExecutable, profile, writeAtomicFn }) {
   const launcherPath = join(dirname(statePath), "bin", profile.launcherName);
   const appPath = join(applicationsDirectory, profile.appName);
   await writeAtomicFn(launcherPath, desktopLauncherContents(statePath), 0o700);
   await writeAtomicFn(join(appPath, "Contents", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>CFBundleDisplayName</key><string>${profile.displayName}</string><key>CFBundleExecutable</key><string>${profile.executableName}</string><key>CFBundleIdentifier</key><string>${profile.bundleId}</string><key>CFBundleName</key><string>${profile.displayName}</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n`, 0o600);
-  await writeAtomicFn(join(appPath, "Contents", "MacOS", profile.executableName), desktopAppContents(launcherPath, nodeExecutable, profile.displayName), 0o700);
+  await writeAtomicFn(join(appPath, "Contents", "MacOS", profile.executableName), desktopAppContents(launcherPath, nodeExecutable, profile), 0o700);
   return { appPath, launcherPath };
 }
 async function removeVerifiedLegacyDesktopApp(applicationsDirectory) {

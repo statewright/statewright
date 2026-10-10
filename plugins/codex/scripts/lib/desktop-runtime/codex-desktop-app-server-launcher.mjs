@@ -11,6 +11,7 @@ import { adoptCodexRootSession, claimCodexRootSession, claimManagedControlIdenti
 import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
 import { getGatewayCredential } from "./credential-store.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
+export { connectDesktopProfile } from "./desktop-device-connect.mjs";
 
 // The selected Desktop record owns the endpoint. A shell's profile or explicit
 // API key must never redirect it or supply a credential from another gateway.

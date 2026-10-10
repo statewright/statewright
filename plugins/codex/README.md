@@ -230,8 +230,9 @@ app-server-only shell.
 The installed plugin always binds this standard launcher to the production
 gateway (`https://mcp.statewright.ai`). Desktop reads the credential for its exact
 gateway from the OS keyring, not a plaintext key file or an inherited shell key.
-Missing or unavailable credentials stop launch non-interactively; connect that
-gateway explicitly before retrying. The first Desktop turn is held briefly
+An unavailable keyring stops launch with an error. A missing credential starts
+the profile-bound browser connection flow before ChatGPT launches; cancelling
+or failing that flow leaves the keyring unchanged. The first Desktop turn is held briefly
 until the native App Server reports Statewright's tools as ready, so a fast
 first prompt cannot race MCP registration.
 
@@ -274,7 +275,14 @@ value only if the launchd value still points to the recorded Statewright shim;
 otherwise it refuses to overwrite the user's setting. Plugin startup refreshes
 production and already-configured staging/development launchers together, keeping
 their gateway, client identity, and disabled status. It does not create private
-profiles or start OAuth. `doctor` reports redacted keyring status; an old
+profiles or start OAuth during setup. On first launch, if that Desktop profile
+has no gateway credential, it explains that Statewright will open in the
+browser, starts the device-authorization flow for the profile's configured
+authorization service, and starts ChatGPT only after the gateway-keyed OS
+credential is verified and stored. The GUI remains the signed ChatGPT
+executable; Node is a separate setup/bridge companion, while Desktop's Codex
+App Server path uses the native dispatcher rather than a Node shell shim.
+`doctor` reports redacted keyring status; an old
 plaintext key file is not evidence that the Desktop profile is ready.
 A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
 chat remain required before this is release-ready.

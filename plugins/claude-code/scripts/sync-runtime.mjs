@@ -16,6 +16,7 @@ export const RUNTIME_FILES = [
   ".mcp.json",
   "capture.sh",
   "client-id.sh",
+  "environment-shell.sh",
   "hook.sh",
   "mcp-proxy.sh",
   "plugin.json",

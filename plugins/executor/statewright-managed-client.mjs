@@ -5,8 +5,8 @@ import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { bootstrapManagedClients, codexNativeDestinationInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
-import { resolveGatewayApiKey } from "./lib/credential-store.mjs";
+import { bootstrapManagedClients, codexNativeDestinationInvocation, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
+import { resolveTuiGatewayApiKey } from "./lib/credential-store.mjs";
 import { resolvedGatewayEnvironment } from "./lib/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/error-reporting.mjs";
 
@@ -44,6 +44,12 @@ function parseArgs(argv) {
 
 function usage() {
   return "Usage: statewright-managed-client --host codex|claude --real-bin PATH -- [client args]\n       statewright-managed-client --bootstrap\n       statewright-managed-client --uninstall\n       statewright-managed-client --install --enable --host codex|claude [--real-bin PATH]\n       statewright-managed-client --disable --host codex|claude\n       statewright-managed-client --kill-app-server [--client-id ID|--thread-id ID]";
+}
+
+export function managedClientTuiInvocation(host, args) {
+  if (host === "codex") return !codexOneShotInvocation(host, args);
+  if (host === "claude") return !args.some((arg) => arg === "-p" || arg === "--print");
+  return false;
 }
 
 async function residentThread(root, clientId) {
@@ -135,7 +141,9 @@ async function main() {
   const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
   if (!nativeDestination && await managedClientEnabled(options.host)) {
     try {
-      environment.STATEWRIGHT_API_KEY = await resolveGatewayApiKey(environment);
+      environment.STATEWRIGHT_API_KEY = await resolveTuiGatewayApiKey(environment, {
+        allowUnlock: managedClientTuiInvocation(options.host, options.args),
+      });
       process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });
       return;
     } catch (error) {

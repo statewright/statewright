@@ -78,6 +78,7 @@ export function isExpectedTransportClose({ side, code } = {}) {
 export function isExpectedPluginError(error) {
   const message = String(error instanceof Error ? error.message : error ?? "");
   return error?.name === "AbortError"
+    || error?.code === "CREDENTIAL_UNLOCK_CANCELLED"
     || /^(?:--(?:host|real-bin|workflow|sandbox|approval-policy|approvals-reviewer|delivery-run-id)|Unknown option:)/.test(message)
     || /^(?:Choose either|Unsupported managed client host|Statewright cannot translate OpenAI model|Provide the task)/.test(message)
     || message.startsWith("[statewright] BLOCKED:")

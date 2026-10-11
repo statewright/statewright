@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { canonicalGateway, PRODUCTION_GATEWAY } from "./gateway-profile.mjs";
 
@@ -125,6 +126,73 @@ export async function resolveGatewayApiKey(environment = process.env, home = hom
   if (!legacy) throw new CredentialStoreError("No credential is stored for this gateway", "CREDENTIAL_MISSING");
   await setGatewayCredential(gateway, legacy, { environment, home, ...options });
   return legacy;
+}
+
+async function confirmKeychainUnlock({ input, output }) {
+  const terminal = createInterface({ input, output, terminal: true });
+  try {
+    const answer = await terminal.question(
+      "[statewright] Try unlocking the macOS default keychain? It may remain unlocked until macOS locks it again. [y/N] ",
+    );
+    return /^(?:y|yes)$/i.test(answer.trim());
+  } finally {
+    terminal.close();
+  }
+}
+
+export function unlockMacKeychain({ spawnProcess = spawn } = {}) {
+  return new Promise((resolveUnlock, rejectUnlock) => {
+    // Let Apple's tool own the password prompt. Never receive the password in
+    // Node, pass it in argv, or substitute a shell command for this binary.
+    const child = spawnProcess("/usr/bin/security", ["unlock-keychain"], {
+      stdio: "inherit",
+      shell: false,
+    });
+    child.once("error", rejectUnlock);
+    child.once("exit", (code) => resolveUnlock(code === 0));
+  });
+}
+
+export async function resolveTuiGatewayApiKey(environment = process.env, {
+  platform = process.platform,
+  allowUnlock = true,
+  input = process.stdin,
+  output = process.stderr,
+  lookup = resolveGatewayApiKey,
+  confirm = confirmKeychainUnlock,
+  unlock = unlockMacKeychain,
+} = {}) {
+  try {
+    return await lookup(environment);
+  } catch (error) {
+    if (error?.code !== "CREDENTIAL_STORE_UNAVAILABLE" || platform !== "darwin" || !allowUnlock) throw error;
+    if (!input.isTTY || !output.isTTY) {
+      throw new CredentialStoreError(
+        "macOS Keychain could not read the gateway credential; retry in an interactive terminal to unlock the default keychain",
+        "CREDENTIAL_STORE_UNAVAILABLE",
+      );
+    }
+    output.write("[statewright] macOS Keychain could not read this gateway credential from this terminal.\n");
+    let approved = false;
+    try { approved = await confirm({ input, output }); } catch { /* cancelled */ }
+    if (!approved) {
+      throw new CredentialStoreError("Keychain unlock was cancelled", "CREDENTIAL_UNLOCK_CANCELLED");
+    }
+    let unlocked = false;
+    try { unlocked = await unlock(); } catch { /* preserve a bounded, secret-free error */ }
+    if (!unlocked) {
+      throw new CredentialStoreError("Keychain unlock did not complete; gateway credential remains unavailable", "CREDENTIAL_UNLOCK_FAILED");
+    }
+    try {
+      return await lookup(environment);
+    } catch (retryError) {
+      if (retryError?.code === "CREDENTIAL_MISSING") throw retryError;
+      throw new CredentialStoreError(
+        "Keychain unlocked, but this terminal still cannot read the gateway credential; check the item's access approval or the SSH security session",
+        "CREDENTIAL_STORE_UNAVAILABLE",
+      );
+    }
+  }
 }
 
 async function cli() {

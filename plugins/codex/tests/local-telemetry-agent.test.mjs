@@ -702,6 +702,95 @@ test("PocketBase delivery advances while live usage retries independently across
   });
 });
 
+test("count-only primary receipts cannot starve later live usage, including backoff and restart", async () => {
+  await withTempDir(async (directory) => {
+    const live = [];
+    let primaryCalls = 0;
+    const options = {
+      dataDir: directory, pocketbaseUrl: "https://statewright.invalid",
+      gatewayUrl: "https://mcp.statewright.invalid", apiKey: "local-secret",
+      correlationWindowMs: 0, maxDrainEvents: 2,
+      fetchImpl: async (url, request) => {
+        if (url.includes("runtime-usage")) {
+          live.push(JSON.parse(request.body).usage);
+          return { ok: true, status: 204 };
+        }
+        primaryCalls++;
+        return { ok: true, status: 202, json: async () => ({ accepted: 1 }) };
+      },
+    };
+    const service = new LocalTelemetryService(options);
+    service.bind({
+      conversation_id: "thread-root", run_id: "run-1", run_session_id: "gateway-session-1",
+      workflow: "workflow", state: "intake", state_epoch: 1,
+      effective_at: "2026-07-27T11:59:00.000Z",
+    });
+    for (let i = 0; i < 5; i++) service.ingestOtlp(otlpFixture({
+      sourceTime: `2026-07-27T12:00:0${i}.000Z`, timeUnixNano: String(1785153600000000000n + BigInt(i) * 1000000000n),
+    }));
+    assert.deepEqual(await service.flush(), { delivered: 0, pending: 5 });
+    assert.equal(live.length, 2);
+    service.delivery.next_attempt_at = new Date(Date.now() + 60_000).toISOString();
+    await service.flush();
+    await service.flush();
+    assert.equal(primaryCalls, 1, "primary retry must respect its backoff");
+    assert.deepEqual(live.map(x => x.sequence), [1, 2, 3, 4, 5]);
+    assert.equal(service.outbox.pendingCount(), 5, "ambiguous receipts remain unacknowledged");
+    service.liveUsageOutbox.compact();
+    const restarted = new LocalTelemetryService(options);
+    await restarted.flush();
+    assert.equal(live.length, 5, "compaction/restart must preserve projection watermark");
+    restarted.ingestOtlp(otlpFixture({sourceTime: "2026-07-27T12:00:06.000Z", timeUnixNano: "1785153606000000000"}));
+    await restarted.flush();
+    assert.deepEqual(live.map(x => x.sequence), [1, 2, 3, 4, 5, 6], "new events progress during primary backoff");
+  });
+});
+
+test("live projection scans bounded pages even when the backlog contains ineligible events", async () => {
+  await withTempDir(async (directory) => {
+    let delivered = 0;
+    const service = new LocalTelemetryService({
+      dataDir: directory, pocketbaseUrl: "https://statewright.invalid",
+      gatewayUrl: "https://mcp.statewright.invalid", apiKey: "local-secret", maxDrainEvents: 2,
+      fetchImpl: async () => { delivered++; return {ok: true, status: 204}; },
+    });
+    for (let i = 0; i < 7; i++) {
+      const normalized = normalizeOtlpLogs(otlpFixture({
+        sourceTime: `2026-07-27T12:00:0${i}.000Z`, timeUnixNano: String(1785153600000000000n + BigInt(i) * 1000000000n),
+      }))[0];
+      service.outbox.appendUsage(normalized, i < 5 ? null : {
+        run_id: "run-1", run_session_id: "session-1", state: "record", state_epoch: 7,
+      });
+    }
+    await service.flushLive();
+    assert.equal(service.liveProjectionCandidates.size, 5);
+    assert.equal(delivered, 0);
+    await service.flushLive();
+    assert.equal(service.liveProjectionCandidates.size, 3);
+    await service.flushLive();
+    assert.equal(service.liveProjectionCandidates.size, 1);
+    assert.equal(delivered, 1);
+    await service.flushLive();
+    assert.equal(delivered, 2);
+  });
+});
+
+test("primary-only collectors do not retain live projection candidates", async () => {
+  await withTempDir(async (directory) => {
+    const options = {dataDir: directory, pocketbaseUrl: "https://statewright.invalid", apiKey: "local-secret",
+      fetchImpl: async (_url, request) => acceptedTelemetryResponse(request)};
+    const service = new LocalTelemetryService(options);
+    service.outbox.appendUsage(normalizeOtlpLogs(otlpFixture())[0], null);
+    assert.equal(service.liveProjectionCandidates.size, 0);
+    const restarted = new LocalTelemetryService(options);
+    assert.equal(restarted.liveProjectionCandidates.size, 0);
+    await restarted.flush();
+    restarted.outbox.compact();
+    assert.equal(restarted.liveProjectionCandidates.size, 0);
+    assert.equal(restarted.outbox.pendingCount(), 0);
+  });
+});
+
 test("an inactive live session is terminal and cannot poison later usage delivery", async () => {
   await withTempDir(async (directory) => {
     let liveRequests = 0;

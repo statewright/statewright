@@ -5,10 +5,15 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=../tool-policy.sh
 source "$ROOT/tool-policy.sh"
 
+if ! statewright_policy_mode_is_denylist "blacklist_heuristic_v1"; then
+  echo "expected deprecated denylist policy wire alias to remain accepted" >&2
+  exit 1
+fi
+
 assert_allowed() {
   STATEWRIGHT_ALLOWED_TOOLS="$1"
   STATEWRIGHT_DISALLOWED_TOOLS=""
-  STATEWRIGHT_TOOL_POLICY_MODE="blacklist_heuristic_v1"
+  STATEWRIGHT_TOOL_POLICY_MODE="denylist_heuristic_v1"
   if ! statewright_tool_allowed "$2" "$3"; then
     echo "expected allow: $2" >&2
     exit 1
@@ -18,7 +23,7 @@ assert_allowed() {
 assert_denied() {
   STATEWRIGHT_ALLOWED_TOOLS=""
   STATEWRIGHT_DISALLOWED_TOOLS="$1"
-  STATEWRIGHT_TOOL_POLICY_MODE="blacklist_heuristic_v1"
+  STATEWRIGHT_TOOL_POLICY_MODE="denylist_heuristic_v1"
   if statewright_tool_allowed "$2" "$3"; then
     echo "expected denial: $2 with blocked capability $1 and input $3" >&2
     exit 1
@@ -49,6 +54,8 @@ for command in 'cat README.md' 'cat README.md && cat LICENSE' "rg -n 'needle' sr
   assert_allowed $'Read\nBash' exec_command "$(shell_input "$command")"
   test "$STATEWRIGHT_TOOL_MODE" = "bash"
 done
+# This asserts only dispatch to the gateway, NOT command admission. Manifest
+# expansion and final capability/risk decisions are covered by gateway tests.
 assert_allowed $'Read\nBash' exec_command "$(shell_input 'task test:unit')"
 test "$STATEWRIGHT_TOOL_MODE" = "bash"
 for native in Read read_file Grep grep search_files Glob glob find find_files ls list_directory; do

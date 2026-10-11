@@ -1,5 +1,8 @@
 # Statewright handoff banner workarounds
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 ## Research Summary
 
 There is a credible no-fork workaround for a subset of Statewright handoffs: change the active turn's model settings through Codex's experimental `turn/settings/update` API, eliminating the interruption that causes the red banner. A diagnostic against the installed Codex 0.153.4 binary proved a same-turn model/effort switch with zero interrupted terminals, but this is not a general cross-provider solution and upstream explicitly warns that model-instruction correctness and attribution are incomplete. For handoffs that must interrupt, no safe JSON-RPC-only banner override was found; a narrowly scoped renderer change remains cleaner than dropping or relabeling lifecycle events. [4–9]
@@ -173,7 +176,7 @@ Research access date: 2026-09-14. Installed executable: `codex-cli 0.153.4`. Pin
 10. OpenAI, [pinned side-conversation UI](/tmp/codex-src.uaLmNC/codex-rs/tui/src/app/side.rs:225), `codex-rs/tui/src/app/side.rs`; local side-thread ownership of the suppression mode.
 11. OpenAI, [pinned PostToolUse regression](/tmp/codex-src.uaLmNC/codex-rs/core/tests/suite/hooks.rs:5215), `codex-rs/core/tests/suite/hooks.rs`; continue-false still produces a second model request. Read as source, not executed as a Rust test here.
 12. OpenAI, [pinned turn suspension](/tmp/codex-src.uaLmNC/codex-rs/core/src/session/turn_suspension.rs:14), `codex-rs/core/src/session/turn_suspension.rs`; recovery without a terminal and explicit pending-input loss.
-13. Statewright, [managed MCP bridge](/Users/ben/dev/statewright/plugins/executor/lib/managed-mcp-bridge.mjs:52), current local checkout inspected 2026-09-14; existing forwarding seam, not an implemented response barrier.
+13. Statewright, [managed MCP bridge](../../plugins/executor/lib/managed-mcp-bridge.mjs), current local checkout inspected 2026-09-14; existing forwarding seam, not an implemented response barrier.
 
 Additional direct evidence: [native diagnostic source](probes/turn-settings-workaround.mjs) and [machine-readable results](probes/turn-settings-workaround-results.json). Seven native scenarios passed, including expected rejection cases and two extra negative assertions in the active-turn scenario. [Native TUI evidence](probes/turn-settings-tui-results.json) records the separate interactive acceptance test and eleven passing assertions.
 

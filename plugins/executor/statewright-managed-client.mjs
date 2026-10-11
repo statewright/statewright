@@ -5,14 +5,16 @@ import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { bootstrapManagedClients, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
+import { bootstrapManagedClients, codexNativeDestinationInvocation, codexOneShotInvocation, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, nativeDestinationEnvironment, runManagedClient, setManagedClientEnabled, uninstallManagedClients } from "./lib/managed-client-supervisor.mjs";
+import { resolveTuiGatewayApiKey } from "./lib/credential-store.mjs";
+import { resolvedGatewayEnvironment } from "./lib/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/error-reporting.mjs";
 
 const launcherPath = fileURLToPath(import.meta.url);
 
 function managedClientVersion(argv = process.argv.slice(2)) {
   const hostIndex = argv.indexOf("--host");
-  return hostIndex >= 0 && argv[hostIndex + 1] === "claude" ? "0.3.1" : "0.3.3";
+  return hostIndex >= 0 && argv[hostIndex + 1] === "claude" ? "0.3.1" : "0.3.4";
 }
 
 function parseArgs(argv) {
@@ -42,6 +44,12 @@ function parseArgs(argv) {
 
 function usage() {
   return "Usage: statewright-managed-client --host codex|claude --real-bin PATH -- [client args]\n       statewright-managed-client --bootstrap\n       statewright-managed-client --uninstall\n       statewright-managed-client --install --enable --host codex|claude [--real-bin PATH]\n       statewright-managed-client --disable --host codex|claude\n       statewright-managed-client --kill-app-server [--client-id ID|--thread-id ID]";
+}
+
+export function managedClientTuiInvocation(host, args) {
+  if (host === "codex") return !codexOneShotInvocation(host, args);
+  if (host === "claude") return !args.some((arg) => arg === "-p" || arg === "--print");
+  return false;
 }
 
 async function residentThread(root, clientId) {
@@ -129,13 +137,26 @@ async function main() {
     return;
   }
   if (!options.realBin) throw new Error("--real-bin is required when launching a managed client.");
-  if (await managedClientEnabled(options.host)) {
-    process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter });
-    return;
+  const nativeDestination = codexNativeDestinationInvocation(options.host, options.args);
+  const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
+  if (!nativeDestination && await managedClientEnabled(options.host)) {
+    try {
+      environment.STATEWRIGHT_API_KEY = await resolveTuiGatewayApiKey(environment, {
+        allowUnlock: managedClientTuiInvocation(options.host, options.args),
+      });
+      process.exitCode = await runManagedClient({ host: options.host, command: options.realBin, args: options.args, reporter, environment });
+      return;
+    } catch (error) {
+      if (error?.code !== "CREDENTIAL_MISSING") throw error;
+      if (!environment.STATEWRIGHT_PB_URL) {
+        throw new Error("No credential is stored for this gateway and its authorization service is not configured in ~/.statewright/environments.json.");
+      }
+      process.stderr.write("[statewright] no credential is stored for this gateway; launching the client so statewright_connect can complete browser approval. Restart after approval to enable managed routing.\n");
+    }
   }
   const child = spawn(options.realBin, options.args, {
     stdio: "inherit",
-    env: managedClientChildEnvironment({ host: options.host }),
+    env: managedClientChildEnvironment({ host: options.host, environment }),
     cwd: process.cwd(),
     shell: process.platform === "win32",
   });

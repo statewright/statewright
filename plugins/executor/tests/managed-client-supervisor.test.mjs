@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import net from "node:net";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -9,7 +9,15 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, claimManagedSessionOwner, readCodexRootSession, readManagedSessionLabels, recoverApprovedCodexIdentity, releaseManagedSessionOwner, resolveManagedClientIdentity, resumedSessionId, tmuxWindowLabel } from "../lib/managed-client-identity.mjs";
 import { approvalJournal } from "../lib/approval-journal.mjs";
-import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+import { acquireManagedTelemetry, bootstrapManagedClients, buildRoutedArgs, codexAllSessionsRequested, codexOneShotInvocation, codexResumeHasExplicitPermissionOverride, codexYoloResumeOverride, installManagedClientShim, managedClientChildEnvironment, managedClientEnabled, resolveRealBinary, restartManagedChild, routeClaudeModel, runManagedClient as runActualManagedClient, setManagedClientEnabled, terminateWindowsProcessTree, uninstallManagedClients, windowsProcessTreeEnvironment } from "../lib/managed-client-supervisor.mjs";
+
+// These legacy supervisor fixtures emit restart files, not the native App Server
+// protocol. Select that compatibility transport explicitly; default admission is
+// exercised separately below, and one-shot calls retain the production default.
+const runManagedClient = options => runActualManagedClient({ ...options, environment: {
+  ...(!codexOneShotInvocation(options.host, options.args) ? { STATEWRIGHT_CODEX_TRANSPORT: "restart" } : {}),
+  ...options.environment,
+} });
 
 function fakeBridgeFactory() {
   return {
@@ -321,7 +329,7 @@ test("managed Codex resume runs the history guard before spawning the native cli
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("resident App Server preflights Codex history before starting resident infrastructure", async () => {
+test("default resident App Server preflights Codex history before starting resident infrastructure", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-resident-history-guard-"));
   const fake = join(home, "fake-codex.mjs");
   const spawned = join(home, "resident-started");
@@ -329,11 +337,11 @@ test("resident App Server preflights Codex history before starting resident infr
     await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(spawned)}, "yes");\n`);
     await chmod(fake, 0o755);
     await assert.rejects(
-      runManagedClient({
+      runActualManagedClient({
         host: "codex",
         command: fake,
         args: ["resume", "durable-thread"],
-        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test", STATEWRIGHT_CODEX_TRANSPORT: "app-server" },
+        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
         home,
         pollMs: 5,
         bridgeFactory: fakeBridgeFactory,
@@ -342,6 +350,56 @@ test("resident App Server preflights Codex history before starting resident infr
       /stop before resident/,
     );
     assert.equal(await access(spawned).then(() => true, () => false), false);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("non-Yolo explicit Codex resume permissions select the compatibility transport", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-explicit-resume-permissions-"));
+  const fake = join(home, "fake-codex.mjs");
+  const captured = join(home, "args.json");
+  const stderr = [];
+  try {
+    await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(captured)}, JSON.stringify(process.argv.slice(2)));\n`);
+    await chmod(fake, 0o755);
+    const originalWrite = process.stderr.write;
+    process.stderr.write = (chunk, ...rest) => { stderr.push(String(chunk)); return true; };
+    try {
+      assert.equal(await runActualManagedClient({
+        host: "codex",
+        command: fake,
+        args: ["--sandbox", "workspace-write", "resume", "durable-thread"],
+        environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+        home,
+        pollMs: 5,
+        bridgeFactory: fakeBridgeFactory,
+        historyGuard: async () => ({ status: "healthy" }),
+      }), 0);
+    } finally { process.stderr.write = originalWrite; }
+    assert.deepEqual(JSON.parse(await readFile(captured, "utf8")), [
+      "--sandbox", "workspace-write", "resume", "durable-thread",
+    ]);
+    assert.match(stderr.join(""), /explicit permission overrides.*restart transport/i);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("an explicit Yolo resume uses the durable resident instead of a disposable bridge", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-equivalent-yolo-resume-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  let bridgeStarts = 0;
+  try {
+    assert.deepEqual(codexYoloResumeOverride("codex", [
+      "--dangerously-bypass-approvals-and-sandbox", "resume", sessionId, "--", "--dangerously-bypass-approvals-and-sandbox",
+    ]), { sessionId, args: ["resume", sessionId, "--", "--dangerously-bypass-approvals-and-sandbox"] });
+    await assert.rejects(runActualManagedClient({
+      host: "codex",
+      command: "/does-not-need-to-start",
+      args: ["--dangerously-bypass-approvals-and-sandbox", "resume", sessionId],
+      environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
+      home,
+      bridgeFactory: () => { bridgeStarts += 1; return fakeBridgeFactory(); },
+      historyGuard: async () => { throw new Error("resident preflight reached"); },
+    }), /resident preflight reached/);
+    assert.equal(bridgeStarts, 0, "Yolo resume must not enter restart transport");
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -355,6 +413,35 @@ test("Codex resume selectors are not mistaken for durable session IDs", () => {
   assert.equal(resumedSessionId("codex", ["--profile", "resume", "fix-it"]), null);
   assert.equal(resumedSessionId("codex", ["-m", "resume", "fix-it"]), null);
   assert.equal(resumedSessionId("codex", ["-m", "gpt-5.6-sol", "resume", "durable-thread"]), "durable-thread");
+});
+
+test("Codex classifies only explicit resume permission overrides", () => {
+  for (const args of [
+    ["--dangerously-bypass-approvals-and-sandbox", "resume", "thread-1"],
+    ["--yolo", "resume", "thread-1"],
+    ["resume", "thread-1", "--approve-for-me"],
+    ["resume", "--last", "-a", "never"],
+    ["-s=workspace-write", "resume", "thread-1"],
+    ["resume", "thread-1", "--add-dir=/workspace/cache"],
+    ["-C", "/workspace/project", "resume", "thread-1"],
+    ["resume", "thread-1", "-c", 'approval_policy="never"'],
+    ["resume", "thread-1", '-capproval_policy="never"'],
+    ["resume", "thread-1", "-cnetwork.enabled=false"],
+    ["resume", "thread-1", '--config=permissions.network_access="restricted"'],
+    ["--profile", "locked-down", "resume", "thread-1"],
+    ["--profile=locked-down", "resume", "thread-1"],
+    ["-plocked-down", "resume", "thread-1"],
+    ["--config=sandbox_workspace_write.writable_roots=[\"/workspace/cache\"]", "resume", "thread-1"],
+  ]) assert.equal(codexResumeHasExplicitPermissionOverride("codex", args), true, args.join(" "));
+
+  for (const args of [
+    ["resume", "thread-1"],
+    ["-m", "gpt-6-astra", "resume", "thread-1"],
+    ["-c", 'model_reasoning_effort="high"', "resume", "thread-1"],
+    ["resume", "thread-1", "--", "--sandbox", "danger-full-access"],
+    ["exec", "--dangerously-bypass-approvals-and-sandbox", "echo", "ok"],
+  ]) assert.equal(codexResumeHasExplicitPermissionOverride("codex", args), false, args.join(" "));
+  assert.equal(codexResumeHasExplicitPermissionOverride("claude", ["resume", "thread-1", "-a", "never"]), false);
 });
 
 test("Codex global resume scope is explicit and ignores prompt text after --", () => {
@@ -600,7 +687,7 @@ test("disabled managed-client wrapper does not leak its parent Codex writer iden
 });
 
 test("Codex restart preserves non-route args and applies the requested route", () => {
-  assert.deepEqual(buildRoutedArgs({ host: "codex", originalArgs: ["--full-auto", "-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="low"'], request: { session_id: "session-1", model: "openai-codex/gpt-5.6-sol", effort: "high" } }), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--full-auto", "resume", "session-1", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
+  assert.deepEqual(buildRoutedArgs({ host: "codex", originalArgs: ["--yolo", "-m", "gpt-5.6-terra", "-c", 'model_reasoning_effort="low"'], request: { session_id: "session-1", model: "openai-codex/gpt-5.6-sol", effort: "high" } }), ["-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"', "--yolo", "resume", "session-1", "Continue the active Statewright workflow in its current state. Use statewright_get_state first."]);
 });
 
 test("Codex restart replaces an existing resume invocation", () => {
@@ -612,6 +699,38 @@ test("Codex restart replaces an existing resume invocation", () => {
   assert.deepEqual(args, [
     "-m", "gpt-5.6-terra", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="medium"', "--full-auto",
     "resume", "new-session", "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+});
+
+test("Codex routed restart retains explicit permission flags placed after resume", () => {
+  const args = buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["resume", "old-session", "continue", "--sandbox", "workspace-write", "-a", "on-request", "--add-dir=/workspace/cache", "-cnetwork.enabled=false", '--config=permissions.network_access="restricted"'],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  });
+  assert.deepEqual(args, [
+    "-m", "gpt-5.6-sol", "-c", 'model_provider="openai"', "-c", 'model_reasoning_effort="high"',
+    "--sandbox", "workspace-write", "-a", "on-request", "--add-dir=/workspace/cache", "-cnetwork.enabled=false", '--config=permissions.network_access="restricted"',
+    "resume", "old-session", "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+});
+
+test("Codex routed restart distinguishes the resume command from option values", () => {
+  assert.deepEqual(buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["--profile", "resume", "resume", "old-session", "--yolo"],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  }).slice(6), [
+    "--profile", "resume", "--yolo", "resume", "old-session",
+    "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
+  ]);
+  assert.deepEqual(buildRoutedArgs({
+    host: "codex",
+    originalArgs: ["--add-dir", "resume", "resume", "old-session", "-a", "on-request", "--profile=locked"],
+    request: { session_id: "old-session", model: "openai-codex/gpt-5.6-sol", effort: "high" },
+  }).slice(6), [
+    "--add-dir", "resume", "-a", "on-request", "--profile=locked", "resume", "old-session",
+    "Continue the active Statewright workflow in its current state. Use statewright_get_state first.",
   ]);
 });
 
@@ -980,6 +1099,9 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     await writeFile(launcher, "");
     const first = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(first.installed.length, 1);
+    const closeoutShim = join(home, ".statewright", "bin", "statewright-git-closeout");
+    assert.match(await readFile(closeoutShim, "utf8"), /git-closeout\.mjs/);
+    assert.equal((await stat(closeoutShim)).mode & 0o777, 0o555);
     assert.equal(await managedClientEnabled("codex", home), true);
     assert.equal(await managedClientEnabled("claude", home), false);
     const profile = await readFile(join(home, ".zshrc"), "utf8");
@@ -987,7 +1109,7 @@ test("plugin bootstrap installs available shims and one marked shell path block"
     const second = await bootstrapManagedClients({ launcherPath: launcher, home, path: bin, shell: "/bin/zsh" });
     assert.equal(second.profile, null);
     const removed = await uninstallManagedClients({ home, shell: "/bin/zsh" });
-    assert.equal(removed.removed.length, 1);
+    assert.equal(removed.removed.length, 2);
     assert.equal(removed.profile, join(home, ".zshrc"));
     assert.doesNotMatch(await readFile(join(home, ".zshrc"), "utf8"), /statewright managed clients/);
     assert.equal(await managedClientEnabled("codex", home), false);
@@ -1015,12 +1137,36 @@ test("Windows bootstrap resolves cmd launchers and installs reversible cmd shims
       const shimPath = join(home, ".statewright", "bin", `${host}.cmd`);
       assert.match(await readFile(shimPath, "utf8"), /statewright-managed-client|launcher\.mjs/i);
     }
+    assert.match(await readFile(join(home, ".statewright", "bin", "statewright-git-closeout.cmd"), "utf8"), /git-closeout\.mjs/);
     const profilePath = join(home, "Documents", "PowerShell", "Microsoft.PowerShell_profile.ps1");
     assert.match(await readFile(profilePath, "utf8"), /statewright managed clients/);
     const removed = await uninstallManagedClients({ home, platform: "win32" });
-    assert.equal(removed.removed.length, 2);
+    assert.equal(removed.removed.length, 3);
     assert.equal(removed.profile, profilePath);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex installation copies cache-owned runtime to a durable versioned location", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-durable-runtime-"));
+  const home = join(root, "home");
+  const sourceLauncher = resolve("plugins/codex/scripts/statewright-managed-client.mjs");
+  try {
+    const installed = await installManagedClientShim({
+      host: "codex",
+      launcherPath: sourceLauncher,
+      home,
+      realBinary: "/opt/example/codex",
+    });
+    assert.match(installed.launcherPath, /\.statewright\/runtime\/codex\//);
+    assert.notEqual(installed.launcherPath, sourceLauncher);
+    await access(installed.launcherPath);
+    await access(join(dirname(installed.launcherPath), "lib", "desktop-runtime", "credential-store.mjs"));
+    const shim = await readFile(installed.shimPath, "utf8");
+    assert.match(shim, new RegExp(installed.launcherPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(shim, /plugins\/cache/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const TEST_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -1048,23 +1194,33 @@ async function pollHealth(port, attempts = 80) {
   return null;
 }
 
-test("keyless managed client resolves the on-disk telemetry key instead of reporting a false identity conflict", async () => {
+test("keyless managed client resolves the OS-store telemetry key instead of reporting a false identity conflict", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-telemetry-key-"));
   const home = join(root, "home");
   const cwd = join(root, "cwd");
   try {
     await mkdir(join(home, ".statewright"), { recursive: true });
     await mkdir(cwd, { recursive: true });
-    await writeFile(join(home, ".statewright", "api_key"), "file-telemetry-key\n", { mode: 0o600 });
+    const credentialHelper = join(root, "credential-helper.mjs");
+    await writeFile(credentialHelper, `#!/usr/bin/env node
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+if (request.operation === "get") console.log(JSON.stringify({ok:true,status:"ok",account:"fixture",secret:"file-telemetry-key"}));
+else console.log(JSON.stringify({ok:true,status:"ok",account:"fixture"}));
+`);
+    await chmod(credentialHelper, 0o700);
     await writeFile(join(home, ".statewright", "config.json"), `${JSON.stringify({ telemetry: { codex: { native_tokens: true } } })}\n`);
     const port = await freeLoopbackPort();
     const listenerEnv = {
+      PATH: process.env.PATH,
       STATEWRIGHT_TELEMETRY_DIR: join(home, ".statewright", "telemetry", "native-codex"),
       STATEWRIGHT_TELEMETRY_PORT: String(port),
       STATEWRIGHT_API_KEY: "file-telemetry-key",
       STATEWRIGHT_PB_URL: "http://127.0.0.1:9",
       STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:9",
       STATEWRIGHT_CODEX_SESSIONS_DIR: join(root, "sessions"),
+      STATEWRIGHT_CREDENTIAL_HELPER: credentialHelper,
     };
     const listener = spawn(process.execPath, [TELEMETRY_AGENT], { env: listenerEnv, stdio: "ignore", detached: process.platform !== "win32" });
     listener.unref();
@@ -1072,7 +1228,7 @@ test("keyless managed client resolves the on-disk telemetry key instead of repor
     assert.equal(healthy?.listener_status, "healthy", "test listener became healthy");
     try {
       // A client shell that does not export STATEWRIGHT_API_KEY must resolve the
-      // key from the on-disk file and accept the already-healthy listener.
+      // key through the OS credential helper and accept the healthy listener.
       const telemetry = await acquireManagedTelemetry({
         environment: { ...listenerEnv, STATEWRIGHT_API_KEY: undefined },
         home,

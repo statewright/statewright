@@ -2,8 +2,7 @@
 
 Date: 2026-09-27. Statewright integration branch:
 `release/codex-0.3.4-prep`. Reviewed source head before documentation:
-`8a9ae590ef918e8b35842e898929dc537b7ae00e`. Companion Auldwyrm integration
-head: `acdbb8b7901c797ab90e8d96942200f5d9fd8b35`.
+`8a9ae590ef918e8b35842e898929dc537b7ae00e`.
 
 ## Verdict
 
@@ -48,15 +47,10 @@ infrastructure out of plugin source`).
 
 ## Fresh local evidence
 
-- `cargo fmt --all -- --check` passed in both integration worktrees.
+- `cargo fmt --all -- --check` passed in the Statewright integration worktree.
 - Statewright `cargo test --workspace` passed; the gateway suite reported 310
   passed, zero failed, and one ignored, with all remaining workspace tests and
   doctests completing without failure.
-- Auldwyrm PocketBase OAuth and account-cleanup tests passed 12/12.
-- Auldwyrm OAuth authorization UI tests passed 3/3.
-- Auldwyrm `cargo test -p statewright-mcp-gateway` passed 170/170.
-- Auldwyrm `cargo test -p statewright-studio` completed without failures; the
-  package currently defines no Rust unit tests.
 - Generated Claude and Codex managed-client synchronization checks passed.
 - `task test:plugin-release` passed across executor, Codex, Claude, Cursor, Pi,
   OpenCode, OMX, shell contracts, local route canaries, and synchronization
@@ -64,12 +58,8 @@ infrastructure out of plugin source`).
 - `git diff --check` passed before the formatter and generated-bundle commits
   and after the final release-hygiene repair.
 
-The Auldwyrm repository-wide Rust test is an inherited baseline non-pass, not
-an OAuth regression: `statewright-operator` cannot compile because its tracked
-`crates/operator/src/crds.rs` does not define the CRD types referenced by the
-reconciler. The OAuth branch does not introduce those types or modify that
-boundary except for formatter-only whitespace. The focused gateway and Studio
-package results above passed.
+Companion service build and test details are outside this public-source review.
+They are not evidence for Statewright's workspace or plugin gates.
 
 ## Inherited evidence, not rerun here
 
@@ -85,7 +75,13 @@ resume a same-root historical conversation not originally started through
 Statewright, then submit a subsequent turn. Until that succeeds, version
 metadata remains at 0.3.3 and no 0.3.4 tag or publication should occur.
 
+That native acceptance covers Codex App Server history only. Before release,
+the staging remote MCP endpoint must also be registered as a ChatGPT plugin and
+complete OAuth plus a direct Statewright tool call in an ordinary ChatGPT
+conversation that originated on mobile. Opening a cloud ChatGPT conversation
+inside the wrapped Desktop process does not attach the local Codex MCP server.
+
 After acceptance, update release metadata, rerun exact-commit hosted CI and
-plugin canaries, and require clean Statewright and Auldwyrm integration trees
+plugin canaries, and require clean integration trees
 before any tag or push. The current work did not push, tag, publish, deploy to
 production, or restart an active Desktop session.

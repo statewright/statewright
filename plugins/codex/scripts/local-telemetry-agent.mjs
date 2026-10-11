@@ -26,6 +26,7 @@ const buildId = process.env.STATEWRIGHT_TELEMETRY_BUILD_ID ||
   createHash("sha256")
     .update(readFileSync(new URL(import.meta.url)))
     .update(readFileSync(new URL("./lib/local-telemetry-agent.mjs", import.meta.url)))
+    .update(readFileSync(new URL("./lib/desktop-runtime/local-telemetry-agent.mjs", import.meta.url)))
     .digest("hex")
     .slice(0, 16);
 

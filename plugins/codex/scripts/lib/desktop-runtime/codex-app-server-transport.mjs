@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -60,8 +61,10 @@ async function reserveLoopbackPort() {
 
 export function codexAppServerTransportEnabled({ environment = process.env, config = {} } = {}) {
   const override = environment.STATEWRIGHT_CODEX_TRANSPORT?.trim();
-  if (override) return override === "app-server";
-  return config?.routing?.managed_clients?.codex_transport === "app-server";
+  const transport = override || config?.routing?.managed_clients?.codex_transport || "app-server";
+  if (transport === "app-server") return true;
+  if (transport === "restart") return false;
+  throw new Error("Unsupported Codex transport. Expected app-server or the explicit legacy restart transport.");
 }
 
 export function appServerHomePrefixForClient(clientId) {
@@ -188,7 +191,7 @@ export async function runCodexAppServerTransport({
   pollMs = 100,
   stderr = process.stderr,
   telemetry = async () => {},
-  reporter = createErrorReporter({ plugin: "codex", version: "0.3.3", environment }),
+  reporter = createErrorReporter({ plugin: "codex", version: "0.3.4", environment }),
 }) {
   const launch = await resolveWindowsLaunch(command, platform);
   let pendingRoute = null;
@@ -257,6 +260,8 @@ export async function startCodexAppServerRuntime({
   clientId,
   nextRouteRequest = async () => null,
   approvalService = null,
+  workflowService = null,
+  classifierApprovalService = approvalService,
   peekRouteRequest = async () => null,
   stderr = process.stderr,
   telemetry = async () => {},
@@ -264,19 +269,24 @@ export async function startCodexAppServerRuntime({
   threadLabels = {},
   getThreadLabels = async () => threadLabels,
   getThreadCwds = async () => ({}),
+  resolveResumePermissions = async () => null,
   onThreadStarted = async () => {},
   onThreadResumed = async () => {},
   authorizeThread = async () => {},
+  workflowOriginStore,
+  onNativeUsage,
+  routeOwner = async () => ({}),
   requiredMcpToolSuffix = null,
   requiredMcpReadyTimeoutMs = 0,
   idleMs = 500,
   shutdownGraceMs = 1_500,
   onIdle = async () => {},
-  reporter = createErrorReporter({ plugin: "codex", version: "0.3.3", environment }),
+  reporter = createErrorReporter({ plugin: "codex", version: "0.3.4", environment }),
 }) {
   const codexHome = environment.CODEX_HOME ?? join(home, ".codex");
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
+  const classifierApprovalToken = classifierApprovalService ? randomUUID() : null;
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
   const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
 
@@ -309,14 +319,21 @@ export async function startCodexAppServerRuntime({
     const routeProxy = await startCodexAppServerRouteProxy({
       upstreamUrl: url,
       approvalService,
+      workflowService,
+      classifierApprovalService,
+      classifierApprovalToken,
       compactResume: environment.STATEWRIGHT_CODEX_COMPACT_RESUME !== "false",
       resumeHistoryLimit: resumeHistoryLimit(environment),
       threadListCwd,
       getThreadLabels,
       getThreadCwds,
+      resolveResumePermissions,
       onThreadStarted,
       onThreadResumed,
       authorizeThread,
+      workflowOriginStore,
+      onNativeUsage,
+      routeOwner,
       requiredMcpToolSuffix,
       requiredMcpReadyTimeoutMs,
       idleMs,
@@ -355,6 +372,7 @@ export async function startCodexAppServerRuntime({
     stderr.write(`[statewright] App Server ready at ${routeProxy.url}; upstream ${url}.\n`);
     return {
       proxyUrl: routeProxy.url,
+      proxyToken: classifierApprovalToken,
       upstreamUrl: url,
       async close() {
         closing = true;

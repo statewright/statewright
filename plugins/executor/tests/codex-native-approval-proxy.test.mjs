@@ -140,6 +140,9 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
   };
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
+    routeOwner: async id => id === threadId
+      ? { root_session_id: threadId, client_id: "fixture-client" }
+      : {},
     ...(withService ? { approvalService: service } : {}),
     takePendingRoute: async () => {
       const next = routes.shift() ?? null;
@@ -533,7 +536,8 @@ for (const boundary of ["reservation", "provider"]) {
     await f.rpc("thread/start");
     f.armPending();
     let acknowledgements = 0, releases = 0;
-    f.setRoute({ route: { session_id: threadId, run_id: destination.run_id, state: destination.state,
+    f.setRoute({ route: { session_id: threadId, run_id: destination.run_id,
+      run_session_id: destination.run_session_id, state: destination.state,
       model: destination.model,
       effort: destination.thinking_level },
     ack: async () => { acknowledgements++; }, release: async () => { releases++; } });
@@ -595,7 +599,7 @@ test("native approval forwards completed evidence before interrupt and consumes 
   assert.ok(completionIndex >= 0 && interruptIndex > completionIndex);
   const visibleCompletion = f.visible.find(message => message.method === "item/completed");
   assert.equal(visibleCompletion.params.item.result.content[0].text,
-    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+    "Statewright Arbiter: review · fixture-origin-model / high · approval pending → implement");
   assert.deepEqual(completion.params.item.result.structuredContent, pending, "approval parsing retained the upstream payload");
   assert.equal(request.params.mode, "form");
   assert.equal(request.params.threadId, threadId);
@@ -888,7 +892,7 @@ test("without an approval service normal traffic and native server-request repli
   await f.rpc("initialize");
   const visibleCompletion = f.visible.find(message => message.method === "item/completed");
   assert.equal(visibleCompletion.params.item.result.content[0].text,
-    "Statewright supervisor: review · fixture-origin-model / high · approval pending → implement");
+    "Statewright Arbiter: review · fixture-origin-model / high · approval pending → implement");
   assert.deepEqual(completion.params.item.result.structuredContent, pending, "upstream completion remains intact");
   assert.deepEqual(f.visible.find(message => message.method === formMethod), nativeRequest);
   assert.deepEqual(f.calls.find(message => message.id === nativeRequest.id), { id: nativeRequest.id, result: { action: "accept" } });

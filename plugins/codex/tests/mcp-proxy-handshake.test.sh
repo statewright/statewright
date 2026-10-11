@@ -49,6 +49,6 @@ echo "$RESPONSE" | jq -e '
 [ -x "$TMP/home/.statewright/bin/codex" ]
 grep -q 'statewright managed clients' "$TMP/home/.zshrc"
 node -e 'const fs = require("fs"); const config = JSON.parse(fs.readFileSync(process.argv[1])); if (config.routing?.managed_clients?.hosts?.codex !== true) process.exit(1)' "$TMP/home/.statewright/config.json"
-grep -q 'statewright-desktop-setup.mjs provision --app' "$TMP/desktop-node.log"
+grep -q 'statewright-desktop-setup.mjs provision-all --app' "$TMP/desktop-node.log"
 
 echo "MCP proxy handshake tests passed"

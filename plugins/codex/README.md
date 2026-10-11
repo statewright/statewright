@@ -51,15 +51,73 @@ After installation, call `statewright_connect`. Statewright creates a short-live
 device request and opens an authenticated approval page in your browser. Confirm
 that the browser shows the same device code as the tool response, then approve.
 The plugin polls in the background, verifies the returned Statewright gateway
-key against a read-only endpoint, and writes it atomically to
-`~/.statewright/api_key` with mode `0600`. It never asks you to paste the key into
-a Codex or ChatGPT conversation.
+key against a read-only endpoint, and stores it in macOS Keychain, Windows
+Credential Manager, or Linux Secret Service. The native helper keys each entry
+by canonical gateway URL, so production, staging, and development credentials
+remain independent. It never asks you to paste the key into a Codex or ChatGPT
+conversation.
+
+The old `~/.statewright/api_key` file is consulted only for the exact production
+gateway and copied into the OS credential store. It is preserved for rollback
+and is never used for another gateway. Headless Linux installations without an
+unlocked Secret Service fail closed; automation can still use the process-scoped
+`STATEWRIGHT_API_KEY` override.
+
+Gateway aliases use non-secret configuration in
+`~/.statewright/environments.json`:
+
+```json
+{
+  "gateways": {
+    "staging": {
+      "gateway_url": "https://staging-gateway.example/mcp",
+      "auth_url": "https://staging-accounts.example"
+    },
+    "dev1": {
+      "gateway_url": "https://dev1-gateway.example/mcp",
+      "auth_url": "https://dev1-accounts.example"
+    }
+  }
+}
+```
+
+Set `STATEWRIGHT_GATEWAY_URL` to select a configured URL directly, or
+`STATEWRIGHT_ENV=dev1` to select a named profile. Unknown named environments and
+gateways without an authorization-service mapping fail closed instead of
+falling back to production.
 
 If browser launch is disabled, `statewright_connect` returns the complete
-approval URL and device code. `https://statewright.ai/keys` remains the manual
-recovery path when device enrollment cannot be started. The tool catalog reads
-the credential file for every request, so authenticated tools become available
-in the same MCP process after approval.
+approval URL and device code. The selected environment's `auth_url` plus
+`/keys` is the manual recovery path when device enrollment cannot be started;
+non-production profiles never redirect recovery to production. The tool catalog
+reads the OS credential store for every request, so authenticated tools become
+available in the same MCP process after approval.
+
+Browser confirmation URLs are constructed from that same `auth_url`, not from
+the origin echoed by the device-code response. This keeps a stale server-side
+public URL from redirecting staging or development confirmation to another
+environment.
+
+### Connection faults and multiple servers
+
+The proxy uses the canonical `/mcp` endpoint without appending a slash. HTTP
+401 exposes explicit `statewright_connect` recovery; HTTP 403 remains a permission
+denial. Other HTTP errors, network failures, and invalid replies are reported
+separately rather than all appearing as “Gateway unreachable.” Documentation and
+connection tools remain discoverable during recovery. No failed action is replayed
+after login and no browser opens merely because a request failed.
+
+A lost managed-server binding requires reconnecting that owner through its normal
+lifecycle. The proxy must not move its workflow calls to a different server or
+session. An explicit environment credential still takes precedence over a newly
+stored key; refresh its owning launcher normally after changing that override.
+
+Explicit Codex `--remote` destinations and native server/control commands pass
+through unchanged instead of creating another local resident server. They do not
+inherit the invoking managed session's thread/bridge identity or in-memory
+Statewright key. Each destination supplies its own Statewright integration and
+credential. This does not rebind an already-running shared daemon or enable
+Statewright on an unconfigured remote server.
 
 ### Exact native token telemetry
 
@@ -140,19 +198,58 @@ that want to name the workflow and bootstrap route up front.
 ### ChatGPT Desktop routing (experimental, macOS)
 
 The same `statewright` Codex plugin can optionally route Desktop App Server
-turns. It is a single-thread experimental broker: it does not patch or
-redistribute ChatGPT.app, and it does not claim support for arbitrary Desktop
-chats, approvals, or generated-answer correctness.
+turns. The normal launcher allocates an isolated managed workflow and App Server
+for each selected local chat, including historical chats in different project
+directories. Browsing history does not claim a workflow. It does not patch or
+redistribute ChatGPT.app. Native Desktop acceptance remains a release gate;
+protocol tests alone do not prove end-to-end approvals or answer correctness.
+
+Each lane preserves the native thread's saved permissions unless explicitly
+overridden, and refuses a second managed writer to that exact thread. The broker
+retains the prior registered chat's workflow identity. It currently caps resident
+lanes at 16 (including discovery), with no eviction of active work; restart after
+closing idle work if the cap is reached. Forking a chat is explicitly unsupported.
+Direct broker invocations without the launcher's lane allocator retain the legacy
+single-thread behavior.
+Profile-wide settings writes are explicitly rejected rather than updating only
+the discovery process. Set those defaults outside this launcher before restarting;
+per-chat settings continue to route to the owning lane. Synchronizing global
+settings across active lanes remains a release limitation.
+
+This launcher applies to **Codex/Work chats backed by Codex App Server**. A
+cloud ChatGPT conversation, including one started on mobile and later opened in
+the Desktop app, remains a ChatGPT conversation and does not inherit the local
+Codex MCP process. To use Statewright in those conversations, connect the
+deployed Statewright MCP endpoint as a ChatGPT plugin and enable that plugin in
+the conversation. The local launcher and the remote ChatGPT plugin are two
+separate host integrations over the same Statewright service.
 
 On macOS, open a chat that uses the installed Statewright plugin once. Its MCP
 startup quietly provisions **ChatGPT + Statewright** in your user Applications
-folder. Quit every ChatGPT.app instance, then open **ChatGPT + Statewright**
-from Applications, Spotlight, or the Dock. It starts ChatGPT with the routing
-shim only for that process tree; normal ChatGPT launches are unchanged.
+folder. Open **ChatGPT + Statewright** from Applications, Spotlight, or the
+Dock. Each Statewright Desktop profile has its own ChatGPT user data, so it can
+run beside regular ChatGPT. Its broker starts a separate App Server from the
+configured Codex home, retaining installed plugins and ChatGPT CLI authentication
+without sharing the live App Server process. The separate window may require
+its own ChatGPT sign-in. Normal ChatGPT launches are unchanged.
+
+The macOS plugin artifact includes architecture-specific native dispatchers for
+Apple Silicon and Intel. The dispatcher sends only an exact `app-server`
+invocation through Statewright's existing broker; `exec-server` and every other
+Codex mode are replaced in-process by the signed Codex executable bundled with
+ChatGPT. This preserves the caller's arguments, environment, working directory,
+standard streams, signals, and exit status. Automatic provisioning records a
+profile-specific sidecar, receipt, and rollback shim. Once a profile records
+native dispatch, setup fails closed if neither the installed binary nor an
+approved replacement verifies; it never silently regenerates the old
+app-server-only shell.
 
 The installed plugin always binds this standard launcher to the production
-gateway (`https://mcp.statewright.ai`). A pre-provisioned credential stays in
-local Statewright storage and is never requested in chat. The first Desktop turn is held briefly
+gateway (`https://mcp.statewright.ai`). Desktop reads the credential for its exact
+gateway from the OS keyring, not a plaintext key file or an inherited shell key.
+An unavailable keyring stops launch with an error. A missing credential starts
+the profile-bound browser connection flow before ChatGPT launches; cancelling
+or failing that flow leaves the keyring unchanged. The first Desktop turn is held briefly
 until the native App Server reports Statewright's tools as ready, so a fast
 first prompt cannot race MCP registration.
 
@@ -167,21 +264,67 @@ node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs do
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs disable
 ```
 
+A source checkout does not contain a prebuilt native binary. Pass a trusted
+local build explicitly when testing setup from source:
+
+```bash
+cargo build --release -p statewright-native-desktop-launcher
+node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable \
+  --native-launcher /path/to/statewright/target/release/statewright-native-desktop-launcher
+```
+
 The production profile uses the public Statewright gateway. An internal
 staging profile must receive its endpoint explicitly so private infrastructure
 is never compiled into the public plugin:
 
 ```bash
 node /path/to/statewright/plugins/codex/scripts/statewright-desktop-setup.mjs enable \
-  --profile staging --gateway-url https://your-staging-gateway.example
+  --profile staging --gateway-url https://your-staging-gateway.example \
+  --native-launcher /path/to/statewright/target/release/statewright-native-desktop-launcher
 ```
+
+Production, staging, and development keep separate state, shim, configuration,
+receipt, rollback, credential, launcher-app, and user-data paths.
+Disabling one profile removes only artifacts recorded by that profile.
 
 When upgrading a legacy launchd-based setup, `enable` restores its recorded prior
 value only if the launchd value still points to the recorded Statewright shim;
-otherwise it refuses to overwrite the user's setting. Re-run `enable` after
-updating the plugin so its private shim points at the newly installed runtime.
+otherwise it refuses to overwrite the user's setting. Plugin startup refreshes
+production and already-configured staging/development launchers together, keeping
+their gateway, client identity, and disabled status. It does not create private
+profiles or start OAuth during setup. On first launch, if that Desktop profile
+has no gateway credential, it explains that Statewright will open in the
+browser, starts the device-authorization flow for the profile's configured
+authorization service, and starts ChatGPT only after the gateway-keyed OS
+credential is verified and stored. The GUI remains the signed ChatGPT
+executable; Node is a separate setup/bridge companion, while Desktop's Codex
+App Server path uses the native dispatcher rather than a Node shell shim.
+`doctor` reports redacted keyring status; an old
+plaintext key file is not evidence that the Desktop profile is ready.
 A signed-in route canary plus direct MCP-tool visibility in a fresh Desktop code
 chat remain required before this is release-ready.
+
+Managed interactive Codex uses the App Server transport by default, independently
+of which configured gateway the launch shortcut selects. `exec` and `review`
+remain one-shot; an explicitly bare Codex launch stays outside this wrapper.
+`STATEWRIGHT_CODEX_TRANSPORT=restart` retains the legacy compatibility transport
+when deliberately selected. Invalid transport values are rejected. A resident
+from another gateway/auth profile is never silently reused or terminated.
+
+On `resume`, Statewright preserves the destination thread's last effective
+approval, permission-profile/sandbox, and workspace-root settings from its
+canonical Codex rollout. Explicit CLI permission or root flags take precedence;
+those invocations use the compatibility transport because native Codex rejects
+permission overrides before sending a remote `thread/resume`. A legacy custom
+profile that cannot be represented losslessly is rejected rather than widened.
+A named profile preserves its ID and resolves against the currently installed
+definition of that profile. Fork locations come from the fork's own settings or
+session metadata, never a copied parent turn context.
+
+ChatGPT/mobile acceptance is separate: register the deployed HTTPS `/mcp`
+endpoint in ChatGPT developer mode, complete its OAuth flow, then verify direct
+Statewright tool visibility in an ordinary ChatGPT conversation that originated
+on mobile. A passing Codex App Server resume does not satisfy that gate.
 
 ### Native workflow approvals (experimental App Server mode)
 
@@ -220,6 +363,30 @@ It exercises the installed vendor protocol with
 no inference or real approval decision. These are not desktop/Windows GUI or
 live staging journey certificates. Marketplace release packaging and the live
 pause/approve/resume road test remain separate release gates.
+
+Classifier fallback approval is a separate, invocation-scoped path. In a
+managed `codex-local-models` session, repeated distinct reformulations of one
+redacted uncertain intent may be presented through the native permission form
+only when the gateway receipt explicitly permits separate approval. Workflow
+capability, classifier-policy, interceptor, and known-risk denials are never
+eligible for this fallback. The companion must own the exact thread and return
+the matching thread, run, state, intent, invocation, denial basis, authority,
+and retry-policy identities. One acceptance releases only the waiting
+invocation after a fresh authoritative run/state check. Exact retries,
+concurrent requests, stale or changed-state replies, dismissal,
+timeout, disconnect, an unavailable companion, or an unsupported client stay
+denied. This path does not resume a terminal workflow or replace a
+workflow-transition approval.
+
+The local host services approval requests through a serial, explicit-priority
+chain of responsibility. Only an unsupported (`NotHandled`) request may pass to
+the next handler; deny, ask, allow, and error are terminal, and required-handler
+errors fail closed. The authoritative workflow-transition barrier precedes the
+classifier fallback. The loopback `POST /classifier-approval` adapter uses the
+v2 request/response contract and binds the exact thread, workflow run, gateway
+run session, state, state epoch, intent, and invocation. Statewright and the
+local companion must therefore be updated as one full-tree staging candidate;
+mixed v1/v2 runtimes stay denied rather than dropping identity fields.
 
 Start a workflow via MCP tool:
 
@@ -297,7 +464,7 @@ final outcome.
 ## Hook events
 
 - **UserPromptSubmit**: injects workflow state, tools, instructions, autonomous mode directive
-- **PreToolUse**: enforces allowed_tools per state, bash discernment, command whitelisting
+- **PreToolUse**: enforces allowed_tools per state, bash discernment, command allowlisting
 - **PostToolUse**: interrupt detection (file pattern matching), fork/join status, capture
 - **Stop**: blocks Codex from yielding while an active workflow is nonfinal and
   permits it only after a final state.

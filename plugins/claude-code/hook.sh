@@ -823,7 +823,7 @@ case "$ENDPOINT" in
         [ -n "$INIT_MODEL" ] && INIT_MODEL_NOTE=" Recommended model: $INIT_MODEL."
         if request_interactive_approval_review "$STATE_JSON"; then
           APPROVAL_MESSAGE=$(echo "$STATE_JSON" | jq -r '.pending_approval.message // "Human review required."' 2>/dev/null || true)
-          echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} The managed Statewright supervisor is opening the evidence packet in your browser. This workflow remains parked until an authorized reviewer approves or rejects it.\"}}"
+          echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] REVIEW REQUIRED: ${APPROVAL_MESSAGE} The managed Statewright Arbiter is opening the evidence packet in your browser. This workflow remains parked until an authorized reviewer approves or rejects it.\"}}"
         else
           request_interactive_route_restart "$STATE_JSON"
           echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Workflow loaded. Phase: ${INIT_STATE}. Tools: ${INIT_TOOLS}. Transitions: ${INIT_TRANSITIONS}.${INIT_MODEL_NOTE} KEEP WORKING -- begin the ${INIT_STATE} phase immediately. Do not stop or summarize.${INIT_INSTRUCTIONS:+ Instructions: $INIT_INSTRUCTIONS}\"}}"
@@ -910,7 +910,7 @@ case "$ENDPOINT" in
             APPROVAL_MESSAGE=$(echo "$STATE_JSON" | jq -r '.pending_approval.message // "Human review required."' 2>/dev/null || true)
             APPROVAL_MODE=$(echo "$STATE_JSON" | jq -r '.meta.approval_mode // "ui"' 2>/dev/null || true)
             REVIEW_NOTICE=""
-            request_interactive_approval_review "$STATE_JSON" && REVIEW_NOTICE=" The managed Statewright supervisor is opening the evidence packet in your browser."
+            request_interactive_approval_review "$STATE_JSON" && REVIEW_NOTICE=" The managed Statewright Arbiter is opening the evidence packet in your browser."
             if [ "$APPROVAL_MODE" = "external" ]; then
               echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"[statewright] Approval is pending on the configured external review channel.${REVIEW_NOTICE} Do not continue this workflow until that reviewer resolves it.\"}}"
             else

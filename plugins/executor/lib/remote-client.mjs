@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { canonicalGateway } from "./gateway-profile.mjs";
+import { resolveGatewayApiKey } from "./credential-store.mjs";
 
 const MAX_GATEWAY_ERROR_BYTES = 4 * 1024;
 
@@ -25,20 +24,11 @@ async function gatewayErrorDetail(response) {
 }
 
 export function gatewayEndpoint(value) {
-  const url = new URL(value);
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new Error("Gateway identity must be an HTTP URL without credentials, query or fragment");
-  }
-  const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = path.endsWith("/mcp") ? path : `${path}/mcp`;
-  return url.href;
+  return canonicalGateway(value);
 }
 
-export async function resolveApiKey(environment = process.env, home = homedir()) {
-  if (environment.STATEWRIGHT_API_KEY?.trim()) {
-    return environment.STATEWRIGHT_API_KEY.trim();
-  }
-  return (await readFile(join(home, ".statewright", "api_key"), "utf8")).trim();
+export async function resolveApiKey(environment = process.env, home, options) {
+  return resolveGatewayApiKey(environment, home, options);
 }
 
 export class RemoteStatewrightClient {

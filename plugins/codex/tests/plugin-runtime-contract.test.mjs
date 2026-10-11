@@ -32,6 +32,7 @@ test("plugin MCP transport launches from the installed plugin root", async () =>
   assert.deepEqual(server.args, ["./mcp-proxy.sh"]);
   assert.equal(server.cwd, ".");
   assert.deepEqual(server.env_vars, [
+    "STATEWRIGHT_NODE_BIN",
     "STATEWRIGHT_GATEWAY_URL",
     "STATEWRIGHT_PB_URL",
     "STATEWRIGHT_API_KEY",

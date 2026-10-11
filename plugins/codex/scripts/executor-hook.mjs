@@ -3,11 +3,13 @@
 const TIMEOUT_MS = 5_000;
 
 function stateContext(state) {
+  const executionPreference = "Execution preference: use one bounded native operation at a time; avoid heredocs, inline interpreters, and compound blobs unless structurally necessary and authorized.";
   if (state.isFinal) {
     return `[statewright] Workflow complete. Final state: ${state.state}.`;
   }
-  if (state.additionalContext) return state.additionalContext;
+  if (state.additionalContext) return `${state.additionalContext} ${executionPreference}`;
   const parts = [`[statewright] Workflow active. Phase: ${state.state}.`];
+  parts.push(executionPreference);
   if (state.instructions) parts.push(`Instructions: ${state.instructions}`);
   if (state.transitions?.length) {
     parts.push(`Transitions: ${state.transitions.map((item) => item.event).join(", ")}.`);
@@ -27,6 +29,79 @@ function toolResponse(input) {
 
 function isStatewrightTool(toolName) {
   return /(?:^|[_:/.-])statewright_(?:[a-z0-9_]+)$/i.test(toolName);
+}
+
+export function formatGuardDenial(result) {
+  const risk = result?.risk_assessment ?? result?.riskAssessment;
+  if (!risk || typeof risk !== "object") {
+    return {
+      display: result?.reason ?? "Blocked by Statewright.",
+      machine: result?.reason ?? "Blocked by Statewright.",
+    };
+  }
+
+  const basis = String(risk.final_denial_basis ?? risk.resolution_basis ?? "unknown");
+  const required = String(risk.required_authority ?? "approved execution path");
+  const delegationDenied = risk.deterministic_source === "unmanaged_agent_delegation";
+  const delegation = result?.delegation;
+  let display;
+  if (delegationDenied) {
+    const managedEvents = Array.isArray(delegation?.managed_transition_candidates)
+      ? delegation.managed_transition_candidates
+        .map(item => item?.event && `${item.event} (${item.kind ?? "managed"})`).filter(Boolean).join(", ")
+      : "";
+    if (delegation?.recommendation === "statewright_managed_fork") {
+      display = managedEvents
+        ? `Statewright guard: denied · this delegated task requests a different model or reasoning route. Candidate workflow-managed child transitions: ${managedEvents}. Use one only when its declared child route matches the request; the child remains attached to the parent workflow evidence.`
+        : "Statewright guard: denied · this delegated task requests a different model or reasoning route, but the current state declares no managed fork or subworkflow transition. Continue inline or transition to a state that declares one.";
+    } else {
+      display = "Statewright guard: denied · continue inline by default so evidence stays attached to the current workflow. A raw delegated agent would receive a separate, unbounded tool surface.";
+    }
+  } else if ([
+    "semantic_threshold_not_met",
+    "incomplete_structural_evidence",
+    "semantic_vector_unavailable",
+    "semantic_assessment_incomplete",
+  ].includes(basis)) {
+    display = "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation instead of a heredoc or inline interpreter; use the approved execution path when code must run.";
+  } else if (basis === "deterministic_nonlocal_risk") {
+    display = "Statewright guard: denied · known non-local effect. Next: use the approved execution path.";
+  } else if (basis.startsWith("workflow_capability_")) {
+    display = `Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants ${required}.`;
+  } else if (basis.startsWith("classifier_policy_")) {
+    display = `Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with ${required}.`;
+  } else {
+    display = `Statewright guard: denied · classifier policy requires ${required}.`;
+  }
+  const vector = risk.semantic_vector;
+  if (risk.semantic_status === "Assessed" && vector && typeof vector === "object") {
+    const percent = value => `${Math.round((Number.isFinite(value) ? value : 0) * 100)}%`;
+    display += ` System One signals: read-only ${percent(vector.read_only)}, write ${percent(vector.may_write)}, destructive ${percent(vector.destructive)}, external ${percent(vector.external_or_account_effect)}.`;
+  }
+  const rework = result?.classifier_rework ?? result?.classifierRework;
+  if (!delegationDenied && rework?.action === "rework") {
+    display += ` Rework attempt ${rework.attempts}/${rework.max_reworks}; after this budget, the same classified intent must be sent for human approval.`;
+  } else if (!delegationDenied && rework?.action === "approval_required") {
+    display += " Rework budget exhausted; this exact classified intent now requires native human approval.";
+  }
+  return {
+    display,
+    machine: JSON.stringify({
+      classifier_receipt: redactClassifierReceipt(risk),
+      ...(delegation ? { managed_delegation: redactClassifierReceipt(delegation) } : {}),
+      ...(rework ? { classifier_rework: redactClassifierReceipt(rework) } : {}),
+    }),
+  };
+}
+
+function redactClassifierReceipt(value) {
+  if (Array.isArray(value)) return value.map(redactClassifierReceipt);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !["command", "raw_command", "tool_input", "input", "arguments"].includes(key))
+      .map(([key, nested]) => [key, redactClassifierReceipt(nested)]),
+  );
 }
 
 export async function adapterCall(endpoint, body, options = {}) {
@@ -93,11 +168,13 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
         tool_input: input.tool_input ?? {},
       }, options);
       if (result.decision === "deny" || result.decision === "block") {
+        const denial = formatGuardDenial(result);
         return {
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             permissionDecision: "deny",
-            permissionDecisionReason: result.reason ?? "Blocked by Statewright.",
+            permissionDecisionReason: denial.display,
+            additionalContext: `[statewright] Machine classifier receipt: ${denial.machine}`,
           },
         };
       }

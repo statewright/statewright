@@ -76,6 +76,7 @@ if (!existsSync(marker)) {
       HOMEPATH: home.slice(2),
       STATEWRIGHT_API_KEY: "windows-route-canary",
       STATEWRIGHT_SENTRY_DISABLED: "true",
+      STATEWRIGHT_CODEX_TRANSPORT: "restart", // Fake executable exercises .cmd restart cleanup, not App Server.
     },
     home,
     cwd: root,

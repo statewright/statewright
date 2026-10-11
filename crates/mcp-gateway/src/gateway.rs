@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
-use statewright_engine::MachineDefinition;
+use statewright_engine::{MachineDefinition, TransitionDef};
 
 use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
@@ -50,6 +50,67 @@ fn is_exploratory_read_only_state(session: &crate::session::GatewaySession) -> b
         == Some("exploratory_read_only")
 }
 
+fn normalized_route_model(model: &str) -> &str {
+    model
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(model)
+}
+
+fn route_model_changed(current: &str, requested: &str) -> bool {
+    if current.contains('/') && requested.contains('/') {
+        current != requested
+    } else {
+        normalized_route_model(current) != normalized_route_model(requested)
+    }
+}
+
+/// Provider-neutral delegation policy returned to host shims. A raw child
+/// tool call is never executable authority: ordinary work remains inline,
+/// while an explicit route change must bind to a declared workflow fork or
+/// invoked subworkflow so evidence and tool policy stay attached to the run.
+fn managed_delegation_policy(
+    session: &crate::session::GatewaySession,
+    tool_input: &serde_json::Value,
+) -> serde_json::Value {
+    let state = session.definition.states.get(&session.current_state);
+    let current_model = state.and_then(|definition| definition.model.as_deref());
+    let current_effort = state.and_then(|definition| definition.thinking_level.as_deref());
+    let requested_model = tool_input
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let requested_effort = tool_input
+        .get("reasoning_effort")
+        .or_else(|| tool_input.get("reasoningEffort"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let model_change = requested_model.is_some_and(|requested| {
+        current_model.is_none_or(|current| route_model_changed(current, requested))
+    });
+    let effort_change = requested_effort.is_some_and(|requested| current_effort != Some(requested));
+    let route_change_requested = model_change || effort_change;
+    let managed_events: Vec<_> = state
+        .into_iter()
+        .flat_map(|definition| definition.on.iter())
+        .filter_map(|(event, transition)| match transition {
+            TransitionDef::Fork { .. } => Some(json!({"event": event, "kind": "fork"})),
+            TransitionDef::Invoke { .. } => Some(json!({"event": event, "kind": "subworkflow"})),
+            _ => None,
+        })
+        .collect();
+    json!({
+        "schema": "statewright/managed-delegation/v1",
+        "raw_delegation_allowed": false,
+        "recommendation": if route_change_requested { "statewright_managed_fork" } else { "continue_inline" },
+        "route_change_requested": route_change_requested,
+        "evidence_owner": "parent_workflow",
+        "managed_transition_candidates": managed_events,
+    })
+}
+
 /// Core MCP gateway that dispatches messages.
 pub struct Gateway {
     pub session_manager: SessionManager,
@@ -75,7 +136,15 @@ pub struct Gateway {
     usage: UsageLedger,
     /// Required for adapter-only reports. Never exposed in tools/list.
     usage_control_token: Option<String>,
+    /// True when the remote MCP host owns the conversation model and has not
+    /// advertised a Statewright-managed routing channel.
+    host_controls_model: bool,
+    /// MCP client name captured from initialize.clientInfo for diagnostics and
+    /// a user-facing routing disclosure.
+    host_client_name: Option<String>,
 }
+
+const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Statewright checks calls made through this MCP connection and workflow transitions; it cannot gate tools the host offers outside this connector. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
 
 #[derive(Debug)]
 pub struct NativeUsageError {
@@ -196,6 +265,8 @@ impl Gateway {
             project_id: None,
             usage: UsageLedger::default(),
             usage_control_token: std::env::var("STATEWRIGHT_USAGE_CONTROL_TOKEN").ok(),
+            host_controls_model: false,
+            host_client_name: None,
         }
     }
 
@@ -420,7 +491,22 @@ impl Gateway {
         state["run_session_id"] = json!(self.transport_session_id);
         state["state_epoch"] = json!(self.usage.state_epoch());
         state["capture_output"] = json!(capture_output);
+        if self.host_controls_model {
+            state["model_routing"] = json!({
+                "status": "host_controlled",
+                "enforced": false,
+                "host_client": self.host_client_name,
+                "message": HOST_MODEL_ROUTING_WARNING,
+            });
+        }
         state
+    }
+
+    /// Mark whether this transport has a Statewright-managed host routing
+    /// channel. Remote web MCP hosts omit that channel and retain ownership of
+    /// the model running the conversation.
+    pub fn set_remote_host_model_control(&mut self, host_controls_model: bool) {
+        self.host_controls_model = host_controls_model;
     }
 
     /// Set the API key fingerprint for session ownership verification.
@@ -693,7 +779,7 @@ impl Gateway {
     /// Handle an incoming JSON-RPC request and return a response.
     pub async fn handle_message(&mut self, request: JsonRpcRequest) -> Option<JsonRpcResponse> {
         match request.method.as_str() {
-            "initialize" => Some(self.handle_initialize(request.id)),
+            "initialize" => Some(self.handle_initialize(request.id, request.params.as_ref())),
             "notifications/initialized" => None, // notification, no response
             "tools/list" => Some(self.handle_tools_list(request.id)),
             "tools/call" => Some(self.handle_tools_call(request.id, request.params).await),
@@ -706,20 +792,32 @@ impl Gateway {
         }
     }
 
-    fn handle_initialize(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
-        JsonRpcResponse::success(
-            id,
-            json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": { "listChanged": false }
-                },
-                "serverInfo": {
-                    "name": "statewright-gateway",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }),
-        )
+    fn handle_initialize(
+        &mut self,
+        id: Option<serde_json::Value>,
+        params: Option<&serde_json::Value>,
+    ) -> JsonRpcResponse {
+        self.host_client_name = params
+            .and_then(|value| value.get("clientInfo"))
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(128).collect());
+        let mut result = json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": { "listChanged": false }
+            },
+            "serverInfo": {
+                "name": "statewright-gateway",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+        if self.host_controls_model {
+            result["instructions"] = json!(HOST_MODEL_ROUTING_WARNING);
+        }
+        JsonRpcResponse::success(id, result)
     }
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
@@ -995,20 +1093,22 @@ impl Gateway {
                     );
                 }
                 // Run pre-call interceptors (edit guard, bash guard, scope limits, read dedup, context budget)
-                let pre_warning =
-                    match interceptors::pre_call_check(&session, &params.name, &params.arguments) {
-                        PreCallDecision::Block(reason) => {
-                            return JsonRpcResponse::success(
-                                id,
-                                serde_json::to_value(crate::protocol::ToolCallResult::error(
-                                    reason,
-                                ))
+                let pre_warning = match interceptors::pre_call_check_with_pipeline(
+                    &session,
+                    &params.name,
+                    &params.arguments,
+                    Some(&pipeline),
+                ) {
+                    PreCallDecision::Block(reason) => {
+                        return JsonRpcResponse::success(
+                            id,
+                            serde_json::to_value(crate::protocol::ToolCallResult::error(reason))
                                 .unwrap(),
-                            );
-                        }
-                        PreCallDecision::Warn(msg) => Some(msg),
-                        PreCallDecision::Allow => None,
-                    };
+                        );
+                    }
+                    PreCallDecision::Warn(msg) => Some(msg),
+                    PreCallDecision::Allow => None,
+                };
 
                 // Forward to upstream
                 self.session_manager.increment_iteration(&self.session_id);
@@ -1217,10 +1317,21 @@ impl Gateway {
         }
     }
 
+    #[cfg(test)]
     async fn adapter_pre_tool(
         &mut self,
         tool_name: &str,
         tool_input: &serde_json::Value,
+    ) -> serde_json::Value {
+        self.adapter_pre_tool_with_evidence(tool_name, tool_input, None)
+            .await
+    }
+
+    async fn adapter_pre_tool_with_evidence(
+        &mut self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        command_evidence: Option<&serde_json::Value>,
     ) -> serde_json::Value {
         if self.active_workflow.is_none() {
             return json!({"decision": "allow", "active": false});
@@ -1247,18 +1358,28 @@ impl Gateway {
             intent,
         )
         .await;
+        let pipeline = risk_assessment::apply_native_command_evidence(
+            pipeline,
+            registered_tool,
+            tool_name,
+            tool_input,
+            command_evidence,
+        );
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => {
                 return json!({
                     "decision": "deny",
                     "reason": "workflow session disappeared while semantic risk was assessed",
-                    "risk_assessment": pipeline.visible_json(),
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_session_unavailable",
+                        "active_workflow_session",
+                    ),
                 });
             }
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
-        // including tools the state whitelist would admit — until an
+        // including tools the state allowlist would admit — until an
         // authorized reviewer decides the pending approval. Hosts observe
         // the gate through the state projection; they never decide it.
         if let Some(pending) = &session.pending_approval {
@@ -1267,7 +1388,10 @@ impl Gateway {
                 "approval_pending": true,
                 "approval_id": pending.approval_id,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "approval_pending",
+                    "human_approval",
+                ),
                 "reason": format!(
                     "APPROVAL PENDING (id: {}): the workflow is parked at state '{}' awaiting a human decision on event '{}' ({}). All tool calls are blocked until an authorized reviewer approves or rejects the pending approval; do not attempt further tool calls or transitions.",
                     pending.approval_id,
@@ -1277,21 +1401,38 @@ impl Gateway {
                 ),
             });
         }
+        if pipeline.deterministic.source == "unmanaged_agent_delegation" {
+            let delegation = managed_delegation_policy(&session, tool_input);
+            return json!({
+                "decision": "deny",
+                "reason": "Raw agent delegation is not an execution boundary. Continue inline by default so evidence stays attached to the parent workflow; when a model or reasoning route change is required, use a declared Statewright-managed fork or subworkflow.",
+                "state": session.current_state,
+                "delegation": delegation,
+                "risk_assessment": pipeline.visible_json(),
+            });
+        }
         if let Some(reason) = enforcement::unsupported_shell_dialect_reason(tool_name, tool_input) {
             return json!({
                 "decision": "deny",
                 "reason": reason,
                 "available_tools": statewright_agent::tool_enforcer::get_allowed_tools(&session.definition, &session.current_state).unwrap_or_default(),
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "unsupported_shell_dialect",
+                    "supported_bash_dialect",
+                ),
             });
         }
-        if let Some(reason) = enforcement::semantic_effect_risk_denial(&session, &pipeline) {
+        if let Some(denial) = enforcement::semantic_effect_risk_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
         let original_denied = statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
@@ -1310,7 +1451,10 @@ impl Gateway {
                     return json!({
                         "decision":"deny", "state":session.current_state,
                         "reason":"MCP invocation has unresolved or mutating effects in this exploratory state.",
-                        "risk_assessment":pipeline.visible_json(),
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_effect_unresolved",
+                            "registered_read_only_effect",
+                        ),
                     });
                 }
                 Some(policy) => policy.to_string(),
@@ -1318,16 +1462,24 @@ impl Gateway {
                     return json!({
                         "decision":"deny", "state":session.current_state,
                         "reason":"MCP tool is not registered as read-only in this exploratory state.",
-                        "risk_assessment":pipeline.visible_json(),
+                        "risk_assessment":pipeline.visible_json_for_denial(
+                            "exploratory_registration_missing",
+                            "registered_read_only_tool",
+                        ),
                     });
                 }
             }
         } else {
-            enforcement::resolve_adapter_tool_name_with_pipeline(
+            enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
                 &session,
                 tool_name,
                 tool_input,
                 Some(&pipeline),
+                if registered_tool.is_some() {
+                    enforcement::AdapterToolOrigin::RegisteredUpstream
+                } else {
+                    enforcement::AdapterToolOrigin::NativeUnregistered
+                },
             )
         };
         let (session, checkpoint_context) = match enforcement::enforce_tool_call(
@@ -1344,20 +1496,27 @@ impl Gateway {
                     "reason": reason,
                     "available_tools": available_tools,
                     "state": session.current_state,
-                    "risk_assessment": pipeline.visible_json(),
+                    "risk_assessment": pipeline.visible_json_for_denial(
+                        "workflow_tool_policy",
+                        "declared_tool_capability",
+                    ),
                 });
             }
             EnforcementDecision::ImplicitTransition { event, new_state } => {
                 let mut execution_session = session.clone();
                 execution_session.current_state = new_state.clone();
-                if let Some(reason) =
-                    enforcement::semantic_effect_capability_denial(&execution_session, &pipeline)
-                {
+                if let Some(denial) = enforcement::semantic_effect_capability_denial_details(
+                    &execution_session,
+                    &pipeline,
+                ) {
                     return json!({
                         "decision": "deny",
-                        "reason": reason,
+                        "reason": denial.reason,
                         "state": session.current_state,
-                        "risk_assessment": pipeline.visible_json(),
+                        "risk_assessment": pipeline.visible_json_for_denial(
+                            denial.basis,
+                            denial.required_authority,
+                        ),
                     });
                 }
                 let old_state = session.current_state.clone();
@@ -1385,7 +1544,10 @@ impl Gateway {
                         return json!({
                             "decision": "deny",
                             "reason": "workflow session disappeared during implicit transition",
-                            "risk_assessment": pipeline.visible_json(),
+                            "risk_assessment": pipeline.visible_json_for_denial(
+                                "workflow_session_unavailable",
+                                "active_workflow_session",
+                            ),
                         });
                     }
                 }
@@ -1399,12 +1561,17 @@ impl Gateway {
             }
         };
 
-        if let Some(reason) = enforcement::semantic_effect_capability_denial(&session, &pipeline) {
+        if let Some(denial) =
+            enforcement::semantic_effect_capability_denial_details(&session, &pipeline)
+        {
             return json!({
                 "decision": "deny",
-                "reason": reason,
+                "reason": denial.reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    denial.basis,
+                    denial.required_authority,
+                ),
             });
         }
 
@@ -1419,7 +1586,10 @@ impl Gateway {
                 "decision": "deny",
                 "reason": reason,
                 "state": session.current_state,
-                "risk_assessment": pipeline.visible_json(),
+                "risk_assessment": pipeline.visible_json_for_denial(
+                    "interceptor_policy",
+                    "interceptor_clearance",
+                ),
             }),
             PreCallDecision::Warn(warning) => json!({
                 "decision": "allow",
@@ -1453,8 +1623,14 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"active": false, "error": "No active session"}),
         };
-        let policy_tool_name =
-            enforcement::resolve_adapter_tool_name(&before, tool_name, tool_input);
+        let origin = if self.upstream.tool_info(tool_name).ok().flatten().is_some() {
+            enforcement::AdapterToolOrigin::RegisteredUpstream
+        } else {
+            enforcement::AdapterToolOrigin::NativeUnregistered
+        };
+        let policy_tool_name = enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+            &before, tool_name, tool_input, None, origin,
+        );
         let previous_state = before.current_state.clone();
         self.session_manager.increment_iteration(&self.session_id);
 
@@ -1573,7 +1749,13 @@ impl Gateway {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 let tool_input = arguments.get("tool_input").cloned().unwrap_or(json!({}));
-                let response = self.adapter_pre_tool(tool_name, &tool_input).await;
+                let response = self
+                    .adapter_pre_tool_with_evidence(
+                        tool_name,
+                        &tool_input,
+                        arguments.get("command_evidence"),
+                    )
+                    .await;
                 JsonRpcResponse::success(
                     id,
                     serde_json::to_value(crate::protocol::ToolCallResult::text(
@@ -3505,6 +3687,53 @@ mod tests {
         )
     }
 
+    fn delegation_gateway() -> Gateway {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id": "delegation",
+            "initial": "design",
+            "states": {
+                "design": {
+                    "model": "openai-codex/gpt-6-astra",
+                    "thinking_level": "high",
+                    "allowed_tools": ["collaborationspawn_agent"],
+                    "on": {
+                        "FORK_REVIEW": {"fork": {
+                            "branches": {"review": {"initial": "review", "terminal": "branch_done"}},
+                            "join": "all", "on_complete": "implement", "on_fail": "failed"
+                        }},
+                        "RUN_SPECIALIST": {"invoke": "specialist", "on_complete": "implement", "on_fail": "failed"}
+                    }
+                },
+                "review": {"on": {"DONE": "branch_done"}},
+                "branch_done": {"type": "final"},
+                "implement": {"type": "final"},
+                "failed": {"type": "final"}
+            }
+        })).unwrap();
+        let manager = SessionManager::new();
+        manager.create("delegation-session".into(), definition.clone());
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                name: "collaborationspawn_agent".into(),
+                annotations: None,
+                description: None,
+                input_schema: json!({}),
+            },
+            crate::protocol::ToolCallResult::text("raw child must not run"),
+        )]);
+        let mut workflows = HashMap::new();
+        workflows.insert("delegation".into(), definition);
+        Gateway::new(
+            manager,
+            upstream,
+            "delegation-session".into(),
+            workflows,
+            Some("delegation".into()),
+            String::new(),
+            None,
+        )
+    }
+
     fn exploratory_gateway() -> Gateway {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id": "explore",
@@ -3605,6 +3834,7 @@ mod tests {
         assert_eq!(snapshot["run_id"], "run-1");
         assert_eq!(snapshot["run_session_id"], "test-session");
         assert_eq!(snapshot["capture_output"], true);
+        assert!(snapshot.get("model_routing").is_none());
     }
 
     #[tokio::test]
@@ -3619,6 +3849,41 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let result = resp.result.unwrap();
         assert_eq!(result["serverInfo"]["name"], "statewright-gateway");
+        assert!(result.get("instructions").is_none());
+    }
+
+    #[tokio::test]
+    async fn unmanaged_remote_initialize_and_state_disclose_host_model_control() {
+        let mut gw = test_gateway();
+        gw.set_remote_host_model_control(true);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "initialize".into(),
+            params: Some(json!({
+                "clientInfo": {"name": "ChatGPT", "version": "1"}
+            })),
+            id: Some(json!(1)),
+        };
+
+        let response = gw.handle_message(req).await.unwrap();
+        let result = response.result.unwrap();
+        assert!(
+            result["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("cannot apply")
+        );
+
+        let snapshot = gw.enrich_state_snapshot(json!({"state": "planning"}), false);
+        assert_eq!(snapshot["model_routing"]["status"], "host_controlled");
+        assert_eq!(snapshot["model_routing"]["enforced"], false);
+        assert_eq!(snapshot["model_routing"]["host_client"], "ChatGPT");
+        assert!(
+            snapshot["model_routing"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("it cannot gate tools the host offers outside this connector")
+        );
     }
 
     #[tokio::test]
@@ -5482,7 +5747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_pre_tool_denies_whitelist_tools_while_approval_pending() {
+    async fn adapter_pre_tool_denies_allowlisted_tools_while_approval_pending() {
         let mut gw = approval_gateway();
         gw.session_manager.set_pending_approval(
             "approval-session",
@@ -5496,8 +5761,8 @@ mod tests {
             },
         );
 
-        // A tool the state whitelist admits is still denied while the gate
-        // is parked: the approval gate outranks the state whitelist.
+        // A tool the state allowlist admits is still denied while the gate
+        // is parked: the approval gate outranks the state allowlist.
         let result = gw
             .adapter_pre_tool("read_file", &json!({ "path": "x" }))
             .await;
@@ -5526,6 +5791,86 @@ mod tests {
             .await;
         assert_eq!(admitted["decision"], "allow");
         assert!(admitted.get("approval_pending").is_none());
+    }
+
+    #[tokio::test]
+    async fn adapter_pre_tool_returns_provider_neutral_managed_delegation_policy() {
+        let mut gateway = delegation_gateway();
+
+        let inline = gateway
+            .adapter_pre_tool(
+                "collaborationspawn_agent",
+                &json!({
+                    "task_name": "review", "message": "inspect the plan"
+                }),
+            )
+            .await;
+        assert_eq!(inline["decision"], "deny");
+        assert_eq!(
+            inline["risk_assessment"]["deterministic_source"],
+            "unmanaged_agent_delegation"
+        );
+        assert_eq!(
+            inline["delegation"]["schema"],
+            "statewright/managed-delegation/v1"
+        );
+        assert_eq!(inline["delegation"]["recommendation"], "continue_inline");
+        assert_eq!(inline["delegation"]["raw_delegation_allowed"], false);
+        assert_eq!(inline["delegation"]["evidence_owner"], "parent_workflow");
+        assert_eq!(
+            inline["delegation"]["managed_transition_candidates"],
+            json!([
+                {"event": "FORK_REVIEW", "kind": "fork"},
+                {"event": "RUN_SPECIALIST", "kind": "subworkflow"}
+            ])
+        );
+
+        let routed = gateway
+            .adapter_pre_tool(
+                "collaborationspawn_agent",
+                &json!({
+                    "task_name": "review", "message": "inspect the plan",
+                    "model": "gpt-5.6-terra", "reasoning_effort": "medium"
+                }),
+            )
+            .await;
+        assert_eq!(routed["decision"], "deny");
+        assert_eq!(
+            routed["delegation"]["recommendation"],
+            "statewright_managed_fork"
+        );
+        assert_eq!(routed["delegation"]["route_change_requested"], true);
+
+        let provider_change = gateway
+            .adapter_pre_tool(
+                "collaborationspawn_agent",
+                &json!({
+                    "model": "other-provider/gpt-6-astra", "reasoning_effort": "high"
+                }),
+            )
+            .await;
+        assert_eq!(
+            provider_change["delegation"]["recommendation"],
+            "statewright_managed_fork"
+        );
+        assert_eq!(
+            provider_change["delegation"]["route_change_requested"],
+            true
+        );
+
+        let same_route = gateway
+            .adapter_pre_tool(
+                "collaborationspawn_agent",
+                &json!({
+                    "model": "gpt-6-astra", "reasoning_effort": "high"
+                }),
+            )
+            .await;
+        assert_eq!(
+            same_route["delegation"]["recommendation"],
+            "continue_inline"
+        );
+        assert_eq!(same_route["delegation"]["route_change_requested"], false);
     }
 
     #[tokio::test]
@@ -6187,10 +6532,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_cannot_bypass_blacklist_write_capability() {
+    async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",
-            "context":{"tool_policy_mode":"blacklist_heuristic_v1"},
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},
             "states": {
                 "inspect": {
                     "allowed_tools":["Edit"], "disallowed_tools":["Write"],
@@ -6205,15 +6550,7 @@ mod tests {
         manager.increment_iteration("checkpoint-policy-session");
         let mut workflows = HashMap::new();
         workflows.insert("checkpoint-policy".into(), definition);
-        let upstream = UpstreamManager::mock(vec![(
-            ToolInfo {
-                annotations: None,
-                name: "Edit".into(),
-                description: None,
-                input_schema: json!({"type":"object"}),
-            },
-            crate::protocol::ToolCallResult::text("must not execute"),
-        )]);
+        let upstream = UpstreamManager::mock(vec![]);
         let mut gateway = Gateway::new(
             manager,
             upstream,
@@ -6235,12 +6572,171 @@ mod tests {
                 .as_str()
                 .is_some_and(|reason| reason.contains("Local write effect is explicitly blocked"))
         );
+        assert_eq!(result["risk_assessment"]["equivalent_retry_allowed"], false);
+        assert_eq!(result["risk_assessment"]["reformulation_allowed"], false);
+        assert_eq!(
+            result["risk_assessment"]["exact_invocation_retry_allowed"],
+            false
+        );
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_capability_write_denied"
+        );
+        assert_eq!(result["risk_assessment"]["required_authority"], "Write");
         let session = gateway
             .session_manager
             .get("checkpoint-policy-session")
             .unwrap();
         assert_eq!(session.current_state, "inspect");
         assert_eq!(session.iteration_count, 1);
+    }
+
+    #[tokio::test]
+    async fn command_evidence_adapter_keeps_read_only_and_network_boundaries() {
+        for (allow_execution, leaf, expect_allow) in [
+            (true, "node_modules/.bin/vitest run tests/a.spec.js", true),
+            (false, "node_modules/.bin/vitest run tests/a.spec.js", false),
+            (
+                true,
+                "node_modules/.bin/vitest run tests/a.spec.js && echo x > marker",
+                false,
+            ),
+            (
+                true,
+                "node_modules/.bin/vitest run tests/a.spec.js && curl https://example.invalid",
+                false,
+            ),
+        ] {
+            let allowed = if allow_execution {
+                vec!["Read", "Bash", "BoundedLocalExecution"]
+            } else {
+                vec!["Read", "Bash"]
+            };
+            let definition: MachineDefinition = serde_json::from_value(json!({
+                "id":"command-evidence-policy", "initial":"validate",
+                "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "states": {"validate":{"allowed_tools":allowed,"disallowed_tools":["Write"],"on":{"DONE":"done"}},"done":{"type":"final"}}
+            })).unwrap();
+            let manager = SessionManager::new();
+            manager.create("evidence-session".into(), definition.clone());
+            let mut workflows = HashMap::new();
+            workflows.insert("command-evidence-policy".into(), definition);
+            let mut gateway = Gateway::new(
+                manager,
+                UpstreamManager::mock(vec![]),
+                "evidence-session".into(),
+                workflows,
+                Some("command-evidence-policy".into()),
+                String::new(),
+                None,
+            );
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(1)),
+                params: Some(json!({
+                    "name":"statewright_adapter_pre_tool", "arguments": {
+                        "tool_name":"exec_command", "tool_input":{"cmd":"task unit","workdir":"/workspace"},
+                        "command_evidence": {
+                            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+                            "command":"task unit", "requested_cwd":"/workspace", "cwd":"/workspace",
+                            "invocation":crate::bash_classifier::literal_invocation("task unit").unwrap(),
+                            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+                            "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}],
+                            "commands":[{"original":leaf,"resolved":leaf,"cwd":".",
+                                "invocation":crate::bash_classifier::literal_invocation(leaf)}]
+                        }
+                    }
+                })),
+            };
+            let response = gateway.handle_message(req).await.unwrap();
+            let value: serde_json::Value = serde_json::from_str(
+                response.result.unwrap()["content"][0]["text"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                value["decision"] == "allow",
+                expect_allow,
+                "{leaf}: {value}"
+            );
+            assert_eq!(
+                gateway
+                    .session_manager
+                    .get("evidence-session")
+                    .unwrap()
+                    .current_state,
+                "validate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_write_alias_cannot_inherit_native_allowlist_authority() {
+        let definition: MachineDefinition = serde_json::from_value(json!({
+            "id":"registered-collision", "initial":"inspect",
+            "states": {
+                "inspect": {"allowed_tools":["Write"], "on":{"DONE":"done"}},
+                "done":{"type":"final"}
+            }
+        }))
+        .unwrap();
+        let manager = SessionManager::new();
+        manager.create("registered-collision-session".into(), definition.clone());
+        let mut workflows = HashMap::new();
+        workflows.insert("registered-collision".into(), definition);
+        let upstream = UpstreamManager::mock(vec![(
+            ToolInfo {
+                annotations: serde_json::from_value(json!({
+                    "readOnlyHint": false,
+                    "destructiveHint": true,
+                    "openWorldHint": true
+                }))
+                .unwrap(),
+                name: "apply_patch".into(),
+                description: None,
+                input_schema: json!({"type":"object"}),
+            },
+            crate::protocol::ToolCallResult::text("must not execute"),
+        )]);
+        let mut gateway = Gateway::new(
+            manager,
+            upstream,
+            "registered-collision-session".into(),
+            workflows,
+            Some("registered-collision".into()),
+            String::new(),
+            None,
+        );
+
+        let result = gateway
+            .adapter_pre_tool("apply_patch", &json!({"patch":"redacted"}))
+            .await;
+
+        assert_eq!(result["decision"], "deny");
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("not available"))
+        );
+        assert_eq!(
+            result["risk_assessment"]["deterministic_source"],
+            "mcp_annotation"
+        );
+        assert_eq!(result["risk_assessment"]["deterministic_risk"], "Critical");
+        assert_ne!(
+            result["risk_assessment"]["deterministic_source"],
+            "native_write"
+        );
+        assert_eq!(
+            result["risk_assessment"]["required_authority"],
+            "declared_tool_capability"
+        );
+        assert_eq!(
+            result["risk_assessment"]["final_denial_basis"],
+            "workflow_tool_policy"
+        );
     }
 
     #[tokio::test]

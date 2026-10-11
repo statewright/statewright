@@ -4,6 +4,19 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use statewright_engine::MachineDefinition;
 
+pub(crate) const DENYLIST_HEURISTIC_POLICY_MODE: &str = "denylist_heuristic_v1";
+pub(crate) const LEGACY_DENYLIST_HEURISTIC_POLICY_MODE: &str = "blacklist_heuristic_v1";
+
+pub(crate) fn canonicalize_tool_policy_mode(context: &mut serde_json::Value) {
+    if context
+        .get("tool_policy_mode")
+        .and_then(serde_json::Value::as_str)
+        == Some(LEGACY_DENYLIST_HEURISTIC_POLICY_MODE)
+    {
+        context["tool_policy_mode"] = serde_json::json!(DENYLIST_HEURISTIC_POLICY_MODE);
+    }
+}
+
 /// A parked transition awaiting human approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
@@ -66,7 +79,7 @@ impl GatewaySession {
         if value["session"].get("pending_approval").is_none() {
             return Err("Paused checkpoint is missing approval status".into());
         }
-        let session: Self = serde_json::from_value(value["session"].clone())
+        let mut session: Self = serde_json::from_value(value["session"].clone())
             .map_err(|_| "Invalid paused session checkpoint")?;
         if session.instance_id != instance_id
             || session.current_state != state
@@ -84,10 +97,20 @@ impl GatewaySession {
                 return Err("Invalid pending approval checkpoint".into());
             }
         }
+        canonicalize_tool_policy_mode(&mut session.definition.context);
+        canonicalize_tool_policy_mode(&mut session.context);
+        if let Some(pending) = session.pending_approval.as_mut() {
+            canonicalize_tool_policy_mode(&mut pending.new_context);
+        }
+        if let Some(subflow) = session.subflow.as_mut() {
+            canonicalize_tool_policy_mode(&mut subflow.parent_definition.context);
+            canonicalize_tool_policy_mode(&mut subflow.parent_context);
+        }
         Ok(session)
     }
 
-    pub fn new(instance_id: String, definition: MachineDefinition) -> Self {
+    pub fn new(instance_id: String, mut definition: MachineDefinition) -> Self {
+        canonicalize_tool_policy_mode(&mut definition.context);
         let initial = definition.initial.clone();
         // Ensure context is always an object, never null — downstream code uses as_object_mut()
         let context = if definition.context.is_object() {
@@ -220,7 +243,7 @@ impl SessionManager {
         &self,
         instance_id: &str,
         new_state: String,
-        new_context: serde_json::Value,
+        mut new_context: serde_json::Value,
     ) -> bool {
         if let Some(session) = self
             .sessions
@@ -228,6 +251,7 @@ impl SessionManager {
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(instance_id)
         {
+            canonicalize_tool_policy_mode(&mut new_context);
             session.previous_state = Some(session.current_state.clone());
             session.current_state = new_state;
             session.context = new_context;
@@ -247,7 +271,7 @@ impl SessionManager {
         &self,
         instance_id: &str,
         name: String,
-        definition: MachineDefinition,
+        mut definition: MachineDefinition,
         input: serde_json::Value,
         on_complete: String,
         on_fail: Option<String>,
@@ -258,6 +282,7 @@ impl SessionManager {
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(instance_id)
         {
+            canonicalize_tool_policy_mode(&mut definition.context);
             let mut context = if definition.context.is_object() {
                 definition.context.clone()
             } else {
@@ -266,6 +291,7 @@ impl SessionManager {
             if input.is_object() {
                 context = statewright_engine::apply_context_patch(&context, &input);
             }
+            canonicalize_tool_policy_mode(&mut context);
             session.subflow = Some(ActiveSubflow {
                 name,
                 parent_definition: session.definition.clone(),
@@ -299,8 +325,9 @@ impl SessionManager {
         } else {
             subflow.on_fail.unwrap_or_else(|| "failed".to_string())
         };
-        let context =
+        let mut context =
             statewright_engine::apply_context_patch(&subflow.parent_context, &session.context);
+        canonicalize_tool_policy_mode(&mut context);
         session.definition = subflow.parent_definition;
         session.previous_state = Some(subflow.parent_state);
         session.current_state = target.clone();

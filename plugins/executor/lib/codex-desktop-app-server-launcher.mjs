@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { WebSocket } from "ws";
 import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
@@ -9,6 +9,39 @@ import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { adoptCodexRootSession, claimCodexRootSession, claimManagedControlIdentity, readCodexRootSession } from "./managed-client-identity.mjs";
 import { gatewayEndpoint, resolveApiKey } from "./remote-client.mjs";
+import { getGatewayCredential } from "./credential-store.mjs";
+import { resolveGatewayProfile } from "./gateway-profile.mjs";
+import { startDesktopBridgePool } from "./desktop-bridge-pool.mjs";
+import { runDesktopMultichatRuntime } from "./desktop-multichat-runtime.mjs";
+import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
+import { LocalTelemetryService } from "./local-telemetry-agent.mjs";
+import { projectDesktopUsage } from "./desktop-native-usage.mjs";
+export { connectDesktopProfile } from "./desktop-device-connect.mjs";
+
+// The selected Desktop record owns the endpoint. A shell's profile or explicit
+// API key must never redirect it or supply a credential from another gateway.
+export async function desktopProfileEnvironment(state, environment = process.env, home = homedir()) {
+  if (!state?.gateway_url) throw new Error("Desktop profile has no gateway; rerun Desktop setup.");
+  const isolated = { ...environment };
+  for (const name of ["STATEWRIGHT_ENV", "STATEWRIGHT_GATEWAY_URL", "STATEWRIGHT_PB_URL", "STATEWRIGHT_API_KEY"]) delete isolated[name];
+  const profile = await resolveGatewayProfile({ ...isolated, STATEWRIGHT_GATEWAY_URL: state.gateway_url }, home);
+  return { ...isolated, STATEWRIGHT_GATEWAY_URL: profile.gatewayUrl, ...(profile.authUrl ? { STATEWRIGHT_PB_URL: profile.authUrl } : {}) };
+}
+
+export async function startProfileDesktopMcpBridge({ state, environment = process.env, home = homedir(),
+  getCredential = getGatewayCredential, startBridge = startDesktopMcpBridge, withLanePool = false }) {
+  const selected = await desktopProfileEnvironment(state, environment, home);
+  // Do not trigger legacy migration or interactive OAuth from a GUI launch.
+  const apiKey = await getCredential(selected.STATEWRIGHT_GATEWAY_URL, { environment: selected, home });
+  const createBridge = clientId => startBridge({ environment: { ...selected, STATEWRIGHT_API_KEY: apiKey }, clientId, home });
+  const bridge = await createBridge(state.client_id);
+  if (!withLanePool) return bridge;
+  let pool;
+  try { pool = await startDesktopBridgePool({ profileClientId: state.client_id, legacyBridge: bridge, createBridge }); }
+  catch (error) { await bridge.close(); throw error; }
+  return { url: bridge.url, token: bridge.token, poolUrl: pool.url, poolToken: pool.token,
+    close: async () => { try { await pool.close(); } finally { await bridge.close(); } } };
+}
 
 // A Desktop broker is a separate managed client. These names carry process
 // handles owned by a parent TUI/session and must not escape into Desktop.
@@ -19,7 +52,9 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
   "STATEWRIGHT_DESKTOP_MCP_URL", "STATEWRIGHT_DESKTOP_MCP_TOKEN",
-  "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+  "STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL", "STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN",
+  "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
+  "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
 ];
 
 export function desktopBrokerEnvironment(environment, { controlDir, clientId }) {
@@ -33,11 +68,18 @@ export function desktopBrokerEnvironment(environment, { controlDir, clientId }) 
   };
 }
 
-export async function startDesktopMcpBridge({ environment, clientId, bridgeFactory = options => new ManagedMcpBridge(options) }) {
+export async function startDesktopMcpBridge({ environment, clientId, home = homedir(), bridgeFactory = options => new ManagedMcpBridge(options) }) {
+  const apiKey = await resolveApiKey(environment);
+  const nativeUsage = environment.STATEWRIGHT_PB_URL ? new LocalTelemetryService({
+    dataDir: join(home, ".statewright", "telemetry", "desktop", clientId),
+    gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai").replace(/\/mcp\/?$/, ""),
+    pocketbaseUrl: environment.STATEWRIGHT_PB_URL, apiKey,
+  }) : null;
   const bridge = bridgeFactory({
     gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"),
-    apiKey: await resolveApiKey(environment),
+    apiKey,
     clientId,
+    ...(nativeUsage ? {nativeUsage, projectUsage: projectDesktopUsage} : {}),
   });
   await bridge.start();
   return bridge;
@@ -133,6 +175,56 @@ function isManagedClientId(value) {
   return /^swc_[a-f0-9]{32}$/.test(value ?? "");
 }
 
+export async function desktopClassifierState({ bridge, clientId, fetchImpl = fetch }) {
+  const response = await fetchImpl(`${bridge.url.replace(/\/+$/, "")}/mcp`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${bridge.token}`,
+      "X-Statewright-Client-Id": clientId,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "statewright-desktop-classifier-state",
+      method: "tools/call",
+      params: { name: "statewright_get_state", arguments: {} },
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`Desktop classifier state HTTP ${response.status}`);
+  const rpc = await response.json();
+  if (!rpc.error && rpc.result?.isError && rpc.result.content?.length === 1
+      && rpc.result.content[0].type === "text"
+      && rpc.result.content[0].text === "No active workflow. Load a workflow before requesting state.") return null;
+  if (rpc.error || rpc.result?.isError) throw new Error("Desktop classifier state is unavailable");
+  if (rpc.result?.structuredContent && typeof rpc.result.structuredContent === "object") {
+    return rpc.result.structuredContent;
+  }
+  for (const block of rpc.result?.content ?? []) {
+    if (block.type !== "text") continue;
+    try {
+      const value = JSON.parse(block.text);
+      if (value && typeof value === "object") return value;
+    } catch { /* another text block may contain the authoritative snapshot */ }
+  }
+  throw new Error("Desktop classifier state has no authoritative snapshot");
+}
+
+async function writeDesktopRuntimeManifest(path, value) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+async function removeOwnedDesktopRuntimeManifest(path, identity) {
+  try {
+    const current = JSON.parse(await readFile(path, "utf8"));
+    if (current.pid === identity.pid && current.proxyToken === identity.proxyToken) await unlink(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+  }
+}
+
 export function desktopAppServerLaunchPlan(argv, environment = process.env, home = homedir()) {
   const originalCommand = nonEmpty(environment.STATEWRIGHT_DESKTOP_ORIGINAL_CODEX);
   const clientId = nonEmpty(environment.STATEWRIGHT_DESKTOP_CLIENT_ID);
@@ -156,6 +248,14 @@ export async function runDesktopAppServerBroker({
   WebSocketImpl = WebSocket, home = homedir(), setExitCode = code => { process.exitCode = code; },
 } = {}) {
   const plan = desktopAppServerLaunchPlan(argv, environment, home);
+  if (environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL || environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN) {
+    if (!environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL || !environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN) {
+      throw new Error("Desktop lane allocator identity is incomplete.");
+    }
+    return runDesktopMultichatRuntime({ plan, environment, home, stdin, stdout, stderr,
+      startRuntime, isolateEnvironment: desktopBrokerEnvironment, classifierState: desktopClassifierState,
+      WebSocketImpl, setExitCode });
+  }
   // A Desktop install may be the first Statewright client on this machine.
   // Establish the same private control boundary as the resident TUI before a
   // route reader can observe it.
@@ -171,16 +271,27 @@ export async function runDesktopAppServerBroker({
   // ChatGPT process. Direct CLI callers retain the in-process fallback.
   const bridge = inheritedBridge
     ?? await startMcpBridge({ environment: isolatedEnvironment, clientId: plan.clientId });
-  let runtime;
+  let runtime, services;
+  const manifestPath = join(dirname(plan.controlDir), "manifest.json");
+  let manifestIdentity = null;
   try {
+    const classifierApprovalService = {
+      ownsThread: async threadId => (await readCodexRootSession(plan.controlDir, plan.clientId))?.sessionId === threadId,
+      getState: () => desktopClassifierState({ bridge, clientId: plan.clientId }),
+    };
+    services = desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId, bridge,
+      ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState});
     runtime = await startRuntime({
       command: plan.command,
       environment: {
         ...isolatedEnvironment,
         STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
         STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+        STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
       },
       clientId: plan.clientId,
+      classifierApprovalService,
+      ...services,
       nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId),
       getThreadCwds: (threadIds) => readThreadMetadata({ threadIds }),
       onThreadStarted: claimThread,
@@ -189,7 +300,18 @@ export async function runDesktopAppServerBroker({
       requiredMcpReadyTimeoutMs: 30_000,
       stderr,
     });
+    if (!runtime.proxyToken) throw new Error("Desktop App Server runtime did not publish its classifier approval token.");
+    manifestIdentity = { pid: process.pid, proxyToken: runtime.proxyToken };
+    await writeDesktopRuntimeManifest(manifestPath, {
+      version: 3,
+      ...manifestIdentity,
+      clientId: plan.clientId,
+      proxyUrl: runtime.proxyUrl,
+      startedAt: new Date().toISOString(),
+    });
   } catch (error) {
+    services?.closeNativeUsage();
+    await runtime?.close().catch(() => {});
     await bridge.close().catch(() => {});
     throw error;
   }
@@ -210,6 +332,7 @@ export async function runDesktopAppServerBroker({
   const signalHandlers = new Map();
   const onEnd = () => { void close(); };
   const close = async ({ abnormal = false } = {}) => {
+    services?.closeNativeUsage();
     if (abnormal) setExitCode(1);
     return closing ??= (async () => {
     stdin.off?.("data", onData);
@@ -218,6 +341,7 @@ export async function runDesktopAppServerBroker({
     for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
     if (socket.readyState === WebSocketImpl.OPEN || socket.readyState === WebSocketImpl.CONNECTING) socket.close();
     try {
+      if (manifestIdentity) await removeOwnedDesktopRuntimeManifest(manifestPath, manifestIdentity);
       await runtime.close();
     } finally {
       await bridge.close();

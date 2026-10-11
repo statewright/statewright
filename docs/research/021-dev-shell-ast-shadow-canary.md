@@ -1,26 +1,19 @@
 # Dev shell-AST shadow canary receipt
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 Date: 2026-09-27. Source: `f6c4c4bf9141a195c9a85752b398c36d3ef80f34`.
 Scope: authenticated live canary against the development gateway only. No
 staging or production promotion, authorization-mode change, or persistent
 credential was performed.
 
-## Deployment identity
+## Historical validation scope
 
-The `statewright-development` deployment ran the exact private-registry image
-digest
-`sha256:60955824235ed6209862f42f5ee1f830af8fe63ef976dd4606e424e08c4c3673`
-with `STATEWRIGHT_SHELL_AST_SHADOW=true` and `RUST_LOG=info`. Its rollout was
-ready at `1/1`, and its health endpoint returned HTTP 200.
-
-The staging namespace remained on its prior b786 image
-`sha256:037c51c34f51a83968a3512646b0d0dd4da0c68629850b42a5bfbd09b711d97d`
-without the AST shadow flag. Production was not addressed.
-
-Before the live canary, `cargo test --workspace` completed successfully in the
-feature worktree: the gateway suite reported 301 passing and one ignored test.
-This is directly executed evidence for this milestone, not an inherited test
-claim.
+The development gateway ran with `STATEWRIGHT_SHELL_AST_SHADOW=true`.
+Private image digests, rollout topology and environment operations are omitted.
+The recorded workspace test run reported 301 gateway tests passing and one
+ignored. These are historical results, not checks rerun for this cleanup.
 
 ## Authenticated canary
 
@@ -58,6 +51,4 @@ receipt or the repository.
 Before making AST classification authoritative, expand the canary into a
 representative denial corpus, compare false-allow and false-deny behavior,
 independently review the authority/fallback rules, and prove the controlled
-mode in development. The live `RUST_LOG=info` development setting must also be
-codified in the development deployment overlay rather than relying on this
-runtime adjustment. Staging remains unchanged until those gates pass.
+mode in development. Staging remains unchanged until those gates pass.

@@ -4,15 +4,21 @@ import { randomBytes } from 'node:crypto'
 
 const appUrl = process.env.STATEWRIGHT_APP_URL?.replace(/\/$/, '')
 const mcpUrl = process.env.STATEWRIGHT_MCP_URL?.replace(/\/$/, '')
+const expectedSemanticStatus = process.env.STATEWRIGHT_EXPECT_SEMANTIC_STATUS || 'Assessed'
 
 if (!appUrl || !mcpUrl) {
   console.error('STATEWRIGHT_APP_URL and STATEWRIGHT_MCP_URL are required')
+  process.exit(2)
+}
+if (!['Assessed', 'Disabled'].includes(expectedSemanticStatus)) {
+  console.error('STATEWRIGHT_EXPECT_SEMANTIC_STATUS must be Assessed or Disabled')
   process.exit(2)
 }
 
 const marker = `${Date.now()}-${randomBytes(6).toString('hex')}`
 const email = `shell-ast-canary-${marker}@statewright.dev`
 const password = `ShellAst-${randomBytes(18).toString('base64url')}-9!`
+const workflowName = `classifier-canary-${marker}`
 let userId
 let userToken
 let keyId
@@ -39,6 +45,21 @@ async function jsonRequest(url, options = {}) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
+}
+
+function boundedFailure(body) {
+  if (!body || typeof body !== 'object') return 'no structured error'
+  const code = typeof body.error === 'string' ? body.error : null
+  const message = typeof body.message === 'string' ? body.message : null
+  const fields = body.data && typeof body.data === 'object'
+    ? Object.entries(body.data)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, detail]) => `${name}:${detail?.code || detail?.message || 'invalid'}`)
+      .join(',')
+    : null
+  return [code && `error=${code}`, message && `message=${message}`, fields && `fields=${fields}`]
+    .filter(Boolean)
+    .join(' ') || 'no bounded error fields'
 }
 
 function parseMcpBody(response, text) {
@@ -90,6 +111,22 @@ async function tool(name, args = {}) {
 }
 
 const cases = [
+  {
+    name: 'plain_git_status',
+    command: 'git status --short',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Low',
+    exposure: 'Local'
+  },
+  {
+    name: 'compound_rg_bare_sort',
+    command: "rg --files | sort; rg -n 'M1' README.md docs/plan.md",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Low',
+    exposure: 'Local'
+  },
   {
     name: 'compound_read',
     command: 'if git rev-parse HEAD; then tmux capture-pane -p -t %36 | tail -80; fi',
@@ -149,10 +186,78 @@ const cases = [
   {
     name: 'data_heredoc_redirect',
     command: "cat > artifact <<'EOF'\ngit push origin HEAD\nEOF",
-    decision: 'deny',
+    decision: 'allow',
     source: 'shell_ast',
     risk: 'Moderate',
     exposure: 'Local'
+  },
+  {
+    name: 'mkdir_local_write',
+    command: 'mkdir -p docs/plans',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local'
+  },
+  {
+    name: 'package_test_validation',
+    command: 'npm test',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'bounded_local_execution'
+  },
+  {
+    name: 'package_test_with_read',
+    command: 'npm test && git status --short',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'bounded_local_execution'
+  },
+  {
+    name: 'package_test_with_write',
+    command: 'npm test && mkdir output',
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local',
+    effect: 'local_write_and_bounded_local_execution'
+  },
+  {
+    name: 'python_inline_output',
+    command: "python3 -c 'print(1)'",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Low',
+    exposure: 'Local'
+  },
+  {
+    name: 'python_inline_write',
+    command: "python3 -c 'open(\"artifact\", \"w\").write(\"x\")'",
+    decision: 'allow',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Local'
+  },
+  {
+    name: 'python_inline_destructive',
+    command: "python3 -c 'import shutil; shutil.rmtree(\"artifact\")'",
+    decision: 'deny',
+    source: 'shell_ast',
+    risk: 'Critical',
+    exposure: 'Local'
+  },
+  {
+    name: 'python_inline_unresolved',
+    command: "python3 -c 'private_framework.execute()'",
+    decision: 'deny',
+    source: 'shell_ast',
+    risk: 'Moderate',
+    exposure: 'Unknown',
+    reformulationAllowed: true
   },
   {
     name: 'malformed_shell',
@@ -160,7 +265,8 @@ const cases = [
     decision: 'deny',
     source: 'shell',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Unknown',
+    reformulationAllowed: true
   },
   {
     name: 'opaque_executable',
@@ -168,11 +274,14 @@ const cases = [
     decision: 'deny',
     source: 'shell_ast',
     risk: 'Moderate',
-    exposure: 'Unknown'
+    exposure: 'Unknown',
+    reformulationAllowed: true
   }
 ]
 
 const results = []
+const nativeAliasResults = []
+const restrictedResults = []
 let failure
 
 try {
@@ -195,14 +304,70 @@ try {
   assert(authenticated.response.ok, `authentication returned HTTP ${authenticated.response.status}`)
   userToken = authenticated.body.token
 
-  const generated = await jsonRequest(`${appUrl}/api/keys/generate`, {
+  const workflow = await jsonRequest(`${appUrl}/api/collections/workflows/records`, {
     method: 'POST',
     headers: { Authorization: userToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: `shell-ast-canary-${marker}` })
+    body: JSON.stringify({
+      owner: userId,
+      name: workflowName,
+      active: true,
+      definition: {
+        id: workflowName,
+        initial: 'implement',
+        context: { tool_policy_mode: 'denylist_heuristic_v1' },
+        meta: { classifier_policy: { risk_tolerance: 'assessed_moderate_local' } },
+        states: {
+          implement: {
+            allowed_tools: ['Read', 'Bash', 'Write', 'BoundedLocalExecution', 'GitLocalWrite'],
+            on: { RESTRICT: 'read_only', DONE: 'done' }
+          },
+          read_only: {
+            allowed_tools: ['Read', 'Bash'],
+            classifier_policy: { risk_tolerance: 'assessed_moderate_local' },
+            on: { DONE: 'done' }
+          },
+          done: { type: 'final' }
+        },
+        guards: {}
+      }
+    })
   })
-  assert(generated.response.ok, `key generation returned HTTP ${generated.response.status}`)
-  keyId = generated.body.id
-  apiKey = generated.body.key
+  assert(workflow.response.ok, `workflow creation returned HTTP ${workflow.response.status}: ${boundedFailure(workflow.body)}`)
+
+  const issued = await jsonRequest(`${appUrl}/api/oauth/device/code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: 'statewright-codex', scope: 'mcp' })
+  })
+  assert(issued.response.ok, `device code issuance returned HTTP ${issued.response.status}: ${boundedFailure(issued.body)}`)
+
+  const approved = await jsonRequest(`${appUrl}/api/oauth/device/authorization`, {
+    method: 'POST',
+    headers: { Authorization: userToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_code: issued.body.user_code, decision: 'approve' })
+  })
+  assert(approved.response.ok, `device approval returned HTTP ${approved.response.status}: ${boundedFailure(approved.body)}`)
+  assert(approved.body?.status === 'approved', `device approval returned ${approved.body?.status || 'no status'}`)
+
+  const exchanged = await jsonRequest(`${appUrl}/api/oauth/device/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      client_id: 'statewright-codex',
+      device_code: issued.body.device_code
+    })
+  })
+  assert(exchanged.response.ok, `device token exchange returned HTTP ${exchanged.response.status}: ${boundedFailure(exchanged.body)}`)
+  apiKey = exchanged.body.access_token
+  assert(/^sw_live_[A-Za-z0-9_-]{64}$/.test(apiKey), 'device token exchange returned an invalid access token')
+
+  const listed = await jsonRequest(`${appUrl}/api/keys`, {
+    headers: { Authorization: userToken }
+  })
+  assert(listed.response.ok, `key listing returned HTTP ${listed.response.status}`)
+  keyId = listed.body?.keys?.find((entry) => entry.prefix === apiKey.substring(0, 12))?.id
+  assert(keyId, 'OAuth-created API key was not visible to its owner')
 
   await rpc('initialize', {
     protocolVersion: '2025-03-26',
@@ -210,7 +375,7 @@ try {
     clientInfo: { name: 'shell-ast-authority-canary', version: '1' }
   })
   await rpc('notifications/initialized', {}, { notification: true })
-  await tool('statewright_load_workflow', { name: 'bugfix' })
+  await tool('statewright_load_workflow', { name: workflowName })
 
   for (const entry of cases) {
     const result = await tool('statewright_adapter_pre_tool', {
@@ -218,11 +383,27 @@ try {
       tool_input: { cmd: entry.command }
     })
     const risk = result.risk_assessment || {}
-    assert(result.decision === entry.decision, `${entry.name}: expected ${entry.decision}, got ${result.decision}`)
+    assert(
+      result.decision === entry.decision,
+      `${entry.name}: expected ${entry.decision}, got ${result.decision}; risk=${JSON.stringify(risk)}`
+    )
     assert(risk.deterministic_source === entry.source, `${entry.name}: expected source ${entry.source}, got ${risk.deterministic_source}`)
     assert(risk.deterministic_risk === entry.risk, `${entry.name}: expected risk ${entry.risk}, got ${risk.deterministic_risk}`)
     assert(risk.deterministic_exposure === entry.exposure, `${entry.name}: expected exposure ${entry.exposure}, got ${risk.deterministic_exposure}`)
-    assert(risk.semantic_status === 'Assessed', `${entry.name}: expected semantic status Assessed, got ${risk.semantic_status}`)
+    assert(risk.semantic_status === expectedSemanticStatus, `${entry.name}: expected semantic status ${expectedSemanticStatus}, got ${risk.semantic_status}`)
+    assert(typeof risk.resolution_basis === 'string', `${entry.name}: missing resolution_basis`)
+    assert(typeof risk.required_authority === 'string', `${entry.name}: missing required_authority`)
+    if (entry.effect) {
+      assert(risk.resolved_effect === entry.effect, `${entry.name}: expected effect ${entry.effect}, got ${risk.resolved_effect}`)
+    }
+    if (entry.decision === 'deny') {
+      assert(typeof risk.final_denial_basis === 'string', `${entry.name}: missing final_denial_basis`)
+    }
+    const reformulationAllowed = entry.reformulationAllowed === true
+    const equivalentRetryAllowed = entry.decision === 'allow' || reformulationAllowed
+    assert(risk.equivalent_retry_allowed === equivalentRetryAllowed, `${entry.name}: equivalent retry guidance did not match the decision`)
+    assert(risk.reformulation_allowed === reformulationAllowed, `${entry.name}: reformulation guidance did not match the decision`)
+    assert(risk.exact_invocation_retry_allowed === (entry.decision === 'allow'), `${entry.name}: exact retry guidance did not match the decision`)
     results.push({
       name: entry.name,
       decision: result.decision,
@@ -230,6 +411,85 @@ try {
       risk: risk.deterministic_risk,
       exposure: risk.deterministic_exposure,
       semantic_status: risk.semantic_status
+    })
+  }
+
+  for (const alias of [
+    'Write',
+    'write',
+    'Edit',
+    'edit',
+    'MultiEdit',
+    'multiedit',
+    'apply_patch',
+    'functions.apply_patch',
+    'StrReplace',
+    'str_replace'
+  ]) {
+    const result = await tool('statewright_adapter_pre_tool', {
+      tool_name: alias,
+      tool_input: { path: 'classifier-family-canary', patch: 'classifier-family-canary' }
+    })
+    const risk = result.risk_assessment || {}
+    assert(result.decision === 'allow', `${alias}: expected allow, got ${result.decision}`)
+    assert(risk.deterministic_source === 'native_write', `${alias}: expected native_write, got ${risk.deterministic_source}`)
+    assert(risk.deterministic_risk === 'Moderate', `${alias}: expected Moderate, got ${risk.deterministic_risk}`)
+    assert(risk.deterministic_exposure === 'Local', `${alias}: expected Local, got ${risk.deterministic_exposure}`)
+    assert(risk.resolved_effect === 'local_write', `${alias}: expected local_write, got ${risk.resolved_effect}`)
+    nativeAliasResults.push({ alias, decision: result.decision, source: risk.deterministic_source })
+  }
+
+  await tool('statewright_transition', {
+    event: 'RESTRICT',
+    data: { rationale: 'Verify resolved effects against a state without Write authority.' }
+  })
+  for (const entry of [
+    {
+      name: 'restricted_package_test',
+      command: 'npm test',
+      decision: 'deny',
+      effect: 'bounded_local_execution'
+    },
+    {
+      name: 'restricted_package_test_with_write',
+      command: 'npm test && mkdir output',
+      decision: 'deny',
+      effect: 'local_write_and_bounded_local_execution'
+    },
+    {
+      name: 'restricted_python_output',
+      command: "python3 -c 'print(1)'",
+      decision: 'allow',
+      effect: 'read_only'
+    },
+    {
+      name: 'restricted_python_write',
+      command: "python3 -c 'open(\"artifact\", \"w\").write(\"x\")'",
+      decision: 'deny',
+      effect: 'local_write'
+    },
+    {
+      name: 'restricted_compound_worktree',
+      command: 'git rev-parse HEAD && git worktree add -b fix/structural .agent-worktrees/structural HEAD',
+      decision: 'deny',
+      effect: 'local_write'
+    }
+  ]) {
+    const result = await tool('statewright_adapter_pre_tool', {
+      tool_name: 'exec_command',
+      tool_input: { cmd: entry.command }
+    })
+    const risk = result.risk_assessment || {}
+    assert(
+      result.decision === entry.decision,
+      `${entry.name}: expected ${entry.decision}, got ${result.decision}; risk=${JSON.stringify(risk)}`
+    )
+    assert(risk.resolved_effect === entry.effect, `${entry.name}: expected effect ${entry.effect}, got ${risk.resolved_effect}`)
+    restrictedResults.push({
+      name: entry.name,
+      decision: result.decision,
+      effect: risk.resolved_effect,
+      denial_basis: risk.final_denial_basis || null
     })
   }
 } catch (error) {
@@ -263,9 +523,12 @@ if (failure) {
 console.log(
   JSON.stringify({
     status: 'pass',
+    credential_path: 'oauth_device_grant',
     app_url: appUrl,
     mcp_url: mcpUrl,
     cases: results,
+    native_aliases: nativeAliasResults,
+    restricted_cases: restrictedResults,
     cleanup: { api_key_revoked: true, user_deleted: true }
   })
 )

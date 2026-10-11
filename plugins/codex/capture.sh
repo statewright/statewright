@@ -7,12 +7,16 @@ command -v jq &>/dev/null || exit 0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=client-id.sh
 source "$SCRIPT_DIR/client-id.sh"
+# shellcheck source=gateway-profile.sh
+source "$SCRIPT_DIR/gateway-profile.sh"
 
-API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null || true)}"
+if ! statewright_gateway_profile; then exit 0; fi
+API_KEY="$(statewright_load_api_key 2>/dev/null || true)"
 API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
-PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
+PB_URL="$STATEWRIGHT_PB_URL"
 
 [ -z "$API_KEY" ] && exit 0
+[ -z "$PB_URL" ] && exit 0
 
 HOOK_INPUT=$(cat 2>/dev/null || true)
 [ -z "$HOOK_INPUT" ] && exit 0

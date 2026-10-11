@@ -6,6 +6,8 @@ members = [
     "crates/cli",
     "crates/tui",
     "crates/mcp-gateway",
+    "crates/credentials",
+    "crates/native-desktop-launcher",
 ]
 
 [workspace.package]

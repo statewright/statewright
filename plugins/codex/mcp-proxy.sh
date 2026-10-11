@@ -5,6 +5,38 @@
 # continue to read it dynamically from ~/.statewright/api_key.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MCP_RESPONSE_SUMMARIZER="${SCRIPT_DIR}/scripts/summarize-mcp-response.mjs"
+MCP_RECOVERY="${SCRIPT_DIR}/scripts/lib/desktop-runtime/mcp-recovery.mjs"
+DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
+# GUI MCP launches do not inherit the terminal PATH. Keep the launcher's pinned
+# interpreter authoritative; this helper does not replace the signed host app.
+PROXY_NODE_BIN="${STATEWRIGHT_NODE_BIN:-}"
+if [ -z "$PROXY_NODE_BIN" ]; then
+  PROXY_NODE_BIN=$(command -v node 2>/dev/null || true)
+  if [ -z "$PROXY_NODE_BIN" ] && [ -x "$DESKTOP_BUNDLED_NODE" ]; then
+    PROXY_NODE_BIN="$DESKTOP_BUNDLED_NODE"
+  fi
+fi
+
+normalize_transport_response() {
+  local normalized
+  if [ -x "$PROXY_NODE_BIN" ] && normalized=$(printf '%s\n%s' "$1" "$2" | "$PROXY_NODE_BIN" "$MCP_RECOVERY" "${3:-}") && [ -n "$normalized" ]; then
+    printf '%s\n' "$normalized"
+  else
+    # A missing helper must produce a response, not a two-minute MCP timeout.
+    printf '%s' "$1" | jq -c '{jsonrpc:"2.0",id:.id,error:{code:-32603,message:"Statewright Node response helper is unavailable. Repair the selected runtime and restart this client."}}'
+  fi
+}
+
+summarize_transition_response() {
+  local tool_name="$1" response="$2" summarized
+  if [ "$tool_name" != "statewright_transition" ] || [ ! -f "$MCP_RESPONSE_SUMMARIZER" ] || [ ! -x "$PROXY_NODE_BIN" ]; then
+    printf '%s' "$response"
+    return 0
+  fi
+  summarized=$(printf '%s' "$response" | "$PROXY_NODE_BIN" "$MCP_RESPONSE_SUMMARIZER" "$tool_name" 2>/dev/null) || summarized=""
+  if [ -n "$summarized" ]; then printf '%s' "$summarized"; else printf '%s' "$response"; fi
+}
 
 inject_codex_local_tools() {
   local response="$1"
@@ -19,7 +51,7 @@ run_codex_local_tool() {
   local line="$1" tool_name
   tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
   case "$tool_name" in
-    statewright_search_docs|statewright_search_references)
+    statewright_search_docs|statewright_search_references|statewright_connect)
       env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN \
         -u STATEWRIGHT_ADAPTER_URL -u STATEWRIGHT_ADAPTER_TOKEN "$0" <<<"$line"
       return 0
@@ -37,6 +69,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     if [ "$method" = "tools/call" ] && run_codex_local_tool "$line"; then
       continue
     fi
@@ -46,18 +79,22 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     # the ordinary health-check timeout made managed V2 workflows silently
     # fall through to the legacy gateway before their selected model ran.
     timeout_seconds=15
-    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     [ "$method" = "tools/call" ] && [ "$tool_name" = "statewright_run_agent" ] && timeout_seconds=300
-    response=$(curl -sf --max-time "$timeout_seconds" -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+    response=$(curl -sS --max-time "$timeout_seconds" -w '\n%{http_code}' -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
       -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
+      -H "X-Statewright-Client-Id: ${STATEWRIGHT_CLIENT_ID:-}" \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
-    if [ -n "$response" ]; then
-      [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
-      printf '%s\n' "$response"
+    # A dead owner is not permission to replay a call under another session.
+    # Local initialization/discovery stays available for actionable recovery.
+    if [ "$method" = "initialize" ]; then
+      printf '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":%s}\n' "$(printf '%s' "$line" | jq -c '.id')"
     else
-      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN "$0" <<<"$line"
+      response=$(normalize_transport_response "$line" "$response" --managed)
+      [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
+      printf '%s\n' "$response"
     fi
   done
   exit 0
@@ -70,16 +107,23 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     method=$(printf '%s' "$line" | jq -r '.method // empty' 2>/dev/null)
+    tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
     if [ "$method" = "tools/call" ] && run_codex_local_tool "$line"; then
       continue
     fi
-    response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
+    response=$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
       -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
+    if [ "$method" = "initialize" ]; then
+      printf '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":%s}\n' "$(printf '%s' "$line" | jq -c '.id')"
+      continue
+    fi
+    response=$(normalize_transport_response "$line" "$response" --managed)
     if [ -n "$response" ]; then
       [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     else
       id=$(printf '%s' "$line" | jq -c '.id // null' 2>/dev/null || echo null)
@@ -89,24 +133,34 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   exit 0
 fi
 
-GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
-PB_URL="${STATEWRIGHT_PB_URL:-https://statewright.ai}"
 RAW_CAPTURE_DESTINATION="${STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION:-}"
-KEY_FILE="${HOME}/.statewright/api_key"
 STATEWRIGHT_DIR="${HOME}/.statewright"
-INVALID_KEY_SENTINEL="${STATEWRIGHT_DIR}/invalid_api_key"
-MISSING_KEY_SENTINEL="${STATEWRIGHT_DIR}/missing_api_key_prompted"
 REFERENCE_SEARCH="${SCRIPT_DIR}/reference-search.mjs"
 TELEMETRY_AGENT="${SCRIPT_DIR}/scripts/local-telemetry-agent.mjs"
 TELEMETRY_BOOTSTRAP="${SCRIPT_DIR}/scripts/bootstrap-native-token-telemetry.mjs"
 TELEMETRY_DIR="${STATEWRIGHT_TELEMETRY_DIR:-${HOME}/.statewright/telemetry/native-codex}"
-MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/../executor/statewright-managed-client.mjs"
+MANAGED_CLIENT_BOOTSTRAP="${SCRIPT_DIR}/scripts/statewright-managed-client.mjs"
 DESKTOP_SETUP="${SCRIPT_DIR}/scripts/statewright-desktop-setup.mjs"
 DESKTOP_PLATFORM="${STATEWRIGHT_DESKTOP_PLATFORM:-$(uname -s)}"
 DESKTOP_APP_EXECUTABLE="${STATEWRIGHT_DESKTOP_APP_EXECUTABLE:-/Applications/ChatGPT.app/Contents/MacOS/ChatGPT}"
-DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
+# shellcheck source=gateway-profile.sh
+source "${SCRIPT_DIR}/gateway-profile.sh"
+
+if ! statewright_gateway_profile; then
+  echo "[statewright] could not resolve the selected gateway profile" >&2
+  exit 1
+fi
+GW_URL="$STATEWRIGHT_GATEWAY_URL"
+PB_URL="$STATEWRIGHT_PB_URL"
+GATEWAY_STATE_DIR="${STATEWRIGHT_DIR}/gateways/${STATEWRIGHT_GATEWAY_IDENTITY}"
+INVALID_KEY_SENTINEL="${GATEWAY_STATE_DIR}/invalid_api_key"
+MISSING_KEY_SENTINEL="${GATEWAY_STATE_DIR}/missing_api_key_prompted"
+
+load_api_key() {
+  statewright_load_api_key 2>/dev/null || true
+}
 
 key_fingerprint() {
   if command -v shasum >/dev/null 2>&1; then
@@ -174,8 +228,8 @@ request_device_authorization() {
 }
 
 persist_verified_device_key() {
-  local key="$1" body status temp_key
-  [[ "$key" =~ ^sw_live_[0-9a-f]{32}$ ]] || return 1
+  local key="$1" body status
+  [[ "$key" =~ ^sw_live_([0-9a-f]{32}|[0-9A-Za-z]{64})$ ]] || return 1
 
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
   status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
@@ -185,16 +239,7 @@ persist_verified_device_key() {
   rm -f "$body"
   [ "$status" = "200" ] || return 1
 
-  umask 077
-  mkdir -p "$STATEWRIGHT_DIR" || return 1
-  chmod 700 "$STATEWRIGHT_DIR" || return 1
-  temp_key=$(mktemp "$STATEWRIGHT_DIR/api_key.device.XXXXXX") || return 1
-  if ! printf '%s\n' "$key" > "$temp_key"; then
-    rm -f "$temp_key"
-    return 1
-  fi
-  chmod 600 "$temp_key" || { rm -f "$temp_key"; return 1; }
-  mv -f "$temp_key" "$KEY_FILE"
+  printf '%s' "$key" | statewright_store_api_key >/dev/null || return 1
   rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
 }
 
@@ -234,7 +279,8 @@ poll_device_authorization() {
 mark_invalid_key() {
   local fingerprint service source
   fingerprint=$(key_fingerprint "$1")
-  mkdir -p "$STATEWRIGHT_DIR" 2>/dev/null || return 0
+  mkdir -p "$GATEWAY_STATE_DIR" 2>/dev/null || return 0
+  chmod 700 "$GATEWAY_STATE_DIR" 2>/dev/null || true
   if [ "$(cat "$INVALID_KEY_SENTINEL" 2>/dev/null || true)" != "$fingerprint" ]; then
     printf '%s\n' "$fingerprint" > "$INVALID_KEY_SENTINEL"
     chmod 600 "$INVALID_KEY_SENTINEL"
@@ -257,7 +303,7 @@ credential_source_label() {
   if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
     printf '%s' 'STATEWRIGHT_API_KEY'
   else
-    printf '%s' '~/.statewright/api_key'
+    printf '%s' 'the OS credential store'
   fi
 }
 
@@ -265,11 +311,11 @@ credential_source_label() {
 # its OTel configuration at startup, so a newly created exporter applies after
 # the next Codex restart. Existing user-owned [otel] configuration is untouched.
 bootstrap_native_token_telemetry() {
-  command -v node >/dev/null 2>&1 || return 0
+  [ -x "$PROXY_NODE_BIN" ] || return 0
   [ -f "$TELEMETRY_BOOTSTRAP" ] || return 0
   mkdir -p "$TELEMETRY_DIR"
   local result action
-  result=$(node "$TELEMETRY_BOOTSTRAP" 2>/dev/null || true)
+  result=$("$PROXY_NODE_BIN" "$TELEMETRY_BOOTSTRAP" 2>/dev/null || true)
   action=$(printf '%s' "$result" | jq -r '.action // empty' 2>/dev/null || true)
   case "$action" in
     created)
@@ -292,8 +338,8 @@ bootstrap_native_token_telemetry
 
 # This prepares transparent shims for the next terminal launch. It is quiet,
 # idempotent, and only touches a shell profile when a supported client exists.
-if command -v node >/dev/null 2>&1 && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
-  node "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
+if [ -x "$PROXY_NODE_BIN" ] && [ -f "$MANAGED_CLIENT_BOOTSTRAP" ]; then
+  "$PROXY_NODE_BIN" "$MANAGED_CLIENT_BOOTSTRAP" --bootstrap >/dev/null 2>&1 || true
 fi
 
 # Desktop routing is an opt-in application surface.  Provision its stable
@@ -302,11 +348,11 @@ fi
 DESKTOP_NODE=""
 if [ -x "$DESKTOP_BUNDLED_NODE" ]; then
   DESKTOP_NODE="$DESKTOP_BUNDLED_NODE"
-elif command -v node >/dev/null 2>&1; then
-  DESKTOP_NODE=$(command -v node)
+elif [ -x "$PROXY_NODE_BIN" ]; then
+  DESKTOP_NODE="$PROXY_NODE_BIN"
 fi
 if [ "$DESKTOP_PLATFORM" = "Darwin" ] && [ -x "$DESKTOP_APP_EXECUTABLE" ] && [ -f "$DESKTOP_SETUP" ] && [ -n "$DESKTOP_NODE" ]; then
-  "$DESKTOP_NODE" "$DESKTOP_SETUP" provision --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
+  "$DESKTOP_NODE" "$DESKTOP_SETUP" provision-all --app "$DESKTOP_APP_EXECUTABLE" >/dev/null 2>&1 || true
 fi
 
 CLIENT_ID=$(statewright_client_id codex)
@@ -369,13 +415,13 @@ health_matches_telemetry_identity() {
 
 start_local_telemetry_agent() {
   local key expected current pid candidate_pid started=false
-  command -v node >/dev/null 2>&1 || return 0
+  [ -x "$PROXY_NODE_BIN" ] || return 0
   [ -f "$TELEMETRY_AGENT" ] || return 0
   mkdir -p "$TELEMETRY_DIR"
   chmod 700 "$TELEMETRY_DIR"
   acquire_telemetry_lock || return 0
 
-  key="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  key="$(load_api_key)"
   key="${key%"${key##*[![:space:]]}"}"
   if [ -z "$key" ]; then
     stop_managed_telemetry_agent || true
@@ -387,7 +433,7 @@ start_local_telemetry_agent() {
     STATEWRIGHT_GATEWAY_URL="$GW_URL" \
     STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
-    node "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
+    "$PROXY_NODE_BIN" "$TELEMETRY_AGENT" --identity 2>/dev/null || true)
   if [ -z "$expected" ]; then
     release_telemetry_lock
     return 0
@@ -419,7 +465,7 @@ start_local_telemetry_agent() {
     STATEWRIGHT_GATEWAY_URL="$GW_URL" \
     STATEWRIGHT_RAW_TOOL_CAPTURE_DESTINATION="$RAW_CAPTURE_DESTINATION" \
     STATEWRIGHT_TELEMETRY_DIR="$TELEMETRY_DIR" \
-    nohup node "$TELEMETRY_AGENT" \
+    nohup "$PROXY_NODE_BIN" "$TELEMETRY_AGENT" \
       >>"$TELEMETRY_DIR/agent.log" 2>&1 &
   candidate_pid=$!
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -572,7 +618,7 @@ while IFS= read -r line; do
     continue
   fi
 
-  API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
+  API_KEY="$(load_api_key)"
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
 
   # Handle statewright_search_docs locally (no gateway round-trip)
@@ -625,15 +671,21 @@ while IFS= read -r line; do
     rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
   fi
 
-  if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
-    if [ "$METHOD" != "notifications/initialized" ]; then
-      INVALID_KEY_MESSAGE="Statewright credential from $(credential_source_label) was rejected by $(gateway_service_label "$GW_URL"). Browser setup was not started."
-      jq -cn --arg text "$INVALID_KEY_MESSAGE" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-1,message:$text},id:$id}'
+  if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY" && [ "$TOOL_NAME" != "statewright_connect" ]; then
+    if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
+      # An explicit environment credential is intentionally non-interactive.
+      # A rejected OS-stored credential instead behaves as disconnected so the
+      # setup catalog can offer statewright_connect and replace only this slot.
+      if [ "$METHOD" != "notifications/initialized" ]; then
+        normalize_transport_response "$line" $'\n401'
+      fi
+      continue
+    else
+      API_KEY=""
     fi
-    continue
   fi
 
-  if [ -z "$API_KEY" ]; then
+  if [ -z "$API_KEY" ] || { [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_connect" ]; }; then
     if [ "$METHOD" = "tools/list" ]; then
       echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_search_docs","description":"Search Statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Available without a local credential.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}},{"name":"statewright_list_workflows","description":"Report local Statewright connectivity and available workflows. Without a local credential it reports connected:false and an empty workflow list.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_connect","description":"Connect this client through secure browser approval. The plugin verifies and stores the resulting credential without asking you to copy an API key.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_list_workflows" ]; then
@@ -642,21 +694,28 @@ while IFS= read -r line; do
       DEVICE_AUTHORIZATION=$(request_device_authorization || true)
       DEVICE_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.device_code // empty' 2>/dev/null)
       USER_CODE=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.user_code // empty' 2>/dev/null)
-      VERIFY_URL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.verification_uri_complete // empty' 2>/dev/null)
       EXPIRES_IN=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.expires_in // empty' 2>/dev/null)
       POLL_INTERVAL=$(printf '%s' "$DEVICE_AUTHORIZATION" | jq -r '.interval // empty' 2>/dev/null)
-      case "$VERIFY_URL" in
-        "${PB_URL%/}/device?user_code="*) ;;
-        *) VERIFY_URL="" ;;
-      esac
-      if [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ] || [ -z "$VERIFY_URL" ]; then
-        jq -cn --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:"Statewright account connection could not be started. Try again, or use https://statewright.ai/keys as the manual recovery path."},id:$id}'
+      # The selected profile is authoritative for the browser origin. The
+      # server-supplied complete URI may reflect stale deployment metadata;
+      # never let it redirect a staging or development login to another host.
+      VERIFY_URL="${PB_URL%/}/device?user_code=$USER_CODE"
+      if [ -z "$PB_URL" ] || [ -z "$DEVICE_CODE" ] || [ -z "$USER_CODE" ]; then
+        if [ -n "$PB_URL" ]; then
+          CONNECT_ERROR="Statewright account connection could not be started. Try again, or use ${PB_URL%/}/keys as the manual recovery path for this environment."
+        else
+          CONNECT_ERROR="Statewright account connection could not be started because this gateway has no authorization-service mapping. Configure its auth_url in ~/.statewright/environments.json and try again."
+        fi
+        jq -cn --arg message "$CONNECT_ERROR" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:$message},id:$id}'
       else
         (poll_device_authorization "$DEVICE_CODE" "$EXPIRES_IN" "$POLL_INTERVAL") >/dev/null 2>&1 &
         if open_device_approval_page "$VERIFY_URL"; then
           CONNECT_TEXT="Opened secure Statewright approval in your browser. Confirm that it shows device code $USER_CODE, then approve it. This plugin will verify and store the credential automatically; do not paste an API key into chat."
         else
           CONNECT_TEXT="Open $VERIFY_URL and confirm device code $USER_CODE. After approval, this plugin will verify and store the credential automatically; do not paste an API key into chat."
+        fi
+        if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
+          CONNECT_TEXT="$CONNECT_TEXT This process has an explicit credential override; storing a key does not replace that override. Refresh the owning launcher through its normal lifecycle before retrying."
         fi
         jq -cn --arg text "$CONNECT_TEXT" --argjson id "$ID" '{jsonrpc:"2.0",result:{content:[{type:"text",text:$text}]},id:$id}'
       fi
@@ -680,7 +739,7 @@ while IFS= read -r line; do
     ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)
     QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)
     LIMIT=$(echo "$line" | jq -r '.params.arguments.limit // 8' 2>/dev/null)
-    RESULT=$(node "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
+    RESULT=$("$PROXY_NODE_BIN" "$REFERENCE_SEARCH" --root "$(pwd)" --query "$QUERY" --limit "$LIMIT" 2>/dev/null)
     if [ -n "$RESULT" ]; then
       RESULT_TEXT=$(echo "$RESULT" | jq -r 'if .error then .error else (.results | if length == 0 then "No provenance-addressable references found." else .[] | "## [\(.source_kind)] \(.path):\(.line_start)-\(.line_end)\ncommit: \(.commit_sha // "uncommitted")\nhash: \(.source_hash)\nrank: \(.rank) [\(.rank_reasons | join(", "))]\n\(.excerpt)\n" end) end' 2>/dev/null)
       jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'$ID'}'
@@ -691,21 +750,26 @@ while IFS= read -r line; do
   fi
 
   # Forward to gateway with auth
-  RESPONSE=$(curl -sf --max-time 10 -X POST "$GW_URL/" \
+  HTTP_RESPONSE=$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST "$GW_URL" \
     -H 'Content-Type: application/json' \
     -H "Authorization: Bearer $API_KEY" \
     "${SESSION_HEADER_ARGS[@]}" \
-    -d "$line" 2>/dev/null)
+    -d "$line" 2>/dev/null || true)
+  if [ "${HTTP_RESPONSE##*$'\n'}" = "401" ]; then
+    mark_invalid_key "$API_KEY"
+  fi
+  RESPONSE=$(normalize_transport_response "$line" "$HTTP_RESPONSE")
 
   if [ -n "$RESPONSE" ]; then
-    # Inject local tools into tools/list responses from gateway
-    if [ "$METHOD" = "tools/list" ]; then
+    # Recovery catalogs must not advertise unavailable protected tools.
+    if [ "$METHOD" = "tools/list" ] && ! printf '%s' "$RESPONSE" | jq -e '.result._meta.statewright.recovery' >/dev/null 2>&1; then
       SEARCH_TOOL='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}}'
       REFERENCE_TOOL='{"name":"statewright_search_references","description":"Search the incremental local repository index with deterministic lexical ranking. Returns read-only provenance, source hashes, rank reasons, and excerpts; ignored and secret material is excluded.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Task, identifier, changed path, failed hypothesis, or validation signature to find"},"limit":{"type":"integer","minimum":1,"maximum":20,"default":8}},"required":["query"]}}'
       PAUSE_TOOL='{"name":"statewright_pause","description":"Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).","inputSchema":{"type":"object","properties":{}}}'
       FORCE_TOOL='{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}'
       RESPONSE=$(echo "$RESPONSE" | jq -c --argjson s "$SEARCH_TOOL" --argjson r "$REFERENCE_TOOL" --argjson p "$PAUSE_TOOL" --argjson f "$FORCE_TOOL" '.result.tools = ([.result.tools[] | select(.name != "statewright_search_docs" and .name != "statewright_search_references" and .name != "statewright_pause" and .name != "statewright_force_state")] + [$s, $r, $p, $f])' 2>/dev/null || echo "$RESPONSE")
     fi
+    [ "$METHOD" = "tools/call" ] && RESPONSE=$(summarize_transition_response "$TOOL_NAME" "$RESPONSE")
     echo "$RESPONSE"
   else
     ID=$(echo "$line" | jq -c '.id // null' 2>/dev/null)

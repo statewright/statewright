@@ -1,5 +1,8 @@
 # MCP tool-intent repair receipt — 2026-09-27
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 ## Scope and ownership
 
 User requested repair of false MCP denials and explicitly deactivated Statewright
@@ -20,7 +23,7 @@ The source change and decisions are recorded in [ADR 015](../adr/015-mcp-intent-
   the exact `list_task_lists` opaque-mutation denial despite exact phase permission.
 - A new MCP intent regression failed before implementation because a server
   namespace containing `delete` incorrectly raised a list operation to High.
-- Final `/Users/ben/.cargo/bin/cargo test -p statewright-mcp-gateway --quiet`:
+- Final `cargo test -p statewright-mcp-gateway --quiet`:
   **274 passed, 0 failed, 1 ignored**; binary and doc-test targets had zero tests.
   Existing unused-variable/dead-code warnings remain; no warning-free claim.
 - `task test:tool-policy`: passed Codex shell policy tests, all **10** Node

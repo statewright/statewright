@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, extname, join, resolve } from "node:path";
@@ -13,6 +13,7 @@ import { createErrorReporter, isExpectedExit } from "./error-reporting.mjs";
 import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
+import { GIT_CLOSEOUT_MODULE_PATH } from "./git-closeout.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,8 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID",
   "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER",
+  "STATEWRIGHT_ADAPTER_URL",
+  "STATEWRIGHT_ADAPTER_TOKEN",
 ];
 const WINDOWS_PROCESS_TREE_ENV = new Set([
   "comspec",
@@ -392,16 +395,12 @@ const CODEX_TOP_LEVEL_COMMANDS = new Set([
   "unarchive", "update",
 ]);
 
-export function codexOneShotInvocation(host, args) {
-  if (host !== "codex") return false;
+function codexTopLevelCommandIndex(args) {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
-    // `--` ends option/subcommand parsing; any following `exec` is prompt text.
-    if (argument === "--") return false;
+    if (argument === "--") return -1;
     if (argument.startsWith("-") && argument.includes("=")) continue;
     if (argument === "-i" || argument === "--image") {
-      // Clap accepts one or more image paths. Stop only when the next token is
-      // another option or a real top-level Codex command.
       while (index + 1 < args.length) {
         const candidate = args[index + 1];
         if (candidate === "--" || candidate.startsWith("-") || CODEX_TOP_LEVEL_COMMANDS.has(candidate)) break;
@@ -414,12 +413,108 @@ export function codexOneShotInvocation(host, args) {
       continue;
     }
     if (argument.startsWith("-")) continue;
-    // Codex advertises `e` as the exec alias and `review` as a separate
-    // non-interactive top-level command. Any other first positional token is
-    // either an interactive command (including resume) or its prompt.
-    return argument === "exec" || argument === "e" || argument === "review";
+    return CODEX_TOP_LEVEL_COMMANDS.has(argument) ? index : -1;
   }
-  return false;
+  return -1;
+}
+
+export function codexOneShotInvocation(host, args) {
+  if (host !== "codex") return false;
+  const index = codexTopLevelCommandIndex(args);
+  return index >= 0 && ["exec", "e", "review"].includes(args[index]);
+}
+
+// Native destination/control operations belong to their selected server, not
+// to a new local resident created by this shim. Do not rewrite remote argv.
+export function codexNativeDestinationInvocation(host, args) {
+  if (host !== "codex") return false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") break;
+    if (["--remote", "--help", "-h", "--version", "-V"].includes(arg) || arg.startsWith("--remote=")) return true;
+    if (CODEX_OPTIONS_WITH_VALUE.has(arg)) index += 1;
+  }
+  const index = codexTopLevelCommandIndex(args);
+  return index >= 0 && !["resume", "fork", "exec", "e", "review"].includes(args[index]);
+}
+
+export function nativeDestinationEnvironment(environment = process.env) {
+  const child = managedClientChildEnvironment({ host: "codex", environment });
+  // The destination resolves its own credential. Never seed a shared daemon
+  // with the invoking server's in-memory key or approval/control capability.
+  delete child.STATEWRIGHT_API_KEY;
+  delete child.STATEWRIGHT_CODEX_RESIDENT_ROOT;
+  return child;
+}
+
+function permissionConfigOverride(value) {
+  const key = String(value ?? "").split("=", 1)[0].trim().replaceAll(/["'\s]/g, "");
+  const exact = [
+    "approval_policy",
+    "approvals_reviewer",
+    "default_permissions",
+    "sandbox_mode",
+  ];
+  return exact.includes(key) || ["network", "permissions", "sandbox_workspace_write"]
+    .some(root => key === root || key.startsWith(`${root}.`));
+}
+
+function codexExplicitPermissionArgs(args = []) {
+  const result = [];
+  const valueOptions = new Set(["-a", "--ask-for-approval", "-C", "--cd", "-p", "--profile", "-s", "--sandbox", "--add-dir"]);
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--") break;
+    if (["--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"].includes(argument)
+        || /^--(?:ask-for-approval|cd|profile|sandbox|add-dir)=/.test(argument)
+        || /^-(?:a|C|p|s)(?:=)?.+/.test(argument)) {
+      result.push(argument);
+      continue;
+    }
+    if (valueOptions.has(argument)) {
+      result.push(argument);
+      if (index + 1 < args.length) result.push(args[++index]);
+      continue;
+    }
+    if (argument === "-c" || argument === "--config") {
+      const value = args[index + 1];
+      if (permissionConfigOverride(value)) result.push(argument, value);
+      index += 1;
+      continue;
+    }
+    if (/^(?:-c|--config)=/.test(argument)
+        && permissionConfigOverride(argument.slice(argument.indexOf("=") + 1))) result.push(argument);
+    else if (argument.startsWith("-c") && argument.length > 2
+        && permissionConfigOverride(argument.slice(2))) result.push(argument);
+  }
+  return result;
+}
+
+/**
+ * Native Codex intentionally omits permission fields on a flag-free remote
+ * resume. Statewright restores those fields from the canonical rollout in its
+ * App Server proxy, including legacy threads whose raw profile would otherwise
+ * resolve against current defaults. Explicit permission/session-root flags are
+ * rejected before Codex sends the remote RPC, so those invocations retain the
+ * restart transport where the original CLI arguments remain authoritative.
+ */
+export function codexResumeHasExplicitPermissionOverride(host, args = []) {
+  if (host !== "codex") return false;
+  const commandIndex = codexTopLevelCommandIndex(args);
+  if (commandIndex < 0 || args[commandIndex] !== "resume") return false;
+  return codexExplicitPermissionArgs(args).length > 0;
+}
+
+export function codexYoloResumeOverride(host, args = []) {
+  if (host !== "codex") return null;
+  const explicit = codexExplicitPermissionArgs(args);
+  if (explicit.length !== 1 || !["--dangerously-bypass-approvals-and-sandbox", "--yolo"].includes(explicit[0])) return null;
+  const sessionId = resumedSessionId(host, args);
+  if (!sessionId) return null;
+  // Native --remote rejects permission flags. Carry this explicit CLI choice
+  // on the resident connection and apply it to the forwarded resume RPC.
+  const flagIndex = args.indexOf(explicit[0]);
+  return { sessionId, args: [...args.slice(0, flagIndex), ...args.slice(flagIndex + 1)] };
 }
 
 function forwardManagedTermination(child, exit, { command, platform = process.platform, environment = process.env } = {}) {
@@ -491,12 +586,16 @@ function stripRouteArgs(args, host) {
     return /(?:^|\.)\s*(?:["'](?:model|model_reasoning_effort|model_provider)["']|model|model_reasoning_effort|model_provider)\s*$/.test(key);
   };
   const result = [];
+  const codexCommandIndex = host === "codex" ? codexTopLevelCommandIndex(args) : -1;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     // A routed restart always creates its own `resume <session> <prompt>`
     // invocation. Keeping a prior resume subcommand would leave Codex with
     // two positional session identifiers.
-    if (host === "codex" && arg === "resume") break;
+    if (host === "codex" && index === codexCommandIndex && arg === "resume") {
+      result.push(...codexExplicitPermissionArgs(args.slice(index + 1)));
+      break;
+    }
     if (arg === "-m" || arg === "--model") {
       index += 1;
       continue;
@@ -549,7 +648,7 @@ async function nextRouteRequest(controlDir, consumed) {
   for (const name of entries) {
     const contents = await readFile(join(controlDir, name), "utf8");
     // Native hooks atomically overwrite current.route.json at each state
-    // boundary. Deduplicating only by filename permanently blacklists every
+    // boundary. Deduplicating only by filename permanently denies every
     // route after the first one, so remember the exact receipt instead.
     if (consumed.get(name) === contents) continue;
     const request = JSON.parse(contents);
@@ -570,7 +669,7 @@ async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.3", environment }) }) {
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.1" : "0.3.4", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const launch = await resolveWindowsLaunch(command);
   const launchCommand = launch.command;
@@ -642,10 +741,14 @@ export async function runManagedClient({ host, command, args, environment = proc
       // Claude receives a compact copy of this shared supervisor. Keep the
       // optional Codex-only transport out of its module-load graph.
       const { codexAppServerTransportEnabled } = await import("./codex-app-server-transport.mjs");
-      if (codexAppServerTransportEnabled({
+      const appServerEnabled = codexAppServerTransportEnabled({
         environment,
         config,
-      })) {
+      });
+      const explicitResumePermissionOverride = codexResumeHasExplicitPermissionOverride(host, args);
+      const yoloOverride = appServerEnabled && explicitResumePermissionOverride
+        ? codexYoloResumeOverride(host, args) : null;
+      if (appServerEnabled && (!explicitResumePermissionOverride || yoloOverride)) {
         const { ensureCodexAppServerResident, residentControlDir } = await import("./codex-app-server-resident.mjs");
         if (identity.sessionId) {
           await bindManagedClientIdentity({ host, sessionId: identity.sessionId, clientId: routedClientId, home, cwd });
@@ -665,7 +768,8 @@ export async function runManagedClient({ host, command, args, environment = proc
         });
         const residentRoutes = residentControlDir(home, routedClientId);
         await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
-        const residentArgs = [...args, "--remote", resident.proxyUrl];
+        const { prepareCodexResidentTui } = await import("./codex-resume-relay.mjs");
+        const residentTui = await prepareCodexResidentTui({ proxyUrl: resident.proxyUrl, args, yoloOverride });
         const tuiEnvironment = {
           ...isolatedEnvironment,
           STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
@@ -674,22 +778,27 @@ export async function runManagedClient({ host, command, args, environment = proc
           ...(codexRootSessionId ? { STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: codexRootSessionId } : {}),
           STATEWRIGHT_MANAGED_TELEMETRY_OWNER: telemetry ? "supervisor" : "none",
         };
-        const tui = spawn(command, residentArgs, {
-          cwd,
-          env: tuiEnvironment,
-          stdio: "inherit",
-        });
-        const tuiExit = waitForExit(tui);
-        const stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
+        let stopForwarding;
         try {
+          const tui = spawn(command, residentTui.args, {
+            cwd,
+            env: tuiEnvironment,
+            stdio: "inherit",
+          });
+          const tuiExit = waitForExit(tui);
+          stopForwarding = forwardManagedTermination(tui, tuiExit, { command, environment: tuiEnvironment });
           const result = await tuiExit;
           if (!isExpectedExit(result)) await reporter.report(new Error("Native Codex connected to its resident App Server exited unexpectedly."), {
             mechanism: "child_exit", host, operation: "resident_tui", exit_code: result.code ?? 1, signal: result.signal,
           });
           return result.code ?? 1;
         } finally {
-          await stopForwarding();
+          try { await stopForwarding?.(); }
+          finally { await residentTui.close(); }
         }
+      }
+      if (appServerEnabled && explicitResumePermissionOverride) {
+        process.stderr.write("[statewright] explicit permission overrides on Codex resume require the supported restart transport; preserving the original CLI arguments.\n");
       }
     }
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
@@ -949,13 +1058,58 @@ export async function installManagedClientShim({ host, launcherPath, home = home
   const shimDirectory = join(home, ".statewright", "bin");
   const binary = realBinary ?? resolveRealBinary(host, { shimDirectory, platform });
   await mkdir(shimDirectory, { recursive: true });
+  let durableLauncherPath = launcherPath;
+  if (host === "codex") {
+    const pluginRoot = resolve(dirname(launcherPath), "..");
+    const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      const version = String(manifest.version ?? "unknown").replace(/[^A-Za-z0-9._+-]/g, "_");
+      const durableRoot = join(home, ".statewright", "runtime", "codex", version);
+      durableLauncherPath = join(durableRoot, "scripts", "statewright-managed-client.mjs");
+      if (!existsSync(durableLauncherPath)) {
+        const temporary = `${durableRoot}.install-${process.pid}-${randomUUID()}`;
+        await mkdir(dirname(temporary), { recursive: true });
+        await cp(pluginRoot, temporary, { recursive: true, force: false, errorOnExist: true });
+        try {
+          await rename(temporary, durableRoot);
+        } catch (error) {
+          await rm(temporary, { recursive: true, force: true });
+          if (!existsSync(durableLauncherPath)) throw error;
+        }
+      }
+    }
+  }
   const shimPath = join(shimDirectory, windowsPlatform(platform) ? `${host}.cmd` : host);
   const contents = windowsPlatform(platform)
-    ? `@echo off\r\nif /I \"%~1\"==\"--kill-app-server\" (\r\n  \"${process.execPath}\" \"${launcherPath}\" %*\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\"${process.execPath}\" \"${launcherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
-    : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(launcherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(launcherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
+    ? `@echo off\r\nif /I \"%~1\"==\"--kill-app-server\" (\r\n  \"${process.execPath}\" \"${durableLauncherPath}\" %*\r\n  exit /b %ERRORLEVEL%\r\n)\r\n\"${process.execPath}\" \"${durableLauncherPath}\" --host \"${host}\" --real-bin \"${binary}\" -- %*\r\n`
+    : `#!/usr/bin/env sh\nif [ \"${host}\" = \"codex\" ] && [ \"\${1:-}\" = \"--kill-app-server\" ]; then\n  exec node ${JSON.stringify(durableLauncherPath)} \"$@\"\nfi\nexec node ${JSON.stringify(durableLauncherPath)} --host ${JSON.stringify(host)} --real-bin ${JSON.stringify(binary)} -- \"$@\"\n`;
   await writeFile(shimPath, contents, { mode: windowsPlatform(platform) ? undefined : 0o755 });
   if (!windowsPlatform(platform)) await chmod(shimPath, 0o755);
-  return { shimDirectory, shimPath, realBinary: binary };
+  await installGitCloseoutShim({ home, platform });
+  return { shimDirectory, shimPath, realBinary: binary, launcherPath: durableLauncherPath };
+}
+
+export async function installGitCloseoutShim({ home = homedir(), platform = process.platform } = {}) {
+  const shimDirectory = join(home, ".statewright", "bin");
+  await mkdir(shimDirectory, { recursive: true });
+  const shimPath = join(
+    shimDirectory,
+    windowsPlatform(platform) ? "statewright-git-closeout.cmd" : "statewright-git-closeout",
+  );
+  const contents = windowsPlatform(platform)
+    ? `@echo off\r\n"${process.execPath}" "${GIT_CLOSEOUT_MODULE_PATH}" %*\r\n`
+    : `#!/usr/bin/env sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(GIT_CLOSEOUT_MODULE_PATH)} "$@"\n`;
+  const temporary = `${shimPath}.statewright-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, contents, { mode: windowsPlatform(platform) ? undefined : 0o555 });
+    if (!windowsPlatform(platform)) await chmod(temporary, 0o555);
+    await rename(temporary, shimPath);
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+  return shimPath;
 }
 
 function shellProfile(shell, home, platform = process.platform) {
@@ -1031,6 +1185,13 @@ export async function uninstallManagedClients({ home = homedir(), shell = proces
     const path = join(home, ".statewright", "bin", windowsPlatform(platform) ? `${host}.cmd` : host);
     try { await unlink(path); removed.push(path); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   }
+  const closeout = join(
+    home,
+    ".statewright",
+    "bin",
+    windowsPlatform(platform) ? "statewright-git-closeout.cmd" : "statewright-git-closeout",
+  );
+  try { await unlink(closeout); removed.push(closeout); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const profile = shellProfile(shell, home, platform);
   let profileRemoved = false;
   if (profile) {

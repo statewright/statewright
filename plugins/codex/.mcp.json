@@ -6,6 +6,7 @@
       "cwd": ".",
       "startup_timeout_sec": 120,
       "env_vars": [
+        "STATEWRIGHT_NODE_BIN",
         "STATEWRIGHT_GATEWAY_URL",
         "STATEWRIGHT_PB_URL",
         "STATEWRIGHT_API_KEY",

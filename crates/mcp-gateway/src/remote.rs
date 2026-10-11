@@ -15,8 +15,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use statewright_engine::MachineDefinition;
 
 use crate::gateway::Gateway;
-use crate::protocol::JsonRpcRequest;
+use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 use crate::session::SessionManager;
+use crate::tool_intent::{NativeToolFamily, native_tool_family};
 use crate::upstream::UpstreamManager;
 use crate::usage::{RuntimeUsageReport, UsageDisposition};
 
@@ -36,6 +37,9 @@ pub struct RemoteState {
     db_pool: crate::DbPool,
     /// Approval callback secret (from APPROVAL_CALLBACK_SECRET env var at startup).
     approval_secret: String,
+    /// Temporary, explicit field-calibration channel for classifier-denied
+    /// shell commands. Raw command text never enters ordinary telemetry.
+    classifier_denial_capture: bool,
 }
 
 impl RemoteState {
@@ -66,6 +70,173 @@ struct NativeUsageRequest {
     run_id: String,
     run_session_id: String,
     usage: RuntimeUsageReport,
+}
+
+const CLASSIFIER_DENIAL_COMMAND_BYTES: usize = 64 * 1024;
+const CLASSIFIER_DENIAL_CAPTURE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(750);
+
+fn classifier_denial_basis(value: &str) -> bool {
+    matches!(
+        value,
+        "effective_known_risk"
+            | "deterministic_known_risk"
+            | "deterministic_nonlocal_risk"
+            | "semantic_threshold_not_met"
+            | "incomplete_structural_evidence"
+            | "semantic_vector_unavailable"
+            | "semantic_assessment_incomplete"
+            | "semantic_authorization_disabled"
+            | "exploratory_effect_unresolved"
+    ) || value.starts_with("classifier_policy_")
+        || value.starts_with("workflow_capability_")
+}
+
+fn bounded_command(value: &str) -> (String, bool) {
+    if value.len() <= CLASSIFIER_DENIAL_COMMAND_BYTES {
+        return (value.to_string(), false);
+    }
+    let mut end = CLASSIFIER_DENIAL_COMMAND_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
+}
+
+fn classifier_semantic_vector(value: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let object = value?.as_object()?;
+    let mut projected = serde_json::Map::new();
+    for field in [
+        "read_only",
+        "may_write",
+        "reversible",
+        "destructive",
+        "irreversible",
+        "external_or_account_effect",
+    ] {
+        let Some(score) = object.get(field).and_then(serde_json::Value::as_f64) else {
+            continue;
+        };
+        if (0.0..=1.0).contains(&score) {
+            projected.insert(field.to_string(), serde_json::json!(score));
+        }
+    }
+    (!projected.is_empty()).then(|| serde_json::Value::Object(projected))
+}
+
+fn classifier_denial_sample(
+    request: &JsonRpcRequest,
+    response: &JsonRpcResponse,
+    run_session_id: &str,
+) -> Option<serde_json::Value> {
+    if request.method != "tools/call" {
+        return None;
+    }
+    let params = request.params.as_ref()?;
+    if params.get("name")?.as_str()? != "statewright_adapter_pre_tool" {
+        return None;
+    }
+    let arguments = params.get("arguments")?;
+    let tool_name = arguments.get("tool_name")?.as_str()?;
+    if native_tool_family(tool_name) != Some(NativeToolFamily::Command) {
+        return None;
+    }
+    let tool_input = arguments.get("tool_input")?;
+    let raw_command = tool_input
+        .get("command")
+        .or_else(|| tool_input.get("cmd"))?
+        .as_str()?;
+    if raw_command.is_empty() {
+        return None;
+    }
+
+    // Adapter hook responses are MCP text results whose single text item is a
+    // JSON decision. Parse only that typed wrapper; never retain the complete
+    // request, response, reason, or arbitrary tool input.
+    let decision: serde_json::Value =
+        serde_json::from_str(response.result.as_ref()?["content"][0]["text"].as_str()?).ok()?;
+    if !matches!(decision.get("decision")?.as_str()?, "deny" | "block") {
+        return None;
+    }
+    let risk = decision.get("risk_assessment")?.as_object()?;
+    let intent_fingerprint = risk.get("intent_fingerprint")?.as_str()?;
+    let invocation_fingerprint = risk.get("invocation_fingerprint")?.as_str()?;
+    if !intent_fingerprint.starts_with("intent_v1_")
+        || !invocation_fingerprint.starts_with("invocation_v1_")
+    {
+        return None;
+    }
+    let denial_basis = risk
+        .get("final_denial_basis")
+        .or_else(|| risk.get("resolution_basis"))?
+        .as_str()?;
+    if !classifier_denial_basis(denial_basis) {
+        return None;
+    }
+
+    let (command, command_truncated) = bounded_command(raw_command);
+    Some(serde_json::json!({
+        "schema_version": 1,
+        "run_session_id": run_session_id,
+        "state": decision.get("state").and_then(serde_json::Value::as_str),
+        "tool_name": tool_name,
+        "command": command,
+        "command_bytes": raw_command.len(),
+        "command_truncated": command_truncated,
+        "intent_fingerprint": intent_fingerprint,
+        "invocation_fingerprint": invocation_fingerprint,
+        "final_denial_basis": denial_basis,
+        "resolution_basis": risk.get("resolution_basis").and_then(serde_json::Value::as_str),
+        "deterministic_risk": risk.get("deterministic_risk").and_then(serde_json::Value::as_str),
+        "deterministic_exposure": risk.get("deterministic_exposure").and_then(serde_json::Value::as_str),
+        "deterministic_source": risk.get("deterministic_source").and_then(serde_json::Value::as_str),
+        "effective_risk": risk.get("effective_risk").and_then(serde_json::Value::as_str),
+        "semantic_status": risk.get("semantic_status").and_then(serde_json::Value::as_str),
+        "semantic_vector": classifier_semantic_vector(risk.get("semantic_vector")),
+        "resolved_effect": risk.get("resolved_effect").and_then(serde_json::Value::as_str),
+        "required_authority": risk.get("required_authority").and_then(serde_json::Value::as_str),
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+async fn persist_classifier_denial(
+    state: &RemoteState,
+    api_key: &str,
+    sample: Option<serde_json::Value>,
+) {
+    if !state.classifier_denial_capture {
+        return;
+    }
+    let Some(sample) = sample else {
+        return;
+    };
+    let invocation = sample["invocation_fingerprint"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let result = reqwest::Client::new()
+        .post(format!(
+            "{}/api/gateway/classifier-denials",
+            state.pb_url.trim_end_matches('/')
+        ))
+        .bearer_auth(api_key)
+        .timeout(CLASSIFIER_DENIAL_CAPTURE_TIMEOUT)
+        .json(&sample)
+        .send()
+        .await;
+    match result {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => tracing::warn!(
+            status = %response.status(),
+            invocation_fingerprint = %invocation,
+            "PocketBase rejected classifier denial calibration sample"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            invocation_fingerprint = %invocation,
+            "Could not persist classifier denial calibration sample"
+        ),
+    }
 }
 
 const CLIENT_ID_HEADER: &str = "x-statewright-client-id";
@@ -172,6 +343,8 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
     };
 
     let approval_secret = std::env::var("APPROVAL_CALLBACK_SECRET").unwrap_or_default();
+    let classifier_denial_capture = std::env::var("STATEWRIGHT_CLASSIFIER_DENIAL_CAPTURE")
+        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
     let state = Arc::new(RemoteState {
         sessions: RwLock::new(HashMap::new()),
@@ -181,6 +354,7 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
         authorization_server_url,
         db_pool,
         approval_secret,
+        classifier_denial_capture,
     });
 
     let app = build_router(state);
@@ -310,6 +484,12 @@ async fn handle_sse(
 
     // Set API key fingerprint for /message auth verification
     gateway.set_api_key_fingerprint(&api_key);
+    gateway.set_remote_host_model_control(
+        headers
+            .get(CLIENT_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(str::is_empty),
+    );
 
     // Create SSE channel
     let (tx, rx) = mpsc::channel::<String>(32);
@@ -385,7 +565,8 @@ async fn handle_streamable_http(
     // session header selects a fork/launcher branch beneath that client root.
     let client_id = headers
         .get(CLIENT_ID_HEADER)
-        .and_then(|value| value.to_str().ok());
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty());
     let mcp_session_id = headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
@@ -460,10 +641,17 @@ async fn handle_streamable_http(
         sessions.get(&session_key).cloned().unwrap()
     };
     let mut session = session.lock().await;
+    session
+        .gateway
+        .set_remote_host_model_control(client_id.is_none());
 
     // Process request
+    let capture_request = request.clone();
     match session.gateway.handle_message(request).await {
         Some(response) => {
+            let sample = classifier_denial_sample(&capture_request, &response, &session_key);
+            drop(session);
+            persist_classifier_denial(&state, &api_key, sample).await;
             let mut headers = axum::http::HeaderMap::new();
             headers.insert("content-type", "application/json".parse().unwrap());
             // Include session ID for client to track
@@ -519,13 +707,17 @@ async fn handle_message(
     }
 
     // Process the request through the gateway
+    let capture_request = request.clone();
     if let Some(response) = session.gateway.handle_message(request).await {
+        let sample = classifier_denial_sample(&capture_request, &response, &query.session_id);
         let response_json = serde_json::to_string(&response).unwrap_or_default();
+        let tx = session.tx.clone();
+        drop(session);
+        persist_classifier_denial(&state, &api_key, sample).await;
 
         // Send response via SSE
-        if session.tx.send(response_json).await.is_err() {
+        if tx.send(response_json).await.is_err() {
             // SSE connection closed
-            drop(session);
             state.sessions.write().await.remove(&query.session_id);
             return (StatusCode::GONE, "SSE connection closed").into_response();
         }
@@ -1000,6 +1192,7 @@ mod tests {
             authorization_server_url: "https://statewright.example".into(),
             db_pool: None,
             approval_secret: String::new(),
+            classifier_denial_capture: false,
         })
     }
 
@@ -1012,6 +1205,7 @@ mod tests {
             authorization_server_url: "https://statewright.example".into(),
             db_pool: None,
             approval_secret: secret.into(),
+            classifier_denial_capture: false,
         })
     }
 
@@ -1072,8 +1266,172 @@ mod tests {
             authorization_server_url: "https://statewright.example".into(),
             db_pool: None,
             approval_secret: String::new(),
+            classifier_denial_capture: false,
         });
         (state, calls)
+    }
+
+    fn adapter_request(tool_name: &str, tool_input: serde_json::Value) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: "tools/call".into(),
+            params: Some(json!({
+                "name": "statewright_adapter_pre_tool",
+                "arguments": {"tool_name": tool_name, "tool_input": tool_input}
+            })),
+            id: Some(json!(1)),
+        }
+    }
+
+    fn adapter_decision(decision: serde_json::Value) -> JsonRpcResponse {
+        JsonRpcResponse::success(
+            Some(json!(1)),
+            serde_json::to_value(crate::protocol::ToolCallResult::text(decision.to_string()))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn classifier_capture_projects_only_denied_shell_commands_and_bounded_receipts() {
+        let request = adapter_request(
+            "exec_command",
+            json!({
+                "cmd": "git status --short && touch marker",
+                "api_token": "must-not-be-projected"
+            }),
+        );
+        let response = adapter_decision(json!({
+            "decision": "deny",
+            "state": "baseline",
+            "reason": "private reason must not be projected",
+            "risk_assessment": {
+                "intent_fingerprint": "intent_v1_family",
+                "invocation_fingerprint": "invocation_v1_exact",
+                "deterministic_risk": "Moderate",
+                "deterministic_exposure": "Local",
+                "deterministic_source": "shell_ast",
+                "effective_risk": "Moderate",
+                "semantic_status": "Assessed",
+                "semantic_vector": {"read_only": 0.31, "may_write": 0.94, "private_score": 0.99},
+                "resolved_effect": "local_write",
+                "resolution_basis": "deterministic_local_write",
+                "final_denial_basis": "workflow_capability_write_denied",
+                "required_authority": "Write",
+                "private_extra": "must-not-be-projected"
+            }
+        }));
+
+        let sample = classifier_denial_sample(&request, &response, "owned-session").unwrap();
+        assert_eq!(sample["command"], "git status --short && touch marker");
+        assert_eq!(
+            sample["final_denial_basis"],
+            "workflow_capability_write_denied"
+        );
+        assert_eq!(sample["run_session_id"], "owned-session");
+        assert_eq!(sample["semantic_vector"]["may_write"], 0.94);
+        assert!(sample["semantic_vector"].get("private_score").is_none());
+        assert!(!sample.to_string().contains("api_token"));
+        assert!(!sample.to_string().contains("private reason"));
+        assert!(!sample.to_string().contains("private_extra"));
+
+        let allowed = adapter_decision(json!({
+            "decision": "allow",
+            "risk_assessment": response.result.as_ref().unwrap()
+        }));
+        assert!(classifier_denial_sample(&request, &allowed, "owned-session").is_none());
+
+        let approval = adapter_decision(json!({
+            "decision": "deny",
+            "state": "baseline",
+            "risk_assessment": {
+                "intent_fingerprint": "intent_v1_family",
+                "invocation_fingerprint": "invocation_v1_exact",
+                "final_denial_basis": "approval_pending"
+            }
+        }));
+        assert!(classifier_denial_sample(&request, &approval, "owned-session").is_none());
+        assert!(
+            classifier_denial_sample(
+                &adapter_request("Read", json!({"command": "private"})),
+                &response,
+                "owned-session",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn classifier_capture_truncates_on_a_utf8_boundary() {
+        let command = format!("{}é", "x".repeat(CLASSIFIER_DENIAL_COMMAND_BYTES - 1));
+        let request = adapter_request("Bash", json!({"command": command}));
+        let response = adapter_decision(json!({
+            "decision": "deny",
+            "state": "baseline",
+            "risk_assessment": {
+                "intent_fingerprint": "intent_v1_family",
+                "invocation_fingerprint": "invocation_v1_exact",
+                "final_denial_basis": "semantic_threshold_not_met"
+            }
+        }));
+        let sample = classifier_denial_sample(&request, &response, "owned-session").unwrap();
+        assert_eq!(sample["command_truncated"], true);
+        assert!(sample["command"].as_str().unwrap().len() <= CLASSIFIER_DENIAL_COMMAND_BYTES);
+        assert_eq!(sample["command_bytes"], CLASSIFIER_DENIAL_COMMAND_BYTES + 1);
+    }
+
+    #[tokio::test]
+    async fn classifier_capture_posts_only_when_explicitly_enabled() {
+        let observed = Arc::new(Mutex::new(Vec::<(String, serde_json::Value)>::new()));
+        let received = observed.clone();
+        let app = Router::new().route(
+            "/api/gateway/classifier-denials",
+            post(
+                move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let received = received.clone();
+                    async move {
+                        received.lock().await.push((
+                            headers
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                            body,
+                        ));
+                        StatusCode::CREATED
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pb_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let sample = Some(json!({
+            "invocation_fingerprint": "invocation_v1_exact",
+            "command": "private command"
+        }));
+        let disabled = RemoteState {
+            sessions: RwLock::new(HashMap::new()),
+            session_managers: RwLock::new(HashMap::new()),
+            pb_url: pb_url.clone(),
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
+            db_pool: None,
+            approval_secret: String::new(),
+            classifier_denial_capture: false,
+        };
+        persist_classifier_denial(&disabled, "sw_live_secret", sample.clone()).await;
+        assert!(observed.lock().await.is_empty());
+
+        let enabled = RemoteState {
+            classifier_denial_capture: true,
+            ..disabled
+        };
+        persist_classifier_denial(&enabled, "sw_live_secret", sample).await;
+        let observed = observed.lock().await;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, "Bearer sw_live_secret");
+        assert_eq!(observed[0].1["command"], "private command");
+        server.abort();
     }
 
     #[tokio::test]
@@ -1415,6 +1773,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
+        let first_body = first.into_body().collect().await.unwrap().to_bytes();
+        let first_payload: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        assert!(
+            first_payload["result"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("cannot apply")
+        );
 
         let revoked = app
             .oneshot(
@@ -1431,6 +1797,30 @@ mod tests {
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert!(revoked.headers().contains_key(header::WWW_AUTHENTICATE));
+    }
+
+    #[tokio::test]
+    async fn streamable_http_managed_client_does_not_get_web_routing_warning() {
+        let (state, _) =
+            test_state_with_revalidating_pb("https://mcp.statewright.example/mcp").await;
+        let response = build_router(state)
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sw_live_oauth_token")
+                    .header(CLIENT_ID_HEADER, "swc_native_client")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"statewright-codex","version":"1"}}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload["result"].get("instructions").is_none());
     }
 
     // --- Legacy SSE auth ---
@@ -1860,6 +2250,7 @@ mod tests {
             authorization_server_url: "https://statewright.example".into(),
             db_pool: Some(pool.clone()),
             approval_secret: String::new(),
+            classifier_denial_capture: false,
         });
         let request = |client: &'static str, approval: &'static str| {
             Request::post("/api/runtime-approval")

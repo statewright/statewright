@@ -79,18 +79,30 @@ export class HandoffPresentation {
 
   running(threadId, turnId, handoff) {
     this.handoffs.delete(threadId);
-    const text = `${label(handoff.state)} · ${label(handoff.model)} / ${label(handoff.effort)} · running`;
+    const tier = handoff.serviceTier ? ` / ${label(handoff.serviceTier)}` : "";
+    const returnRoute = handoff.returnRoute?.model
+      ? ` · returns to ${label(handoff.returnRoute.model)} / ${label(handoff.returnRoute.effort)} / ${label(handoff.returnRoute.service_tier)}`
+      : "";
+    const text = handoff.restoredOriginal
+      ? `workflow complete · restored ${label(handoff.model)} / ${label(handoff.effort)}${tier}`
+      : `${label(handoff.state)} · ${label(handoff.model)} / ${label(handoff.effort)}${tier} · running${returnRoute}`;
     // Shared UI/log contract: no prompts, tool output, paths or credentials.
     const event = {schema: "statewright/app-server-handoff/v1", source: "statewright",
       thread_id: threadId, turn_id: turnId, run_id: handoff.runId ?? null,
       phase: "running", from_state: handoff.fromState ?? null, state: handoff.state,
-      model: handoff.model ?? null, effort: handoff.effort ?? null, text};
+      model: handoff.model ?? null, effort: handoff.effort ?? null,
+      service_tier: handoff.serviceTier ?? null,
+      return_model: handoff.returnRoute?.model ?? null,
+      return_effort: handoff.returnRoute?.effort ?? null,
+      return_service_tier: handoff.returnRoute?.service_tier ?? null,
+      restored_original: handoff.restoredOriginal === true,
+      text};
     try { Promise.resolve(this.onStatus(event)).catch(() => {}); } catch { /* display cannot break execution */ }
     // Native Codex has one message stream. A late start response must not
     // finalize an answer already streaming under a synthetic status item.
     if (!this.turns.get(threadId)?.nativeSafe) return [];
     const item = {id: `statewright_status_${randomUUID()}`, type: "agentMessage",
-      phase: "commentary", text: `Statewright supervisor: ${text}`};
+      phase: "commentary", text: `Statewright Arbiter: ${text}`};
     const now = Date.now();
     return ["item/started", "item/completed"].map(method => ({method, params: {threadId, turnId, item,
       [method === "item/started" ? "startedAtMs" : "completedAtMs"]: now}}));

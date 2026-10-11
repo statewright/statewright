@@ -5,13 +5,15 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
-import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
+import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
 import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
+import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
+import { WorkflowRouteOriginStore } from "./workflow-route-origin.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -19,6 +21,8 @@ const RESIDENT_RUNTIME_FILES = [
   RESIDENT_ENTRYPOINT,
   join(EXECUTOR_ROOT, "codex-app-server-transport.mjs"),
   join(EXECUTOR_ROOT, "codex-app-server-route-proxy.mjs"),
+  join(EXECUTOR_ROOT, "approval-pipeline.mjs"),
+  join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
   join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
   join(EXECUTOR_ROOT, "human-approval.mjs"),
   join(EXECUTOR_ROOT, "approval-journal.mjs"),
@@ -26,10 +30,14 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "runtime-approval-service.mjs"),
   join(EXECUTOR_ROOT, "approval-evidence.mjs"),
   join(EXECUTOR_ROOT, "codex-session-metadata.mjs"),
+  join(EXECUTOR_ROOT, "codex-history-integrity.mjs"),
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
   join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
+  join(EXECUTOR_ROOT, "workflow-route-origin.mjs"),
+  join(EXECUTOR_ROOT, "gateway-profile.mjs"),
+  join(EXECUTOR_ROOT, "credential-store.mjs"),
 ];
 
 function safeName(value) {
@@ -66,13 +74,19 @@ export async function residentRuntimeRevision() {
   return createHash("sha256").update(sources.join("\n--- statewright resident module ---\n")).digest("hex").slice(0, 16);
 }
 
-export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined) {
+export async function residentProfileIdentity(environment = process.env, home = homedir()) {
+  const profile = await resolveGatewayProfile(environment, home);
+  return createHash("sha256").update(JSON.stringify([profile.gatewayUrl, profile.authUrl])).digest("hex");
+}
+
+export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined, profileIdentity = undefined) {
   if (manifest?.runtimeRevision !== runtimeRevision) return false;
+  if (profileIdentity !== undefined && manifest.profileIdentity !== profileIdentity) return false;
   return threadListCwd === undefined || (manifest.threadListCwd ?? null) === threadListCwd;
 }
 
-async function ready(manifest, runtimeRevision, threadListCwd) {
-  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
+async function ready(manifest, runtimeRevision, threadListCwd, profileIdentity) {
+  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd, profileIdentity) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
   try {
     return (await fetch(`${manifest.proxyUrl.replace(/^ws/, "http")}/readyz`, { signal: AbortSignal.timeout(400) })).ok;
   } catch { return false; }
@@ -180,11 +194,12 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   const root = residentRoot(home, clientId);
   const manifestPath = join(root, "manifest.json");
   const runtimeRevision = await residentRuntimeRevision();
+  const profileIdentity = await residentProfileIdentity(environment, home);
   const existing = await readManifest(manifestPath);
-  if (await ready(existing, runtimeRevision, threadListCwd)) return existing;
+  if (await ready(existing, runtimeRevision, threadListCwd, profileIdentity)) return existing;
   if (existing?.pid && processAlive(existing.pid)) {
     throw new Error(
-      `Statewright Codex App Server resident ${existing.pid} is still running with a different runtime or resume scope. `
+      `Statewright Codex App Server resident ${existing.pid} is still running with a different runtime, gateway profile, or resume scope. `
       + "It may be preserving detached work; exit it or wait for it to become idle, then retry.",
     );
   }
@@ -209,7 +224,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
-    if (await ready(manifest, runtimeRevision, threadListCwd)) return manifest;
+    if (await ready(manifest, runtimeRevision, threadListCwd, profileIdentity)) return manifest;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   const log = await readFile(join(root, "resident.log"), "utf8").catch(() => "");
@@ -222,9 +237,10 @@ async function main() {
   const command = values.command;
   const cwd = values.cwd;
   const home = values.home ?? homedir();
+  const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
   const threadListCwd = values["thread-list-cwd"] || null;
   const terminalLabel = values["terminal-label"] || null;
-  const reporter = createErrorReporter({ plugin: "codex", version: "0.3.3" });
+  const reporter = createErrorReporter({ plugin: "codex", version: "0.3.4" });
   reporter.installProcessHandlers();
   if (!clientId || !command || !cwd) throw new Error("resident requires client-id, command, and cwd");
   const root = process.env.STATEWRIGHT_CODEX_RESIDENT_ROOT ?? residentRoot(home, clientId);
@@ -239,6 +255,11 @@ async function main() {
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
       ownsThread: async threadId => (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId });
   const knownThreadCwds = new Map();
+  const workflowOriginStore = new WorkflowRouteOriginStore({
+    root: join(root, "workflow-origins"),
+    clientId,
+    ownsBinding: async binding => (await readCodexRootSession(controlDir, clientId))?.sessionId === binding.thread_id,
+  });
   let runtime = null;
   let stopping = false;
   const stop = async () => {
@@ -261,13 +282,15 @@ async function main() {
       STATEWRIGHT_CLIENT_ID: clientId,
       STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
       STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
+      STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     approvalService,
     peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
-    getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, metadataCache: knownThreadCwds }),
+    getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, codexHome, metadataCache: knownThreadCwds }),
+    resolveResumePermissions: (threadId) => readCodexResumePermissions({ threadId, home, codexHome }),
     onThreadStarted: async ({ threadId }) => {
       await claimCodexRootSession(controlDir, { sessionId: threadId, clientId });
       await bindManagedClientIdentity({ host: "codex", sessionId: threadId, clientId, home, cwd });
@@ -275,6 +298,14 @@ async function main() {
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,
+    workflowOriginStore,
+    routeOwner: async threadId => {
+      const registration = await readCodexRootSession(controlDir, clientId);
+      return {
+        client_id: clientId,
+        root_session_id: registration?.sessionId === threadId ? registration.sessionId : null,
+      };
+    },
     onIdle: stop,
     telemetry: telemetryWriter(process.env),
     reporter,
@@ -284,7 +315,9 @@ async function main() {
     pid: process.pid,
     clientId,
     proxyUrl: runtime.proxyUrl,
+    proxyToken: runtime.proxyToken,
     runtimeRevision: await residentRuntimeRevision(),
+    profileIdentity: await residentProfileIdentity(process.env, home),
     threadListCwd,
     startedAt: new Date().toISOString(),
   });
@@ -294,7 +327,7 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === RESIDENT_ENTRYPOINT) {
   main().catch(async (error) => {
-    const reporter = createErrorReporter({ plugin: "codex", version: "0.3.3" });
+    const reporter = createErrorReporter({ plugin: "codex", version: "0.3.4" });
     if (!isExpectedPluginError(error)) await reporter.report(error, { mechanism: "entrypoint", operation: "resident_app_server" });
     process.stderr.write(`[statewright] resident App Server failed: ${error.message}\n`);
     process.exitCode = 2;

@@ -6,9 +6,12 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_ROOT = dirname(fileURLToPath(import.meta.url));
 const CODEX_ROOT = resolve(SCRIPT_ROOT, "..");
+const EXECUTOR_ROOT = resolve(CODEX_ROOT, "..", "executor");
 const EXECUTOR_LIB = resolve(CODEX_ROOT, "..", "executor", "lib");
 export const DESKTOP_RUNTIME_ROOT = resolve(CODEX_ROOT, "scripts", "lib", "desktop-runtime");
 const ENTRY = resolve(EXECUTOR_LIB, "codex-desktop-app-server-launcher.mjs");
+const MANAGED_CLIENT_ENTRY = resolve(EXECUTOR_ROOT, "statewright-managed-client.mjs");
+export const PACKAGED_MANAGED_CLIENT = resolve(CODEX_ROOT, "scripts", "statewright-managed-client.mjs");
 const PACKAGED_IMPORT_REWRITES = new Map([
   ["ws", "../../../vendor/ws/wrapper.mjs"],
 ]);
@@ -20,12 +23,23 @@ function packagedRuntimeSource(source) {
   });
 }
 
+function packagedManagedClientSource(source) {
+  return source.replaceAll('"./lib/', '"./lib/desktop-runtime/').replaceAll("'./lib/", "'./lib/desktop-runtime/");
+}
+
 function relativeImports(source) {
   return [...source.matchAll(/(?:from\s+|import\s*\()\s*["'](\.[^"']+)["']/g)].map(match => match[1]);
 }
 
 async function runtimeSources() {
-  const pending = [ENTRY];
+  const managedClientSource = await readFile(MANAGED_CLIENT_ENTRY, "utf8");
+  const managedClientImports = relativeImports(managedClientSource).map(specifier => resolve(dirname(MANAGED_CLIENT_ENTRY), specifier));
+  for (const imported of managedClientImports) {
+    if (!imported.startsWith(`${EXECUTOR_LIB}/`) || !imported.endsWith(".mjs")) {
+      throw new Error(`Managed client runtime import must stay inside executor/lib: ${relative(MANAGED_CLIENT_ENTRY, imported)}`);
+    }
+  }
+  const pending = [ENTRY, ...managedClientImports];
   const sources = new Set();
   while (pending.length) {
     const source = pending.pop();
@@ -62,6 +76,11 @@ export async function desktopRuntimeDrift() {
     }
   }
   await checkExtras(DESKTOP_RUNTIME_ROOT);
+  let managedClientText = null;
+  try { managedClientText = await readFile(PACKAGED_MANAGED_CLIENT, "utf8"); } catch { /* missing is drift */ }
+  if (managedClientText !== packagedManagedClientSource(await readFile(MANAGED_CLIENT_ENTRY, "utf8"))) {
+    drift.push("statewright-managed-client.mjs");
+  }
   return drift.sort();
 }
 
@@ -74,6 +93,7 @@ export async function syncDesktopRuntime() {
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, packagedRuntimeSource(await readFile(source, "utf8")));
   }
+  await writeFile(PACKAGED_MANAGED_CLIENT, packagedManagedClientSource(await readFile(MANAGED_CLIENT_ENTRY, "utf8")));
   return sources.map(source => relative(EXECUTOR_LIB, source));
 }
 

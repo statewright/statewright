@@ -1,8 +1,11 @@
 # W1 hosted-Windows receipt and X0 desktop capability receipts
 
+> Public excerpt sanitized 2026-10-10; operational details omitted or generalized.
+> Historical results below were not rerun for this documentation cleanup.
+
 Date: 2026-09-16. Release-train evidence for the P0/W0/W1/W2, X0/X1, C1, D1, O1, P1 plan: the
 W1 canary outcome on hosted Windows and the bounded X0 desktop discovery on the local macOS host
-(`aerith.local`, macOS 15.3.1 arm64). Companion to 006 (control-plane host feasibility).
+(macOS 15.3.1 arm64). Companion to 006 (control-plane host feasibility).
 
 ## W1: hosted-Windows authenticated-CLI feasibility (canary)
 
@@ -44,30 +47,28 @@ remains fixed (d70438a) and green through 82f6397.
 ### ChatGPT.app (Codex desktop)
 
 - `com.openai.codex` 26.818.31338, Chromium framework 151.0.7922.170; main process running
-  ~14 days.
+  at discovery time.
 - Ownership: the app main process spawns its **own embedded app-server**
   (`ChatGPT.app/Contents/Resources/codex app-server -c features.code_mode_host=true`) as a child,
   plus Renderer/Service helpers. The app-side app-server exposes no local TCP listener; it
-  communicates over unix sockets and the shared `~/.codex/ipc/ipc.sock`. Outbound: OpenAI
-  (104.18.32.47:443) and local OTel (127.0.0.1:4318).
+  communicates over local IPC.
 - Config/state ownership: shared `~/.codex` home with the installed CLI (config.toml/json,
   auth.json, hooks, plugins, process_manager, ipc, thread-writer-locks, session_index.jsonl).
 
 ### Installed codex CLI + shared session identity
 
-- codex-cli 0.153.4 (npm/homebrew). `~/.codex/sessions` is the shared rollout store (~17 GB,
-  year-partitioned `rollout-YYYY-*.jsonl` plus `session_index.jsonl`); the same naming and index
+- codex-cli 0.153.4 (npm/homebrew). `~/.codex/sessions` is the shared rollout store (year-partitioned `rollout-YYYY-*.jsonl` plus `session_index.jsonl`); the same naming and index
   identify sessions for both the desktop app and the CLI on this host.
 
 ### Statewright-managed app-server (live safe probe)
 
 - A Statewright-managed supervisor instance of codex 0.151.0 runs with a private temporary
   CODEX_HOME (`statewright-swc_...-app-server-...`) and serves WS JSON-RPC on
-  127.0.0.1:55140 (HTTP upgrade; newline-delimited JSON frames).
+  a loopback endpoint (HTTP upgrade; newline-delimited JSON frames).
 - Safe non-mutating probe executed: `initialize` round-trip succeeded (server returned
   userAgent/codexHome/platform result) and then the server pushed a server-originated
-  `remoteControl/status/changed` notification (status disabled, serverName `aerith.local`,
-  installationId 8348dbfa-3043-4910-8b55-01593550f5d3). The WS JSON-RPC app-server transport is
+  `remoteControl/status/changed` notification (status disabled; host and installation
+  identifiers omitted). The WS JSON-RPC app-server transport is
   automatable and already drives the local Statewright executor.
 
 ### Claude Desktop
@@ -79,19 +80,15 @@ remains fixed (d70438a) and green through 82f6397.
   gate selection for the Claude desktop surface is deferred until a provisioned host is
   identified.
 
-### Context surface (D1-relevant, not a vendor desktop surface)
-
-- A local-models stack (`codex-local-models`: python serve + `launch.mjs` with bypass flags,
-  remote clients on ws://127.0.0.1:50445, listener on 127.0.0.1:58631) is live on this host. It
-  is an existing local codex host relevant to the D1 deduplication scope, not part of X0 vendor
-  discovery.
+An optional companion runtime was also present. Its operational details are
+outside the vendor-desktop discovery scope and are omitted.
 
 ## P0: installed standalone Codex vendor road test (local macOS host)
 
 `CODEX_BIN=/opt/homebrew/bin/codex` (vendor `codex-cli 0.153.4`, not a Statewright shim) ran
 `task test:codex-native-approvals:vendor`
 (`node plugins/executor/tests/codex-native-approval-vendor-canary.mjs`) on this host
-(`aerith.local`, macOS 15.3.1 arm64). Same-day date as the W1/X0 receipts above.
+(macOS 15.3.1 arm64). Same-day date as the W1/X0 receipts above.
 
 - Outcome: `statewright/vendor-approval-protocol-canary/v1` **pass**; checked
   `real-native-goal-get`, `native-form-frame`, `creator-label`, `cancel-keeps-journal`,
@@ -109,12 +106,6 @@ authenticated-turn evidence remain external gates (hosted-runner credential secr
 human-owned Windows respectively). The managed X1 fixture evidence is recorded below; stock
 Codex desktop and every Claude Desktop acceptance case remain gated, alongside C1, D1, O1 and
 P1.
-
-Host hygiene note: `~/.statewright/bin/codex --version` (managed shim) reported a stale
-Statewright telemetry listener identity conflict on this host during discovery
-(`statewright-managed-client --kill-app-server` is the documented remedy). It did not affect
-the vendor road test, which spawns the vendor binary directly; it is recorded here because it
-would surface in any live Statewright-managed app-server verification on this host.
 
 ## X0 conclusion
 

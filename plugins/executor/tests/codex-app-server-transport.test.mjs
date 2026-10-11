@@ -14,18 +14,22 @@ import {
   runCodexAppServerTransport,
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
-import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
-import { applyCompactResumeRequest, applyRouteToTurnStart, applyThreadListCwd, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, settingsConfirmRoute, startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
-import { readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
+import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
+import { applyCompactResumeRequest, applyExplicitYoloResumePermissions, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
+import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
+import { readCodexResumePermissions, readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
 import { resolveWindowsLaunch } from "../lib/windows-command-resolution.mjs";
 
 function once(socket, event) {
   return new Promise((resolveEvent) => socket.once(event, resolveEvent));
 }
 
-test("Codex App Server transport remains opt-in and supports an explicit environment override", () => {
-  assert.equal(codexAppServerTransportEnabled({ environment: {} }), false);
+test("managed Codex defaults to App Server across gateway profiles and preserves explicit legacy opt-out", () => {
+  for (const profile of [undefined, "production", "staging", "dev1", "dev2"]) {
+    assert.equal(codexAppServerTransportEnabled({ environment: { STATEWRIGHT_ENV: profile } }), true);
+  }
   assert.equal(codexAppServerTransportEnabled({
+    environment: {},
     config: { routing: { managed_clients: { codex_transport: "app-server" } } },
   }), true);
   assert.equal(codexAppServerTransportEnabled({
@@ -34,7 +38,11 @@ test("Codex App Server transport remains opt-in and supports an explicit environ
   }), false);
   assert.equal(codexAppServerTransportEnabled({
     environment: { STATEWRIGHT_CODEX_TRANSPORT: "app-server" },
+    config: { routing: { managed_clients: { codex_transport: "restart" } } },
   }), true);
+  assert.equal(codexAppServerTransportEnabled({ environment: {}, config: { routing: { managed_clients: { codex_transport: "restart" } } } }), false);
+  assert.throws(() => codexAppServerTransportEnabled({ environment: { STATEWRIGHT_CODEX_TRANSPORT: "typo" } }), /Unsupported Codex transport/);
+  assert.throws(() => codexAppServerTransportEnabled({ environment: {}, config: { routing: { managed_clients: { codex_transport: "typo" } } } }), /Unsupported Codex transport/);
 });
 
 test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
@@ -42,6 +50,21 @@ test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.bat", "win32"), { shell: true });
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.exe", "win32"), { shell: false });
   assert.deepEqual(appServerCommandOptions("/usr/local/bin/codex", "darwin"), { shell: false });
+});
+
+test("resident reuse requires the same canonical gateway and auth profile, never merely the same thread", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-resident-profile-"));
+  try {
+    const prod = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://mcp.statewright.ai" }, home);
+    assert.equal(prod, await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://mcp.statewright.ai/mcp" }, home));
+    const staging = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://stage.example", STATEWRIGHT_PB_URL: "https://stage-auth.example" }, home);
+    const changedAuth = await residentProfileIdentity({ STATEWRIGHT_GATEWAY_URL: "https://stage.example", STATEWRIGHT_PB_URL: "https://other-auth.example" }, home);
+    const manifest = { runtimeRevision: "fixture", profileIdentity: staging, threadListCwd: null };
+    assert.equal(residentMatchesRuntime(manifest, "fixture", null, staging), true);
+    for (const target of [prod, changedAuth]) assert.equal(residentMatchesRuntime(manifest, "fixture", null, target), false);
+    assert.equal(residentMatchesRuntime({ runtimeRevision: "fixture" }, "fixture", null, staging), false);
+    await assert.rejects(residentProfileIdentity({ STATEWRIGHT_ENV: "dev1" }, home), /not configured/);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test("Windows npm Codex shims launch Node directly and preserve argv boundaries", async () => {
@@ -500,6 +523,649 @@ test("App Server routing overrides the native next turn and requires a settings 
   });
 });
 
+test("App Server routing captures and restores the pre-workflow model, effort, and service tier", () => {
+  const origin = captureWorkflowOrigin({
+    method: "turn/start",
+    params: {
+      threadId: "thread-return",
+      model: "gpt-6-astra",
+      effort: "high",
+      serviceTier: "priority",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-6-astra", reasoning_effort: "high" },
+      },
+    },
+  }, { provider: "openai" });
+  assert.deepEqual(origin, {
+    provider: "openai",
+    model: "openai-codex/gpt-6-astra",
+    effort: "high",
+    service_tier: "priority",
+  });
+  const restored = restoreWorkflowOrigin({
+    session_id: "thread-return",
+    run_id: "run-return",
+    state: "complete",
+    restore_original: true,
+  }, { ...origin, run_id: "run-return" });
+  const { message, receipt } = applyRouteToTurnStart({
+    method: "turn/start",
+    params: { threadId: "thread-return", model: "gpt-5.6-terra", effort: "medium", serviceTier: "default" },
+  }, restored);
+  assert.equal(message.params.model, "gpt-6-astra");
+  assert.equal(message.params.effort, "high");
+  assert.equal(message.params.serviceTier, "priority");
+  assert.equal(receipt.route.restored_original, true);
+  assert.equal(receipt.effectiveServiceTier, "priority");
+  assert.equal(settingsConfirmRoute(receipt, {
+    method: "thread/settings/updated",
+    params: { threadId: "thread-return", threadSettings: {
+      model: "gpt-6-astra", modelProvider: "openai", effort: "high", serviceTier: "priority",
+    } },
+  }).confirmed, true);
+  assert.equal(restoreWorkflowOrigin({ restore_original: true, run_id: "foreign" }, {
+    ...origin, run_id: "run-return",
+  }), null);
+});
+
+test("native thread start and resume settings preserve reasoningEffort presence and explicit null", () => {
+  for (const method of ["thread/start", "thread/resume"]) {
+    const native = nativeThreadRouteSettings({
+      thread: { id: "thread-native", effort: "legacy-thread" },
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: "high",
+      effort: "legacy-top-level",
+      serviceTier: "priority",
+    });
+    assert.deepEqual(native, {
+      model: "gpt-5.6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority",
+    }, method);
+
+    const explicitNull = nativeThreadRouteSettings({
+      thread: { id: "thread-native", reasoningEffort: "legacy-thread" },
+      model: "gpt-5.6-sol",
+      modelProvider: "openai",
+      reasoningEffort: null,
+      effort: "legacy-top-level",
+      serviceTier: null,
+    });
+    assert.equal(Object.hasOwn(explicitNull, "effort"), true, method);
+    assert.equal(explicitNull.effort, null, method);
+    assert.equal(Object.hasOwn(explicitNull, "serviceTier"), true, method);
+    assert.equal(explicitNull.serviceTier, null, method);
+
+    const unavailable = nativeThreadRouteSettings({
+      thread: { id: "thread-native" }, model: "gpt-5.6-sol", modelProvider: "openai",
+    });
+    assert.equal(Object.hasOwn(unavailable, "effort"), false, method);
+    assert.equal(Object.hasOwn(unavailable, "serviceTier"), false, method);
+  }
+});
+
+test("workflow origin capture keeps explicit null distinct from unavailable native evidence", () => {
+  const message = { method: "turn/start", params: { threadId: "thread-native" } };
+  const explicitNull = captureWorkflowOrigin(message, {
+    provider: "openai", model: "gpt-5.6-sol", effort: null, service_tier: null,
+  });
+  assert.equal(Object.hasOwn(explicitNull, "effort"), true);
+  assert.equal(explicitNull.effort, null);
+  assert.equal(Object.hasOwn(explicitNull, "service_tier"), true);
+  assert.equal(explicitNull.service_tier, null);
+  const unavailable = captureWorkflowOrigin(message, { provider: "openai", model: "gpt-5.6-sol" });
+  assert.equal(Object.hasOwn(unavailable, "effort"), false);
+  assert.equal(Object.hasOwn(unavailable, "service_tier"), false);
+});
+
+test("only successful terminal or deactivate Statewright completions request restoration", () => {
+  const item = (tool, structuredContent, overrides = {}) => ({
+    id: `item-${tool}`, type: "mcpToolCall", status: "completed", tool, server: "statewright",
+    result: { structuredContent }, ...overrides,
+  });
+  for (const state of ["complete", "blocked", "failed", "cancelled"]) {
+    assert.equal(terminalStatewrightCompletion(item("statewright_transition", {
+      state_snapshot: { state, is_final: true },
+    })).kind, "terminal");
+  }
+  assert.equal(terminalStatewrightCompletion(item("statewright_deactivate", { deactivated: true })).kind, "deactivated");
+  assert.equal(terminalStatewrightCompletion(item("statewright_pause", { paused: true })), null);
+  for (const type of ["mcpToolCall", "McpToolCall"]) {
+    const compact = {transitioned: true, from: "localize", to: "blocked", requires_approval: false,
+      approval_message: null, transition_count: 2, usage: null};
+    const parsed = terminalStatewrightCompletion(item("statewright_transition", compact, {type}));
+    assert.equal(parsed.kind, "transition", "compact success is a hint, never proof of finality");
+    assert.equal(parsed.state, null);
+    for (const status of ["failed", "aborted", "inProgress"]) {
+      assert.equal(terminalStatewrightCompletion(item("statewright_transition", compact, {type, status})), null);
+    }
+  }
+  assert.equal(terminalStatewrightCompletion(item("statewright_transition", {
+    state_snapshot: { state: "implement", is_final: false },
+  })), null);
+  assert.equal(terminalStatewrightCompletion(item("statewright_deactivate", { deactivated: false })), null);
+  assert.equal(terminalStatewrightCompletion({
+    ...item("statewright_deactivate", { deactivated: true }), server: undefined,
+  }), null, "an unscoped bare tool name is not local lifecycle authority");
+  assert.equal(terminalStatewrightCompletion({
+    ...item("mcp__statewright__statewright_deactivate", { deactivated: true }), server: undefined,
+  }).kind, "deactivated");
+  assert.equal(terminalStatewrightCompletion(item("mcp__codex_apps__statewright_staging_statewright_deactivate", {
+    deactivated: true,
+  })), null);
+  assert.equal(terminalStatewrightCompletion({
+    ...item("statewright_deactivate", { deactivated: true }), server: "statewright_staging",
+  }), null);
+  assert.equal(terminalStatewrightCompletion(item("statewright_deactivate", { deactivated: true }, {
+    result: { isError: true },
+  })), null);
+});
+
+test("an unspecified original effort is explicitly cleared and must be confirmed as null", () => {
+  const route = {session_id: "thread-default-effort", model: "openai-codex/gpt-5.6-sol",
+    effort: null, service_tier: "priority", restore_original: true};
+  const applied = applyRouteToTurnStart({method: "turn/start", params: {
+    threadId: route.session_id, effort: "medium",
+    collaborationMode: {mode: "default", settings: {model: "gpt-5.6-terra", reasoning_effort: "medium"}},
+  }}, route);
+  assert.equal(Object.hasOwn(applied.message.params, "effort"), true);
+  assert.equal(applied.message.params.effort, null);
+  assert.equal(applied.message.params.collaborationMode.settings.reasoning_effort, null);
+  assert.equal(settingsConfirmRoute(applied.receipt, {method: "thread/settings/updated", params: {
+    threadId: route.session_id, threadSettings: {model: "gpt-5.6-sol", modelProvider: "openai",
+      effort: null, serviceTier: "priority", collaborationMode: {settings: {model: "gpt-5.6-sol", reasoning_effort: null}}},
+  }}).confirmed, true);
+  const missing = settingsConfirmRoute(applied.receipt, {method: "thread/settings/updated", params: {
+    threadId: route.session_id, threadSettings: {model: "gpt-5.6-sol", modelProvider: "openai",
+      serviceTier: "priority", collaborationMode: {settings: {model: "gpt-5.6-sol"}}},
+  }});
+  assert.equal(missing.confirmed, false);
+  assert.equal(Object.hasOwn(missing, "actualEffort"), false);
+  assert.equal(Object.hasOwn(missing, "actualCollaborationEffort"), false);
+});
+
+test("App Server proxy restores the captured route after the authoritative workflow becomes terminal", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let upstreamSocket;
+  const connected = new Promise((resolveConnection) => upstream.once("connection", (socket) => {
+    upstreamSocket = socket;
+    resolveConnection();
+  }));
+  let state = {
+    run_id: "run-return",
+    state: "intake",
+    model: "openai-codex/gpt-5.6-terra",
+    thinking_level: "medium",
+    is_final: false,
+  };
+  const pending = [{
+    session_id: "thread-return",
+    root_session_id: "thread-return",
+    client_id: "client-return",
+    run_id: "run-return",
+    state: "intake",
+    model: "openai-codex/gpt-5.6-terra",
+    effort: "medium",
+    service_tier: "default",
+  }];
+  const injected = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    approvalService: {
+      getState: async () => state,
+      restore: async () => null,
+    },
+    takePendingRoute: async () => {
+      const route = pending.shift();
+      return route ? { route, ack: async () => {} } : null;
+    },
+    onRouteInjected: async (receipt) => injected.push(receipt),
+    routeOwner: async () => ({ root_session_id: "thread-return", client_id: "client-return" }),
+  });
+  let client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    const nextForwardedTurn = async () => {
+      for (;;) {
+        const request = JSON.parse(String(await once(upstreamSocket, "message")));
+        if (request.method !== "thread/read") return request;
+        upstreamSocket.send(JSON.stringify({ id: request.id, result: {
+          thread: { id: "thread-return", status: { type: "idle" } },
+        } }));
+      }
+    };
+    const initialThread = new Promise((resolveMessage) => upstreamSocket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 1, method: "thread/start", params: {} }));
+    assert.equal((await initialThread).method, "thread/start");
+    upstreamSocket.send(JSON.stringify({ id: 1, result: {
+      thread: { id: "thread-return" }, modelProvider: "openai", model: "gpt-6-astra",
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+
+    client.send(JSON.stringify({ id: 2, method: "turn/start", params: {
+      threadId: "thread-return", input: [], model: "gpt-6-astra", effort: "high", serviceTier: "priority",
+    } }));
+    const routed = await nextForwardedTurn();
+    assert.equal(routed.params.model, "gpt-5.6-terra");
+    assert.equal(routed.params.effort, "medium");
+    assert.equal(routed.params.serviceTier, "default");
+    upstreamSocket.send(JSON.stringify({ id: 2, result: { turn: { id: "workflow-turn" } } }));
+    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
+      threadId: "thread-return", threadSettings: {
+        model: "gpt-5.6-terra", modelProvider: "openai", effort: "medium", serviceTier: "default",
+      },
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+
+    const disconnected = once(client, "close");
+    client.close();
+    await disconnected;
+    const reconnectedUpstream = new Promise((resolveConnection) => upstream.once("connection", (socket) => {
+      upstreamSocket = socket;
+      resolveConnection();
+    }));
+    client = new WebSocket(proxy.url);
+    await once(client, "open");
+    await reconnectedUpstream;
+
+    const manualSettingsForwarded = new Promise((resolveMessage) => upstreamSocket.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 20, method: "thread/settings/update", params: {
+      threadId: "thread-return", model: "gpt-5.5",
+    } }));
+    assert.equal((await manualSettingsForwarded).params.model, "gpt-5.5");
+    upstreamSocket.send(JSON.stringify({ id: 20, result: {} }));
+    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
+      threadId: "thread-return", threadSettings: {
+        model: "gpt-5.5", modelProvider: "openai", effort: "medium", serviceTier: "default",
+      },
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+
+    state = { ...state, state: "complete", is_final: true };
+    pending.push({
+      session_id: "thread-return",
+      root_session_id: "thread-return",
+      client_id: "client-return",
+      run_id: "run-return",
+      state: "complete",
+      model: "",
+      effort: "",
+      restore_original: true,
+    });
+    client.send(JSON.stringify({ id: 3, method: "turn/start", params: {
+      threadId: "thread-return", input: [], model: "gpt-5.5", effort: "medium", serviceTier: "default",
+    } }));
+    const restored = await nextForwardedTurn();
+    assert.equal(restored.params.model, "gpt-5.5", "a confirmed manual model override must survive restoration");
+    assert.equal(restored.params.effort, "medium");
+    assert.equal(restored.params.serviceTier, "default");
+    assert.equal(injected.length, 2);
+    assert.equal(injected[0].route.restored_original, undefined);
+    assert.equal(injected[1].route.restored_original, true);
+    upstreamSocket.send(JSON.stringify({ id: 3, result: { turn: { id: "restored-turn" } } }));
+    upstreamSocket.send(JSON.stringify({ method: "turn/started", params: {
+      threadId: "thread-return", turn: { id: "restored-turn", status: "inProgress", items: [] },
+    } }));
+    upstreamSocket.send(JSON.stringify({ method: "turn/completed", params: {
+      threadId: "thread-return", turn: { id: "restored-turn", status: "completed", items: [] },
+    } }));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise((resolveClose) => upstream.close(resolveClose));
+  }
+});
+
+for (const scenario of [
+  "snapshot", "compact", "bare-model", "inherited-tier", "inherited-effort", "native-null-effort",
+  "native-canary", "native-canary-deactivate", "missing-provider", "missing-effort", "missing-tier",
+  "saved-capitalized", "no-item", "later-turn", "nonterminal", "foreign-server", "foreign-turn",
+  "wrong-run", "wrong-session", "unavailable", "manual", "manual-effort", "manual-tier",
+  "observed-provider-change", "late-manual", "deactivate", "failed-deactivate",
+])
+test(`App Server restores the original native settings at turn end: ${scenario}`, async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let upstreamSocket;
+  const connected = new Promise(resolveConnection => upstream.once("connection", socket => {
+    upstreamSocket = socket;
+    resolveConnection();
+  }));
+  const route = {
+    session_id: "thread-immediate", root_session_id: "thread-immediate", client_id: "client-immediate",
+    run_id: "run-immediate", run_session_id: "run-session-immediate", state: "implement",
+    model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "default",
+  };
+  // Production routes can be bare model IDs and leave the native tier alone.
+  // Keep these inputs distinct from the actual provider-qualified observation.
+  if (["bare-model", "native-canary", "native-canary-deactivate", "missing-provider"].includes(scenario)) route.model = "gpt-5.6-terra";
+  if (["inherited-tier", "native-canary", "native-canary-deactivate"].includes(scenario)) delete route.service_tier;
+  if (["inherited-effort", "native-null-effort"].includes(scenario)) delete route.effort;
+  const actualTier = route.service_tier ?? "priority";
+  const actualEffort = scenario === "native-null-effort" ? null : "medium";
+  const originalEffort = scenario.startsWith("native-canary") || scenario === "native-null-effort" ? "high" : null;
+  const deactivation = ["deactivate", "native-canary-deactivate", "failed-deactivate", "foreign-server"].includes(scenario);
+  const originStore = new WorkflowRouteOriginStore();
+  let pending = route;
+  let state = { ...route, thinking_level: route.effort, is_final: false };
+  const injected = [], confirmed = [], errors = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    workflowOriginStore: originStore,
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    approvalService: {
+      getState: async () => { if (state === "unavailable") throw new Error("fixture gateway unavailable"); return state; },
+      restore: async () => null,
+    },
+    takePendingRoute: async () => {
+      if (!pending) return null;
+      const selected = pending;
+      pending = null;
+      return { route: selected, ack: async () => {} };
+    },
+    routeOwner: async () => ({ root_session_id: route.root_session_id, client_id: route.client_id }),
+    onRouteInjected: async receipt => injected.push(receipt),
+    onRouteConfirmed: async receipt => confirmed.push(receipt),
+    onProtocolError: async error => errors.push(error),
+  });
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    const receive = async label => JSON.parse(String(await Promise.race([
+      once(upstreamSocket, "message"),
+      new Promise((_, rejectTimeout) => setTimeout(() => rejectTimeout(new Error(`timed out waiting for ${label}`)), 500)),
+    ])));
+    client.send(JSON.stringify({ id: 1, method: "thread/start", params: {} }));
+    assert.equal((await receive("thread/start")).method, "thread/start");
+    upstreamSocket.send(JSON.stringify({ id: 1, result: {
+      thread: { id: route.session_id }, modelProvider: "openai", model: "gpt-5.6-sol",
+      reasoningEffort: originalEffort, serviceTier: "priority",
+    } }));
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
+
+    client.send(JSON.stringify({ id: 2, method: "turn/start", params: {
+      threadId: route.session_id, input: [], model: "gpt-5.6-sol",
+    } }));
+    const routed = await receive("routed turn").catch(error => {
+      assert.fail(`${error.message}; protocol=${JSON.stringify(errors)}`);
+    });
+    assert.equal(routed.params.model, "gpt-5.6-terra");
+    upstreamSocket.send(JSON.stringify({ id: 2, result: { turn: { id: "turn-immediate" } } }));
+    const nativeSettings = {
+        model: "gpt-5.6-terra", modelProvider: "openai", effort: actualEffort, serviceTier: actualTier,
+        collaborationMode: {
+          mode: "default",
+          settings: { model: "gpt-5.6-terra", reasoning_effort: actualEffort, developer_instructions: "keep this" },
+        },
+    };
+    if (scenario === "missing-provider") delete nativeSettings.modelProvider;
+    if (scenario === "missing-effort") delete nativeSettings.effort;
+    if (scenario === "missing-tier") delete nativeSettings.serviceTier;
+    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
+      threadId: route.session_id, threadSettings: nativeSettings,
+    } }));
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
+
+    let ownedTurnId = "turn-immediate";
+    if (scenario.startsWith("missing-")) {
+      assert.equal(confirmed.at(-1)?.confirmed, false, "missing native evidence is not confirmation");
+      if (scenario === "missing-provider") assert.equal(confirmed.at(-1).reason, "confirmed_route_provider_unknown");
+      const retained = await originStore.inspect(route.session_id);
+      assert.equal(retained.status, "captured");
+      assert.equal(retained.routed, null, "never manufacture a confirmed route from requested settings");
+      return;
+    }
+    assert.equal(confirmed.at(-1)?.confirmed, true);
+    assert.deepEqual((await originStore.inspect(route.session_id)).routed, {
+      model: "openai-codex/gpt-5.6-terra", effort: actualEffort, service_tier: actualTier,
+    }, "persist the settings-confirmed native route, not the requested route");
+    if (scenario === "later-turn") {
+      upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+        turn: {id: ownedTurnId, status: "completed", items: []}}}));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      client.send(JSON.stringify({id: 4, method: "turn/start", params: {
+        threadId: route.session_id, model: "gpt-5.6-terra", effort: "medium", input: [],
+      }}));
+      assert.equal((await receive("later native turn without route marker").catch(error => {
+        assert.fail(`${error.message}; protocol=${JSON.stringify(errors)}`);
+      })).method, "turn/start");
+      ownedTurnId = "turn-later";
+      upstreamSocket.send(JSON.stringify({id: 4, result: {turn: {id: ownedTurnId}}}));
+    }
+    state = { ...state, state: "complete", is_final: true };
+    if (scenario === "nonterminal") state = {...state, state: "validate", is_final: false};
+    if (deactivation) state = null;
+    if (scenario === "wrong-run") state = {...state, run_id: "another-run"};
+    if (scenario === "wrong-session") state = {...state, run_session_id: "another-session"};
+    if (scenario === "unavailable") state = "unavailable";
+    if (["manual", "manual-effort", "manual-tier"].includes(scenario)) {
+      const change = scenario === "manual-effort" ? {effort: "high"}
+        : scenario === "manual-tier" ? {serviceTier: "flex"} : {model: "gpt-6-astra", effort: "high"};
+      client.send(JSON.stringify({id: 3, method: "thread/settings/update", params: {
+        threadId: route.session_id, ...change,
+      }}));
+      assert.equal((await receive("manual settings")).method, "thread/settings/update");
+      upstreamSocket.send(JSON.stringify({id: 3, result: {}}));
+      upstreamSocket.send(JSON.stringify({method: "thread/settings/updated", params: {
+        threadId: route.session_id, threadSettings: {...nativeSettings, ...change},
+      }}));
+    }
+    if (scenario === "observed-provider-change") upstreamSocket.send(JSON.stringify({
+      method: "thread/settings/updated", params: {threadId: route.session_id,
+        threadSettings: {...nativeSettings, modelProvider: "other-provider"}},
+    }));
+    if (scenario === "snapshot") upstreamSocket.send(JSON.stringify({ method: "item/started", params: {
+      threadId: route.session_id, turnId: "turn-immediate", item: {
+        id: "terminal-item", type: "mcpToolCall", status: "inProgress", server: "statewright",
+        tool: "statewright_transition",
+      },
+    } }));
+    const result = scenario === "snapshot" ? {state_snapshot: state}
+      : deactivation ? {deactivated: true}
+      : {transitioned: true, from: "implement", to: "complete", requires_approval: false,
+          approval_message: null, transition_count: 1, usage: null};
+    const completedTurnId = scenario === "foreign-turn" ? "unseen-turn" : ownedTurnId;
+    if (scenario !== "no-item") upstreamSocket.send(JSON.stringify({ method: "item/completed", params: {
+      threadId: route.session_id, turnId: completedTurnId, item: {
+        id: "terminal-item", type: scenario === "saved-capitalized" ? "McpToolCall" : "mcpToolCall",
+        status: scenario === "failed-deactivate" ? "failed" : "completed",
+        server: scenario === "foreign-server" ? "other-server" : "statewright",
+        tool: deactivation ? "statewright_deactivate" : "statewright_transition",
+        result: {structuredContent: result},
+      },
+    } }));
+    upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+      turn: {id: completedTurnId, status: "completed", items: []}}}));
+    if (["nonterminal", "foreign-server", "foreign-turn", "wrong-run", "wrong-session", "unavailable", "manual", "manual-effort", "manual-tier", "observed-provider-change", "failed-deactivate"].includes(scenario)) {
+      const unexpected = [];
+      const record = raw => unexpected.push(JSON.parse(String(raw)));
+      upstreamSocket.on("message", record);
+      await new Promise(resolve => setTimeout(resolve, 75));
+      upstreamSocket.off("message", record);
+      assert(!unexpected.some(request => request.method === "thread/settings/update"), JSON.stringify(unexpected));
+      assert(!injected.some(receipt => receipt.route?.restored_original));
+      if (["wrong-run", "wrong-session", "unavailable"].includes(scenario)) {
+        assert(errors.some(error => /authoritative final run|fixture gateway unavailable/.test(error.message)), JSON.stringify(errors));
+      }
+      return;
+    }
+    let restoration = null;
+    for (let attempt = 0; attempt < 20 && !restoration; attempt++) {
+      const request = await receive("terminal restoration activity");
+      if (request.method === "thread/read") {
+        upstreamSocket.send(JSON.stringify({ id: request.id, result: {
+          thread: { id: route.session_id, status: { type: "idle" } },
+        } }));
+      } else if (request.method === "thread/settings/update") restoration = request;
+    }
+    assert.ok(restoration, `terminal restoration request missing: ${JSON.stringify(errors)}`);
+    assert.equal(restoration.method, "thread/settings/update");
+    assert.deepEqual(restoration.params, {
+      threadId: route.session_id, model: "gpt-5.6-sol", effort: originalEffort, serviceTier: "priority",
+      collaborationMode: {
+        mode: "default",
+        settings: { model: "gpt-5.6-sol", reasoning_effort: originalEffort, developer_instructions: "keep this" },
+      },
+    });
+    upstreamSocket.send(JSON.stringify({ id: restoration.id, result: {} }));
+    if (scenario === "late-manual") {
+      client.send(JSON.stringify({id: 8, method: "thread/settings/update", params: {
+        threadId: route.session_id, model: "gpt-6-astra", effort: "high",
+      }}));
+      assert.equal((await receive("new manual settings during restore confirmation")).method, "thread/settings/update");
+      upstreamSocket.send(JSON.stringify({id: 8, result: {}}));
+    }
+    upstreamSocket.send(JSON.stringify({ method: "thread/settings/updated", params: {
+      threadId: route.session_id, threadSettings: {
+        model: "gpt-5.6-sol", modelProvider: "openai", effort: originalEffort, serviceTier: "priority",
+        collaborationMode: {
+          mode: "default",
+          settings: { model: "gpt-5.6-sol", reasoning_effort: originalEffort, developer_instructions: "keep this" },
+        },
+      },
+    } }));
+    for (let attempt = 0; attempt < 50 && confirmed.length < 2; attempt++) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
+    }
+    if (scenario === "late-manual") {
+      assert.equal(confirmed.at(-1).confirmed, false);
+      assert.equal(confirmed.at(-1).reason, "restoration_owner_changed");
+      return;
+    }
+    assert.equal(injected.at(-1).route.restored_original, true);
+    assert.equal(confirmed.at(-1).confirmed, true);
+    assert.deepEqual(errors, []);
+    const restoredCount = confirmed.length;
+    upstreamSocket.send(JSON.stringify({method: "turn/completed", params: {threadId: route.session_id,
+      turn: {id: completedTurnId, status: "completed", items: []}}}));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(confirmed.length, restoredCount, "a replay cannot consume restoration twice");
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise(resolveClose => upstream.close(resolveClose));
+  }
+});
+
+for (const scenario of ["final", "pending-inactive", "partial-inactive", "paused", "manual", "wrong-run", "unavailable", "unknown-effort"])
+test(`App Server reconciles a persisted origin on resume: ${scenario}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-origin-resume-"));
+  const binding = {thread_id: "thread-resume", root_session_id: "thread-resume", client_id: "client-resume",
+    run_id: "run-resume", run_session_id: "session-resume"};
+  const origin = {model: "openai-codex/gpt-5.6-sol", effort: null, service_tier: "priority"};
+  const routed = {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"};
+  const first = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+  await first.capture(binding, origin);
+  await first.confirmRoute(binding, routed);
+  if (["pending-inactive", "partial-inactive", "manual"].includes(scenario)) await first.prepareRestore(binding, routed);
+  if (scenario === "manual") await first.relinquish(binding.thread_id, ["model"], {model: origin.model});
+  const store = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+  const state = ["pending-inactive", "partial-inactive", "paused", "manual"].includes(scenario) ? null
+    : {run_id: scenario === "wrong-run" ? "foreign-run" : binding.run_id,
+        run_session_id: binding.run_session_id, state: "complete", is_final: true};
+  const upstream = new WebSocketServer({host: "127.0.0.1", port: 0});
+  await once(upstream, "listening");
+  const requests = [], confirmed = [], errors = [];
+  upstream.on("connection", socket => socket.on("message", raw => {
+    const request = JSON.parse(String(raw));
+    requests.push(request);
+    let result = {};
+    if (request.method === "thread/resume") result = {thread: {id: binding.thread_id}, modelProvider: "openai",
+      model: ["partial-inactive", "manual"].includes(scenario) ? "gpt-5.6-sol" : "gpt-5.6-terra",
+      ...(scenario === "unknown-effort" ? {} : {reasoningEffort: "medium"}), serviceTier: "priority"};
+    if (request.method === "thread/read") result = {thread: {id: binding.thread_id, status: {type: "idle"}}};
+    socket.send(JSON.stringify({id: request.id, result}));
+    if (request.method === "thread/settings/update") socket.send(JSON.stringify({method: "thread/settings/updated",
+      params: {threadId: binding.thread_id, threadSettings: {model: request.params.model,
+        modelProvider: "openai", effort: request.params.effort, serviceTier: request.params.serviceTier}}}));
+  }));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`, workflowOriginStore: store,
+    approvalService: {restore: async () => null, getState: async () => {
+      if (scenario === "unavailable") throw new Error("fixture gateway unavailable");
+      return state;
+    }},
+    onRouteConfirmed: async receipt => confirmed.push(receipt), onProtocolError: async error => errors.push(error),
+  });
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  try {
+    client.send(JSON.stringify({id: 1, method: "thread/resume", params: {threadId: binding.thread_id}}));
+    const response = JSON.parse(String(await once(client, "message")));
+    assert(!response.error);
+    const restores = () => requests.filter(request => request.method === "thread/settings/update");
+    if (["final", "pending-inactive", "partial-inactive"].includes(scenario)) {
+      for (let attempt = 0; attempt < 100 && !confirmed.length; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal(confirmed.length, 1, JSON.stringify(errors));
+      assert.equal(confirmed[0].confirmed, true);
+      assert.equal(restores().length, 1);
+      assert.equal(restores()[0].params.model, "gpt-5.6-sol");
+      assert(Object.hasOwn(restores()[0].params, "effort"));
+      assert.equal(restores()[0].params.effort, null);
+      assert.equal(await store.inspect(binding.thread_id), null);
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      assert.equal(restores().length, 0, JSON.stringify(errors));
+      assert.equal(Boolean(await store.inspect(binding.thread_id)), scenario !== "manual");
+    }
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise(resolve => upstream.close(resolve));
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
+test("a terminal marker without matching provenance is a receipt-backed no-op", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let upstreamSocket;
+  const connected = new Promise(resolveConnection => upstream.once("connection", socket => {
+    upstreamSocket = socket;
+    resolveConnection();
+  }));
+  let pending = {
+    session_id: "thread-missing-origin", root_session_id: "thread-missing-origin", client_id: "client-missing-origin",
+    run_id: "run-missing-origin", state: "complete", restore_original: true,
+  };
+  const injected = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    takePendingRoute: async () => {
+      if (!pending) return null;
+      const selected = pending;
+      pending = null;
+      return { route: selected, ack: async () => {} };
+    },
+    routeOwner: async () => ({ root_session_id: "thread-missing-origin", client_id: "client-missing-origin" }),
+    onRouteInjected: async receipt => injected.push(receipt),
+  });
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await connected;
+  try {
+    const forwarded = new Promise(resolveMessage => upstreamSocket.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 1, method: "turn/start", params: {
+      threadId: "thread-missing-origin", model: "gpt-6-astra", effort: "high", input: [],
+    } }));
+    const request = await forwarded;
+    assert.equal(request.params.model, "gpt-6-astra");
+    assert.equal(request.params.effort, "high");
+    assert.deepEqual(injected[0].restoration, { status: "skipped", reason: "missing_provenance" });
+  } finally {
+    client.terminate();
+    await proxy.close();
+    for (const socket of upstream.clients) socket.terminate();
+    await new Promise(resolveClose => upstream.close(resolveClose));
+  }
+});
+
 test("App Server routing synchronizes Desktop collaboration mode without crossing threads", () => {
   const request = {
     id: 13,
@@ -655,6 +1321,191 @@ test("Codex rollout metadata provides each session's launch checkout", async () 
     await writeFile(history, JSON.stringify({session_id: sessionId, ts: 2, text: "Please use statewright_get_state"}) + "\n{partial", {flag: "a"});
     assert.equal((await read())[sessionId].lastUserMessage, "Please use statewright_get_state", "cached cwd must not freeze the latest submitted input");
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Codex rollout metadata restores the latest effective resume permissions", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-permissions-"));
+  try {
+    const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+    const sessions = join(home, ".codex", "sessions", "2026", "09", "02");
+    await mkdir(sessions, { recursive: true });
+    const records = [
+      { type: "session_meta", payload: { id: sessionId, cwd: "/workspace/original" } },
+      { type: "turn_context", payload: { approval_policy: "on-request", approvals_reviewer: "user", sandbox_policy: { type: "read-only" }, cwd: "/workspace/original", workspace_roots: ["/workspace/original"] } },
+      { type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: { approval_policy: "never", approvals_reviewer: "user", permission_profile: { type: "disabled" }, cwd: "/workspace/current", runtime_workspace_roots: ["/workspace/current", "/workspace/shared"] } } },
+    ];
+    await writeFile(join(sessions, `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`), `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      cwd: "/workspace/current",
+      runtimeWorkspaceRoots: ["/workspace/current", "/workspace/shared"],
+      sandbox: "danger-full-access",
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Codex rollout permission restore uses named profiles and rejects lossy legacy projection", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-profile-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  const path = join(home, ".codex", "sessions", "2026", "09", "02", `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`);
+  try {
+    await mkdir(join(path, ".."), { recursive: true });
+    const write = settings => writeFile(path, `${JSON.stringify({ type: "session_meta", payload: { id: sessionId, cwd: "/workspace/project" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: settings } })}\n`);
+    await write({ approval_policy: "on-request", active_permission_profile: { id: ":workspace" }, permission_profile: { type: "managed" }, cwd: "/workspace/project" });
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", cwd: "/workspace/project", permissions: ":workspace",
+    });
+    await write({ approval_policy: "on-request", permission_profile: { type: "managed", network: "restricted", file_system: { type: "restricted", entries: [] } }, sandbox_policy: { type: "workspace-write" }, cwd: "/workspace/project" });
+    await assert.rejects(readCodexResumePermissions({ home, threadId: sessionId }), /cannot losslessly restore this legacy Codex permission profile/);
+    await write({ approval_policy: "on-request", sandbox_policy: { type: "external-sandbox", network_access: true }, cwd: "/workspace/project" });
+    await assert.rejects(readCodexResumePermissions({ home, threadId: sessionId }), /cannot losslessly restore this legacy Codex permission profile/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("restored resume permissions fill only omitted native request fields", () => {
+  const request = { id: 4, method: "thread/resume", params: {
+    threadId: "thread-1", approvalPolicy: null, approvalsReviewer: null,
+    permissions: null, sandbox: null, cwd: null, runtimeWorkspaceRoots: null,
+  } };
+  assert.deepEqual(applyRestoredResumePermissions(request, {
+    approvalPolicy: "never",
+    approvalsReviewer: "user",
+    sandbox: "danger-full-access",
+    cwd: "/workspace/project",
+    runtimeWorkspaceRoots: ["/workspace/project"],
+  }), {
+    id: 4,
+    method: "thread/resume",
+    params: {
+      threadId: "thread-1",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: null,
+      sandbox: "danger-full-access",
+      cwd: "/workspace/project",
+      runtimeWorkspaceRoots: ["/workspace/project"],
+    },
+  });
+  assert.deepEqual(applyRestoredResumePermissions({
+    id: 5, method: "thread/resume", params: {
+      threadId: "thread-1", approvalPolicy: "on-request", permissions: ":read-only",
+      sandbox: null, cwd: "/workspace/new", runtimeWorkspaceRoots: null,
+    },
+  }, {
+    approvalPolicy: "never", permissions: ":workspace", sandbox: "danger-full-access",
+    cwd: "/workspace/old", runtimeWorkspaceRoots: ["/workspace/old"],
+  }).params, {
+    threadId: "thread-1", approvalPolicy: "on-request", permissions: ":read-only",
+    sandbox: null, cwd: "/workspace/new", runtimeWorkspaceRoots: null,
+  });
+  assert.deepEqual(applyRestoredResumePermissions({
+    id: 6, method: "thread/resume", params: { threadId: "thread-1", permissions: null, sandbox: "read-only" },
+  }, { permissions: ":workspace" }).params, {
+    threadId: "thread-1", permissions: null, sandbox: "read-only",
+  });
+  const other = { id: 5, method: "thread/read", params: { threadId: "thread-1" } };
+  assert.equal(applyRestoredResumePermissions(other, { sandbox: "read-only" }), other);
+});
+
+test("explicit Yolo resume permissions override saved settings only for the bound thread", async () => {
+  const source = { id: 1, method: "thread/resume", params: { threadId: "thread-yolo", approvalPolicy: "on-request", permissions: ":read-only" } };
+  assert.deepEqual(applyExplicitYoloResumePermissions(source, "thread-yolo").params, {
+    threadId: "thread-yolo", approvalPolicy: "never", permissions: null, sandbox: "danger-full-access",
+  });
+  assert.equal(source.params.approvalPolicy, "on-request", "the native input remains unchanged");
+  assert.throws(() => applyExplicitYoloResumePermissions(source, "foreign-thread"), /different thread/);
+  assert.equal(applyExplicitYoloResumePermissions({ method: "thread/start", params: {} }, "thread-yolo").params.sandbox,
+    "danger-full-access", "the original global CLI flag applies to new threads in this TUI");
+
+  const upstream = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await once(upstream, "listening");
+  const connected = new Promise(resolveConnection => upstream.once("connection", resolveConnection));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    compactResume: false,
+    resolveResumePermissions: async () => { throw new Error("saved profile is unrepresentable"); },
+  });
+  const client = new WebSocket(`${proxy.url}/?statewright_resume_yolo_thread=thread-yolo`);
+  try {
+    await once(client, "open");
+    const upstreamSocket = await connected;
+    const forwarded = new Promise(resolveMessage => upstreamSocket.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+    client.send(JSON.stringify({ id: 2, method: "thread/resume", params: { threadId: "thread-yolo" } }));
+    assert.deepEqual((await forwarded).params, {
+      threadId: "thread-yolo", approvalPolicy: "never", permissions: null, sandbox: "danger-full-access",
+    });
+  } finally {
+    client.terminate();
+    await proxy.close();
+    await new Promise(resolveClose => upstream.close(resolveClose));
+  }
+});
+
+test("Codex resume location ignores copied parent turn contexts", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-rollout-fork-location-"));
+  const sessionId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  const path = join(home, ".codex", "sessions", "2026", "09", "02", `rollout-2026-09-02T11-39-20-${sessionId}.jsonl`);
+  try {
+    await mkdir(join(path, ".."), { recursive: true });
+    const records = [
+      { type: "session_meta", payload: { id: sessionId, cwd: "/workspace/child", runtime_workspace_roots: ["/workspace/child"] } },
+      { type: "turn_context", payload: { approval_policy: "on-request", sandbox_policy: { type: "read-only" }, cwd: "/workspace/parent", workspace_roots: ["/workspace/parent"] } },
+    ];
+    await writeFile(path, `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", sandbox: "read-only", cwd: "/workspace/child",
+      runtimeWorkspaceRoots: ["/workspace/child"],
+    });
+    records.push(
+      { type: "event_msg", payload: { type: "thread_settings_applied", thread_id: sessionId, thread_settings: { approval_policy: "never", permission_profile: { type: "disabled" }, cwd: "/workspace/child-next", runtime_workspace_roots: ["/workspace/child-next"] } } },
+      { type: "turn_context", payload: { approval_policy: "on-request", sandbox_policy: { type: "read-only" }, cwd: "/workspace/parent-next", workspace_roots: ["/workspace/parent-next"] } },
+    );
+    await writeFile(path, `${records.map(JSON.stringify).join("\n")}\n`);
+    assert.deepEqual(await readCodexResumePermissions({ home, threadId: sessionId }), {
+      approvalPolicy: "on-request", sandbox: "read-only", cwd: "/workspace/child-next",
+      runtimeWorkspaceRoots: ["/workspace/child-next"],
+    });
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("App Server proxy restores saved permissions before forwarding resume", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  let socket;
+  const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    resolveResumePermissions: async threadId => {
+      assert.equal(threadId, "historical-thread");
+      return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" };
+    },
+  });
+  const client = new WebSocket(proxy.url);
+  try {
+    await once(client, "open");
+    await connected;
+    const forwarded = once(socket, "message");
+    client.send(JSON.stringify({ id: 1, method: "thread/resume", params: {
+      threadId: "historical-thread", approvalPolicy: null, approvalsReviewer: null,
+      permissions: null, sandbox: null, cwd: null, runtimeWorkspaceRoots: null,
+    } }));
+    assert.deepEqual(JSON.parse(String(await forwarded)).params, {
+      threadId: "historical-thread",
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      permissions: null,
+      sandbox: "danger-full-access",
+      cwd: null,
+      runtimeWorkspaceRoots: null,
+      excludeTurns: true,
+      initialTurnsPage: { limit: 4, sortDirection: "desc", itemsView: "summary" },
+    });
+  } finally {
+    client.close();
+    await proxy.close();
+    await new Promise(resolve => upstream.close(resolve));
+  }
 });
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {
@@ -1145,14 +1996,16 @@ test("App Server route proxy switches an idle OpenAI thread to Casa Qwen before 
     const unsubscribe = new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-qwen", input: [] } }));
     assert.equal(resumeRequest.method, "thread/resume");
-    assert.deepEqual(await unsubscribe, { jsonrpc: "2.0", id: "statewright-provider-switch-1", method: "thread/unsubscribe", params: { threadId: "thread-qwen" } });
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
+    const unsubscribeRequest = await unsubscribe;
+    assert.match(unsubscribeRequest.id, /^statewright-internal:[a-f0-9-]+:1$/);
+    assert.deepEqual(unsubscribeRequest, { jsonrpc: "2.0", id: unsubscribeRequest.id, method: "thread/unsubscribe", params: { threadId: "thread-qwen" } });
+    socket.send(JSON.stringify({ id: unsubscribeRequest.id, result: {} }));
     const localResume = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     assert.equal(localResume.method, "thread/resume");
     assert.equal(localResume.params.modelProvider, "qwen_private");
     assert.equal(localResume.params.model, "qwen3.8-27b");
     assert.equal(localResume.params.config["model_providers.qwen_private"].wire_api, "responses");
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "qwen_private", model: "qwen3.8-27b", thread: { id: "thread-qwen" } } }));
+    socket.send(JSON.stringify({ id: localResume.id, result: { modelProvider: "qwen_private", model: "qwen3.8-27b", thread: { id: "thread-qwen" } } }));
     const routedTurn = await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     assert.equal(routedTurn.method, "turn/start");
     assert.equal(routedTurn.params.model, "qwen3.8-27b");
@@ -1184,12 +2037,12 @@ test("App Server route rejection keeps the native connection usable", async () =
     await once(client, "message");
     const reply = new Promise((resolveMessage) => client.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
     client.send(JSON.stringify({ id: 2, method: "turn/start", params: { threadId: "thread-retry", input: [] } }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-1", result: {} }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-2", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
-    await new Promise((resolveMessage) => socket.once("message", (raw) => resolveMessage(JSON.parse(String(raw)))));
-    socket.send(JSON.stringify({ id: "statewright-provider-switch-3", result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    const unsubscribe = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: unsubscribe.id, result: {} }));
+    const switched = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: switched.id, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
+    const restored = JSON.parse(String(await once(socket, "message")));
+    socket.send(JSON.stringify({ id: restored.id, result: { modelProvider: "openai", model: "gpt-5.6-terra", thread: { id: "thread-retry" } } }));
     const rejected = await reply;
     assert.equal(rejected.id, 2);
     assert.match(rejected.error.message, /route was not applied/i);
@@ -1453,7 +2306,8 @@ test("Desktop MCP readiness gate holds turn/start until Statewright tools are vi
     if (message.method !== "mcpServerStatus/list") return;
     statusCalls += 1;
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {
-      data: [{ name: "statewright", tools: statusCalls >= 2 ? { statewright_get_state: {} } : {} }],
+      data: [{ name: "statewright", tools: statusCalls >= 2 ? { statewright_get_state: {} } : {} },
+        { name: "unrelated", tools: { statewright_get_state: {} } }],
       nextCursor: null,
     } }));
   }));
@@ -1472,6 +2326,8 @@ test("Desktop MCP readiness gate holds turn/start until Statewright tools are vi
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.equal(statusCalls, 2);
+    assert.ok(forwarded.filter(message => message.method === "mcpServerStatus/list")
+      .every(message => message.params.serverName === "statewright" && message.params.detail === "toolsAndAuthOnly"));
     assert.deepEqual(forwarded.map(message => message.method), ["mcpServerStatus/list", "mcpServerStatus/list", "turn/start"]);
   } finally {
     client.close();

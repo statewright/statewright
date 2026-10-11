@@ -46,7 +46,8 @@ for (const scenario of ["hosted", "hosted-notification-first", "hosted-streaming
         send({id: req.id, result: {thread: {id: "t1"}, modelProvider: "another-provider", model: "previous-model"}});
       });
     });
-    let route = {session_id: "t1", run_id: "run1", state: "intake", model: "openai-codex/gpt-6-astra", effort: "high"};
+    let route = {session_id: "t1", root_session_id: "t1", client_id: "client1",
+      run_id: "run1", state: "intake", model: "openai-codex/gpt-6-astra", effort: "high"};
     const proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
       onHandoffStatus: event => statuses.push(event),
       takePendingRoute: async () => {const next = route; route = null; return next;}});

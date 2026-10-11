@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { WebSocketServer } from "ws";
-import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
+import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopClassifierState, desktopProfileEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge, startProfileDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
 import { adoptCodexRootSession, claimCodexRootSession, readCodexRootSession, resetCodexRootSession } from "../lib/managed-client-identity.mjs";
 
 function fakeMcpBridge(onClose = () => {}) {
@@ -16,6 +16,57 @@ function fakeMcpBridge(onClose = () => {}) {
     close: async () => onClose(),
   });
 }
+
+test("Desktop profile binds gateway and keyring independently of inherited shell credentials", async () => {
+  const home = await mkdtemp(join(tmpdir(), "desktop-keyring-profile-"));
+  try {
+    await mkdir(join(home, ".statewright"));
+    await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({ gateways: { staging: { gateway_url: "https://stage.example/mcp", auth_url: "https://stage-auth.example" } } }));
+    for (const gateway of ["https://mcp.statewright.ai", "https://stage.example", "https://dev.example"]) {
+      const state = { gateway_url: gateway, client_id: "swc_0123456789abcdef0123456789abcdef" };
+      const inherited = { STATEWRIGHT_API_KEY: "foreign-key", STATEWRIGHT_ENV: "unconfigured", STATEWRIGHT_GATEWAY_URL: "https://foreign.example", STATEWRIGHT_PB_URL: "https://foreign-auth.example", PATH: "/usr/bin" };
+      const selected = await desktopProfileEnvironment(state, inherited, home);
+      assert.equal(selected.STATEWRIGHT_API_KEY, undefined);
+      assert.equal(selected.STATEWRIGHT_ENV, undefined);
+      assert.equal(selected.STATEWRIGHT_GATEWAY_URL, `${gateway}/mcp`);
+      assert.notEqual(selected.STATEWRIGHT_PB_URL, inherited.STATEWRIGHT_PB_URL);
+      if (gateway === "https://stage.example") assert.equal(selected.STATEWRIGHT_PB_URL, "https://stage-auth.example");
+      let lookups = 0;
+      const result = await startProfileDesktopMcpBridge({ state, environment: inherited, home,
+        getCredential: async (requested, options) => {
+          lookups++;
+          assert.equal(requested, `${gateway}/mcp`);
+          assert.equal(options.environment.STATEWRIGHT_API_KEY, undefined);
+          return "selected-fixture-key";
+        },
+        startBridge: async ({ environment, clientId }) => {
+          assert.equal(environment.STATEWRIGHT_API_KEY, "selected-fixture-key");
+          assert.equal(environment.STATEWRIGHT_GATEWAY_URL, `${gateway}/mcp`);
+          assert.equal(clientId, state.client_id);
+          return "started";
+        },
+      });
+      assert.equal(result, "started");
+      assert.equal(lookups, 1);
+      assert.equal(inherited.STATEWRIGHT_API_KEY, "foreign-key");
+    }
+    await assert.rejects(desktopProfileEnvironment({}, {}, home), /no gateway/);
+    await assert.rejects(desktopProfileEnvironment({ gateway_url: "https://user:secret@stage.example" }, {}, home));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Desktop keyring absence or failure never falls back to inherited keys or starts an auth flow", async () => {
+  for (const code of ["CREDENTIAL_MISSING", "CREDENTIAL_STORE_UNAVAILABLE", "CREDENTIAL_HELPER_TIMEOUT"]) {
+    let starts = 0;
+    await assert.rejects(startProfileDesktopMcpBridge({
+      state: { gateway_url: "https://stage.example", client_id: "fixture" }, home: "/nonexistent-desktop-fixture",
+      environment: { STATEWRIGHT_API_KEY: "wrong-gateway" },
+      getCredential: async () => { throw Object.assign(new Error(code), { code }); },
+      startBridge: async () => { starts++; },
+    }), { code });
+    assert.equal(starts, 0);
+  }
+});
 
 test("Desktop broker is explicit, app-server-only, isolated, and client scoped", () => {
   const environment = {
@@ -42,6 +93,8 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
     STATEWRIGHT_MANAGED_MCP_SESSION_ID: "parent-managed-session", STATEWRIGHT_MANAGED_TELEMETRY_OWNER: "supervisor",
     STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID: "parent-root", STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:2000",
     STATEWRIGHT_ADAPTER_TOKEN: "adapter-token", CODEX_SESSION_ID: "parent-writer", CODEX_THREAD_ID: "parent-thread",
+    LOCAL_MODELS_RUN_DIR: "/tmp/foreign-local-models-run",
+    STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/tmp/foreign-receipt.json",
   }, { controlDir: "/tmp/desktop-control", clientId: "swc_0123456789abcdef0123456789abcdef" });
   assert.equal(child.STATEWRIGHT_API_KEY, "keep-user-auth");
   assert.equal(child.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
@@ -50,7 +103,8 @@ test("Desktop broker strips parent workflow bridge and writer identity", () => {
     "STATEWRIGHT_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_URL", "STATEWRIGHT_MANAGED_MCP_TOKEN",
     "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_TELEMETRY_OWNER",
     "STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
-    "CODEX_SESSION_ID", "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
+    "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
   ]) assert.equal(child[name], undefined, `${name} must not escape the parent session`);
 });
 
@@ -70,6 +124,53 @@ test("Desktop bridge owns gateway authentication outside the App Server sandbox"
   });
   assert.equal(started, 1);
   assert.ok(bridge);
+});
+
+test("Desktop canonical MCP profile delivers live usage to the gateway API base", async t => {
+  const home = await mkdtemp(join(tmpdir(), "desktop-usage-endpoint-"));
+  t.after(() => rm(home, {recursive: true, force: true}));
+  await mkdir(join(home, ".statewright"));
+  await writeFile(join(home, ".statewright", "environments.json"), JSON.stringify({gateways: {
+    staging: {gateway_url: "https://gateway.test/prefix/mcp", auth_url: "https://site.test"},
+  }}));
+  let service;
+  await startProfileDesktopMcpBridge({home, state: {gateway_url: "https://gateway.test/prefix/mcp", client_id: "lane"},
+    environment: {}, getCredential: async () => "fixture-key",
+    startBridge: options => startDesktopMcpBridge({...options, bridgeFactory: config => {
+      service = config.nativeUsage; return {start: async () => {}};
+    }}),
+  });
+  assert.equal(service.gatewayUrl, "https://gateway.test/prefix");
+  const urls = [];
+  service.fetchImpl = async (url, options) => {
+    urls.push(url);
+    const body = JSON.parse(options.body);
+    return url.endsWith("/api/runtime-usage") ? new Response(null, {status: 204})
+      : Response.json({accepted_event_ids: body.events.map(e => e.event_id)});
+  };
+  service.outbox.appendUsage({event_id: "endpoint-fixture", conversation_id: "thread", provider: "openai",
+    model: "gpt-6-sol", effort: "high", precision: "exact", token_usage_delta: {total_tokens: 1}},
+  {run_id: "run", run_session_id: "session", state: "baseline", state_epoch: 1});
+  await service.flush();
+  assert.ok(urls.includes("https://gateway.test/prefix/api/runtime-usage"));
+});
+
+test("Desktop classifier state uses only the selected authenticated bridge", async () => {
+  let observed;
+  const state = { run_id: "run-one", state: "implement", state_epoch: 2 };
+  assert.deepEqual(await desktopClassifierState({
+    bridge: { url: "http://127.0.0.1:43123", token: "desktop-token" },
+    clientId: "swc_0123456789abcdef0123456789abcdef",
+    fetchImpl: async (url, options) => {
+      observed = { url, options, body: JSON.parse(options.body) };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: "fixture",
+        result: { structuredContent: state } }));
+    },
+  }), state);
+  assert.equal(observed.url, "http://127.0.0.1:43123/mcp");
+  assert.equal(observed.options.headers.Authorization, "Bearer desktop-token");
+  assert.equal(observed.options.headers["X-Statewright-Client-Id"], "swc_0123456789abcdef0123456789abcdef");
+  assert.equal(observed.body.params.name, "statewright_get_state");
 });
 
 test("Desktop broker buffers an immediate stdio request and initializes its private route boundary", async () => {
@@ -122,8 +223,13 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
         assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43123");
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "desktop-bridge-token");
+        assert.equal(options.environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,
+          join(controlDir, "..", "manifest.json"));
+        assert.equal(typeof options.classifierApprovalService.getState, "function");
+        assert.equal(typeof options.classifierApprovalService.ownsThread, "function");
         await options.onThreadStarted({ threadId: "desktop-thread" });
-        return { proxyUrl: `ws://127.0.0.1:${address.port}`, close: async () => { closed += 1; } };
+        return { proxyUrl: `ws://127.0.0.1:${address.port}`, proxyToken: "classifier-token",
+          close: async () => { closed += 1; } };
       },
     });
     stdin.write('{"id":1,"method":"initialize","params":{}}\n');
@@ -134,6 +240,9 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
     assert.deepEqual(JSON.parse(await readFile(join(controlDir, "codex-root-session.json"), "utf8")), {
       version: 1, session_id: "desktop-thread", client_id: "swc_0123456789abcdef0123456789abcdef",
     });
+    const manifest = JSON.parse(await readFile(join(controlDir, "..", "manifest.json"), "utf8"));
+    assert.equal(manifest.proxyToken, "classifier-token");
+    assert.equal(manifest.proxyUrl, `ws://127.0.0.1:${address.port}`);
   } finally {
     await launch?.close();
     assert.equal(closed, 1);
@@ -211,7 +320,8 @@ test("Desktop broker reuses the launcher's unsandboxed MCP bridge without leakin
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "launcher-owned-token");
         assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_URL, undefined);
         assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_TOKEN, undefined);
-        return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, close: async () => {} };
+        return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, proxyToken: "classifier-token",
+          close: async () => {} };
       },
     });
     assert.equal(innerBridgeStarted, 0);
@@ -253,7 +363,8 @@ test("Desktop broker reserves its only new-thread slot before vendor forwarding"
       startMcpBridge: fakeMcpBridge(),
       startRuntime: async options => {
         authorize = options.authorizeThread;
-        return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, close: async () => {} };
+        return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, proxyToken: "classifier-token",
+          close: async () => {} };
       },
     });
     await authorize({ method: "thread/start", threadId: null });
@@ -529,6 +640,7 @@ test("Desktop broker detaches open stdin when its backend closes", async () => {
       startMcpBridge: fakeMcpBridge(),
       startRuntime: async () => ({
         proxyUrl: `ws://127.0.0.1:${upstream.address().port}`,
+        proxyToken: "classifier-token",
         close: async () => { closed += 1; },
       }),
       setExitCode: code => exitCodes.push(code),

@@ -55,6 +55,12 @@ covered. Generated Codex and Claude runtime copies match the source; the full
 `scodex resume` launcher and remains separate from those tests; an untrusted
 SSH host key must not be bypassed to manufacture that evidence.
 
+The supported managed-client installer placed this candidate at
+`~/.statewright/runtime/codex/0.3.4+codex.20261011140803` and switched only
+the local Codex shim. Installed launcher and credential-store bytes match the
+tested source, and `scodex --version` reaches Codex CLI 0.160.0. That version
+smoke does not exercise the keychain lookup; SSH resume acceptance is pending.
+
 ## Rollback
 
 Revert this local change and reinstall the previous managed-client package.

@@ -74,7 +74,7 @@ async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   }
 }
 
-test("codex exposes only safe setup tools and opens device approval on explicit connect", async () => {
+test("codex exposes only safe setup tools and opens device approval on explicit connect", async (t) => {
   const name = "codex";
   const proxy = resolve("plugins/codex/mcp-proxy.sh");
     const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));
@@ -113,7 +113,8 @@ esac
 `);
       await chmod(fakeCurl, 0o755);
       const environment = Object.fromEntries(
-        Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+        Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_") &&
+          !["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].includes(key)),
       );
       Object.assign(environment, {
         HOME: home,
@@ -129,7 +130,61 @@ esac
       const disabledConnect = responseById(disabled.stdout, 4);
       assert.match(disabledConnect.result.content[0].text, /Open https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/);
       assert.match(disabledConnect.result.content[0].text, /device code BCDF-GHJK-MNPQ/);
+      await assert.rejects(readFile(capture), { code: "ENOENT" });
       await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
+
+      for (const [key, value] of Object.entries({
+        SSH_CONNECTION: "192.0.2.1 40000 192.0.2.2 22",
+        SSH_CLIENT: "192.0.2.1 40000 22",
+        SSH_TTY: "/dev/pts/1",
+      })) {
+        await t.test(`device approval stays in the terminal with ${key}`, async () => {
+          const remoteCapture = join(root, `${key}-browser.txt`);
+          const remote = await runProxy(proxy, { ...environment, [key]: value,
+            STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: remoteCapture });
+          assert.equal(remote.code, 0, remote.stderr);
+          const text = responseById(remote.stdout, 4).result.content[0].text;
+          assert.match(text, /https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/);
+          assert.match(text, /device code BCDF-GHJK-MNPQ/);
+          assert.doesNotMatch(text, /Opened secure/);
+          await assert.rejects(readFile(remoteCapture), { code: "ENOENT" });
+        });
+      }
+
+      await t.test("Linux skips only headless approval, preserving desktop and WSL openers", async () => {
+        const fakeUname = join(bin, "uname");
+        await writeFile(fakeUname, "#!/usr/bin/env bash\nprintf 'Linux\\n'\n");
+        await chmod(fakeUname, 0o755);
+        const headlessCapture = join(root, "headless-browser.txt");
+        const headless = await runProxy(proxy, { ...environment, OS: "", DISPLAY: "", WAYLAND_DISPLAY: "",
+          WSL_DISTRO_NAME: "", WSL_INTEROP: "", STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: headlessCapture });
+        assert.equal(headless.code, 0, headless.stderr);
+        const text = responseById(headless.stdout, 4).result.content[0].text;
+        assert.match(text, /https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/);
+        assert.match(text, /device code BCDF-GHJK-MNPQ/);
+        await assert.rejects(readFile(headlessCapture), { code: "ENOENT" });
+
+        // A fake opener keeps these platform-selection tests independent of
+        // the test host's GUI and never launches a real browser.
+        const fakeOpen = join(bin, "open");
+        await writeFile(fakeOpen, "#!/usr/bin/env bash\nexit 99\n");
+        await chmod(fakeOpen, 0o755);
+        for (const [key, value] of Object.entries({ DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0",
+          WSL_DISTRO_NAME: "Ubuntu", WSL_INTEROP: "/run/WSL/1_interop" })) {
+          const localCapture = join(root, `${key}-browser.txt`);
+          const local = await runProxy(proxy, { ...environment, OS: "", DISPLAY: "", WAYLAND_DISPLAY: "",
+            WSL_DISTRO_NAME: "", WSL_INTEROP: "", [key]: value,
+            STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: localCapture });
+          assert.equal(local.code, 0, local.stderr);
+          const localText = responseById(local.stdout, 4).result.content[0].text;
+          assert.match(localText, /Opened secure Statewright approval in your browser/, key);
+          assert.match(localText, /https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/, key);
+          assert.deepEqual((await readFile(localCapture, "utf8")).trim().split(/\r?\n/),
+            ["open", "https://statewright.ai/device?user_code=BCDF-GHJK-MNPQ"], key);
+        }
+        await rm(fakeOpen);
+        await rm(fakeUname);
+      });
 
       const result = await runProxy(proxy, environment);
       assert.equal(result.code, 0, result.stderr);
@@ -144,8 +199,10 @@ esac
       assert.match(ordinaryCall.error.message, /Statewright is not connected/);
       const connect = responseById(result.stdout, 4);
       assert.match(connect.result.content[0].text, /Opened secure Statewright approval in your browser/);
+      assert.match(connect.result.content[0].text, /https:\/\/statewright\.ai\/device\?user_code=BCDF-GHJK-MNPQ/);
       assert.match(connect.result.content[0].text, /device code BCDF-GHJK-MNPQ/);
-      assert.match(connect.result.content[0].text, /do not paste an API key into chat/i);
+      assert.match(connect.result.content[0].text, /expires in 600 seconds/);
+      assert.doesNotMatch(connect.result.content[0].text, /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
       const workflowStatus = JSON.parse(responseById(result.stdout, 5).result.content[0].text);
       assert.deepEqual(workflowStatus, {
         connected: false,

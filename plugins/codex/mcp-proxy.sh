@@ -180,6 +180,13 @@ open_device_approval_page() {
   local -a browser_command=()
   [ -n "$url" ] || return 1
   [ "${STATEWRIGHT_NO_BROWSER:-false}" = "true" ] && return 1
+  # An opener can succeed on a remote Mac while the user cannot see its browser.
+  # Keep remote/headless approval in the terminal; device polling is unchanged.
+  [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ] && return 1
+  if [ "${OS:-}" != "Windows_NT" ] && [ "$(uname -s 2>/dev/null)" = "Linux" ] &&
+    [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}${WSL_DISTRO_NAME:-}${WSL_INTEROP:-}" ]; then
+    return 1
+  fi
   if [ "${OS:-}" = "Windows_NT" ] && command -v powershell.exe >/dev/null 2>&1; then
     if [ -n "${STATEWRIGHT_BROWSER_OPEN_PROBE:-}" ]; then
       # Pass the URL as an explicit argument array.  A scalar ArgumentList is
@@ -709,10 +716,11 @@ while IFS= read -r line; do
         jq -cn --arg message "$CONNECT_ERROR" --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32002,message:$message},id:$id}'
       else
         (poll_device_authorization "$DEVICE_CODE" "$EXPIRES_IN" "$POLL_INTERVAL") >/dev/null 2>&1 &
+        # Always include a usable link, even when an opener reports success:
+        # the browser may be on another display or on a remote desktop.
+        CONNECT_TEXT="Open $VERIFY_URL on this or another device and confirm device code $USER_CODE. This code expires in $EXPIRES_IN seconds. After approval, this plugin will verify and store the credential automatically."
         if open_device_approval_page "$VERIFY_URL"; then
-          CONNECT_TEXT="Opened secure Statewright approval in your browser. Confirm that it shows device code $USER_CODE, then approve it. This plugin will verify and store the credential automatically; do not paste an API key into chat."
-        else
-          CONNECT_TEXT="Open $VERIFY_URL and confirm device code $USER_CODE. After approval, this plugin will verify and store the credential automatically; do not paste an API key into chat."
+          CONNECT_TEXT="Opened secure Statewright approval in your browser. $CONNECT_TEXT"
         fi
         if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
           CONNECT_TEXT="$CONNECT_TEXT This process has an explicit credential override; storing a key does not replace that override. Refresh the owning launcher through its normal lifecycle before retrying."

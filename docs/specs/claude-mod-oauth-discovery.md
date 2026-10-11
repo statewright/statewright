@@ -42,6 +42,16 @@ rejection` for the new binary in the headless session. Do not remove its
 quarantine flag to make a test pass; obtain the ordinary macOS approval and
 then repeat the native version, plugin-validation, and isolated mod checks.
 
+The first visible `claude` retry instead stopped earlier in a Statewright shim:
+`~/.statewright/bin/claude` pointed at a deleted Codex plugin-cache version.
+The shim has been reinstalled to an existing durable runtime. A source fix now
+makes future Claude shim installs copy either a Codex-hosted or Claude-hosted
+managed launcher to a durable versioned runtime. The pending user-visible TUI
+canary is to run `claude` again on aerith and distinguish a normal launch, a
+Gatekeeper prompt, or a different error. Until that observation arrives, native
+Claude launch and mod validation remain unverified; this does not block source
+and package-level checks.
+
 The gateway's `/.well-known/oauth-protected-resource/mcp` metadata advertises
 the site authorization server and scope `mcp` (`crates/mcp-gateway/src/remote.rs`).
 The site publishes authorization-code/PKCE and device endpoints

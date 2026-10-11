@@ -1169,6 +1169,44 @@ test("Codex installation copies cache-owned runtime to a durable versioned locat
   }
 });
 
+test("Claude shim launched from a Codex plugin uses its durable runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-claude-codex-runtime-"));
+  const home = join(root, "home");
+  const sourceLauncher = resolve("plugins/codex/scripts/statewright-managed-client.mjs");
+  try {
+    const installed = await installManagedClientShim({
+      host: "claude", launcherPath: sourceLauncher, home, realBinary: "/opt/example/claude",
+    });
+    assert.match(installed.launcherPath, /\.statewright\/runtime\/codex\//);
+    await access(installed.launcherPath);
+    const shim = await readFile(installed.shimPath, "utf8");
+    assert.match(shim, new RegExp(installed.launcherPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(shim, /plugins\/cache/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude plugin installation copies its own runtime outside the plugin tree", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-claude-durable-runtime-"));
+  const home = join(root, "home");
+  const sourceLauncher = resolve("plugins/claude-code/executor/statewright-managed-client.mjs");
+  try {
+    const installed = await installManagedClientShim({
+      host: "claude", launcherPath: sourceLauncher, home, realBinary: "/opt/example/claude",
+    });
+    assert.match(installed.launcherPath, /\.statewright\/runtime\/claude\//);
+    assert.notEqual(installed.launcherPath, sourceLauncher);
+    await access(installed.launcherPath);
+    await access(join(dirname(installed.launcherPath), "lib", "credential-store.mjs"));
+    const shim = await readFile(installed.shimPath, "utf8");
+    assert.match(shim, new RegExp(installed.launcherPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(shim, /plugins\/cache/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 const TEST_ROOT = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_AGENT = resolve(TEST_ROOT, "../../codex/scripts/local-telemetry-agent.mjs");
 

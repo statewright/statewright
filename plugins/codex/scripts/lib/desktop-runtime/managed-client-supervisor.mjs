@@ -1059,24 +1059,27 @@ export async function installManagedClientShim({ host, launcherPath, home = home
   const binary = realBinary ?? resolveRealBinary(host, { shimDirectory, platform });
   await mkdir(shimDirectory, { recursive: true });
   let durableLauncherPath = launcherPath;
-  if (host === "codex") {
-    const pluginRoot = resolve(dirname(launcherPath), "..");
-    const manifestPath = join(pluginRoot, ".codex-plugin", "plugin.json");
-    if (existsSync(manifestPath)) {
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      const version = String(manifest.version ?? "unknown").replace(/[^A-Za-z0-9._+-]/g, "_");
-      const durableRoot = join(home, ".statewright", "runtime", "codex", version);
-      durableLauncherPath = join(durableRoot, "scripts", "statewright-managed-client.mjs");
-      if (!existsSync(durableLauncherPath)) {
-        const temporary = `${durableRoot}.install-${process.pid}-${randomUUID()}`;
-        await mkdir(dirname(temporary), { recursive: true });
-        await cp(pluginRoot, temporary, { recursive: true, force: false, errorOnExist: true });
-        try {
-          await rename(temporary, durableRoot);
-        } catch (error) {
-          await rm(temporary, { recursive: true, force: true });
-          if (!existsSync(durableLauncherPath)) throw error;
-        }
+  const pluginRoot = resolve(dirname(launcherPath), "..");
+  const manifests = [
+    { path: join(pluginRoot, ".codex-plugin", "plugin.json"), runtime: "codex", entry: "scripts" },
+    { path: join(pluginRoot, "plugin.json"), runtime: "claude", entry: "executor" },
+  ];
+  const source = manifests.find(({ path, entry }) =>
+    existsSync(path) && resolve(launcherPath) === join(pluginRoot, entry, "statewright-managed-client.mjs"));
+  if (source) {
+    const manifest = JSON.parse(await readFile(source.path, "utf8"));
+    const version = String(manifest.version ?? "unknown").replace(/[^A-Za-z0-9._+-]/g, "_");
+    const durableRoot = join(home, ".statewright", "runtime", source.runtime, version);
+    durableLauncherPath = join(durableRoot, source.entry, "statewright-managed-client.mjs");
+    if (!existsSync(durableLauncherPath)) {
+      const temporary = `${durableRoot}.install-${process.pid}-${randomUUID()}`;
+      await mkdir(dirname(temporary), { recursive: true });
+      await cp(pluginRoot, temporary, { recursive: true, force: false, errorOnExist: true });
+      try {
+        await rename(temporary, durableRoot);
+      } catch (error) {
+        await rm(temporary, { recursive: true, force: true });
+        if (!existsSync(durableLauncherPath)) throw error;
       }
     }
   }

@@ -1,6 +1,6 @@
 # ADR 021: Interactive macOS Keychain recovery for managed TUI launchers
 
-Status: Accepted for a local 0.3.4 candidate; live SSH acceptance pending
+Status: Accepted locally; user-reported SSH resume succeeded on 2026-10-11
 
 ## Context
 
@@ -53,13 +53,16 @@ covered. Generated Codex and Claude runtime copies match the source; the full
 `task test:plugin-release` gate exited 0 on the reviewed candidate
 `0.3.4+codex.20261011140803`. Live SSH acceptance must use the normal
 `scodex resume` launcher and remains separate from those tests; an untrusted
-SSH host key must not be bypassed to manufacture that evidence.
+SSH host key must not be bypassed to manufacture that evidence. The user
+subsequently reported that the normal SSH retry worked. This is user-reported
+live acceptance, not an independently captured terminal trace.
 
 The supported managed-client installer placed this candidate at
 `~/.statewright/runtime/codex/0.3.4+codex.20261011140803` and switched only
 the local Codex shim. Installed launcher and credential-store bytes match the
 tested source, and `scodex --version` reaches Codex CLI 0.160.0. That version
-smoke does not exercise the keychain lookup; SSH resume acceptance is pending.
+smoke does not exercise the keychain lookup; the separate user SSH test above
+provides the live acceptance signal.
 
 ## Rollback
 

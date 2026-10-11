@@ -1,7 +1,7 @@
 # MCP read-only tool annotations
 
 Date: 2026-09-10. Status: implemented locally; gateway deployment not performed.
-Base: `74f16eb`. Control run: `6d39b93d-e007-490c-9f89-7df8616ebd46`.
+Base: `74f16eb`.
 
 ## Context and decision
 
@@ -35,8 +35,8 @@ zero approval callbacks.
 Installed external Claude caches are stale (including prior unrelated files);
 the broader installed-runtime check reports that drift. They were not updated.
 No cluster deploy, push, global permission changes or active-TUI intervention.
-Only generic MCP metadata changes belong here; personal Qwen provider routing
-and telemetry wiring remain in `/Users/ben/plugins/codex-local-models`.
+Only generic MCP metadata changes belong here; personal provider routing and
+telemetry wiring remained outside this repository and outside this change.
 
 Rollback: revert this commit and regenerate the repository-managed Claude bundle.
 New managed bridges pick up the source repair on launch. Serving gateways require

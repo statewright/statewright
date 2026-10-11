@@ -9,9 +9,9 @@ First, add the marketplace:
 /plugin marketplace add statewright/statewright
 ```
 
-Then install:
+Then install (inside Claude Code):
 ```
-/plugin install statewright
+/plugin install statewright@statewright
 ```
 
 Then run the local bootstrap once from the repository checkout:
@@ -106,8 +106,13 @@ To remove the managed shims and the Statewright shell-path block:
 node plugins/executor/statewright-managed-client.mjs --uninstall
 ```
 
-Your browser opens during plugin installation. Sign up, generate a key, and
-paste it when prompted. The local setup command reuses the saved key.
+The current Claude transport still uses the legacy gateway API-key file. On
+the first missing-key request, its proxy can open the signup/key page; the
+local setup command does not itself complete OAuth or install a gateway
+credential. Claude OAuth and per-gateway credential storage are separate
+follow-up work.
+The [mod/OAuth discovery handoff](../../docs/specs/claude-mod-oauth-discovery.md)
+records the current boundary and the acceptance checks for that refit.
 
 For executor-owned isolated delivery, launch Claude Code through the shared executor:
 

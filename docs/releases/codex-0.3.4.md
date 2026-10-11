@@ -49,9 +49,12 @@ has not been tagged or published.
   Authorization-code issuance uses PKCE S256, one-time codes, scoped expiring
   access tokens, refresh rotation, replay rejection, and revocation.
 - Codex browser onboarding can provision a credential without asking the user
-  to copy an API key. The current device flow still stores the returned bearer
-  locally in `~/.statewright/api_key`; this is a migration away from manual key
-  handling, not yet a credential-free internal transport.
+  to copy an API key. The device flow verifies the returned gateway key before
+  storing it in the OS credential store under the canonical gateway URL.
+  The historical `~/.statewright/api_key` file is consulted only for migration
+  to the exact production gateway and is preserved for rollback. The managed
+  client still uses a gateway bearer internally; this is not a credential-free
+  transport.
 - The managed App Server can adopt a user-selected, same-root historical
   Desktop thread through a short-lived, auditable ownership transfer. Native
   success is required before the transfer commits, and foreign-root or stale

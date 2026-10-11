@@ -154,18 +154,6 @@ changed.
 
 ## Remaining cut gates
 
-## Queued release follow-ups
-
-- `034-README-PRICING` — Update the README Pro offer to show the struck-through
-  $19 list price, the active $9/mo Early Bird price, and that the $9 price stays
-  locked while the subscription remains active. This is a next-release
-  documentation change; it does not change the live pricing site.
-- `034-NONINTERACTIVE-AUTH` — Remove the generic Codex MCP proxy's automatic
-  browser launch after an `invalid_api_key` response. Keep the explicit
-  `statewright_connect` device-approval path and fail-closed key handling. The
-  local source change needs focused auth regression coverage and later release
-  branch integration; it does not authorize installation, reload, or release.
-
 Before tagging or publishing 0.3.4:
 
 1. Complete native Desktop acceptance by resuming a same-root conversation

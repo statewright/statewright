@@ -144,7 +144,7 @@ pub struct Gateway {
     host_client_name: Option<String>,
 }
 
-const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Tool policy and transitions remain enforced. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
+const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Statewright checks calls made through this MCP connection and workflow transitions; it cannot gate tools the host offers outside this connector. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
 
 #[derive(Debug)]
 pub struct NativeUsageError {
@@ -3882,7 +3882,7 @@ mod tests {
             snapshot["model_routing"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("Tool policy and transitions remain enforced")
+                .contains("it cannot gate tools the host offers outside this connector")
         );
     }
 

@@ -4,9 +4,14 @@ import { randomBytes } from 'node:crypto'
 
 const appUrl = process.env.STATEWRIGHT_APP_URL?.replace(/\/$/, '')
 const mcpUrl = process.env.STATEWRIGHT_MCP_URL?.replace(/\/$/, '')
+const expectedSemanticStatus = process.env.STATEWRIGHT_EXPECT_SEMANTIC_STATUS || 'Assessed'
 
 if (!appUrl || !mcpUrl) {
   console.error('STATEWRIGHT_APP_URL and STATEWRIGHT_MCP_URL are required')
+  process.exit(2)
+}
+if (!['Assessed', 'Disabled'].includes(expectedSemanticStatus)) {
+  console.error('STATEWRIGHT_EXPECT_SEMANTIC_STATUS must be Assessed or Disabled')
   process.exit(2)
 }
 
@@ -385,7 +390,7 @@ try {
     assert(risk.deterministic_source === entry.source, `${entry.name}: expected source ${entry.source}, got ${risk.deterministic_source}`)
     assert(risk.deterministic_risk === entry.risk, `${entry.name}: expected risk ${entry.risk}, got ${risk.deterministic_risk}`)
     assert(risk.deterministic_exposure === entry.exposure, `${entry.name}: expected exposure ${entry.exposure}, got ${risk.deterministic_exposure}`)
-    assert(risk.semantic_status === 'Assessed', `${entry.name}: expected semantic status Assessed, got ${risk.semantic_status}`)
+    assert(risk.semantic_status === expectedSemanticStatus, `${entry.name}: expected semantic status ${expectedSemanticStatus}, got ${risk.semantic_status}`)
     assert(typeof risk.resolution_basis === 'string', `${entry.name}: missing resolution_basis`)
     assert(typeof risk.required_authority === 'string', `${entry.name}: missing required_authority`)
     if (entry.effect) {

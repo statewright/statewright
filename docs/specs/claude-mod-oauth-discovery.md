@@ -31,6 +31,41 @@ documentation requires CLI `2.1.287` or later. Upgrade and confirm the actual
 test binary before any mod canary; an older CLI is not evidence that a proposed
 mod failed. Do not install or activate a mod merely to complete this handoff.
 
+## 2026-10-11 native-capability probe
+
+Homebrew upgraded `claude-code@latest` to `2.1.296`, and the installed binary's
+Anthropic Developer ID signature passed `codesign --verify --strict`. This is
+an installed-version receipt, **not** an executable canary: `claude --version`
+and `claude plugin validate` could not complete. macOS `syspolicyd` logged
+`Prompt could not be shown` and `Terminating process due to Gatekeeper
+rejection` for the new binary in the headless session. Do not remove its
+quarantine flag to make a test pass; obtain the ordinary macOS approval and
+then repeat the native version, plugin-validation, and isolated mod checks.
+
+The gateway's `/.well-known/oauth-protected-resource/mcp` metadata advertises
+the site authorization server and scope `mcp` (`crates/mcp-gateway/src/remote.rs`).
+The site publishes authorization-code/PKCE and device endpoints
+(`site/pb/hooks/device_authorization.pb.js`). However its registered-client
+table currently contains only `statewright-codex`, with the exact redirect
+`https://chatgpt.com/connector_platform_oauth_redirect`
+(`site/pb/hooks/utils/deviceAuthorization.js`). It has no dynamic client
+registration. Claude's documented remote-HTTP MCP OAuth requires a client
+registration and a localhost callback (optionally a fixed port). Therefore
+the existing discovery metadata does **not** establish that Claude can log in
+today. A Claude public-client registration and exact callback contract would
+be required before a native-HTTP OAuth canary.
+
+Native HTTP is not a drop-in replacement for the current plugin server:
+`plugins/claude-code/.mcp.json` loads one stdio proxy; its managed/adapter
+paths use local bridges, and standalone `mcp-proxy.sh` and `hook.sh` read the
+legacy key path. Adding an HTTP server alongside it would duplicate the MCP
+identity; replacing it would require re-proving local tools, hook credential
+access, managed routing, session continuity, and environment isolation.
+Claude's documented mod `tool.check` handler can override decisions reached by
+permission rules and `PreToolUse` hooks. A Statewright mod must not grant an
+`allow` decision over a prior denial; keep policy at the existing enforceable
+boundary and use a mod for bounded UX or routing only after a native probe.
+
 ## First deep-dive decisions
 
 1. Decide whether the mod owns only UX and in-process events while the plugin

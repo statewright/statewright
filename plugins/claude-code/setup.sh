@@ -126,9 +126,3 @@ MANAGED_CLIENT="${SCRIPT_DIR}/executor/statewright-managed-client.mjs"
 if [ -f "$MANAGED_CLIENT" ] && command -v node >/dev/null 2>&1; then
   node "$MANAGED_CLIENT" --bootstrap >/dev/null 2>&1 || true
 fi
-
-# Stable shell entrypoints, independent of versioned plugin cache paths. Do not
-# rewrite the user's shell profile or enable named environments implicitly.
-install -m 600 "$SCRIPT_DIR/environment-shell.sh" "$STATEWRIGHT_DIR/claude-env.sh"
-printf '%s\n' 'Optional Bash/Zsh environment shortcuts: add this to your shell profile:' \
-  '  . "$HOME/.statewright/claude-env.sh"'

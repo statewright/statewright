@@ -38,52 +38,14 @@ setup; otherwise the public gateway is used:
 STATEWRIGHT_GATEWAY_URL=https://mcp.statewright.ai bash plugins/claude-code/setup.sh
 ```
 
-### Named shell environments
-
-After setup, optionally source the installed shortcuts from your Bash or Zsh
-profile (remove any older aliases with the same names):
-
-```sh
-. "$HOME/.statewright/claude-env.sh"
-```
-
-`claude` selects production; `sclaude` selects `staging`; `d1claude`, `d2claude`
-and `d3claude` select `dev1`, `dev2` and `dev3`. Configure named gateways in
-`~/.statewright/environments.json`, for example:
-
-```json
-{
-  "gateways": {
-    "staging": {
-      "gateway_url": "https://mcp.staging.example.com",
-      "auth_url": "https://staging.example.com"
-    }
-  }
-}
-```
-
-The shortcuts forward all arguments, including resume and permission options,
-and clear inherited Statewright connection/session overrides for the child only.
-They do not read passwords, change Claude authentication or add permission flags.
-Unconfigured named environments fail explicitly through the managed launcher.
-For a one-off custom gateway instead, use `command claude` with your explicit
-environment variables; it bypasses the shell function, not the installed runtime.
-
-These shortcuts select the current managed launcher on `PATH`; they are not a
-native mod/OAuth migration. They do not configure Claude Desktop. In particular,
-forwarding `--desktop` does not guarantee that the Desktop session inherits the
-selected gateway. Desktop Code needs explicit plugin/host configuration and its
-own acceptance test as part of the native upgrade.
-
 Verify the install:
 
 ```bash
-type -a claude
+command -v claude
 cat ~/.statewright/config.json
 ```
 
-The first command should list `~/.statewright/bin/claude` (and the optional
-shell function, if loaded). The config
+The first command should resolve to `~/.statewright/bin/claude`. The config
 should contain `routing.managed_clients.enabled: true` and
 `routing.managed_clients.hosts.claude: true`.
 

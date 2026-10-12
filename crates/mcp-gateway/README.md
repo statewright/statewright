@@ -32,9 +32,23 @@ reconciles an already committed decision without prompting or resubmitting it.
 Registered transports expire after an hour of inactivity; prompts after three
 minutes. Native control's headerless v1 compatibility does not support approval.
 
-This is not yet a complete native execution adapter. End-to-end capability flags
-for native tool enforcement, human approval and model routing remain false until
-the host adapter is integrated and accepted. It exposes no decision operation. Native
+Native adapters can use revision-bound `pre_tool`, `post_tool` and `stop` actions
+to call the existing gateway handlers. `pre_tool` takes a tool name and input;
+`post_tool` additionally requires the actual response and an explicit `is_error`.
+Failed calls count as attempts, not confirmed file reads or edits. Read the new
+revision after each result; do not replay a mutation after an uncertain response.
+The wrapper advertises workflow control, native tool checks and human approval
+support. These capabilities require the corresponding host hooks and approval
+service; they are not a claim that every host tool is intercepted.
+
+The declared enforcement scope is `native_pre_permission_hooks`: a host may
+rewrite arguments during its later permission stage, and server-executed tools
+may not cross that hook. The adapter must preserve native deny/ask decisions,
+report actual completion inputs, and discard reports from a retired workflow.
+Hooks are not an OS sandbox, and an unloaded adapter cannot enforce them. Model
+routing remains false: the host keeps its selected conversation model.
+
+The protocol exposes no decision operation. Native
 conversation state currently survives client reconnects while the gateway is
 running; durable native recovery after gateway replacement is not implemented.
 Existing API-key/Codex/web transport paths retain their existing behavior.

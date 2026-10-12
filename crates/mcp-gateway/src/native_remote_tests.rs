@@ -56,7 +56,7 @@ async fn fixture() -> Fixture {
         }
         let owner = if key == "Bearer no-owner" { "" } else if key == "Bearer owner-b" { "owner-b" } else { "owner-a" };
         let mut workflows = json!({"canary":{"id":"canary","initial":"intake","states":{
-            "intake":{"on":{"DONE":"complete","REVIEW":{"target":"complete","requires_approval":true}}},
+            "intake":{"allowed_tools":["Read"],"on":{"DONE":"complete","REVIEW":{"target":"complete","requires_approval":true}}},
             "complete":{"type":"final"}}},"spare":{"id":"spare","initial":"done","states":{"done":{"type":"final"}}}});
         if key == "Bearer disabled" { workflows["canary"]["meta"] = json!({"enabled":false}); }
         if key == "Bearer changed" { workflows["canary"]["states"]["intake"]["instructions"] = json!("Revised definition"); }
@@ -126,6 +126,124 @@ fn decoded(response: &Value) -> Value {
             .expect("native response text"),
     )
     .unwrap()
+}
+
+fn action_outcome(snapshot: &Value) -> Value {
+    assert_ne!(snapshot["outcome"]["isError"], true, "{snapshot}");
+    serde_json::from_str(snapshot["outcome"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn native_tools_reuse_existing_pre_post_and_stop_handlers() {
+    let f = fixture().await;
+    let mut state = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    state = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"canary"}),
+                state["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(state["enforcement_scope"], "native_pre_permission_hooks");
+    for (operation, input, expected) in [
+        (
+            "pre_tool",
+            json!({"tool_name":"Read","tool_input":{"file_path":"allowed.txt"}}),
+            "allow",
+        ),
+        (
+            "pre_tool",
+            json!({"tool_name":"Write","tool_input":{"file_path":"no.txt","content":"no"}}),
+            "deny",
+        ),
+        ("stop", json!({}), "block"),
+    ] {
+        let before = state["revision"].clone();
+        state = decoded(
+            &call(
+                &f,
+                "first",
+                args(CHAT_A, operation, input.clone(), before.as_str()),
+            )
+            .await
+            .1,
+        );
+        assert_eq!(action_outcome(&state)["decision"], expected);
+        assert_ne!(state["revision"], before);
+        assert!(
+            call(&f, "first", args(CHAT_A, operation, input, before.as_str()))
+                .await
+                .1["error"]
+                .is_object()
+        );
+    }
+    // The old post-tool business logic still counts failed attempts, but never
+    // fabricates read/edit evidence from them. Its unit suite checks annotations.
+    for failed in [true, false] {
+        state = decoded(&call(&f, "first", args(CHAT_A, "post_tool", json!({"tool_name":"Read","tool_input":{"file_path":"allowed.txt"},"tool_response":"fixture","is_error":failed}), state["revision"].as_str())).await.1);
+        assert_eq!(action_outcome(&state)["active"], true);
+        assert_eq!(
+            action_outcome(&state)["iteration"],
+            if failed { 1 } else { 2 }
+        );
+    }
+    for (operation, input) in [
+        (
+            "post_tool",
+            json!({"tool_name":"Read","tool_input":{},"tool_response":"missing failed flag"}),
+        ),
+        (
+            "pre_tool",
+            json!({"tool_name":"Read","tool_input":{},"approved":true}),
+        ),
+        (
+            "pre_tool",
+            json!({"tool_name":"statewright_transition","tool_input":{}}),
+        ),
+        ("stop", json!({"approved":true})),
+    ] {
+        assert!(
+            call(
+                &f,
+                "first",
+                args(CHAT_A, operation, input, state["revision"].as_str())
+            )
+            .await
+            .1["error"]
+                .is_object()
+        );
+    }
+    state = decoded(
+        &call(
+            &f,
+            "first",
+            args(CHAT_A, "deactivate", json!({}), state["revision"].as_str()),
+        )
+        .await
+        .1,
+    );
+    state = decoded(
+        &call(
+            &f,
+            "first",
+            args(CHAT_A, "stop", json!({}), state["revision"].as_str()),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(action_outcome(&state)["decision"], "allow");
+    assert_eq!(action_outcome(&state)["active"], false);
 }
 
 #[tokio::test]
@@ -981,7 +1099,7 @@ async fn native_approval_required_transition_stays_held_without_a_decision_api()
     );
     assert_eq!(waiting["state"]["state"], "intake");
     assert!(waiting["state"]["pending_approval"]["approval_id"].is_string());
-    assert_eq!(waiting["capabilities"]["human_approval"], false);
+    assert_eq!(waiting["capabilities"]["human_approval"], true);
     assert!(
         call(
             &f,

@@ -71,6 +71,21 @@ struct Transition {
     data: Option<serde_json::Map<String, Value>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreTool {
+    tool_name: String,
+    tool_input: serde_json::Map<String, Value>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostTool {
+    tool_name: String,
+    tool_input: serde_json::Map<String, Value>,
+    tool_response: String,
+    is_error: bool,
+}
+
 fn valid_label(value: &str) -> bool {
     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
 }
@@ -114,6 +129,37 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
                 .map_err(|_| "Invalid approval request")?;
             "statewright_request_approval"
         }
+        "pre_tool" => {
+            let input: PreTool = serde_json::from_value(request.input.clone())
+                .map_err(|_| "Invalid native pre-tool input")?;
+            if !valid_label(&input.tool_name)
+                || input.tool_name.contains("statewright_")
+                || serde_json::to_string(&input.tool_input)
+                    .unwrap_or_default()
+                    .len()
+                    > 131072
+            {
+                return Err("Invalid native tool observation");
+            }
+            "statewright_adapter_pre_tool"
+        }
+        "post_tool" => {
+            let input: PostTool = serde_json::from_value(request.input.clone())
+                .map_err(|_| "Invalid native post-tool input")?;
+            if !valid_label(&input.tool_name)
+                || input.tool_name.contains("statewright_")
+                || input.tool_response.len() > 1048576
+                || serde_json::to_string(&input.tool_input)
+                    .unwrap_or_default()
+                    .len()
+                    > 131072
+            {
+                return Err("Invalid native tool observation");
+            }
+            let _ = input.is_error;
+            "statewright_adapter_post_tool"
+        }
+        "stop" if request.input == json!({}) => "statewright_adapter_stop",
         _ => return Err("Unsupported native operation or input"),
     };
     if tool != "statewright_get_state"
@@ -135,7 +181,7 @@ pub(super) fn definition() -> ToolInfo {
           "properties": {"context":{"type":"object","additionalProperties":false,
             "properties":{"version":{"type":"integer","enum":[1]},"conversation_id":{"type":"string","format":"uuid"}},
             "required":["version","conversation_id"]},
-          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval"]},
+          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval","pre_tool","post_tool","stop"]},
           "input":{"type":"object"},"expected_revision":{"type":["string","null"]}},
           "required":["context","operation","input"]}) }
 }
@@ -360,7 +406,8 @@ pub(super) async fn snapshot(
     };
     let result = json!({"protocol_version":1,"conversation_id":chat,
         "revision":session.native_revision,"state":current,"outcome":outcome,
-        "capabilities":{"workflow_control":true,"native_tool_enforcement":false,"human_approval":false,"model_routing":false}});
+        "capabilities":{"workflow_control":true,"native_tool_enforcement":true,"human_approval":true,"model_routing":false},
+        "enforcement_scope":"native_pre_permission_hooks"});
     JsonRpcResponse::success(
         id,
         serde_json::to_value(ToolCallResult::text(result.to_string())).unwrap(),

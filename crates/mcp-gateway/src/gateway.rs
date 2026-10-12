@@ -509,6 +509,12 @@ impl Gateway {
         self.host_controls_model = host_controls_model;
     }
 
+    /// Refresh the authenticated native catalog without changing the definition
+    /// pinned to an active run. New loads must use currently authorized entries.
+    pub(crate) fn refresh_native_catalog(&mut self, workflows: HashMap<String, MachineDefinition>) {
+        self.workflows = workflows;
+    }
+
     /// Set the API key fingerprint for session ownership verification.
     pub fn set_api_key_fingerprint(&mut self, api_key: &str) {
         self.api_key_fingerprint =
@@ -804,6 +810,10 @@ impl Gateway {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.chars().take(128).collect());
+        JsonRpcResponse::success(id, Self::initialization_result(self.host_controls_model))
+    }
+
+    pub(crate) fn initialization_result(host_controls_model: bool) -> serde_json::Value {
         let mut result = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -814,10 +824,10 @@ impl Gateway {
                 "version": env!("CARGO_PKG_VERSION")
             }
         });
-        if self.host_controls_model {
+        if host_controls_model {
             result["instructions"] = json!(HOST_MODEL_ROUTING_WARNING);
         }
-        JsonRpcResponse::success(id, result)
+        result
     }
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {

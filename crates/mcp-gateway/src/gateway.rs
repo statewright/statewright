@@ -6293,6 +6293,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adapter_failed_edit_does_not_trigger_success_interrupt() {
+        let mut gw = interrupt_gateway_with_mock();
+        let input =
+            json!({"file_path":"site/pb/hooks/auth.pb.js","old_string":"old","new_string":"new"});
+        let failed = gw.adapter_post_tool("Edit", &input, "permission denied", true);
+        assert_eq!(failed["state"], "implementing");
+        assert!(failed["interrupt"].is_null());
+        assert_eq!(failed["iteration"], 1);
+        let succeeded = gw.adapter_post_tool("Edit", &input, "done", false);
+        assert_eq!(succeeded["state"], "pb_validating");
+        assert!(succeeded["interrupt"].is_object());
+    }
+
     #[tokio::test]
     async fn interrupt_reentrance_prevented_while_in_handler() {
         let mut gw = interrupt_gateway_with_mock();

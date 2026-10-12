@@ -28,7 +28,7 @@ impl Identity {
                 .bytes()
                 .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
     }
-    fn namespace(&self, issuer: &str, owner: &str) -> String {
+    pub(super) fn namespace(&self, issuer: &str, owner: &str) -> String {
         let tuple = json!([
             "statewright-native-v1",
             issuer,
@@ -46,17 +46,17 @@ impl Identity {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Context {
+pub(super) struct Context {
     version: u32,
-    conversation_id: String,
+    pub(super) conversation_id: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Request {
-    context: Context,
+pub(super) struct Request {
+    pub(super) context: Context,
     operation: String,
-    input: Value,
-    expected_revision: Option<String>,
+    pub(super) input: Value,
+    pub(super) expected_revision: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +74,7 @@ struct Transition {
 fn valid_label(value: &str) -> bool {
     !value.is_empty() && value.len() <= 200 && !value.chars().any(char::is_control)
 }
-fn parse(arguments: Value) -> Result<(Request, &'static str), &'static str> {
+pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'static str> {
     let request: Request =
         serde_json::from_value(arguments).map_err(|_| "Invalid native request")?;
     if request.context.version != 1
@@ -109,6 +109,11 @@ fn parse(arguments: Value) -> Result<(Request, &'static str), &'static str> {
             let _ = input.data;
             "statewright_transition"
         }
+        "request_approval" => {
+            let _: super::native_approval::Ticket = serde_json::from_value(request.input.clone())
+                .map_err(|_| "Invalid approval request")?;
+            "statewright_request_approval"
+        }
         _ => return Err("Unsupported native operation or input"),
     };
     if tool != "statewright_get_state"
@@ -125,12 +130,12 @@ fn parse(arguments: Value) -> Result<(Request, &'static str), &'static str> {
 pub(super) fn definition() -> ToolInfo {
     ToolInfo { name: TOOL.into(), annotations: Some(ToolAnnotations { read_only_hint: Some(false),
         destructive_hint: Some(false), idempotent_hint: Some(false), open_world_hint: Some(false), ..Default::default() }),
-        description: Some("Versioned native workspace control. The host supplies its current conversation context. No human approval or arbitrary tool execution is accepted. Read get_state before a mutation; never retry a mutation without readback.".into()),
+        description: Some("Versioned native workspace control. The host supplies its current conversation context. Approval requests open a native human form; no decision or arbitrary tool execution is accepted as input. Read get_state before a mutation; never retry a mutation without readback.".into()),
         input_schema: json!({"type":"object","additionalProperties":false,
           "properties": {"context":{"type":"object","additionalProperties":false,
             "properties":{"version":{"type":"integer","enum":[1]},"conversation_id":{"type":"string","format":"uuid"}},
             "required":["version","conversation_id"]},
-          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate"]},
+          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval"]},
           "input":{"type":"object"},"expected_revision":{"type":["string","null"]}},
           "required":["context","operation","input"]}) }
 }
@@ -332,17 +337,32 @@ pub(super) async fn handle(
         session.native_revision = uuid::Uuid::new_v4().to_string();
         result
     };
+    snapshot(
+        &mut session,
+        &native.context.conversation_id,
+        outcome,
+        request.id,
+    )
+    .await
+}
+
+pub(super) async fn snapshot(
+    session: &mut RemoteSession,
+    chat: &str,
+    outcome: Value,
+    id: Option<Value>,
+) -> JsonRpcResponse {
     let current = match decoded_state(
         &invoke(&mut session.gateway, "statewright_get_state", json!({})).await,
     ) {
         Ok(value) => value,
-        Err(error) => return fail(error),
+        Err(error) => return JsonRpcResponse::error(id, -32602, error),
     };
-    let result = json!({"protocol_version":1,"conversation_id":native.context.conversation_id,
+    let result = json!({"protocol_version":1,"conversation_id":chat,
         "revision":session.native_revision,"state":current,"outcome":outcome,
         "capabilities":{"workflow_control":true,"native_tool_enforcement":false,"human_approval":false,"model_routing":false}});
     JsonRpcResponse::success(
-        request.id,
+        id,
         serde_json::to_value(ToolCallResult::text(result.to_string())).unwrap(),
     )
 }

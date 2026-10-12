@@ -28,8 +28,12 @@ mod native_remote_tests;
 #[path = "native_remote.rs"]
 mod native;
 
+#[path = "native_approval.rs"]
+mod native_approval;
+
 /// Shared state for the remote MCP transport server.
 pub struct RemoteState {
+    native_approvals: Mutex<native_approval::Broker>,
     /// Active SSE sessions: session_id -> sender for SSE events.
     sessions: RwLock<HashMap<String, Arc<Mutex<RemoteSession>>>>,
     /// Per-API-key session managers, shared across parent and branch sessions.
@@ -355,6 +359,7 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
         .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
     let state = Arc::new(RemoteState {
+        native_approvals: Mutex::new(native_approval::Broker::default()),
         sessions: RwLock::new(HashMap::new()),
         session_managers: RwLock::new(HashMap::new()),
         pb_url: config.pb_url,
@@ -541,7 +546,7 @@ async fn handle_streamable_http(
     State(state): State<Arc<RemoteState>>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    Json(request): Json<JsonRpcRequest>,
+    Json(message): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let resource_path = if uri.path() == "/mcp" { "/mcp" } else { "/" };
     let resource = resource_url(&state, resource_path);
@@ -564,6 +569,13 @@ async fn handle_streamable_http(
             tracing::warn!(%error, "Failed to validate API key");
             return unauthorized_response(&state, resource_path, "Invalid API key or no workflows");
         }
+    };
+    if validated.oauth_client_id == "statewright-claude" {
+        return native_approval::route(state, validated, &resource, &headers, message).await;
+    }
+    let request: JsonRpcRequest = match serde_json::from_value(message) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
     // Deterministic base key from API key
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
@@ -591,12 +603,6 @@ async fn handle_streamable_http(
         // MCP transport identity is not the native conversation identity. Never
         // teach a client to select mutable chat state through its header echo.
         return streamable_json_response(response, &session_key);
-    }
-    if validated.oauth_client_id == "statewright-claude" {
-        return match native::discovery(&validated, &resource, request) {
-            Some(response) => streamable_json_response(response, &session_key),
-            None => StatusCode::ACCEPTED.into_response(),
-        };
     }
     if validated.workflows.is_empty() {
         return (StatusCode::NOT_FOUND, "No workflows found").into_response();
@@ -979,21 +985,7 @@ async fn handle_runtime_approval(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     projection["decision"] = serde_json::json!(body.decision);
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/api/internal/human-approval",
-            state.pb_url.trim_end_matches('/')
-        ))
-        .bearer_auth(&state.approval_secret)
-        .timeout(std::time::Duration::from_secs(10))
-        .json(&projection)
-        .send()
-        .await;
-    let receipt = match response {
-        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
-        _ => None,
-    };
-    let Some(receipt) = receipt else {
+    let Some(receipt) = approval_service_receipt(&state, &projection).await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
     if session
@@ -1009,6 +1001,29 @@ async fn handle_runtime_approval(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     Json(receipt).into_response()
+}
+
+async fn approval_service_receipt(
+    state: &RemoteState,
+    projection: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if state.approval_secret.is_empty() {
+        return None;
+    }
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/internal/human-approval",
+            state.pb_url.trim_end_matches('/')
+        ))
+        .bearer_auth(&state.approval_secret)
+        .timeout(std::time::Duration::from_secs(10))
+        .json(&projection)
+        .send()
+        .await;
+    match response {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+        _ => None,
+    }
 }
 
 /// POST /api/runtime-usage — Update the live usage ledger from provider-native
@@ -1232,6 +1247,7 @@ mod tests {
 
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
@@ -1245,6 +1261,7 @@ mod tests {
 
     fn test_state_with_secret(secret: &str) -> Arc<RemoteState> {
         Arc::new(RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
@@ -1306,6 +1323,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         let state = Arc::new(RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: format!("http://{addr}"),
@@ -1457,6 +1475,7 @@ mod tests {
             "command": "private command"
         }));
         let disabled = RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: pb_url.clone(),
@@ -2291,6 +2310,7 @@ mod tests {
             axum::serve(listener, pb).await.unwrap();
         });
         let state = Arc::new(RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url,

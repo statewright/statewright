@@ -287,15 +287,16 @@ pub fn post_call_annotations(
 ) -> PostCallUpdate {
     let mut update = PostCallUpdate::default();
 
-    // Track file edits
-    if is_edit_tool(tool_name) {
+    // A failed/interrupted tool is not confirmed file-effect evidence. Partial
+    // effects need independent verification, not inference from its requested
+    // path. Error text still consumes context and the caller counts the attempt.
+    if !result.is_error && is_edit_tool(tool_name) {
         if let Some(path) = extract_file_path(arguments) {
             update.file_edited = Some(path);
         }
     }
 
-    // Track file reads
-    if is_read_tool(tool_name) {
+    if !result.is_error && is_read_tool(tool_name) {
         if let Some(path) = extract_file_path(arguments) {
             update.file_read = Some(path);
         }
@@ -425,6 +426,36 @@ mod tests {
 
     fn session() -> GatewaySession {
         GatewaySession::new("test".into(), def_with_guards())
+    }
+
+    #[test]
+    fn failed_file_tools_do_not_record_effects_but_still_count_context() {
+        for tool in ["Edit", "Write", "apply_patch", "Read", "read_file"] {
+            let result = ToolCallResult::error("permission denied");
+            let update = post_call_annotations(tool, &json!({"file_path":"src/main.rs"}), &result);
+            assert!(
+                update.file_edited.is_none(),
+                "{tool} failure is not edit evidence"
+            );
+            assert!(
+                update.file_read.is_none(),
+                "{tool} failure is not read evidence"
+            );
+            assert_eq!(update.result_bytes, "permission denied".len() as u64);
+        }
+        let result = ToolCallResult::text("done");
+        assert_eq!(
+            post_call_annotations("Write", &json!({"file_path":"src/main.rs"}), &result)
+                .file_edited
+                .as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            post_call_annotations("Read", &json!({"file_path":"src/main.rs"}), &result)
+                .file_read
+                .as_deref(),
+            Some("src/main.rs")
+        );
     }
 
     fn assessed_python_pipeline(command: &str, read_only: bool) -> RiskPipelineAssessment {

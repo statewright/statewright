@@ -328,6 +328,15 @@ async fn native_discovery_and_legacy_paths_do_not_share_execution() {
                 .any(|tool| tool["name"] == "statewright_native_request"),
             exposed
         );
+        let catalog = rpc(
+            &f,
+            key,
+            "tools/call",
+            json!({"name":"statewright_list_workflows","arguments":{}}),
+        )
+        .await
+        .1;
+        assert_eq!(decoded(&catalog)["native_control"]["version"] == 1, exposed);
     }
     let params = json!({"name":"statewright_load_workflow","arguments":{"name":"canary"}});
     assert!(

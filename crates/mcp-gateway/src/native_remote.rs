@@ -168,8 +168,16 @@ pub(super) fn discovery(
         {
             let mut names: Vec<_> = validated.workflows.keys().collect();
             names.sort();
+            let native_control = validated
+                .native_session
+                .as_ref()
+                .filter(|identity| {
+                    identity.valid(resource, &validated.owner_id, &validated.oauth_client_id)
+                })
+                .map(|_| json!({"version":1}));
             serde_json::to_value(ToolCallResult::text(
-                json!({"workflows":names,"active":null}).to_string(),
+                json!({"workflows":names,"active":null,"native_control":native_control})
+                    .to_string(),
             ))
             .unwrap()
         }

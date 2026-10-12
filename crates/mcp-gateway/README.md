@@ -19,9 +19,22 @@ deciding what to do next. Discovery and deactivation remain available if the
 workflow catalog becomes empty. Native clients cannot fall back to unscoped
 workflow calls or legacy SSE.
 
-This is a workflow-control foundation, not a complete native execution adapter.
-The response explicitly reports native tool enforcement, human elicitation and
-model routing as unavailable. It exposes no approval decision operation. Native
+Experimental `request_approval` accepts only `run_id` and `approval_id`, plus the
+current conversation/revision. It requires an initialized, authenticated MCP
+transport with form-elicitation support and a durable pending run. The gateway
+projects the request through its existing approval service, checks reviewer
+authorization, then holds an SSE request for the native human form. A tool
+argument cannot approve. Replies are one-use and bound to the transport, grant,
+conversation, pending transition and revision. Cancellation leaves the workflow
+pending; switching it off invalidates the prompt. After an uncertain decision,
+read state and request the exact pending approval again: service preflight
+reconciles an already committed decision without prompting or resubmitting it.
+Registered transports expire after an hour of inactivity; prompts after three
+minutes. Native control's headerless v1 compatibility does not support approval.
+
+This is not yet a complete native execution adapter. End-to-end capability flags
+for native tool enforcement, human approval and model routing remain false until
+the host adapter is integrated and accepted. It exposes no decision operation. Native
 conversation state currently survives client reconnects while the gateway is
 running; durable native recovery after gateway replacement is not implemented.
 Existing API-key/Codex/web transport paths retain their existing behavior.

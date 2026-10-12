@@ -12,6 +12,8 @@ const RESOURCE: &str = "https://mcp.statewright.example/mcp";
 struct Fixture {
     state: Arc<RemoteState>,
     pb: tokio::task::JoinHandle<()>,
+    approvals: Arc<Mutex<Vec<Value>>>,
+    service: Arc<Mutex<Value>>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -19,7 +21,26 @@ impl Drop for Fixture {
     }
 }
 async fn fixture() -> Fixture {
-    let app = Router::new().route("/api/gateway/workflows", get(|headers: HeaderMap| async move {
+    let approvals = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let service = Arc::new(Mutex::new(json!({"can_decide":true,"status":"pending"})));
+    let recorded = approvals.clone();
+    let settings = service.clone();
+    let app = Router::new().route("/api/internal/human-approval", post(move |headers: HeaderMap, Json(body): Json<Value>| {
+        let recorded = recorded.clone(); let settings = settings.clone();
+        async move {
+            assert_eq!(headers["authorization"], "Bearer fixture-secret");
+            recorded.lock().await.push(body.clone());
+            let mut settings = settings.lock().await;
+            if settings["can_decide"] == true && body["decision"].is_string() && settings["status"] == "pending" {
+                settings["status"] = body["decision"].clone();
+                if settings["lose_decision_response"] == true { return (StatusCode::BAD_GATEWAY, Json(json!({}))); }
+            }
+            let receipt = json!({"approval_id":body["approval_id"],"run_id":body["run_id"],"instance_id":body["instance_id"],
+              "from_state":body["pending"]["from_state"],"to_state":body["pending"]["to_state"],
+              "context_snapshot":body["pending"]["context_snapshot"],"status":settings["status"],"can_decide":settings["can_decide"]});
+            (StatusCode::OK, Json(receipt))
+        }
+    })).route("/api/gateway/workflows", get(|headers: HeaderMap| async move {
         let key = headers.get("authorization").unwrap().to_str().unwrap();
         if key == "Bearer revoked" { return (StatusCode::UNAUTHORIZED, Json(json!({}))); }
         let principal = if key == "Bearer foreign" { "b".repeat(64) } else { "a".repeat(64) };
@@ -49,7 +70,10 @@ async fn fixture() -> Fixture {
     let pb = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     Fixture {
         pb,
+        approvals,
+        service,
         state: Arc::new(RemoteState {
+            native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url,
@@ -76,7 +100,6 @@ async fn rpc(f: &Fixture, key: &str, method: &str, params: Value) -> (StatusCode
             Request::post("/mcp")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {key}"))
-                .header("mcp-session-id", "foreign_br_fake")
                 .body(Body::from(
                     json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string(),
                 ))
@@ -103,6 +126,563 @@ fn decoded(response: &Value) -> Value {
             .expect("native response text"),
     )
     .unwrap()
+}
+
+#[tokio::test]
+async fn native_approval_transport_is_random_and_negotiates_form_protocol() {
+    let f = fixture().await;
+    let mut transports = Vec::new();
+    for _ in 0..2 {
+        let response = build_router(f.state.clone())
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer first")
+                    .body(Body::from(
+                        json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+              "params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}}}})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        transports.push(
+            response.headers()["mcp-session-id"]
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["result"]["protocolVersion"], "2025-06-18");
+    }
+    assert_ne!(transports[0], transports[1]);
+}
+
+async fn wire(f: &Fixture, key: &str, transport: &str, message: Value) -> Response {
+    build_router(f.state.clone())
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("authorization", format!("Bearer {key}"))
+                .header("mcp-session-id", transport)
+                .header("mcp-protocol-version", "2025-06-18")
+                .body(Body::from(message.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+async fn initialize(f: &Fixture, key: &str, capabilities: Value) -> String {
+    let r = wire(
+        f,
+        key,
+        "",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion":"2025-06-18","capabilities":capabilities}}),
+    )
+    .await;
+    assert_eq!(r.status(), StatusCode::OK);
+    r.headers()["mcp-session-id"].to_str().unwrap().to_string()
+}
+async fn waiting() -> (Fixture, Value) {
+    let mut f = fixture().await;
+    Arc::get_mut(&mut f.state).unwrap().approval_secret = "fixture-secret".into();
+    let initial = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    let loaded = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"canary"}),
+                initial["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    // Memory fixture only: production obtains this run identity from durable storage.
+    let session = f
+        .state
+        .sessions
+        .read()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    session
+        .lock()
+        .await
+        .gateway
+        .seed_native_usage_run("native-fixture-run", "intake");
+    let state = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "transition",
+                json!({"event":"REVIEW"}),
+                loaded["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert!(state["state"]["pending_approval"].is_object());
+    (f, state)
+}
+fn approval_request(state: &Value) -> Value {
+    json!({"jsonrpc":"2.0","id":"approval-call","method":"tools/call","params":{"name":native::TOOL,
+      "arguments":args(CHAT_A, "request_approval", json!({"run_id":state["state"]["run_id"],"approval_id":state["state"]["pending_approval"]["approval_id"]}), state["revision"].as_str())}})
+}
+async fn next_event(body: &mut Body) -> Value {
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let bytes = frame.into_data().unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .expect(text);
+    serde_json::from_str(data).unwrap()
+}
+async fn prompt(f: &Fixture, state: &Value, transport: &str) -> (Body, Value) {
+    let response = wire(f, "first", transport, approval_request(state)).await;
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body();
+    let event = next_event(&mut body).await;
+    assert_eq!(event["method"], "elicitation/create");
+    (body, event)
+}
+
+#[tokio::test]
+async fn native_approval_accept_decline_cancel_and_malformed_are_distinct() {
+    for (answer, expected, target) in [
+        (
+            json!({"action":"accept","content":{"decision":"approve"}}),
+            "approved",
+            "complete",
+        ),
+        (
+            json!({"action":"accept","content":{"decision":"reject"}}),
+            "rejected",
+            "intake",
+        ),
+        (json!({"action":"decline"}), "rejected", "intake"),
+        (json!({"action":"cancel"}), "cancelled", "intake"),
+        (
+            json!({"action":"accept","content":{"decision":"approve","injected":true}}),
+            "invalid_reply",
+            "intake",
+        ),
+    ] {
+        let (f, state) = waiting().await;
+        let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+        let (mut body, event) = prompt(&f, &state, &transport).await;
+        let reply = wire(
+            &f,
+            "rotated",
+            &transport,
+            json!({"jsonrpc":"2.0","id":event["id"],"result":answer}),
+        )
+        .await;
+        assert_eq!(reply.status(), StatusCode::ACCEPTED);
+        assert!(
+            reply
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty()
+        );
+        let result = decoded(&next_event(&mut body).await);
+        assert_eq!(
+            decoded(&json!({"result":result["outcome"]}))["approval_status"],
+            expected
+        );
+        assert_eq!(result["state"]["state"], target);
+        let submitted = f
+            .approvals
+            .lock()
+            .await
+            .iter()
+            .filter(|v| v["decision"].is_string())
+            .count();
+        assert_eq!(
+            submitted,
+            usize::from(["approved", "rejected"].contains(&expected))
+        );
+        if submitted == 0 {
+            assert!(result["state"]["pending_approval"].is_object());
+        }
+        assert_ne!(result["revision"], state["revision"]);
+    }
+}
+
+#[tokio::test]
+async fn native_approval_rejects_foreign_replayed_and_forged_decisions() {
+    let (f, state) = waiting().await;
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let other = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let mut forged = approval_request(&state);
+    forged["params"]["arguments"]["input"]["decision"] = json!("approved");
+    let bytes = wire(&f, "first", &transport, forged)
+        .await
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(serde_json::from_slice::<Value>(&bytes).unwrap()["error"].is_object());
+    assert!(f.approvals.lock().await.is_empty());
+    let (mut body, event) = prompt(&f, &state, &transport).await;
+    let answer = json!({"jsonrpc":"2.0","id":event["id"],"result":{"action":"accept","content":{"decision":"approve"}}});
+    for (key, t, expected) in [
+        ("foreign", transport.as_str(), StatusCode::NOT_FOUND),
+        ("revoked", &transport, StatusCode::UNAUTHORIZED),
+        ("first", &other, StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(wire(&f, key, t, answer.clone()).await.status(), expected);
+    }
+    assert_eq!(
+        wire(&f, "rotated", &transport, answer.clone())
+            .await
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        wire(&f, "first", &transport, answer).await.status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        decoded(&next_event(&mut body).await)["state"]["state"],
+        "complete"
+    );
+    assert_eq!(f.approvals.lock().await.len(), 2);
+}
+
+#[tokio::test]
+async fn native_approval_off_and_rpc_cancel_never_approve() {
+    for off in [false, true] {
+        let (f, state) = waiting().await;
+        let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+        let (mut body, event) = prompt(&f, &state, &transport).await;
+        let current = decoded(
+            &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+                .await
+                .1,
+        );
+        if off {
+            let stopped = decoded(
+                &call(
+                    &f,
+                    "first",
+                    args(
+                        CHAT_A,
+                        "deactivate",
+                        json!({}),
+                        current["revision"].as_str(),
+                    ),
+                )
+                .await
+                .1,
+            );
+            assert!(stopped["state"].is_null());
+            assert_eq!(wire(&f, "first", &transport, json!({"jsonrpc":"2.0","id":event["id"],"result":{"action":"accept","content":{"decision":"approve"}}})).await.status(), StatusCode::ACCEPTED);
+            assert!(next_event(&mut body).await["error"].is_object());
+        } else {
+            assert_eq!(wire(&f, "first", &transport, json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"approval-call"}})).await.status(), StatusCode::ACCEPTED);
+            let cancelled = next_event(&mut body).await;
+            assert_eq!(cancelled["method"], "notifications/cancelled");
+            assert_eq!(cancelled["params"]["requestId"], event["id"]);
+            assert!(body.frame().await.is_none());
+            let current = decoded(
+                &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+                    .await
+                    .1,
+            );
+            assert!(current["state"]["pending_approval"].is_object());
+        }
+        assert_eq!(f.approvals.lock().await.len(), 1); // Projection only, never a decision.
+    }
+}
+
+#[tokio::test]
+async fn native_approval_requires_owning_reviewer_capability_and_durable_identity() {
+    let (f, state) = waiting().await;
+    for caps in [json!({}), json!({"elicitation":{"url":{}}})] {
+        let transport = initialize(&f, "first", caps).await;
+        let response = wire(&f, "first", &transport, approval_request(&state)).await;
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert!(f.approvals.lock().await.is_empty());
+    }
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    f.service.lock().await["can_decide"] = json!(false);
+    let response = wire(&f, "first", &transport, approval_request(&state)).await;
+    let result: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("authorized reviewer")
+    );
+    assert_eq!(f.approvals.lock().await.len(), 1);
+}
+
+#[tokio::test]
+async fn native_approval_reconciles_lost_commit_and_first_browser_decision() {
+    for lost in [false, true] {
+        let (f, state) = waiting().await;
+        let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+        let (mut body, event) = prompt(&f, &state, &transport).await;
+        if lost {
+            f.service.lock().await["lose_decision_response"] = json!(true);
+        } else {
+            f.service.lock().await["status"] = json!("rejected");
+        }
+        assert_eq!(wire(&f, "first", &transport, json!({"jsonrpc":"2.0","id":event["id"],"result":{"action":"accept","content":{"decision":"approve"}}})).await.status(), StatusCode::ACCEPTED);
+        let result = next_event(&mut body).await;
+        if lost {
+            assert!(result["error"].is_object());
+            let current = decoded(
+                &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+                    .await
+                    .1,
+            );
+            let recovered = wire(&f, "rotated", &transport, approval_request(&current)).await;
+            assert_eq!(recovered.headers()["content-type"], "application/json");
+            let recovered: Value =
+                serde_json::from_slice(&recovered.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(decoded(&recovered)["state"]["state"], "complete");
+        } else {
+            let result = decoded(&result);
+            assert_eq!(result["state"]["state"], "intake");
+            assert!(result["state"]["pending_approval"].is_null());
+        }
+        assert_eq!(
+            f.approvals
+                .lock()
+                .await
+                .iter()
+                .filter(|r| r["decision"].is_string())
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_approval_disconnect_does_not_decide_or_cancel() {
+    let (f, state) = waiting().await;
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let (body, event) = prompt(&f, &state, &transport).await;
+    drop(body);
+    assert_eq!(f.approvals.lock().await.len(), 1);
+    let current = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    assert!(current["state"]["pending_approval"].is_object());
+    let duplicate = wire(&f, "first", &transport, approval_request(&current)).await;
+    assert_eq!(duplicate.headers()["content-type"], "application/json");
+    // The same authenticated client may still return its explicit response;
+    // disconnection alone isn't a human decision or MCP cancellation.
+    assert_eq!(wire(&f, "rotated", &transport, json!({"jsonrpc":"2.0","id":event["id"],"result":{"action":"accept","content":{"decision":"approve"}}})).await.status(), StatusCode::ACCEPTED);
+    for _ in 0..100 {
+        let current = decoded(
+            &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+                .await
+                .1,
+        );
+        if current["state"]["state"] == "complete" {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("Explicit response did not resolve after disconnect");
+}
+
+#[tokio::test]
+async fn native_approval_off_then_new_run_retires_old_prompt() {
+    let (f, state) = waiting().await;
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let (mut old_body, old_event) = prompt(&f, &state, &transport).await;
+    let current = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    let off = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "deactivate",
+                json!({}),
+                current["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    let loaded = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"canary"}),
+                off["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    let session = f
+        .state
+        .sessions
+        .read()
+        .await
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    session
+        .lock()
+        .await
+        .gateway
+        .seed_native_usage_run("native-fixture-run-2", "intake");
+    let waiting = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "transition",
+                json!({"event":"REVIEW"}),
+                loaded["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    let (mut body, event) = prompt(&f, &waiting, &transport).await;
+    assert_ne!(old_event["id"], event["id"]);
+    assert!(next_event(&mut old_body).await["error"].is_object());
+    assert_eq!(wire(&f, "first", &transport, json!({"jsonrpc":"2.0","id":old_event["id"],"result":{"action":"accept","content":{"decision":"approve"}}})).await.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        wire(
+            &f,
+            "first",
+            &transport,
+            json!({"jsonrpc":"2.0","id":event["id"],"result":{"action":"cancel"}})
+        )
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    assert!(decoded(&next_event(&mut body).await)["state"]["pending_approval"].is_object());
+    assert_eq!(
+        f.approvals
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["decision"].is_string())
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn native_transport_validation_covers_ordinary_calls_too() {
+    let f = fixture().await;
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let read = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":native::TOOL,"arguments":args(CHAT_A, "get_state", json!({}), None)}});
+    assert_eq!(
+        wire(&f, "foreign", &transport, read.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        wire(&f, "first", "unknown", read.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        wire(&f, "rotated", &transport, read.clone()).await.status(),
+        StatusCode::OK
+    );
+    let mut malformed = read;
+    malformed["result"] = json!({"action":"accept"});
+    assert_eq!(
+        wire(&f, "first", &transport, malformed).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// Optional real-client interoperability. Driver owns a disposable native host
+/// config and synthetic elicitation answers; this is not a human acceptance test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires STATEWRIGHT_NATIVE_APPROVAL_DRIVER and a native MCP client"]
+async fn native_approval_client_interop() {
+    let driver = std::env::var("STATEWRIGHT_NATIVE_APPROVAL_DRIVER").expect("explicit driver path");
+    let (f, _) = waiting().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let router = build_router(f.state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let output = tokio::process::Command::new("node")
+        .arg(driver)
+        .arg(&url)
+        .arg(CHAT_A)
+        .env_clear()
+        .env("PATH", "/opt/homebrew/bin:/usr/bin:/bin")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    server.abort();
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let current = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    assert_eq!(current["state"]["state"], "complete");
+    assert_eq!(
+        f.approvals
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r["decision"].is_string())
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

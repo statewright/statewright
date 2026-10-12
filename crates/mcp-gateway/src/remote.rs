@@ -21,6 +21,13 @@ use crate::tool_intent::{NativeToolFamily, native_tool_family};
 use crate::upstream::UpstreamManager;
 use crate::usage::{RuntimeUsageReport, UsageDisposition};
 
+#[cfg(test)]
+#[path = "native_remote_tests.rs"]
+mod native_remote_tests;
+
+#[path = "native_remote.rs"]
+mod native;
+
 /// Shared state for the remote MCP transport server.
 pub struct RemoteState {
     /// Active SSE sessions: session_id -> sender for SSE events.
@@ -63,6 +70,7 @@ struct RemoteSession {
     gateway: Gateway,
     tx: mpsc::Sender<String>,
     resource: String,
+    native_revision: String,
 }
 
 #[derive(Deserialize)]
@@ -456,6 +464,9 @@ async fn handle_sse(
     }
 
     // Create session (shared SessionManager per API key for fork/join branch visibility)
+    if result.oauth_client_id == "statewright-claude" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
     let session_manager = state.get_session_manager(&api_key_hash.to_string()).await;
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -506,6 +517,7 @@ async fn handle_sse(
             gateway,
             tx,
             resource,
+            native_revision: uuid::Uuid::new_v4().to_string(),
         })),
     );
 
@@ -553,10 +565,6 @@ async fn handle_streamable_http(
             return unauthorized_response(&state, resource_path, "Invalid API key or no workflows");
         }
     };
-    if validated.workflows.is_empty() {
-        return (StatusCode::NOT_FOUND, "No workflows found").into_response();
-    }
-
     // Deterministic base key from API key
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
     let api_key_fingerprint = api_key_hash.to_string();
@@ -572,6 +580,27 @@ async fn handle_streamable_http(
         .and_then(|v| v.to_str().ok())
         .filter(|value| !value.is_empty());
     let session_key = streamable_session_key(&api_key_fingerprint, client_id, mcp_session_id);
+
+    let native_tool = request
+        .params
+        .as_ref()
+        .and_then(|params| params.get("name"))
+        .and_then(|name| name.as_str());
+    if request.method == "tools/call" && native_tool == Some(native::TOOL) {
+        let response = native::handle(&state, validated, &resource, request).await;
+        // MCP transport identity is not the native conversation identity. Never
+        // teach a client to select mutable chat state through its header echo.
+        return streamable_json_response(response, &session_key);
+    }
+    if validated.oauth_client_id == "statewright-claude" {
+        return match native::discovery(&validated, &resource, request) {
+            Some(response) => streamable_json_response(response, &session_key),
+            None => StatusCode::ACCEPTED.into_response(),
+        };
+    }
+    if validated.workflows.is_empty() {
+        return (StatusCode::NOT_FOUND, "No workflows found").into_response();
+    }
 
     // Use shared SessionManager for this API key (parent + branches share state)
     let session_manager = state.get_session_manager(&api_key_fingerprint).await;
@@ -622,6 +651,7 @@ async fn handle_streamable_http(
             gateway,
             tx,
             resource,
+            native_revision: uuid::Uuid::new_v4().to_string(),
         })))
     } else {
         None
@@ -652,16 +682,19 @@ async fn handle_streamable_http(
             let sample = classifier_denial_sample(&capture_request, &response, &session_key);
             drop(session);
             persist_classifier_denial(&state, &api_key, sample).await;
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert("content-type", "application/json".parse().unwrap());
-            // Include session ID for client to track
-            if let Ok(val) = session_key.parse() {
-                headers.insert("mcp-session-id", val);
-            }
-            (StatusCode::OK, headers, axum::Json(response)).into_response()
+            streamable_json_response(response, &session_key)
         }
         None => StatusCode::ACCEPTED.into_response(),
     }
+}
+
+fn streamable_json_response(response: JsonRpcResponse, session_key: &str) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    if let Ok(value) = session_key.parse() {
+        headers.insert("mcp-session-id", value);
+    }
+    (StatusCode::OK, headers, Json(response)).into_response()
 }
 
 /// POST /message?session_id=... — Receive JSON-RPC request, route to gateway, respond via SSE.
@@ -733,6 +766,8 @@ struct FetchResult {
     workflows: HashMap<String, MachineDefinition>,
     owner_id: String,
     plan_limit: Option<u64>,
+    oauth_client_id: String,
+    native_session: Option<native::Identity>,
 }
 
 async fn fetch_workflows(
@@ -762,6 +797,9 @@ async fn fetch_workflows(
         workflows: HashMap<String, MachineDefinition>,
         owner_id: Option<String>,
         plan_limit: Option<u64>,
+        #[serde(default)]
+        oauth_client_id: String,
+        native_session: Option<native::Identity>,
     }
 
     let mut data: GatewayResponse = resp
@@ -789,6 +827,8 @@ async fn fetch_workflows(
         workflows: data.workflows,
         owner_id: data.owner_id.unwrap_or_default(),
         plan_limit: data.plan_limit,
+        oauth_client_id: data.oauth_client_id,
+        native_session: data.native_session,
     })
 }
 
@@ -905,6 +945,7 @@ async fn handle_runtime_approval(
             gateway,
             tx,
             resource,
+            native_revision: uuid::Uuid::new_v4().to_string(),
         }));
         let mut sessions = state.sessions.write().await;
         session = Some(
@@ -1105,6 +1146,11 @@ async fn handle_approval_callback(
         }
     };
     let mut remote_session = remote_session.lock().await;
+    // Legacy development fixtures permit an empty callback secret. Never apply
+    // that compatibility rule to native grant-scoped approval state.
+    if session_id.starts_with("native_") && expected_secret.is_empty() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     let pending_matches = remote_session
         .gateway
         .session_manager
@@ -1123,6 +1169,7 @@ async fn handle_approval_callback(
             .into_response();
     }
 
+    remote_session.native_revision = uuid::Uuid::new_v4().to_string();
     match body.status.as_str() {
         "approved" => {
             // Get the parked transition details
@@ -1510,6 +1557,7 @@ mod tests {
                 gateway,
                 tx,
                 resource: "https://mcp.statewright.example/mcp".into(),
+                native_revision: uuid::Uuid::new_v4().to_string(),
             })),
         );
 

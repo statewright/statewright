@@ -40,6 +40,7 @@ test('native control validates ownership, version, revision, capabilities and ne
   assert.equal(decodeNativeControl(content(receipt({ state: state() })), one).state.state, 'intake');
   for (const replacement of [
     { conversation_id: two }, { protocol_version: 2 }, { revision: 'unknown' },
+    { workflow_aliases: null }, { workflow_aliases: { engineering: 'other' } },
     { state: {} }, { state: { ...state(), state: 'bad\x1b[31m' } },
     { state: { ...state(), transitions: [{ event: 'NEXT', target: null }] } },
     { state: { ...state(), transitions: [{ event: 'NEXT', target: 'inspect' }, { event: 'NEXT', target: 'other' }] } },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { decodeCatalog, gatewayTool, GATEWAY, SERVER, LOGIN_COMMAND, connectionFailure } from '../hooks/catalog.mjs';
+import { decodeCatalog, decodeCatalogConnection, resolveWorkflowName, gatewayTool, GATEWAY, SERVER, LOGIN_COMMAND, connectionFailure } from '../hooks/catalog.mjs';
 
 const wire = (workflows, active = null) => ({ content: [{ type: 'text', text: JSON.stringify({ workflows, active }) }] });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -13,6 +13,19 @@ const connectionWire = (state, snapshot) => ({ content: [{ type: 'text', text: J
     protocol_version: 1, conversation_id: state.session, revision: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', state: null, outcome: null,
     capabilities: { workflow_control: false, native_tool_enforcement: false, human_approval: false, model_routing: false } }),
 }) }] });
+
+test('engineering alias requires authoritative owned-catalog metadata and exact names win', () => {
+  const aliases = { engineering: 'agentic-engineering' };
+  assert.equal(resolveWorkflowName('engineering', ['agentic-engineering'], aliases), 'agentic-engineering');
+  assert.equal(resolveWorkflowName('engineering', ['agentic-engineering', 'engineering'], aliases), 'engineering');
+  assert.equal(resolveWorkflowName('engineering', [], aliases), 'engineering');
+  assert.equal(resolveWorkflowName('engineering', ['agentic-engineering'], {}), 'engineering');
+  const wire = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
+  assert.deepEqual(decodeCatalogConnection(wire({ workflows: ['agentic-engineering'], workflow_aliases: aliases })).workflowAliases, aliases);
+  for (const value of [null, [], { engineering: 'other' }, { unexpected: 'agentic-engineering' }])
+    assert.throws(() => decodeCatalogConnection(wire({ workflows: ['agentic-engineering'], workflow_aliases: value })));
+  assert.throws(() => decodeCatalogConnection(wire({ workflows: ['agentic-engineering', 'engineering'], workflow_aliases: aliases })));
+});
 
 test('connection diagnostics classify native failures without copying messages or payloads', () => {
   for (const [message, code] of [
@@ -866,10 +879,12 @@ test('all mod boundaries reject foreign native context and mutations; own reads 
 
 // A stateful wire fixture exercises the shipping workspace, not the older
 // separate visual mock. The real Rust/native-host interoperability is separate.
-async function workflowHost() {
+async function workflowHost(catalog) {
   const h = await host();
+  if (catalog) h.state.catalog = { content: [{ type: 'text', text: JSON.stringify(catalog) }] };
   h.state.session = '11111111-1111-4111-8111-111111111111';
   const snapshot = { protocol_version: 1, conversation_id: h.state.session, revision: crypto.randomUUID(), state: null, outcome: null,
+    ...(catalog?.workflow_aliases ? { workflow_aliases: catalog.workflow_aliases } : {}),
     capabilities: { workflow_control: true, native_tool_enforcement: true, human_approval: true, model_routing: false } };
   const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
   h.state.read = async ({ tool, args }) => {
@@ -937,6 +952,39 @@ test('sidebar Start followed by the same named workflow request reads state with
   })) chunks.push(chunk);
   assert.ok(chunks.some(c => c.text === 'Canary continues'));
   assert.ok(!chunks.some(c => /refresh the workflow/.test(c.text ?? '')));
+});
+test('engineering alias continues canonical native state without changing load arguments or restarting', async () => {
+  const h = await workflowHost({ workflows: ['agentic-engineering'], workflow_aliases: { engineering: 'agentic-engineering' } });
+  await h.press('start');
+  const before = structuredClone(h.snapshot);
+  const result = JSON.parse((await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'engineering' })).result);
+  assert.equal(result.status, 'already_active');
+  assert.equal(result.state.workflow, 'agentic-engineering');
+  assert.deepEqual(h.snapshot, before);
+  assert.equal(h.state.calls.filter(c => c.args.operation === 'load_workflow').length, 1);
+  // Fresh server metadata can revoke an earlier alias when an exact entry is
+  // created or disabled. Do not trust the connection's old enabled-name list.
+  h.snapshot.workflow_aliases = {};
+  const revoked = JSON.parse((await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'engineering' })).result);
+  assert.equal(revoked.status, 'workflow_conflict');
+  assert.equal(h.state.calls.filter(c => c.args.operation === 'load_workflow').length, 1);
+});
+test('engineering alias preserves the original consent-bound native load arguments', async () => {
+  const h = await workflowHost({ workflows: ['agentic-engineering'], workflow_aliases: { engineering: 'agentic-engineering' } });
+  await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'engineering' });
+  const loads = h.state.calls.filter(c => c.args.operation === 'load_workflow');
+  assert.equal(loads.length, 1);
+  assert.deepEqual(loads[0].args.input, { name: 'engineering' });
+});
+test('fresh engineering alias identity supersedes a connection catalog containing the old exact name', async () => {
+  const h = await workflowHost({ workflows: ['engineering'] });
+  await h.press('start');
+  h.snapshot.state.workflow = 'agentic-engineering';
+  h.snapshot.workflow_aliases = { engineering: 'agentic-engineering' };
+  const result = JSON.parse((await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'engineering' })).result);
+  assert.equal(result.status, 'already_active');
+  assert.equal(result.state.workflow, 'agentic-engineering');
+  assert.equal(h.state.calls.filter(c => c.args.operation === 'load_workflow').length, 1);
 });
 test('requesting a different active workflow preserves the run and reports the conflict', async () => {
   const h = await workflowHost(); await h.press('start');

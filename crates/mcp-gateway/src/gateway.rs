@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use serde_json::json;
 use statewright_engine::{MachineDefinition, TransitionDef};
 
+use crate::config::{
+    available_workflow_names, resolve_workflow_name, workflow_aliases, workflow_enabled,
+};
 use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
 use crate::interceptors::{self, PreCallDecision};
@@ -154,11 +157,7 @@ pub struct NativeUsageError {
 
 impl Gateway {
     fn workflow_enabled(definition: &MachineDefinition) -> bool {
-        definition
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.enabled)
-            .unwrap_or(true)
+        workflow_enabled(definition)
     }
 
     fn authoritative_workflow_definition(
@@ -194,15 +193,15 @@ impl Gateway {
     }
 
     fn available_workflow_names(&self) -> Vec<&str> {
-        let mut names = self
-            .workflows
-            .iter()
-            .filter_map(|(name, definition)| {
-                Self::workflow_enabled(definition).then_some(name.as_str())
-            })
-            .collect::<Vec<_>>();
-        names.sort_unstable();
-        names
+        available_workflow_names(&self.workflows)
+    }
+
+    pub(crate) fn resolved_workflow_name<'a>(&'a self, requested: &'a str) -> &'a str {
+        resolve_workflow_name(&self.workflows, requested)
+    }
+
+    pub(crate) fn workflow_aliases(&self) -> HashMap<&str, &str> {
+        workflow_aliases(&self.workflows)
     }
 
     async fn paused_run(
@@ -2657,6 +2656,7 @@ impl Gateway {
                 let workflow_names = self.available_workflow_names();
                 let result = json!({
                     "workflows": workflow_names,
+                    "workflow_aliases": workflow_aliases(&self.workflows),
                     "active": self.active_workflow,
                 });
                 JsonRpcResponse::success(
@@ -2683,12 +2683,13 @@ impl Gateway {
                 // create_workflow(overwrite=true) lossy. The durable JSON record is the
                 // only safe source for a read-modify-overwrite cycle.
                 #[cfg(feature = "metering")]
-                let definition = if let Some(pool) = &self.db_pool {
-                    match sqlx::query_scalar::<_, serde_json::Value>(
-                        "SELECT definition FROM workflows WHERE owner = $1 AND name = $2",
+                let (workflow_name, definition) = if let Some(pool) = &self.db_pool {
+                    match sqlx::query_as::<_, (String, serde_json::Value)>(
+                        "SELECT name, definition FROM workflows WHERE owner = $1 AND (name = $2 OR name = $3) ORDER BY CASE WHEN name = $2 THEN 0 ELSE 1 END LIMIT 1",
                     )
                     .bind(&self.owner_id)
                     .bind(workflow_name)
+                    .bind(self.resolved_workflow_name(workflow_name))
                     .fetch_optional(pool)
                     .await
                     {
@@ -2743,6 +2744,10 @@ impl Gateway {
             }
             "statewright_load_workflow" => {
                 let workflow_name = arguments.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                #[cfg(feature = "metering")]
+                let requested_name = workflow_name;
+                let resolved_name = self.resolved_workflow_name(workflow_name).to_string();
+                let workflow_name = resolved_name.as_str();
                 let resume = arguments
                     .get("resume")
                     .and_then(|r| r.as_bool())
@@ -2861,18 +2866,19 @@ impl Gateway {
                 // record before mutating session state so a workflow disabled by
                 // another client cannot still be loaded from a stale cache.
                 #[cfg(feature = "metering")]
-                if let Some(pool) = &self.db_pool {
-                    let stored = sqlx::query_scalar::<_, serde_json::Value>(
-                        "SELECT definition FROM workflows WHERE owner = $1 AND name = $2",
+                let durable_name = if let Some(pool) = &self.db_pool {
+                    let stored = sqlx::query_as::<_, (String, serde_json::Value)>(
+                        "SELECT name, definition FROM workflows WHERE owner = $1 AND (name = $2 OR name = $3) ORDER BY CASE WHEN name = $2 THEN 0 ELSE 1 END LIMIT 1",
                     )
                     .bind(&self.owner_id)
+                    .bind(requested_name)
                     .bind(workflow_name)
                     .fetch_optional(pool)
                     .await;
                     match stored {
-                        Ok(Some(value)) => {
+                        Ok(Some((stored_name, value))) => {
                             definition = match Self::authoritative_workflow_definition(
-                                workflow_name,
+                                &stored_name,
                                 definition,
                                 Some(value),
                             ) {
@@ -2887,6 +2893,7 @@ impl Gateway {
                                     );
                                 }
                             };
+                            stored_name
                         }
                         Ok(None) => {
                             return JsonRpcResponse::success(
@@ -2906,7 +2913,11 @@ impl Gateway {
                             );
                         }
                     }
-                }
+                } else {
+                    resolved_name.clone()
+                };
+                #[cfg(feature = "metering")]
+                let workflow_name = durable_name.as_str();
 
                 if let Err(e) = statewright_engine::validate_definition(&definition) {
                     return JsonRpcResponse::success(
@@ -4666,6 +4677,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engineering_alias_load_uses_canonical_identity_and_exact_entries_win() {
+        for exact in [None, Some(true), Some(false)] {
+            let mut gw = test_gateway();
+            let mut canonical = test_definition();
+            canonical.id = "agentic-engineering".into();
+            gw.workflows.insert(canonical.id.clone(), canonical);
+            if let Some(enabled) = exact {
+                let mut definition = test_definition();
+                definition.id = "engineering".into();
+                definition.meta = Some(serde_json::from_value(json!({"enabled":enabled})).unwrap());
+                gw.workflows.insert(definition.id.clone(), definition);
+            }
+            let before = gw.session_manager.get("test-session").unwrap().checkpoint();
+            let result = gw.handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(), method: "tools/call".into(), id: Some(json!(1)),
+                params: Some(json!({"name":"statewright_load_workflow","arguments":{"name":"engineering"}})),
+            }).await.unwrap();
+            if exact == Some(false) {
+                assert_eq!(result.result.as_ref().unwrap()["isError"], true);
+                assert_eq!(gw.active_workflow.as_deref(), Some("test"));
+                assert_eq!(
+                    gw.session_manager.get("test-session").unwrap().checkpoint(),
+                    before
+                );
+            } else {
+                let expected = if exact.is_some() {
+                    "engineering"
+                } else {
+                    "agentic-engineering"
+                };
+                let result = tool_result_json(result);
+                assert_eq!(result["loaded"], expected);
+                assert_eq!(result["state_snapshot"]["workflow"], expected);
+                assert_eq!(gw.active_workflow.as_deref(), Some(expected));
+                assert_eq!(
+                    gw.session_manager
+                        .get("test-session")
+                        .unwrap()
+                        .definition
+                        .id,
+                    expected
+                );
+                assert_eq!(gw.workflows.contains_key("engineering"), exact.is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn engineering_alias_without_canonical_fails_without_mutation() {
+        let mut gw = test_gateway();
+        let before = gw.session_manager.get("test-session").unwrap().checkpoint();
+        let result = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(1)),
+                params: Some(
+                    json!({"name":"statewright_load_workflow","arguments":{"name":"engineering"}}),
+                ),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.result.unwrap()["isError"], true);
+        assert_eq!(
+            gw.session_manager.get("test-session").unwrap().checkpoint(),
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn load_workflow_returns_authoritative_snapshot_without_rewriting_transport_identity() {
         let mut gw = test_gateway();
 
@@ -5538,6 +5619,124 @@ mod tests {
             "string"
         );
         assert_eq!(wire["inputSchema"]["properties"]["run_id"]["minLength"], 1);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn engineering_alias_durable_read_and_exact_resume_preserve_canonical_run() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMP TABLE workflows (owner text, name text, definition json)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMP TABLE workflow_runs (id text, owner text, workflow_name text, status text, session_id text, project_id text, final_state text, context_snapshot json, updated text)").execute(&pool).await.unwrap();
+        let mut gw = test_gateway();
+        let mut definition = test_definition();
+        definition.id = "agentic-engineering".into();
+        gw.workflows
+            .insert(definition.id.clone(), definition.clone());
+        gw.db_pool = Some(pool.clone());
+        let mut raw = serde_json::to_value(&definition).unwrap();
+        raw["x_preserved_extension"] = json!({"untouched":true});
+        sqlx::query("INSERT INTO workflows VALUES ($1, 'agentic-engineering', $2)")
+            .bind(&gw.owner_id)
+            .bind(&raw)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut paused = gw.session_manager.create("test-session".into(), definition);
+        paused.current_state = "implementing".into();
+        paused.transition_count = 7;
+        let checkpoint = paused.checkpoint();
+        sqlx::query("INSERT INTO workflow_runs VALUES ('canonical-paused', $1, 'agentic-engineering', 'paused', 'test-session', '', 'implementing', $2, '')")
+            .bind(&gw.owner_id).bind(&checkpoint).execute(&pool).await.unwrap();
+        async fn invoke(
+            gw: &mut Gateway,
+            tool: &str,
+            arguments: serde_json::Value,
+        ) -> JsonRpcResponse {
+            gw.handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                id: Some(json!(1)),
+                params: Some(json!({"name":tool,"arguments":arguments})),
+            })
+            .await
+            .unwrap()
+        }
+        let read = tool_result_json(
+            invoke(
+                &mut gw,
+                "statewright_get_workflow",
+                json!({"name":"engineering"}),
+            )
+            .await,
+        );
+        assert_eq!(read["name"], "agentic-engineering");
+        assert_eq!(read["definition"], raw);
+        let resumed = tool_result_json(
+            invoke(
+                &mut gw,
+                "statewright_load_workflow",
+                json!({"name":"engineering","resume":true,"run_id":"canonical-paused"}),
+            )
+            .await,
+        );
+        assert_eq!(resumed["loaded"], "agentic-engineering");
+        assert_eq!(resumed["resumed"], true);
+        assert_eq!(resumed["run_id"], "canonical-paused");
+        assert_eq!(resumed["state_snapshot"]["state"], "implementing");
+        assert_eq!(
+            gw.session_manager.get("test-session").unwrap().checkpoint(),
+            checkpoint
+        );
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "alias resume cannot create a second run");
+
+        // A durable exact entry added since the cached catalog was fetched wins
+        // over fallback too; never read or resume the canonical workflow instead.
+        let disabled = json!({"id":"engineering","initial":"done","meta":{"enabled":false},"states":{"done":{"type":"final"}}});
+        sqlx::query("INSERT INTO workflows VALUES ($1, 'engineering', $2)")
+            .bind(&gw.owner_id)
+            .bind(&disabled)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let read = tool_result_json(
+            invoke(
+                &mut gw,
+                "statewright_get_workflow",
+                json!({"name":"engineering"}),
+            )
+            .await,
+        );
+        assert_eq!(read["name"], "engineering");
+        assert_eq!(read["definition"], disabled);
+        let denied = invoke(
+            &mut gw,
+            "statewright_load_workflow",
+            json!({"name":"engineering"}),
+        )
+        .await;
+        assert_eq!(denied.result.unwrap()["isError"], true);
+        assert_eq!(gw.current_run_id.as_deref(), Some("canonical-paused"));
+        assert_eq!(
+            gw.session_manager.get("test-session").unwrap().checkpoint(),
+            checkpoint
+        );
+        pool.close().await;
     }
 
     #[cfg(feature = "metering")]

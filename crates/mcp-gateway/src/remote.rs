@@ -463,7 +463,7 @@ async fn handle_sse(
             StatusCode::UNAUTHORIZED
         })?;
 
-    if result.workflows.is_empty() {
+    if result.default.is_empty() {
         tracing::warn!("No workflows found for API key");
         return Err(StatusCode::NOT_FOUND);
     }
@@ -606,7 +606,7 @@ async fn handle_streamable_http(
         // teach a client to select mutable chat state through its header echo.
         return streamable_json_response(response, &session_key);
     }
-    if validated.workflows.is_empty() {
+    if validated.default.is_empty() {
         return (StatusCode::NOT_FOUND, "No workflows found").into_response();
     }
 
@@ -810,25 +810,18 @@ async fn fetch_workflows(
         native_session: Option<native::Identity>,
     }
 
-    let mut data: GatewayResponse = resp
+    let data: GatewayResponse = resp
         .json()
         .await
         .map_err(|e| format!("Parse error: {}", e))?;
 
-    // Treat the upstream response as untrusted catalog input. Older PB hooks
-    // may still return disabled definitions, so filter again at the gateway.
-    data.workflows.retain(|_, definition| {
-        definition
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.enabled)
-            .unwrap_or(true)
-    });
-
+    // Retain disabled entries for exact-name precedence during alias lookup.
+    // They remain unselectable and cannot become the startup definition.
+    let available = crate::config::available_workflow_names(&data.workflows);
     let default = data
         .default
-        .filter(|name| data.workflows.contains_key(name))
-        .unwrap_or_else(|| data.workflows.keys().next().cloned().unwrap_or_default());
+        .filter(|name| available.contains(&name.as_str()))
+        .unwrap_or_else(|| available.first().copied().unwrap_or_default().to_string());
 
     Ok(FetchResult {
         default,
@@ -1503,7 +1496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_fetch_excludes_disabled_definitions_and_disabled_default() {
+    async fn workflow_fetch_preserves_exact_names_but_excludes_disabled_default() {
         let enabled = json!({
             "id": "enabled",
             "initial": "done",
@@ -1535,7 +1528,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.default, "enabled");
-        assert_eq!(result.workflows.keys().collect::<Vec<_>>(), vec!["enabled"]);
+        assert_eq!(result.workflows.len(), 2);
+        assert_eq!(
+            crate::config::available_workflow_names(&result.workflows),
+            vec!["enabled"]
+        );
+        assert!(!crate::config::workflow_enabled(
+            &result.workflows["disabled"]
+        ));
         server.abort();
     }
 

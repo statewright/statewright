@@ -73,39 +73,41 @@ uses the ordinary Claude app; [ChatGPT with Codex](https://docs.statewright.ai/p
 uses the macOS **ChatGPT + Statewright** launcher. Ordinary cloud chats are a
 separate integration and cannot enforce model routing.
 
-Then ask for a workflow. This is an illustrative bugfix sequence; actual states,
-events and tools come from the selected workflow:
+Start with **agentic-engineering** (alias **engineering**) for a fix, small
+feature, refactor or investigation. This illustrative sequence shows the normal
+change path; actual states, events and tools come from the selected workflow:
 
 ```
-❯ start the bugfix workflow — fix the failing tests in calc.py
+❯ use the engineering workflow to fix the failing tests in calc.py
 
-◆ statewright — statewright_load_workflow (name: bugfix)
-◆ [statewright] Workflow activated: bugfix
+◆ statewright — statewright_load_workflow (name: agentic-engineering)
+◆ [statewright] Workflow activated: agentic-engineering
 
 ◆ statewright — statewright_get_state (MCP)
 
-◆ Current phase: planning. Let me read the code first.
+◆ diagnose → baseline: understand the failure and record a focused plan
 
-  Read 2 files
+  Read the relevant code; reproduce the failing test
 
-  [statewright] planning => implementing
+◆ implement: make the smallest coherent change
 
-◆ statewright — statewright_transition (READY)
+  Edit calc.py and add regression coverage
 
-  Edit calc.py: 1 line changed
+◆ validate → review: check the result and look for missed cases
 
-  [statewright] implementing => testing
+  Run the focused checks; record results and limitations
 
-◆ statewright — statewright_transition (DONE)
-
-  Bash: pytest -x — 7 passed
-
-  [statewright] testing => completed
+◆ handoff → complete: summarize the outcome and what was verified
 ◆ [statewright] Workflow complete.
 ```
 
 In Claude, `/statewright` opens the sidebar: choose a workflow, then
 **Start workflow**. Selection alone does not start a run.
+
+The starter uses your selected model, supports evidence-backed no-change
+outcomes, and allows one repair round before stopping with a useful handoff.
+It does not automatically commit or deploy. See the
+[starter workflow guide](docs/agentic-engineering.md) for boundaries and upgrades.
 
 ## Research results
 

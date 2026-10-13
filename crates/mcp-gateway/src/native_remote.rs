@@ -239,8 +239,7 @@ pub(super) fn discovery(
                         .is_none_or(|args| args == &json!({}))
             }) =>
         {
-            let mut names: Vec<_> = validated.workflows.keys().collect();
-            names.sort();
+            let names = crate::config::available_workflow_names(&validated.workflows);
             let native_control = validated
                 .native_session
                 .as_ref()
@@ -249,7 +248,7 @@ pub(super) fn discovery(
                 })
                 .map(|_| json!({"version":1}));
             serde_json::to_value(ToolCallResult::text(
-                json!({"workflows":names,"active":null,"native_control":native_control})
+                json!({"workflows":names,"workflow_aliases":crate::config::workflow_aliases(&validated.workflows),"active":null,"native_control":native_control})
                     .to_string(),
             ))
             .unwrap()
@@ -330,8 +329,10 @@ pub(super) async fn handle(
         Ok(value) => value,
         Err(error) => return fail(error),
     };
-    let mut workflows: Vec<_> = validated.workflows.keys().cloned().collect();
-    workflows.sort();
+    let workflows: Vec<_> = crate::config::available_workflow_names(&validated.workflows)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let namespace = identity.namespace(&state.authorization_server_url, &validated.owner_id);
     let session_key = format!("{}__{}", namespace, native.context.conversation_id);
     let manager = state.get_session_manager(&namespace).await;
@@ -465,6 +466,7 @@ pub(super) async fn snapshot(
     };
     let result = json!({"protocol_version":1,"conversation_id":chat,
         "revision":session.native_revision,"state":current,"outcome":outcome,
+        "workflow_aliases":session.gateway.workflow_aliases(),
         "capabilities":{"workflow_control":true,"native_tool_enforcement":true,"human_approval":true,"model_routing":false},
         "enforcement_scope":"native_pre_permission_hooks"});
     JsonRpcResponse::success(

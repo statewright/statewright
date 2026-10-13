@@ -1,7 +1,7 @@
 // Native workflow-control transport. This does NOT enforce ordinary Claude
 // tools or authorize a human decision. The workspace must use executionReadiness
 // before enabling Start; a connected gateway alone is insufficient.
-import { validName, decodeCatalogConnection } from './catalog.mjs';
+import { validName, validWorkflowAliases, decodeCatalogConnection } from './catalog.mjs';
 
 export const NATIVE_CONTROL_TOOL = 'statewright_native_request';
 export const NATIVE_CONNECT_TOOL = 'statewright_native_connect';
@@ -41,6 +41,8 @@ export function decodeNativeControl(result, conversation) {
   if (!uuid(conversation) || !toolResult(result) || result.isError || result.content.length !== 1 ||
       result.content[0].text.length > 262144) throw new Error('Statewright response unavailable');
   const value = JSON.parse(result.content[0].text);
+  if (value?.workflow_aliases !== undefined && !validWorkflowAliases(value.workflow_aliases))
+    throw new Error('Invalid workflow aliases');
   if (!object(value) || value.protocol_version !== 1 || value.conversation_id !== conversation ||
       !uuid(value.revision) || !object(value.capabilities) ||
       !['workflow_control', 'native_tool_enforcement', 'human_approval', 'model_routing']
@@ -73,10 +75,11 @@ export function decodeNativeConnection(result, conversation) {
       value.protocol_version !== 1 || value.conversation_id !== conversation)
     throw new Error('Invalid native connection identity');
   const wrap = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
-  const { workflows } = decodeCatalogConnection(wrap({ workflows: value.workflows }));
   const snapshot = decodeNativeControl(wrap(value.snapshot), conversation);
+  const { workflows, workflowAliases } = decodeCatalogConnection(wrap({ workflows: value.workflows,
+    workflow_aliases: snapshot.workflow_aliases }));
   if (snapshot.outcome !== null) throw new Error('Connection must be read-only');
-  return { workflows, nativeControl: true, snapshot };
+  return { workflows, workflowAliases, nativeControl: true, snapshot };
 }
 
 // Local enforcement is an integration prerequisite, not a server claim or a

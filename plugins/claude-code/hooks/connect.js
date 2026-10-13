@@ -1,4 +1,4 @@
-import { decodeCatalogConnection, connectionFailure, validName, gatewayTool, gatewayServer, catalogTool, catalogCall, emptyArgs, SERVER,
+import { decodeCatalogConnection, connectionFailure, validName, resolveWorkflowName, gatewayTool, gatewayServer, catalogTool, catalogCall, emptyArgs, SERVER,
   NATIVE_SERVER, LOGIN_COMMAND } from './catalog.mjs';
 import { createNativeControl, NATIVE_CONTROL_TOOL, NATIVE_CONNECT_TOOL, decodeNativeConnection,
   executionReadiness, progressNodes } from './native-control.mjs';
@@ -12,7 +12,7 @@ const PANE = 'statewright';
 const PAGE_SIZE = 32; // Native Select accepts at most 64 options.
 let navigationRevision = 0;
 const fresh = conversation => ({ conversation, desktopNavigationRevision: ++navigationRevision, epoch: 0, busy: false, connected: false,
-  names: [], selected: '', page: 0, notice: '', error: '', connectionIssue: null, manual: false, timer: null, paneOpen: false, handoff: false,
+  names: [], workflowAliases: {}, selected: '', page: 0, notice: '', error: '', connectionIssue: null, manual: false, timer: null, paneOpen: false, handoff: false,
   checked: false, interactive: false, pending: null, prompted: false, prompting: false, powerlineOverride: null, appearanceGeneration: 0,
   native: null, control: null, controlError: '', generation: 0, requiresEnforcement: false, controlConsent: false, consentEpoch: 0,
   runningTool: null, actionBusy: false, journey: null, showGraph: true, routes: [], routeError: '', modelActivity: null, baseRequest: null, fallback: null });
@@ -116,7 +116,11 @@ async function workflowAction($, operation, input = {}, shownRevision, permissio
       if (await current($) !== v || v.generation !== generation)
         throw new Error('This request was superseded by a newer workflow action.');
       if (snapshot.state && !snapshot.state.is_final) {
-        if (snapshot.state.workflow !== input.name) return { ...snapshot, status: 'workflow_conflict',
+        // A fresh alias map proves its targets are in the current owned catalog;
+        // the connection's selectable names may predate additions or removals.
+        const aliases = snapshot.workflow_aliases ?? v.workflowAliases;
+        const names = snapshot.workflow_aliases === undefined ? v.names : Object.values(aliases);
+        if (snapshot.state.workflow !== resolveWorkflowName(input.name, names, aliases)) return { ...snapshot, status: 'workflow_conflict',
           message: 'A different workflow is active in this conversation. Continue it, or ask the user before turning it Off and starting another.' };
         return { ...snapshot, status: 'already_active',
           message: 'This workflow is already active. Continue from the current state and follow its tools and transitions; no workflow was restarted.' };
@@ -363,6 +367,7 @@ async function connect($, v, epoch, allowSignIn) {
     if (!await live($, v, epoch)) return;
     const names = catalog.workflows;
     v.names = names;
+    v.workflowAliases = catalog.workflowAliases;
     if (!names.includes(v.selected)) v.selected = names[0] ?? '';
     v.page = Math.max(0, Math.floor(names.indexOf(v.selected) / PAGE_SIZE));
     v.connected = true;

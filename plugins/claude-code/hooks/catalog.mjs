@@ -43,6 +43,15 @@ export function validName(name) {
   return typeof name === 'string' && name.trim().length > 0 && name.length <= 200 &&
     !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(name);
 }
+// Use only the gateway's owned-catalog resolution. An enabled-name list alone
+// cannot distinguish an absent alias from an explicitly disabled exact entry.
+export function resolveWorkflowName(name, workflows, aliases = {}) {
+  if (workflows.includes(name)) return name;
+  return name === 'engineering' && aliases.engineering === 'agentic-engineering' &&
+    workflows.includes('agentic-engineering') ? 'agentic-engineering' : name;
+}
+export const validWorkflowAliases = value => value !== null && typeof value === 'object' && !Array.isArray(value) &&
+  Object.entries(value).every(([alias, target]) => alias === 'engineering' && target === 'agentic-engineering');
 export function decodeCatalog(result) {
   return decodeCatalogConnection(result).workflows;
 }
@@ -50,12 +59,15 @@ export function decodeCatalogConnection(result) {
   if (result?.isError || !Array.isArray(result?.content) || result.content.length !== 1 ||
       result.content[0]?.type !== 'text' || typeof result.content[0].text !== 'string' ||
       result.content[0].text.length > 131072) throw new Error('Invalid catalog');
-  const { workflows, native_control } = JSON.parse(result.content[0].text);
+  const { workflows, workflow_aliases = {}, native_control } = JSON.parse(result.content[0].text);
   if (!Array.isArray(workflows) || workflows.length > 1000 || !workflows.every(validName) ||
       new Set(workflows).size !== workflows.length) throw new Error('Invalid catalog');
+  if (!validWorkflowAliases(workflow_aliases) ||
+      Object.entries(workflow_aliases).some(([alias, target]) => workflows.includes(alias) || !workflows.includes(target)))
+    throw new Error('Invalid workflow aliases');
   // The gateway's `active` is NOT bound to this native conversation. Never use it.
   const supported = native_control !== null && typeof native_control === 'object' &&
     !Array.isArray(native_control) && native_control.version === 1;
-  return { workflows, nativeControl: supported,
+  return { workflows, workflowAliases: workflow_aliases, nativeControl: supported,
     unsupportedControl: native_control !== undefined && native_control !== null && !supported };
 }

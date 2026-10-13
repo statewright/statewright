@@ -6,6 +6,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Codex Plugin 0.3.4] — 2026-10-01
 
 ### Added
+- **[workflows]** Add `agentic-engineering` (alias `engineering`) as the
+  provider-neutral starter for fixes, features, refactors and investigations,
+  with baseline evidence, validation, review and one bounded repair round.
 - **[codex]** Add an explicit development Desktop profile alongside staging and
   production profiles.
 - **[gateway]** Record privacy-bounded classifier denials with a short retention

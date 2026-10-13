@@ -62,6 +62,16 @@ async fn fixture() -> Fixture {
         if key == "Bearer changed" { workflows["canary"]["states"]["intake"]["instructions"] = json!("Revised definition"); }
         if key == "Bearer web" { workflows["canary"]["states"]["intake"]["allowed_tools"] = json!(["Read", "WebFetch", "WebSearch"]); }
         if key == "Bearer empty" { workflows = json!({}); }
+        if key.starts_with("Bearer engineering") {
+            let mut definition = workflows["canary"].clone();
+            definition["id"] = json!("agentic-engineering");
+            workflows["agentic-engineering"] = definition.clone();
+            if key != "Bearer engineering" {
+                definition["id"] = json!("engineering");
+                definition["meta"] = json!({"enabled":key != "Bearer engineering-disabled"});
+                workflows["engineering"] = definition;
+            }
+        }
         (StatusCode::OK, Json(json!({"default":"canary","owner_id":owner,"plan_limit":17,
           "native_session":identity, "oauth_client_id": if key == "Bearer legacy" { "" } else { "statewright-claude" },
           "workflows":workflows})))
@@ -136,6 +146,133 @@ fn action_outcome(snapshot: &Value) -> Value {
 
 fn connect_args(chat: &str) -> Value {
     json!({"context":{"version":1,"conversation_id":chat}})
+}
+
+#[tokio::test]
+async fn engineering_alias_native_load_continues_exact_run_and_revision() {
+    let f = fixture().await;
+    let initial = decoded(&connect(&f, "engineering", connect_args(CHAT_A)).await.1);
+    assert_eq!(
+        initial["snapshot"]["workflow_aliases"]["engineering"],
+        "agentic-engineering"
+    );
+    assert!(
+        !initial["workflows"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("engineering"))
+    );
+    let loaded = decoded(
+        &call(
+            &f,
+            "engineering",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"engineering"}),
+                initial["snapshot"]["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(loaded["state"]["workflow"], "agentic-engineering");
+    assert_eq!(action_outcome(&loaded)["loaded"], "agentic-engineering");
+    for name in ["agentic-engineering", "engineering"] {
+        let duplicate = call(
+            &f,
+            "engineering",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":name}),
+                loaded["revision"].as_str(),
+            ),
+        )
+        .await
+        .1;
+        assert!(
+            duplicate["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already active")
+        );
+        let same = decoded(
+            &call(
+                &f,
+                "engineering",
+                args(CHAT_A, "get_state", json!({}), None),
+            )
+            .await
+            .1,
+        );
+        assert_eq!(same["state"], loaded["state"]);
+        assert_eq!(same["revision"], loaded["revision"]);
+        assert!(same["outcome"].is_null());
+    }
+    // Reconnect/refresh with a newly present exact name must not reinterpret it
+    // as the active canonical workflow, including when the new entry is disabled.
+    for key in ["engineering-exact", "engineering-disabled"] {
+        let conflict = call(
+            &f,
+            key,
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"engineering"}),
+                loaded["revision"].as_str(),
+            ),
+        )
+        .await
+        .1;
+        assert!(
+            conflict["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already active")
+        );
+        let current = decoded(
+            &call(&f, key, args(CHAT_A, "get_state", json!({}), None))
+                .await
+                .1,
+        );
+        assert_eq!(current["state"], loaded["state"]);
+        assert_eq!(current["revision"], loaded["revision"]);
+        assert_eq!(current["workflow_aliases"], json!({}));
+    }
+}
+
+#[tokio::test]
+async fn engineering_alias_native_disabled_exact_entry_never_falls_back() {
+    let f = fixture().await;
+    let initial = decoded(
+        &connect(&f, "engineering-disabled", connect_args(CHAT_A))
+            .await
+            .1,
+    );
+    assert_eq!(initial["snapshot"]["workflow_aliases"], json!({}));
+    assert!(
+        !initial["workflows"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("engineering"))
+    );
+    let denied = decoded(
+        &call(
+            &f,
+            "engineering-disabled",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"engineering"}),
+                initial["snapshot"]["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(denied["outcome"]["isError"], true);
+    assert!(denied["state"].is_null());
 }
 
 #[tokio::test]

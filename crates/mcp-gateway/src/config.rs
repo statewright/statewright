@@ -4,6 +4,54 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use statewright_engine::MachineDefinition;
 
+/// Resolve the built-in shorthand only within the caller's owned catalog.
+/// Exact entries take precedence even when disabled; availability is checked
+/// separately so an explicitly disabled `engineering` never falls through.
+pub(crate) fn resolve_workflow_name<'a>(
+    workflows: &'a HashMap<String, MachineDefinition>,
+    requested: &'a str,
+) -> &'a str {
+    if !workflows.contains_key(requested)
+        && requested == "engineering"
+        && workflows.contains_key("agentic-engineering")
+    {
+        "agentic-engineering"
+    } else {
+        requested
+    }
+}
+
+pub(crate) fn workflow_enabled(definition: &MachineDefinition) -> bool {
+    definition
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.enabled)
+        .unwrap_or(true)
+}
+
+pub(crate) fn available_workflow_names(
+    workflows: &HashMap<String, MachineDefinition>,
+) -> Vec<&str> {
+    let mut names = workflows
+        .iter()
+        .filter_map(|(name, definition)| workflow_enabled(definition).then_some(name.as_str()))
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
+/// Discovery metadata, not extra workflow records or selectable entries.
+pub(crate) fn workflow_aliases(
+    workflows: &HashMap<String, MachineDefinition>,
+) -> HashMap<&str, &str> {
+    let mut aliases = HashMap::new();
+    let resolved = resolve_workflow_name(workflows, "engineering");
+    if resolved != "engineering" && workflows.get(resolved).is_some_and(workflow_enabled) {
+        aliases.insert("engineering", resolved);
+    }
+    aliases
+}
+
 /// Top-level gateway configuration with named workflows.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
@@ -55,6 +103,51 @@ mod tests {
             },
             "guards": {}
         })
+    }
+
+    #[test]
+    fn engineering_alias_is_owned_exact_first_and_not_a_catalog_record() {
+        let canonical: MachineDefinition =
+            serde_json::from_value(simple_def("agentic-engineering")).unwrap();
+        let mut workflows = HashMap::new();
+        assert_eq!(
+            resolve_workflow_name(&workflows, "engineering"),
+            "engineering"
+        );
+        assert!(workflow_aliases(&workflows).is_empty());
+        workflows.insert("agentic-engineering".into(), canonical);
+        assert_eq!(
+            resolve_workflow_name(&workflows, "engineering"),
+            "agentic-engineering"
+        );
+        assert_eq!(
+            workflow_aliases(&workflows).get("engineering"),
+            Some(&"agentic-engineering")
+        );
+        assert_eq!(
+            available_workflow_names(&workflows),
+            vec!["agentic-engineering"]
+        );
+        for enabled in [true, false] {
+            let mut exact: MachineDefinition =
+                serde_json::from_value(simple_def("engineering")).unwrap();
+            exact.meta = Some(serde_json::from_value(json!({"enabled":enabled})).unwrap());
+            workflows.insert("engineering".into(), exact);
+            assert_eq!(
+                resolve_workflow_name(&workflows, "engineering"),
+                "engineering"
+            );
+            assert!(workflow_aliases(&workflows).is_empty());
+        }
+        workflows.remove("engineering");
+        workflows.get_mut("agentic-engineering").unwrap().meta =
+            Some(serde_json::from_value(json!({"enabled":false})).unwrap());
+        assert_eq!(
+            resolve_workflow_name(&workflows, "engineering"),
+            "agentic-engineering"
+        );
+        assert!(workflow_aliases(&workflows).is_empty());
+        assert!(available_workflow_names(&workflows).is_empty());
     }
 
     #[test]

@@ -38,23 +38,23 @@ routerAdd('GET', '/api/gateway/workflows', (e) => {
   var records = e.app.findRecordsByFilter('workflows', '1=1', '-updated', 0, 0)
   var workflows = {}
   var defaultName = ''
+  var firstEnabledName = ''
   for (var i = 0; i < records.length; i++) {
     var r = records[i]
     var name = r.get('name')
     var def = r.get('definition')
-    if (def && def.meta && def.meta.enabled === false) {
-      continue
-    }
+    // Keep exact names, including disabled entries, for gateway alias lookup.
+    // The gateway filters discovery and rejects disabled loads.
     workflows[name] = def
+    if (def && def.meta && def.meta.enabled === false) continue
+    if (!firstEnabledName) firstEnabledName = name
     if (r.get('active') && !defaultName) {
       defaultName = name
     }
   }
 
   // If no active workflow, use first available
-  if (!defaultName && records.length > 0) {
-    defaultName = records[0].get('name')
-  }
+  if (!defaultName) defaultName = firstEnabledName
 
   return e.json(200, {
     default: defaultName,

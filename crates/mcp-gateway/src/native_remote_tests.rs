@@ -133,6 +133,215 @@ fn action_outcome(snapshot: &Value) -> Value {
     serde_json::from_str(snapshot["outcome"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
 
+fn connect_args(chat: &str) -> Value {
+    json!({"context":{"version":1,"conversation_id":chat}})
+}
+
+async fn connect(f: &Fixture, key: &str, arguments: Value) -> (StatusCode, Value) {
+    rpc(
+        f,
+        key,
+        "tools/call",
+        json!({"name":native::CONNECT_TOOL,"arguments":arguments}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn native_connect_discovery_requires_valid_identity_and_only_connect_requests_interaction() {
+    for key in [
+        "first",
+        "empty",
+        "legacy",
+        "missing",
+        "version",
+        "client",
+        "resource",
+        "principal",
+        "no-owner",
+    ] {
+        let f = fixture().await;
+        let listing = rpc(&f, key, "tools/list", json!({})).await.1;
+        let tools = listing["result"]["tools"].as_array().unwrap();
+        let connection = tools
+            .iter()
+            .find(|tool| tool["name"] == native::CONNECT_TOOL);
+        let valid = matches!(key, "first" | "empty");
+        assert_eq!(connection.is_some(), valid, "{key}");
+        if let Some(connection) = connection {
+            assert_eq!(
+                connection["_meta"]["anthropic/requiresUserInteraction"],
+                true
+            );
+            assert_eq!(connection["annotations"]["readOnlyHint"], true);
+            assert_eq!(connection["inputSchema"]["additionalProperties"], false);
+            assert_eq!(connection["inputSchema"]["required"], json!(["context"]));
+        }
+        assert!(
+            tools
+                .iter()
+                .filter(|tool| tool["name"] != native::CONNECT_TOOL)
+                .all(|tool| tool["_meta"]["anthropic/requiresUserInteraction"].is_null())
+        );
+        if !valid {
+            assert!(
+                connect(&f, key, connect_args(CHAT_A)).await.1["error"].is_object(),
+                "{key}"
+            );
+            assert!(
+                f.state
+                    .sessions
+                    .read()
+                    .await
+                    .keys()
+                    .all(|key| !key.starts_with("native_"))
+            );
+        }
+    }
+    let f = fixture().await;
+    assert_eq!(
+        connect(&f, "revoked", connect_args(CHAT_A)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(f.state.sessions.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn native_connect_strict_input_cannot_mutate_or_decide() {
+    let f = fixture().await;
+    for arguments in [
+        Value::Null,
+        json!({}),
+        json!({"context":{}}),
+        json!({"context":{"version":2,"conversation_id":CHAT_A}}),
+        json!({"context":{"version":1,"conversation_id":"not-a-uuid"}}),
+        json!({"context":{"version":1,"conversation_id":"00000000-0000-0000-0000-000000000000"}}),
+        json!({"context":{"version":1,"conversation_id":CHAT_A,"approved":true}}),
+        json!({"context":{"version":1,"conversation_id":CHAT_A},"decision":"approved"}),
+        json!({"context":{"version":1,"conversation_id":CHAT_A},"operation":"request_approval"}),
+        json!({"context":{"version":1,"conversation_id":CHAT_A},"input":{"name":"canary"}}),
+        json!({"context":{"version":1,"conversation_id":CHAT_A},"expected_revision":"grant"}),
+    ] {
+        assert!(
+            connect(&f, "first", arguments.clone()).await.1["error"].is_object(),
+            "{arguments}"
+        );
+    }
+    let transport = initialize(&f, "first", json!({})).await;
+    for id in [None, Some(Value::Null)] {
+        let mut request = json!({"jsonrpc":"2.0","method":"tools/call","params":{"name":native::CONNECT_TOOL,"arguments":connect_args(CHAT_A)}});
+        if let Some(id) = id {
+            request["id"] = id;
+        }
+        let response = wire(&f, "first", &transport, request).await;
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["error"].is_object());
+    }
+    assert!(f.state.sessions.read().await.is_empty());
+    assert!(f.approvals.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn native_connect_reads_catalog_and_snapshot_without_starting_or_changing_workflows() {
+    let f = fixture().await;
+    let connected = decoded(&connect(&f, "first", connect_args(CHAT_A)).await.1);
+    assert_eq!(connected["protocol_version"], 1);
+    assert_eq!(connected["conversation_id"], CHAT_A);
+    assert_eq!(connected["workflows"], json!(["canary", "spare"]));
+    assert!(connected["snapshot"]["state"].is_null());
+    let before = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    assert_eq!(connected["snapshot"], before);
+    let active = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"canary"}),
+                before["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    let connected = decoded(&connect(&f, "rotated", connect_args(CHAT_A)).await.1);
+    let after = decoded(
+        &call(&f, "first", args(CHAT_A, "get_state", json!({}), None))
+            .await
+            .1,
+    );
+    assert_eq!(connected["snapshot"], after);
+    assert_eq!(after["revision"], active["revision"]);
+    assert_eq!(after["state"], active["state"]);
+    assert!(after["outcome"].is_null());
+    let denied = decoded(
+        &call(
+            &f,
+            "first",
+            args(
+                CHAT_A,
+                "pre_tool",
+                json!({"tool_name":"Write","tool_input":{"file_path":"no.txt","content":"no"}}),
+                after["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(action_outcome(&denied)["decision"], "deny");
+    assert!(f.approvals.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn native_connect_preserves_pending_approval_and_empty_catalog() {
+    let f = fixture().await;
+    let waiting = held(&f).await;
+    let connected = decoded(&connect(&f, "empty", connect_args(CHAT_A)).await.1);
+    assert_eq!(connected["workflows"], json!([]));
+    assert_eq!(connected["snapshot"]["revision"], waiting["revision"]);
+    assert_eq!(connected["snapshot"]["state"], waiting["state"]);
+    assert!(connected["snapshot"]["outcome"].is_null());
+    let empty = decoded(&connect(&f, "empty", connect_args(CHAT_B)).await.1);
+    assert_eq!(empty["workflows"], json!([]));
+    assert!(empty["snapshot"]["state"].is_null());
+    assert!(f.approvals.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn native_connect_does_not_cross_conversations_principals_or_transports() {
+    let f = fixture().await;
+    let active = held(&f).await;
+    for (key, chat) in [("first", CHAT_B), ("foreign", CHAT_A), ("owner-b", CHAT_A)] {
+        let connected = decoded(&connect(&f, key, connect_args(chat)).await.1);
+        assert!(connected["snapshot"]["state"].is_null());
+        assert_ne!(connected["snapshot"]["revision"], active["revision"]);
+    }
+    let transport = initialize(&f, "first", json!({"elicitation":{}})).await;
+    let read = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":native::CONNECT_TOOL,"arguments":connect_args(CHAT_A)}});
+    assert_eq!(
+        wire(&f, "foreign", &transport, read.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        wire(&f, "first", "unknown", read.clone()).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        wire(&f, "rotated", &transport, read).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        connect(&f, "revoked", connect_args(CHAT_A)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 #[tokio::test]
 async fn native_tools_reuse_existing_pre_post_and_stop_handlers() {
     let f = fixture().await;

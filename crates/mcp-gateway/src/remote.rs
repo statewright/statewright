@@ -598,7 +598,9 @@ async fn handle_streamable_http(
         .as_ref()
         .and_then(|params| params.get("name"))
         .and_then(|name| name.as_str());
-    if request.method == "tools/call" && native_tool == Some(native::TOOL) {
+    if request.method == "tools/call"
+        && matches!(native_tool, Some(native::TOOL | native::CONNECT_TOOL))
+    {
         let response = native::handle(&state, validated, &resource, request).await;
         // MCP transport identity is not the native conversation identity. Never
         // teach a client to select mutable chat state through its header echo.

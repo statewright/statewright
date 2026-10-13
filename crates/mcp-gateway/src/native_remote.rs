@@ -6,6 +6,7 @@ use crate::protocol::{ToolAnnotations, ToolCallResult, ToolInfo};
 use serde_json::{Value, json};
 
 pub(super) const TOOL: &str = "statewright_native_request";
+pub(super) const CONNECT_TOOL: &str = "statewright_native_connect";
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +50,11 @@ impl Identity {
 pub(super) struct Context {
     version: u32,
     pub(super) conversation_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Connect {
+    context: Context,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -186,6 +192,20 @@ pub(super) fn definition() -> ToolInfo {
           "required":["context","operation","input"]}) }
 }
 
+fn connect_definition() -> Value {
+    json!({
+        "name": CONNECT_TOOL,
+        "description": "Connect this Claude conversation to Statewright and read its available workflows and current state. Requires your approval. Does not start, change, or approve a workflow, or grant permission for future tool calls.",
+        "inputSchema": {"type":"object","additionalProperties":false,
+            "properties":{"context":{"type":"object","additionalProperties":false,
+                "properties":{"version":{"type":"integer","enum":[1]},"conversation_id":{"type":"string","format":"uuid"}},
+                "required":["version","conversation_id"]}},
+            "required":["context"]},
+        "annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},
+        "_meta":{"anthropic/requiresUserInteraction":true}
+    })
+}
+
 // Native discovery is independent of an active workflow or nonempty catalog.
 // This permits reconnect/readback/deactivation after the last entry is removed.
 pub(super) fn discovery(
@@ -201,11 +221,13 @@ pub(super) fn discovery(
             let mut tools: Vec<_> = crate::custom_tools::custom_tool_definitions()
                 .into_iter()
                 .filter(|tool| tool.name == "statewright_list_workflows")
+                .map(|tool| serde_json::to_value(tool).unwrap())
                 .collect();
             if validated.native_session.as_ref().is_some_and(|identity| {
                 identity.valid(resource, &validated.owner_id, &validated.oauth_client_id)
             }) {
-                tools.push(definition());
+                tools.push(serde_json::to_value(definition()).unwrap());
+                tools.push(connect_definition());
             }
             json!({"tools":tools})
         }
@@ -290,10 +312,26 @@ pub(super) async fn handle(
         .and_then(|p| p.get("arguments"))
         .cloned()
         .unwrap_or(Value::Null);
+    let is_connect = request
+        .params
+        .as_ref()
+        .is_some_and(|params| params["name"] == CONNECT_TOOL);
+    let arguments = if is_connect {
+        let connect: Connect = match serde_json::from_value(arguments) {
+            Ok(value) => value,
+            Err(_) => return fail("Invalid native connection request"),
+        };
+        json!({"context":{"version":connect.context.version,"conversation_id":connect.context.conversation_id},
+            "operation":"get_state","input":{}})
+    } else {
+        arguments
+    };
     let (native, tool) = match parse(arguments) {
         Ok(value) => value,
         Err(error) => return fail(error),
     };
+    let mut workflows: Vec<_> = validated.workflows.keys().cloned().collect();
+    workflows.sort();
     let namespace = identity.namespace(&state.authorization_server_url, &validated.owner_id);
     let session_key = format!("{}__{}", namespace, native.context.conversation_id);
     let manager = state.get_session_manager(&namespace).await;
@@ -383,13 +421,34 @@ pub(super) async fn handle(
         session.native_revision = uuid::Uuid::new_v4().to_string();
         result
     };
-    snapshot(
+    let response = snapshot(
         &mut session,
         &native.context.conversation_id,
         outcome,
         request.id,
     )
-    .await
+    .await;
+    if !is_connect {
+        return response;
+    }
+    // Reuse the exact authorized conversation read. The connection prompt is
+    // consent for this read only, not a workflow decision or a permission grant.
+    let Some(result) = response.result.as_ref() else {
+        return response;
+    };
+    let snapshot = match decoded_state(result) {
+        Ok(value) => value,
+        Err(error) => return JsonRpcResponse::error(response.id, -32602, error),
+    };
+    JsonRpcResponse::success(
+        response.id,
+        serde_json::to_value(ToolCallResult::text(
+            json!({"protocol_version":1,"conversation_id":native.context.conversation_id,
+                "workflows":workflows,"snapshot":snapshot})
+            .to_string(),
+        ))
+        .unwrap(),
+    )
 }
 
 pub(super) async fn snapshot(

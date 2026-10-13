@@ -242,6 +242,14 @@ pub(super) async fn route(
         && request
             .params
             .as_ref()
+            .is_some_and(|p| p["name"] == native::CONNECT_TOOL)
+    {
+        return response(native::handle(&state, validated, resource, request).await);
+    }
+    if request.method == "tools/call"
+        && request
+            .params
+            .as_ref()
             .is_some_and(|p| p["name"] == native::TOOL)
     {
         if request

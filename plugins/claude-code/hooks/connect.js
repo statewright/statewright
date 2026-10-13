@@ -166,6 +166,7 @@ function executionFor($) {
   // Host capabilities remain statically scoped to this hooks module. The pure
   // adapter receives callbacks, never the native host object itself.
   return createExecutionAdapter({ view: () => current($), request: (_, operation, input) => nativeRequest($, operation, input),
+    after: (ms, callback) => $.clock.after(ms, callback),
     fault: (v, message) => { v.controlError = message; redraw($); } });
 }
 // Native Claude owns OAuth and its credential store. No shell, token access or
@@ -676,7 +677,7 @@ export function register(on, options = {}) {
   on('tool.check', { tool: /^(?!mcp__plugin[:_]statewright[:_]statewright__)/ }, async ($, e, next) => {
     if (await isControlQuestion($, e, next, e.input)) return next(e);
     if (e.tool === connectTool || workflowTools.has(e.tool)) return next(e);
-    return executionFor($).check(null, e, () => next(e));
+    return executionFor($).check(null, e, next);
   }).catch(async ($, e, next) => next.error?.kind === 're-entry' && await isControlQuestion($, e, next, e.input)
     ? next(e) : { decision: 'deny', reason: 'Statewright could not verify this tool request. Refresh its connection.' });
   on('tool.call', async ($, e, next) => {
@@ -694,7 +695,7 @@ export function register(on, options = {}) {
         return { result: JSON.stringify({ ...result, client_model_routing: routingView(v) }) }; }
       catch (error) { await openPane($, false); return { result: JSON.stringify({ status: 'action_needed', message: error.message }) }; }
     }
-    if (!connectTool || e.tool !== connectTool) return executionFor($).call(null, e, () => next(e));
+    if (!connectTool || e.tool !== connectTool) return executionFor($).call(null, e, next);
     const v = await current($);
     if (e.workflow !== undefined && !validName(e.workflow)) return { deny: 'Provide a valid workflow name.' };
     if (v.prompting) return { result: JSON.stringify({ status: 'awaiting_confirmation',

@@ -649,8 +649,11 @@ export function register(on, options = {}) {
         e.input?.context?.conversation_id === v.conversation && v.connected && !next.signal?.aborted;
       // Explicit ask rules/hooks and administrator ceilings keep their native
       // path, even after our session grant. Denials were already returned above.
+      // A saved gateway ALLOW is not an ask constraint: a newly registered
+      // facade can still require consent at this exact invocation after reload.
       if (required.decision !== 'ask' || !scoped() || e.ceiling || native.ceiling ||
-          native.rule || native.hook || frame.permission?.rule || frame.permission?.hook || frame.permission?.ceiling)
+          (native.decision === 'ask' && (native.rule || native.hook)) ||
+          (frame.permission?.decision === 'ask' && (frame.permission.rule || frame.permission.hook)) || frame.permission?.ceiling)
         return required;
       frame.invocation = e.tool_use_id;
       if (!v.controlConsent) {

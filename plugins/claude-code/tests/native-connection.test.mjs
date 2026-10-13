@@ -1208,6 +1208,29 @@ test('registered controls preserve native deny and carry ask to actual MCP permi
     else assert.equal(JSON.parse(result.result).status, 'action_needed');
   }
 });
+for (const entry of ['load', 'connect']) test(`saved gateway allow does not suppress new facade consent: ${entry}`, async () => {
+  const h = await workflowHost();
+  h.state.rpcPermission = () => ({ decision: 'allow', rule: 'saved gateway allow' });
+  h.state.toolPermission = () => ({ decision: 'ask', reason: 'New facade requires permission' });
+  h.state.answer = 'Allow this session';
+  const result = await h.fire('tool.call', entry === 'load'
+    ? { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' }
+    : { tool: 'mcp__statewright__statewright_connect', workflow: 'bugfix' });
+  assert.equal(JSON.parse(result.result).state?.state, 'work');
+  assert.equal(h.state.asks.length, 1, 'permission appears at the requested action, without Refresh');
+  assert.equal(h.state.calls.filter(c => c.args?.operation === 'load_workflow').length, 1);
+});
+
+for (const source of ['rule', 'hook']) test(`facade allow ${source} does not suppress a native control question`, async () => {
+  const h = await workflowHost();
+  h.state.rpcPermission = () => ({ decision: 'ask' });
+  h.state.toolPermission = () => ({ decision: 'allow', [source]: 'allow' });
+  h.state.answer = 'Allow this session';
+  const result = await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+  assert.equal(JSON.parse(result.result).state.state, 'work');
+  assert.equal(h.state.asks.length, 1);
+});
+
 test('real session consent settles ordinary control asks, never ordinary tool permission', async () => {
   const h = await workflowHost();
   h.state.rpcPermission = () => ({ decision: 'ask' });
@@ -1239,6 +1262,24 @@ test('real session consent settles ordinary control asks, never ordinary tool pe
   await h.fire('tool.call', { tool: 'mcp__statewright__statewright_get_state' });
   assert.equal(h.state.asks.length, 2, 'even same-ID startup revokes the grant');
   assert.equal(h.state.calls.length, before);
+});
+for (const policy of [{ decision: 'deny' }, { decision: 'ask', rule: 'explicit ask' },
+  { decision: 'ask', hook: 'PreToolUse' }, { decision: 'ask', ceiling: 'ask' }])
+  test(`saved gateway allow preserves facade policy ${JSON.stringify(policy)}`, async () => {
+    const h = await workflowHost(), before = h.state.calls.length;
+    h.state.rpcPermission = () => ({ decision: 'allow', rule: 'saved gateway allow' });
+    h.state.toolPermission = () => policy; h.state.answer = 'Allow this session';
+    await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+    assert.equal(h.state.calls.length, before);
+    assert.equal(h.state.asks.length, 0, 'explicit native constraints do not become session grants');
+  });
+test('saved gateway allow does not dispatch after refused facade consent', async () => {
+  const h = await workflowHost(), before = h.state.calls.length;
+  h.state.rpcPermission = () => ({ decision: 'allow', rule: 'saved gateway allow' });
+  h.state.toolPermission = () => ({ decision: 'ask' }); h.state.answer = 'Not now';
+  await h.fire('tool.call', { tool: 'mcp__statewright__statewright_load_workflow', name: 'bugfix' });
+  assert.equal(h.state.asks.length, 1); assert.equal(h.state.calls.length, before);
+  assert.equal(h.snapshot.state, null);
 });
 for (const answer of ['Not now', 'allow this session', 'yes', 'dismiss']) test(`control consent ${answer} never dispatches`, async () => {
   const h = await workflowHost(), before = h.state.calls.length;

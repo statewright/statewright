@@ -27,12 +27,18 @@ export async function nativeSettingsFixture(t, threadId, notify) {
     });
   });
   let sequence = 0, nativeId, settings, deliver = false;
+  const settingsByThread = new Map();
   const lines = createInterface({input: child.stdout});
   lines.on("line", line => {
     const message = JSON.parse(line);
-    if (message.method === "thread/settings/updated" && message.params.threadId === nativeId) {
-      settings = message.params.threadSettings;
-      if (deliver) notify({...message, params: {...message.params, threadId}});
+    if (message.method === "thread/settings/updated") {
+      // The native server can publish initial settings before thread/start's
+      // reply gives this fixture the ID. Retain that real notification.
+      settingsByThread.set(message.params.threadId, message.params.threadSettings);
+      if (message.params.threadId === nativeId) {
+        settings = message.params.threadSettings;
+        if (deliver) notify({...message, params: {...message.params, threadId}});
+      }
     }
     const request = pending.get(message.id);
     if (!request) return;
@@ -57,6 +63,7 @@ export async function nativeSettingsFixture(t, threadId, notify) {
     capabilities: {experimentalApi: true}});
   child.stdin.write('{"method":"initialized"}\n');
   nativeId = (await rpc("thread/start", {cwd: home, model: "gpt-6-sol", approvalPolicy: "never"})).thread.id;
+  settings = settingsByThread.get(nativeId);
   await rpc("thread/settings/update", {threadId: nativeId, model: "gpt-6-sol", effort: "high", serviceTier: "priority",
     collaborationMode: {mode: "default", settings: {model: "gpt-6-sol", reasoning_effort: "high", developer_instructions: null}}});
   await rpc("thread/read", {threadId: nativeId, includeTurns: false});

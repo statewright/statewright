@@ -138,7 +138,7 @@ test("installed native Codex accepts the repaired address and rejects the origin
   const args = ["--yolo", "resume", "00000000-0000-4000-8000-000000000001"];
   const tui = await prepareCodexResidentTui({ proxyUrl: "ws://127.0.0.1:1", args, yoloOverride: codexYoloResumeOverride("codex", args) });
   t.after(() => tui.close());
-  const invoke = argv => spawnSync(process.env.CODEX_BIN, argv, { encoding: "utf8", timeout: 5_000, env: { ...process.env, LC_ALL: "C" } });
+  const invoke = argv => spawnSync(process.env.CODEX_BIN, argv, { encoding: "utf8", timeout: 5_000, env: { ...process.env, LC_ALL: "C", TERM: "xterm-256color" } });
   const fixed = invoke(tui.args);
   assert.equal(fixed.error, undefined);
   assert.match(fixed.stderr, /stdin is not a terminal/);

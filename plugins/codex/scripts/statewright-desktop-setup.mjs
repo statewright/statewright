@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
 import { execFile as execFileCallback, spawn as spawnCallback } from "node:child_process";
-import { access, chmod, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -84,6 +84,76 @@ function nativeDesktopConfigContents({ statePath, originalCodex, nodeExecutable,
   for (const [name, value] of Object.entries(values)) if (!value || /[\r\n]/.test(value)) throw new Error(`Native Desktop launcher ${name} is not a safe single-line path.`);
   return `version=1\noriginal_codex=${originalCodex}\nnode_executable=${nodeExecutable}\nbroker_script=${runtime}\nstate_path=${statePath}\n`;
 }
+const DESKTOP_PACKAGE_ROOTS = new Set([".codex-plugin", "scripts", "vendor", "bin", "native"]);
+async function desktopPackageDigest(root, sourcePackage = false) {
+  const hash = createHash("sha256");
+  async function visit(directory, prefix = "") {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
+      if (!prefix && sourcePackage && !DESKTOP_PACKAGE_ROOTS.has(entry.name)) continue;
+      const name = prefix + entry.name, path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error("Desktop runtime package contains a symbolic link: " + name);
+      if (entry.isDirectory()) await visit(path, name + "/");
+      else if (entry.isFile()) {
+        const mode = (await lstat(path)).mode & 0o111;
+        const bytes = await readFile(path);
+        hash.update(name + "\0" + mode + "\0" + bytes.length + "\0").update(bytes);
+      } else throw new Error("Desktop runtime package contains a non-file entry: " + name);
+    }
+  }
+  await visit(root);
+  return hash.digest("hex");
+}
+
+// Desktop must survive cache eviction without first launching the TUI. Keep
+// complete, content-addressed packages; never replace a live runtime in place.
+export async function persistDesktopRuntime({ pluginRoot = resolve(SCRIPT_ROOT, ".."), statePath }) {
+  const source = await realpath(pluginRoot);
+  let storage = resolve(await realpath(dirname(statePath)), "runtime", "codex-desktop");
+  const requireOutsidePackage = path => {
+    const fromSource = relative(source, path);
+    if (!fromSource || (fromSource !== ".." && !fromSource.startsWith(".." + sep) && !isAbsolute(fromSource))) {
+      throw new Error("Desktop runtime storage must be outside the plugin package.");
+    }
+  };
+  requireOutsidePackage(storage);
+  const manifest = await readOptionalJson(join(source, ".codex-plugin", "plugin.json"));
+  if (manifest?.name !== "statewright" || typeof manifest.version !== "string" || !/^[A-Za-z0-9._+-]+$/.test(manifest.version)) {
+    throw new Error("Desktop runtime requires a versioned Statewright Codex package.");
+  }
+  const entry = join("scripts", "statewright-desktop-codex.mjs");
+  if (!await readable(join(source, entry))) throw new Error("Desktop runtime package is missing its broker.");
+  await mkdir(storage, { recursive: true, mode: 0o700 });
+  storage = await realpath(storage);
+  requireOutsidePackage(storage);
+  const digest = await desktopPackageDigest(source, true);
+  const target = join(storage, manifest.version + "-" + digest);
+  const verify = async () => {
+    if (await desktopPackageDigest(target) !== digest) throw new Error("The durable Desktop runtime differs from its package; refusing to overwrite it.");
+  };
+  try {
+    if (!(await lstat(target)).isDirectory()) throw new Error("The durable Desktop runtime is not a directory.");
+    await verify(); return join(target, entry);
+  }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const temporary = await mkdtemp(join(storage, ".install-"));
+  const staged = join(temporary, "package");
+  try {
+    await mkdir(staged, { mode: 0o700 });
+    for (const name of await readdir(source)) {
+      if (DESKTOP_PACKAGE_ROOTS.has(name)) {
+        await cp(join(source, name), join(staged, name), { recursive: true, force: false, errorOnExist: true });
+      }
+    }
+    if (await desktopPackageDigest(staged) !== digest) throw new Error("Desktop plugin changed during runtime snapshot; retry with a stable package.");
+    try { await rename(staged, target); }
+    catch (error) {
+      if (!["EEXIST", "ENOTEMPTY"].includes(error?.code)) throw error;
+      await verify(); // Another profile can publish the identical snapshot.
+    }
+    return join(target, entry);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+}
+
 function parseNativeDesktopConfig(contents) {
   const values = {};
   for (const line of contents.split(/\r?\n/)) {
@@ -420,12 +490,12 @@ export function parseDesktopArgs(argv) {
   return options;
 }
 
-async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper = resolve(SCRIPT_ROOT, "statewright-desktop-codex.mjs"), app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
+async function enableDesktopUnlocked({ statePath, profile: profileName = "production", gatewayUrl: gatewayUrlOverride, preserveGateway = false, original, wrapper, app = DEFAULT_DESKTOP_EXECUTABLE, applicationsDirectory, node = process.execPath, nativeLauncher, nativeLauncherCandidate = defaultNativeLauncherCandidate(), requireNativeLauncher = process.platform === "darwin" && resolve(app) === resolve(DEFAULT_DESKTOP_EXECUTABLE), launchctlPath, launchctlExecFile = execFile, writeAtomicFn = writeAtomic, vendorCandidates = DEFAULT_VENDOR_CODEX_CANDIDATES } = {}) {
   const profile = desktopProfile(profileName);
   const resolvedState = resolve(statePath);
   const existing = await readOptionalJson(resolvedState);
   const vendor = await resolveVendorCodex({ original, existing, candidates: vendorCandidates });
-  const runtime = resolve(wrapper);
+  let runtime = resolve(wrapper ?? join(SCRIPT_ROOT, "statewright-desktop-codex.mjs"));
   const nodeExecutable = resolve(node);
   const desktopExecutable = resolve(app);
   const desktopApplicationsDirectory = resolve(applicationsDirectory ?? defaultDesktopApplicationsDirectory(homedir()));
@@ -444,6 +514,7 @@ async function enableDesktopUnlocked({ statePath, profile: profileName = "produc
     && vendorCandidates.map(value => resolve(value)).includes(resolve(existing.original_codex))
     && vendorCandidates.map(value => resolve(value)).includes(vendor);
   if (existing && existing.version !== 2 && (existing.version !== 3 || (existing.profile ?? "production") !== profile.name || existing.shim_path !== shim || (existing.original_codex !== vendor && !bundledVendorMigration) || existing.desktop_executable !== desktopExecutable)) throw new Error("A different Statewright Desktop setup is already recorded; disable it before replacing its control boundary.");
+  if (wrapper === undefined) runtime = await persistDesktopRuntime({ statePath: resolvedState });
   const legacyPath = await legacyLaunchdPath(existing, { launchctlExecFile, launchctlPath });
   await mkdir(dirname(shim), { recursive: true, mode: 0o700 });
   const verifiedNative = await readVerifiedNativeInstallation({ state: existing, statePath: resolvedState, shimPath: shim, profile });

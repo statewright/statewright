@@ -968,6 +968,77 @@ async fn native_transport_validation_covers_ordinary_calls_too() {
 /// Optional real-client interoperability. Driver owns a disposable native host
 /// config and synthetic elicitation answers; this is not a human acceptance test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires STATEWRIGHT_NATIVE_CONNECT_DRIVER and STATEWRIGHT_NATIVE_CONNECT_ENGINE"]
+async fn native_connect_client_interop() {
+    let driver = std::env::var("STATEWRIGHT_NATIVE_CONNECT_DRIVER").expect("explicit driver path");
+    let engine =
+        std::env::var("STATEWRIGHT_NATIVE_CONNECT_ENGINE").expect("explicit native engine");
+    let f = fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let router = build_router(f.state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        tokio::process::Command::new("node")
+            .arg(driver)
+            .arg(engine)
+            .arg("auto-allow")
+            .arg(&url)
+            .env_clear()
+            .env("PATH", "/opt/homebrew/bin:/usr/bin:/bin")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    server.abort();
+    let output = output.expect("native connection driver timed out").unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("{stdout}");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value =
+        serde_json::from_str(stdout.lines().last().expect("driver report")).unwrap();
+    assert_eq!(report["outcome"], "pass");
+    assert_eq!(report["callDelta"], 1);
+    assert_eq!(report["permissionDelta"], 1);
+    let conversation = report["conversation"]
+        .as_str()
+        .expect("native conversation UUID");
+    let id = uuid::Uuid::parse_str(conversation).unwrap();
+    assert!(!id.is_nil());
+    assert_eq!(id.to_string(), conversation);
+    // Do not create a session during verification and then mistake it for a
+    // successful client call. The real router must already own exactly this one.
+    let sessions = f.state.sessions.read().await;
+    assert_eq!(sessions.len(), 1);
+    assert!(
+        sessions
+            .keys()
+            .all(|key| key.starts_with("native_") && key.ends_with(&format!("__{conversation}")))
+    );
+    drop(sessions);
+    let current = decoded(
+        &call(
+            &f,
+            "first",
+            args(conversation, "get_state", json!({}), None),
+        )
+        .await
+        .1,
+    );
+    assert!(current["state"].is_null());
+    assert!(current["outcome"].is_null());
+    assert!(f.approvals.lock().await.is_empty());
+}
+
+/// Optional approval protocol test, separate from native connection consent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires STATEWRIGHT_NATIVE_APPROVAL_DRIVER and a native MCP client"]
 async fn native_approval_client_interop() {
     let driver = std::env::var("STATEWRIGHT_NATIVE_APPROVAL_DRIVER").expect("explicit driver path");

@@ -19,12 +19,12 @@ test("plugin capability registry covers every released transport with honest evi
   for (const [plugin, capability] of Object.entries(registry.plugins)) {
     assert.deepEqual(
       capability.production_transport.operating_systems,
-      ["ubuntu-24.04", "macos-14"],
+      plugin === "claude" ? [] : ["ubuntu-24.04", "macos-14"],
       `${plugin} production transport matrix`,
     );
-    assert.equal(capability.auth.mode, "api_key", `${plugin} auth mode`);
+    assert.equal(capability.auth.mode, plugin === "claude" ? "oauth" : "api_key", `${plugin} auth mode`);
     assert.ok(
-      ["os_browser", "host_guidance", "executor_owned"].includes(capability.auth.onboarding),
+      ["os_browser", "host_guidance", "executor_owned", "native_claude"].includes(capability.auth.onboarding),
       `${plugin} onboarding classification`,
     );
     assert.equal(capability.adoption_telemetry.event, "ci_canary", `${plugin} adoption event`);
@@ -98,7 +98,7 @@ test("capability versions match package and runtime identities", async () => {
     "OMX distributed bundle must expose the production initialization canary seam");
 });
 
-test("only Codex and Claude claim native Windows and release-artifact evidence", async () => {
+test("native Windows evidence and release artifacts remain distinct", async () => {
   const registry = await json("plugins/capabilities.json");
   const nativeWindows = [];
   const releaseArtifacts = [];
@@ -106,6 +106,23 @@ test("only Codex and Claude claim native Windows and release-artifact evidence",
     if (capability.production_transport.native_windows) nativeWindows.push(plugin);
     if (capability.release_artifact) releaseArtifacts.push(plugin);
   }
-  assert.deepEqual(nativeWindows.sort(), ["claude", "codex"]);
+  assert.deepEqual(nativeWindows.sort(), ["codex"]);
   assert.deepEqual(releaseArtifacts.sort(), ["claude", "codex"]);
+});
+
+test("Claude native metadata cannot borrow the retired transport's acceptance", async () => {
+  const { plugins: { claude } } = await json("plugins/capabilities.json");
+  assert.equal(claude.runtime.vehicle, "native_mod");
+  assert.deepEqual(claude.runtime.hosts, ["claude-code-tui", "claude-desktop-code-local"]);
+  assert.equal(claude.production_transport.evidence_kind, "native_acceptance_pending");
+  assert.equal(claude.auth.onboarding, "native_claude");
+  assert.equal(claude.auth.test, "plugins/claude-code/tests/native-connection.test.mjs");
+  assert.equal(claude.provider_usage.source, "claude_native_response");
+  assert.equal(claude.provider_usage.scope, "local_main_conversation_receipt");
+  assert.equal(claude.adoption_telemetry.scope, "legacy_transport_canary");
+  const mcp = await json("plugins/claude-code/.mcp.json");
+  assert.equal(mcp.mcpServers.statewright.type, "http");
+  assert.equal(mcp.mcpServers.statewright.oauth.clientId, "statewright-claude");
+  const hooks = await json("plugins/claude-code/hooks/hooks.json");
+  assert.deepEqual(hooks, { modules: ["./connect.js"] });
 });

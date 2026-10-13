@@ -468,7 +468,7 @@ test("a mismatched launch never retires a live resident that may own detached wo
       threadListCwd: "/repo-a",
     }));
     await assert.rejects(
-      ensureCodexAppServerResident({ command: "codex", cwd: "/repo-b", home, clientId, threadListCwd: "/repo-b" }),
+      ensureCodexAppServerResident({ command: "codex", cwd: "/repo-b", home, clientId, threadListCwd: "/repo-b", environment: {} }),
       /may be preserving detached work/i,
     );
     assert.doesNotThrow(() => process.kill(child.pid, 0));

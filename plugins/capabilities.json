@@ -2,11 +2,12 @@
   "schema": "statewright/plugin-capabilities/v1",
   "plugins": {
     "claude": {
-      "version": "0.3.1",
-      "production_transport": { "operating_systems": ["ubuntu-24.04", "macos-14"], "native_windows": true },
-      "auth": { "mode": "api_key", "onboarding": "os_browser", "test": "plugins/executor/tests/browser-onboarding.test.mjs" },
-      "adoption_telemetry": { "event": "ci_canary", "endpoint_acknowledgement": true, "persistence_readback": false, "test": "plugins/executor/tests/plugin-adoption-telemetry-canary.test.mjs" },
-      "provider_usage": { "precision": "exact", "source": "claude_transcript", "test": "plugins/claude-code/tests/transcript-telemetry.test.mjs" },
+      "version": "0.3.4",
+      "runtime": { "vehicle": "native_mod", "hosts": ["claude-code-tui", "claude-desktop-code-local"], "minimum_code_engine": "2.1.295" },
+      "production_transport": { "operating_systems": [], "native_windows": false, "evidence_kind": "native_acceptance_pending" },
+      "auth": { "mode": "oauth", "onboarding": "native_claude", "test": "plugins/claude-code/tests/native-connection.test.mjs" },
+      "adoption_telemetry": { "event": "ci_canary", "scope": "legacy_transport_canary", "endpoint_acknowledgement": true, "persistence_readback": false, "test": "plugins/executor/tests/plugin-adoption-telemetry-canary.test.mjs" },
+      "provider_usage": { "precision": "exact", "source": "claude_native_response", "scope": "local_main_conversation_receipt", "test": "plugins/claude-code/tests/native-routing.test.mjs" },
       "release_artifact": true
     },
     "codex": {

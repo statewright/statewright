@@ -657,13 +657,19 @@ test("disabled managed-client wrapper does not leak its parent Codex writer iden
   const fake = join(root, "fake-codex.mjs");
   const captured = join(root, "environment.json");
   const launcher = fileURLToPath(new URL("../statewright-managed-client.mjs", import.meta.url));
+  // A disposable home has no caller-owned gateway profiles or managed config.
+  // Keep only the explicit parent bindings this fixture is testing.
+  const fixtureEnvironment = { ...process.env };
+  for (const name of Object.keys(fixtureEnvironment)) {
+    if (name.startsWith("STATEWRIGHT_") || name === "CODEX_HOME") delete fixtureEnvironment[name];
+  }
   try {
     await writeFile(fake, `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(captured)}, JSON.stringify({ codex_session_id: process.env.CODEX_SESSION_ID ?? null, codex_thread_id: process.env.CODEX_THREAD_ID ?? null, statewright_client_id: process.env.STATEWRIGHT_CLIENT_ID ?? null, statewright_control_dir: process.env.STATEWRIGHT_ROUTE_CONTROL_DIR ?? null }));\n`);
     await chmod(fake, 0o755);
     const result = await new Promise((resolveResult, rejectResult) => {
       const child = spawn(process.execPath, [launcher, "--host", "codex", "--real-bin", fake, "--", "exec", "review this diff"], {
         env: {
-          ...process.env,
+          ...fixtureEnvironment,
           HOME: root,
           STATEWRIGHT_ERROR_DSN: "",
           CODEX_SESSION_ID: "parent-session",

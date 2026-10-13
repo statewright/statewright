@@ -42,7 +42,7 @@ pub fn native_tool_family(name: &str) -> Option<NativeToolFamily> {
 
     match native_leaf_name(name).to_ascii_lowercase().as_str() {
         "read" | "read_file" | "grep" | "search_files" | "glob" | "find" | "find_files" | "ls"
-        | "list_directory" | "view_image" => Some(Read),
+        | "list_directory" | "view_image" | "toolsearch" => Some(Read),
         "edit"
         | "edit_file"
         | "apply_patch"
@@ -97,6 +97,7 @@ mod tests {
             "find_files",
             "view_image",
             "functions.view_image",
+            "ToolSearch",
         ] {
             assert_eq!(
                 native_tool_family(alias),

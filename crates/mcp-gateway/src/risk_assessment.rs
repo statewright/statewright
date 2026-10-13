@@ -1601,6 +1601,18 @@ fn assess_invocation_with_origin(
     } else {
         let base = if known_native_write {
             assessment(RiskBand::Moderate, ExposureBand::Local, "native_write")
+        } else if trusted_native_adapter && tool.is_none() && tool_name == "ToolSearch" {
+            // Claude's built-in search only loads tool definitions. Every
+            // discovered invocation still goes through its own policy check.
+            assessment(RiskBand::Low, ExposureBand::Local, "native_tool_discovery")
+        } else if trusted_native_adapter
+            && tool.is_none()
+            && matches!(tool_name, "WebFetch" | "WebSearch")
+        {
+            // These exact native tools observe web content; unlike arbitrary
+            // fetch/http_request MCP tools, they cannot select a write method.
+            // Fetch/Search capability checks remain independent of read risk.
+            assessment(RiskBand::Low, ExposureBand::External, "native_web_read")
         } else {
             assess_mcp(tool, tool_name)
         };
@@ -2863,6 +2875,67 @@ mod tests {
             assess_mcp(Some(&writer), "update_task"),
             assessment(RiskBand::Moderate, ExposureBand::External, "mcp_name")
         );
+    }
+
+    #[test]
+    fn native_discovery_and_web_reads_require_adapter_provenance() {
+        for (name, input, exposure) in [
+            (
+                "ToolSearch",
+                json!({"query":"select:WebFetch","max_results":1}),
+                ExposureBand::Local,
+            ),
+            (
+                "WebFetch",
+                json!({"url":"https://example.com","prompt":"Summarize"}),
+                ExposureBand::External,
+            ),
+            (
+                "WebSearch",
+                json!({"query":"crate versions"}),
+                ExposureBand::External,
+            ),
+        ] {
+            let native = assess_invocation_with_origin(None, name, &input, None, true);
+            assert_eq!(native.risk, RiskBand::Low, "{name}");
+            assert_eq!(native.exposure, exposure);
+            assert_ne!(
+                assess_invocation(None, name, &input, None).risk,
+                RiskBand::Low
+            );
+            let collision = ToolInfo {
+                name: name.into(),
+                description: None,
+                input_schema: json!({}),
+                annotations: None,
+            };
+            assert_ne!(
+                assess_invocation_with_origin(Some(&collision), name, &input, None, true).risk,
+                RiskBand::Low
+            );
+            for arguments in [
+                json!({"command":"delete"}),
+                json!({"method":"delete"}),
+                json!({"action":"update"}),
+            ] {
+                assert_ne!(
+                    assess_invocation_with_origin(None, name, &arguments, None, true).risk,
+                    RiskBand::Low
+                );
+            }
+        }
+        for name in [
+            "mcp__remote__ToolSearch",
+            "http_request",
+            "fetch",
+            "MyToolSearch",
+        ] {
+            assert_ne!(
+                assess_invocation_with_origin(None, name, &json!({}), None, true).risk,
+                RiskBand::Low,
+                "{name}"
+            );
+        }
     }
 
     #[test]

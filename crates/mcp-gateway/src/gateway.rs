@@ -4397,6 +4397,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_discovery_does_not_grant_the_discovered_tool_authority() {
+        let mut gateway = test_gateway();
+        let discovery = gateway
+            .adapter_pre_tool(
+                "ToolSearch",
+                &json!({"query":"select:WebFetch","max_results":1}),
+            )
+            .await;
+        assert_eq!(discovery["decision"], "allow", "{discovery}");
+        assert_eq!(discovery["policy_tool_name"], "read_file");
+        // This fixture grants reads but not the network capability.
+        let fetch = gateway
+            .adapter_pre_tool(
+                "WebFetch",
+                &json!({"url":"https://example.com","prompt":"Summarize"}),
+            )
+            .await;
+        assert_eq!(fetch["decision"], "deny", "{fetch}");
+        assert_eq!(
+            fetch["risk_assessment"]["deterministic_source"],
+            "native_web_read"
+        );
+        let mut session = gateway.session_manager.get(&gateway.session_id).unwrap();
+        session
+            .definition
+            .states
+            .get_mut(&session.current_state)
+            .unwrap()
+            .allowed_tools = Some(vec!["Read".into(), "WebFetch".into(), "WebSearch".into()]);
+        gateway.session_manager.restore(session.clone());
+        for (name, input) in [
+            (
+                "WebFetch",
+                json!({"url":"https://example.com","prompt":"Summarize"}),
+            ),
+            ("WebSearch", json!({"query":"crate versions"})),
+        ] {
+            let allowed = gateway.adapter_pre_tool(name, &input).await;
+            assert_eq!(allowed["decision"], "allow", "{allowed}");
+        }
+        session
+            .definition
+            .states
+            .get_mut(&session.current_state)
+            .unwrap()
+            .disallowed_tools = Some(vec!["ToolSearch".into()]);
+        gateway.session_manager.restore(session);
+        let denied = gateway
+            .adapter_pre_tool("ToolSearch", &json!({"query":"select:Read"}))
+            .await;
+        assert_eq!(denied["decision"], "deny", "{denied}");
+    }
+
+    #[tokio::test]
     async fn adapter_risk_uses_exact_registered_mcp_metadata() {
         let mut gateway = exploratory_gateway();
         let reader = gateway

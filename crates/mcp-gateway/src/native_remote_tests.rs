@@ -60,6 +60,7 @@ async fn fixture() -> Fixture {
             "complete":{"type":"final"}}},"spare":{"id":"spare","initial":"done","states":{"done":{"type":"final"}}}});
         if key == "Bearer disabled" { workflows["canary"]["meta"] = json!({"enabled":false}); }
         if key == "Bearer changed" { workflows["canary"]["states"]["intake"]["instructions"] = json!("Revised definition"); }
+        if key == "Bearer web" { workflows["canary"]["states"]["intake"]["allowed_tools"] = json!(["Read", "WebFetch", "WebSearch"]); }
         if key == "Bearer empty" { workflows = json!({}); }
         (StatusCode::OK, Json(json!({"default":"canary","owner_id":owner,"plan_limit":17,
           "native_session":identity, "oauth_client_id": if key == "Bearer legacy" { "" } else { "statewright-claude" },
@@ -135,6 +136,70 @@ fn action_outcome(snapshot: &Value) -> Value {
 
 fn connect_args(chat: &str) -> Value {
     json!({"context":{"version":1,"conversation_id":chat}})
+}
+
+#[tokio::test]
+async fn native_http_discovery_then_web_fetch_can_complete_without_semantic_authorization() {
+    let f = fixture().await;
+    let before = decoded(&connect(&f, "web", connect_args(CHAT_A)).await.1);
+    let mut state = decoded(
+        &call(
+            &f,
+            "web",
+            args(
+                CHAT_A,
+                "load_workflow",
+                json!({"name":"canary"}),
+                before["snapshot"]["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    for (tool, input) in [
+        (
+            "ToolSearch",
+            json!({"query":"select:WebFetch","max_results":1}),
+        ),
+        (
+            "WebFetch",
+            json!({"url":"https://example.com","prompt":"Summarize"}),
+        ),
+    ] {
+        state = decoded(
+            &call(
+                &f,
+                "web",
+                args(
+                    CHAT_A,
+                    "pre_tool",
+                    json!({"tool_name":tool,"tool_input":input}),
+                    state["revision"].as_str(),
+                ),
+            )
+            .await
+            .1,
+        );
+        assert_eq!(action_outcome(&state)["decision"], "allow", "{state}");
+        state = decoded(&call(&f, "web", args(CHAT_A, "post_tool", json!({"tool_name":tool,"tool_input":input,"tool_response":"fixture result","is_error":false}), state["revision"].as_str())).await.1);
+    }
+    state = decoded(
+        &call(
+            &f,
+            "web",
+            args(
+                CHAT_A,
+                "transition",
+                json!({"event":"DONE"}),
+                state["revision"].as_str(),
+            ),
+        )
+        .await
+        .1,
+    );
+    assert_eq!(state["state"]["state"], "complete");
+    assert_eq!(state["state"]["is_final"], true);
+    assert!(f.approvals.lock().await.is_empty());
 }
 
 async fn connect(f: &Fixture, key: &str, arguments: Value) -> (StatusCode, Value) {

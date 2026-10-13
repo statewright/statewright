@@ -1,9 +1,13 @@
 {
   "mcpServers": {
     "statewright": {
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-proxy.sh"],
-      "alwaysLoad": true
+      "type": "http",
+      "url": "${user_config.gateway_url}",
+      "oauth": {
+        "clientId": "statewright-claude",
+        "callbackPort": 54545,
+        "scopes": "mcp"
+      }
     }
   }
 }

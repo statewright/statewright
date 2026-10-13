@@ -1,0 +1,31 @@
+# Native login-only terminal, not a Claude client wrapper. Requires Expect.
+# Claude 2.1.296 cancels mcp login when stdin is not a TTY. The OS-provided
+# Expect allocates one while Claude still owns browser/PKCE/tokens/callback.
+# No transcript file, keystroke automation, consent answer or credential parsing.
+set timeout 305
+log_user 0
+trap {catch {close}; catch {wait}; exit 130} {SIGINT SIGTERM SIGHUP}
+# This is native MCP sign-in, never another managed Statewright client. Desktop
+# can inherit the old shim ahead of the vendor CLI even when its shell function
+# uses the native binary. Resolve only after removing that known launcher lane.
+if {![info exists env(HOME)] || ![info exists env(PATH)]} {exit 127}
+set managed [file dirname [file normalize [file join $env(HOME) .statewright bin claude]]]
+set nativePath {}
+foreach entry [split $env(PATH) :] {
+    if {$entry eq ""} {continue}
+    if {[file dirname [file normalize [file join $entry claude]]] eq $managed} {continue}
+    lappend nativePath $entry
+}
+set env(PATH) [join $nativePath :]
+set native [auto_execok claude]
+if {$native eq ""} {exit 127}
+if {[catch {
+    spawn -noecho {*}$native mcp login plugin:statewright:statewright
+}]} {exit 127}
+expect {
+    timeout {catch {close}; catch {wait}; exit 124}
+    eof {}
+}
+set result [wait]
+if {[lindex $result 2] != 0 || [llength $result] > 4} {exit 1}
+exit [lindex $result 3]

@@ -104,7 +104,7 @@ test("update checks keep one hook response and only announce a newer version", a
     STATEWRIGHT_PB_URL: `${bridgeUrl}/newer`,
   })
   assert.match(newer.hookSpecificOutput.additionalContext, /Phase: implementing/)
-  assert.match(newer.hookSpecificOutput.additionalContext, /update available: v0\.3\.1 → v9\.9\.9/)
+  assert.match(newer.hookSpecificOutput.additionalContext, /update available: v0\.3\.4 → v9\.9\.9/)
 
   rmSync(updateCache, { force: true })
   const older = await invoke("user-prompt", {}, {

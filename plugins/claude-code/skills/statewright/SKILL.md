@@ -1,11 +1,20 @@
 ---
-name: statewright
-description: Start, stop, or manage statewright workflows
-user-invocable: true
-arguments: "[command] [workflow]"
-allowed-tools: Bash(*)
+name: statewright-workflows
+description: Start, stop, or manage Statewright workflows through the native workspace tools.
+user-invocable: false
 ---
 
-!`bash ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS`
+Use the installed native Statewright tools, not shell scripts or another MCP
+connection. The user can open the Arbiter with `/statewright`.
 
-IMPORTANT: If the output above says a workflow was found, you MUST call the `statewright_load_workflow` MCP tool with that workflow name to activate it. This is the ONLY way to start enforcement. Do this immediately without asking.
+When the user requests a named workflow, call `statewright_connect` with its
+exact name. It connects or restores the current conversation and starts the
+requested workflow when supported. A connection-required result is not a
+started workflow. Let the user finish sign-in and native approval; never answer
+an approval yourself or retry a refusal through another path.
+
+Follow the returned current state's tools and transitions. Read current state
+after a transition; do not restart an active run. When the user asks to disable
+Statewright, call `statewright_deactivate`. Report connection, host permission,
+workflow-policy and provider errors distinctly. A requested model is not proof
+of the model that answered; use the returned routing receipt when available.

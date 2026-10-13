@@ -1,206 +1,120 @@
-# statewright plugin for Claude Code
+# Statewright for Claude Code
 
-State machine workflow enforcement. Controls which tools your agent can use in each phase.
+The 0.3.4 plugin adds the Arbiter, workflow sidebar, compact tool results and
+per-state model routing to Claude Code and **Claude Desktop → Code → Local**.
+Use ordinary Claude; no separate app or Statewright launcher is required.
 
-## Install
+Use Claude Code 2.1.295 or newer. Desktop bundles its own Code engine: check
+`/status` inside a Code conversation, not only the Desktop application version.
+This integration is not for the ordinary Chat tab or Cowork.
 
-First, add the marketplace:
-```
+## Install and connect
+
+In Claude Code:
+
+```text
 /plugin marketplace add statewright/statewright
-```
-
-Then install (inside Claude Code):
-```
 /plugin install statewright@statewright
 ```
 
-Then run the local bootstrap once from the repository checkout:
+For an existing install, run `claude plugin update statewright@statewright`
+in a terminal. Reload an open conversation with `/reload-plugins`.
+Installation is shared with Desktop Code.
 
-```bash
-bash plugins/claude-code/setup.sh
-exec zsh
+The Arbiter appears when the Code conversation starts. Select its connection
+status to open the sidebar, then **Connect**. Finish Statewright sign-in and
+Claude's native permission prompts. Claude owns OAuth credentials and refresh;
+a Statewright API key file is not required.
+
+The connection and permission to control a conversation are separate.
+An existing login can restore without another browser visit. Workflow-control
+consent is scoped to the live session; reloading or closing it clears that grant.
+It does not override file/command permission rules or workflow approvals.
+
+## Use a workflow
+
+Select a workflow in the sidebar and choose **Start**, or ask Claude to use a
+named workflow. Selecting its name alone does not start it. The Arbiter shows
+current state, available events, and model/effort when known. Expand tool-result
+**Details** to inspect the exact JSON behind a compact summary.
+
+Use `/statewright` to reopen the sidebar, or turn the workflow **Off** there.
+Off restores the host-selected model. Requested effort is a setting, not
+proof of internal reasoning; routed response receipts identify the observed model.
+
+Terminal separators are plain by default. `/statewright configure` opens saved
+preferences. Enable Powerline only if your terminal font supports it;
+`/statewright powerline on`, `off`, or `default` overrides only this session.
+
+## Another gateway or an SSH session
+
+Set **Statewright gateway** through `/statewright configure`, then reload plugins.
+The default is `https://mcp.statewright.ai/mcp`. Your service must support the
+native Claude control protocol and register the `statewright-claude` OAuth client.
+
+If browser sign-in is unavailable, run this in a separate terminal on the same
+machine and in the same Claude configuration scope:
+
+```sh
+claude mcp login plugin:statewright:statewright --no-browser
 ```
 
-The setup command installs Claude hooks, configures the Statewright MCP
-server, installs the managed `claude` shim, reconciles any active Claude
-plugin cache or local directory marketplace, and enables transparent model
-routing. The `exec zsh` reloads `PATH`; it is required only once after the
-initial setup or a plugin update.
+Open its link on a browser-capable computer and paste the full callback URL
+into that terminal. Return to Claude and connect again. Do not paste tokens or
+callback URLs into the conversation. Both paths require the native Claude CLI;
+automatic browser sign-in also requires Expect.
 
-The MCP client and hook gateway are configured as one identity-preserving
-proxy and one endpoint. This is important: configuring Claude with a direct
-HTTP MCP URL creates a second Statewright client session and can show
-conflicting active workflows. For a
-self-hosted or staging gateway, set `STATEWRIGHT_GATEWAY_URL` when running
-setup; otherwise the public gateway is used:
+## Upgrade from manual hooks
 
-```bash
-STATEWRIGHT_GATEWAY_URL=https://mcp.statewright.ai bash plugins/claude-code/setup.sh
+Marketplace-only installations upgrade under the same
+`statewright@statewright` identity. If you previously ran `setup.sh` or installed
+Statewright hooks directly in settings, the plugin update cannot remove them.
+
+Close affected Claude sessions first. From this plugin directory, preview the
+cleanup using the exact old plugin directory named in your settings:
+
+```sh
+node scripts/migrate-native.mjs --settings /absolute/path/to/settings.json \
+  --legacy-root /absolute/path/to/old/claude-code
 ```
 
-Verify the install:
+Review the reported positions. Repeat with `--apply` only after review; pass
+additional `--legacy-root` arguments for distinct old installations. The tool
+removes only exact legacy commands, retains a private byte-for-byte backup,
+and preserves unrelated hooks, permissions, plugin settings and credentials.
+Custom/ambiguous Statewright commands require manual review, not guessing.
+Check user and project settings separately. Do not edit settings concurrently.
 
-```bash
-command -v claude
-cat ~/.statewright/config.json
-```
+Also remove a separately configured legacy Statewright MCP server through
+Claude's MCP settings, if present, and stop using the old managed Claude launcher.
+Do not remove other servers or grant blanket tool permissions. Never run the old
+`setup.sh` to repair a native installation; it now exits without changing anything.
 
-The first command should resolve to `~/.statewright/bin/claude`. The config
-should contain `routing.managed_clients.enabled: true` and
-`routing.managed_clients.hosts.claude: true`.
+## Troubleshooting and limits
 
-After that, use Claude normally. No wrapper command, shell alias, or plugin
-cache path is needed:
+- **No Arbiter:** send the first message in Desktop Code → Local, then check
+  `/status` and `/plugin`. Organization policy may prevent mods from loading.
+- **Missing Statewright tools:** reload plugins; if tools remain missing, quit
+  and reopen the affected Claude host, then resume the conversation.
+- **Connection needs attention:** open the sidebar for the failed step. A native
+  permission denial is not an OAuth failure; signing in again does not fix it.
+- **A command was denied:** preserve the refusal. Shell classification can be
+  conservative; do not retry the denied operation through another interpreter.
+- **Model unavailable:** only the recognized Fable usage-credit gate has an
+  adapter fallback to Opus at the same effort. Other provider/policy failures
+  remain visible; partial responses are never replayed.
+- **Enforcement boundary:** native tool hooks check the call presented before
+  permission settlement. A host-side argument rewrite after that check may
+  execute without another pre-check; post-call input comparison is detection,
+  not prevention. Statewright does not replace Claude's own authorization.
 
-```bash
-claude
-```
+## Development
 
-After updating a checkout or local directory marketplace, rerun setup and
-reload Claude plugins. This updates only Statewright runtime files in the
-active install locations and keeps the plugin MCP proxy as the sole
-Statewright transport:
+`node --test plugins/claude-code/tests/*.test.mjs` runs source tests from the
+repository root. `claude plugin validate plugins/claude-code` and
+`claude plugin test plugins/claude-code` exercise the native plugin contract.
+Fixture passes do not replace live OAuth, TUI or Desktop acceptance.
 
-```bash
-bash plugins/claude-code/setup.sh
-```
-
-To diagnose or reconcile runtime drift without changing Claude settings:
-
-```bash
-task plugins:sync-claude-runtime
-```
-
-### Claude routing canary
-
-Use the Claude-specific canary, which routes between Claude model annotations
-instead of Codex model names:
-
-```text
-Load the `claude-model-routing-canary` workflow and follow its instructions exactly. Confirm the current Statewright phase, then emit the required transition.
-```
-
-The canary starts on `anthropic/claude-sonnet-4-6` and routes to
-`anthropic/claude-opus-4-6`. Do not use the Codex-only `model-routing-canary`
-workflow from Claude.
-
-Your existing Claude sessions can be tested through the managed client by
-starting a fresh terminal and resuming the session normally:
-
-```bash
-claude --resume SESSION_ID
-```
-
-At a Statewright model boundary, the managed client preserves the conversation
-by forking the session and starts the fork with the routed model.
-
-To disable only managed Claude routing while leaving Statewright installed:
-
-```bash
-node plugins/executor/statewright-managed-client.mjs --disable --host claude
-```
-
-To remove the managed shims and the Statewright shell-path block:
-
-```bash
-node plugins/executor/statewright-managed-client.mjs --uninstall
-```
-
-The current Claude transport still uses the legacy gateway API-key file. On
-the first missing-key request, its proxy can open the signup/key page; the
-local setup command does not itself complete OAuth or install a gateway
-credential. Claude OAuth and per-gateway credential storage are separate
-follow-up work.
-The [mod/OAuth discovery handoff](../../docs/specs/claude-mod-oauth-discovery.md)
-records the current boundary and the acceptance checks for that refit.
-
-For executor-owned isolated delivery, launch Claude Code through the shared executor:
-
-```bash
-node plugins/executor/statewright-exec.mjs \
-  --host claude --workflow '<explicit-workflow-name>' --cwd "$PWD" -- \
-  "Fix the failing tests"
-```
-
-The executor owns the remote credential and MCP session. Claude Code receives an authenticated loopback bridge.
-
-### Transparent Model Routing
-
-The plugin setup installs the managed Claude client automatically. After setup,
-start `claude` from the terminal so the shim can load. It stays dormant unless
-a workflow is loaded. At a route boundary it owns
-and restarts only its own CLI child, resumes the same conversation with the workflow
-model, and preserves the plugin MCP session. Claude does not expose a documented CLI
-reasoning-effort flag, so Statewright applies the state model and records the
-effort as advisory for this host. Disable with
-`statewright-managed-client --disable --host claude`.
-
-### Approval evidence
-
-When a parked transition carries a `statewright/evidence-packet/v1` manifest,
-the persistent supervisor uploads the declared project files through the
-gateway-bound approval and opens the authenticated review page once. The hook
-states that the browser review is opening, and a resumed pending gate recreates
-the review request. The workflow remains parked until an authorized reviewer
-decides it; the conversation transcript is not part of the packet.
-
-### Model translation
-
-Claude routes semantic model tiers across providers so a workflow can remain
-portable. The Claude adapter translates `sol` to `opus`, `terra` to `sonnet`,
-and `luna` to `haiku`. For example, `openai/gpt-5.6-sol` launches Claude with
-the native `opus` alias. Native `anthropic/...` model IDs pass through unchanged.
-An OpenAI model without one of these semantic suffixes is rejected rather than
-silently sent to Claude as an invalid model name.
-
-To remove managed routing entirely, run
-`statewright-managed-client --uninstall`. It removes only Statewright's shims
-and marked shell-path block.
-
-## What happens
-
-Every prompt, statewright checks your workflow state and tells Claude which tools are allowed. Claude reads first, edits second, tests third. No skipping phases.
-
-```
-❯ fix the failing tests
-
-⏺ statewright - statewright_get_state (MCP)
-⏺ Current phase: planning. Let me read the code first.
-  Read 2 files
-  [statewright] planning => implementing
-⏺ statewright - statewright_transition (MCP)(event: "READY")
-```
-
-## Default workflow
-
-| Phase | Tools | Limits |
-|-------|-------|--------|
-| planning | Read, Grep, Glob | No edits. |
-| implementing | Read, Edit, Write | 20 lines max, 3 files max |
-| testing | Read, Bash | Test commands only |
-
-Build your own at [statewright.ai/workflows](https://statewright.ai/workflows).
-
-## Status line
-
-Show the current workflow state in your Claude Code status bar. Add to `~/.claude/settings.json`:
-
-```json
-"statusLine": {
-  "type": "command",
-  "command": "/path/to/statusline.sh"
-}
-```
-
-An example script is in [`examples/statusline.sh`](examples/statusline.sh). It renders a powerline segment with the active state and iteration count, colored by phase:
-
-```
- ~/project  main  Opus 4.6  03:42         implementing 2/8  ⚙ statewright 
-```
-
-When no workflow is running, just the brand pill shows. Append the statewright segment to your existing statusline script — see the comments in the example for integration.
-
-## License
-
-FSL-1.1-ALv2 (see [`../LICENSE.md`](../LICENSE.md)). Cloud at
-[statewright.ai](https://statewright.ai).
+See [Statewright docs](https://statewright.ai/docs),
+[Claude mod support](https://code.claude.com/docs/en/plugins/mods/overview), and
+[the repository](../../README.md).

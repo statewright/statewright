@@ -38,11 +38,13 @@ test("runtime sync discovers the installed cache and local directory marketplace
 
     assert.deepEqual(await discoverRuntimeRoots({ home, sourceRoot: CLAUDE_ROOT }), [cache, directoryPlugin].sort());
     await writeFile(join(directoryPlugin, "mcp-proxy.sh"), "stale\n");
+    await writeFile(join(directoryPlugin, "skills/statewright/SKILL.md"), "legacy shell-backed command\n");
     const before = await runtimeDrift({ sourceRoot: CLAUDE_ROOT, targetRoots: [cache, directoryPlugin] });
-    assert.deepEqual(before, [{ root: directoryPlugin, files: ["mcp-proxy.sh"] }]);
+    assert.deepEqual(before, [{ root: directoryPlugin, files: ["skills/statewright/SKILL.md", "mcp-proxy.sh"] }]);
     await syncRuntime({ sourceRoot: CLAUDE_ROOT, targetRoots: [cache, directoryPlugin] });
     assert.deepEqual(await runtimeDrift({ sourceRoot: CLAUDE_ROOT, targetRoots: [cache, directoryPlugin] }), []);
     assert.deepEqual(await readFile(join(directoryPlugin, "mcp-proxy.sh")), await readFile(join(CLAUDE_ROOT, "mcp-proxy.sh")));
+    assert.deepEqual(await readFile(join(directoryPlugin, "skills/statewright/SKILL.md")), await readFile(join(CLAUDE_ROOT, "skills/statewright/SKILL.md")));
     await import(`${pathToFileURL(join(directoryPlugin, "executor/lib/managed-client-supervisor.mjs")).href}?runtime-sync=${Date.now()}`);
   } finally {
     await rm(root, { recursive: true, force: true });

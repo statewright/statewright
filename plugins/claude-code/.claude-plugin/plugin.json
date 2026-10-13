@@ -1,0 +1,33 @@
+{
+  "name": "statewright",
+  "version": "0.3.4",
+  "description": "Statewright workflows with the Arbiter, native approvals, and model routing in Claude Code and Desktop Code.",
+  "author": {
+    "name": "statewright.ai",
+    "url": "https://statewright.ai"
+  },
+  "homepage": "https://statewright.ai",
+  "repository": "https://github.com/statewright/statewright",
+  "license": "FSL-1.1-ALv2",
+  "keywords": [
+    "guardrails",
+    "state-machine",
+    "mcp",
+    "agent-safety",
+    "workflow"
+  ],
+  "userConfig": {
+    "gateway_url": {
+      "type": "string",
+      "title": "Statewright gateway",
+      "description": "MCP URL for your Statewright service. Reload the plugin after changing it, then connect to that service.",
+      "default": "https://mcp.statewright.ai/mcp"
+    },
+    "powerline": {
+      "type": "boolean",
+      "title": "Powerline separators",
+      "description": "Enable if your terminal font supports Powerline. Override only this session with /statewright powerline on, off, or default.",
+      "default": false
+    }
+  }
+}

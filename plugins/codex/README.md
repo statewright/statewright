@@ -2,6 +2,10 @@
 
 State machine guardrails for [OpenAI Codex CLI](https://github.com/openai/codex). Per-state tool enforcement, interrupts, fork/join, approval gates.
 
+Start with the [Codex guide](https://docs.statewright.ai/plugins/codex) or
+[ChatGPT Desktop guide](https://docs.statewright.ai/plugins/codex-desktop).
+The sections below are the detailed integration reference.
+
 ## Read-only tool equivalents
 
 Workflow names such as `Read`, `Grep`, and `Glob` are capabilities, not a promise
@@ -178,12 +182,14 @@ is reported as unattributed rather than mislabeled as reasoning.
 For a terminal Codex session that must enforce per-state model and reasoning
 routes, Statewright installs its transparent managed client during plugin setup.
 Restart the terminal once after installing or updating the plugin, then continue
-launching `codex` normally. The shim is dormant until a
-workflow is loaded. At an authoritative Statewright boundary it resumes the
-same session with that state's `--model` and `model_reasoning_effort`; it owns
-only that terminal's child process group. Other terminals are never signalled.
+launching `codex` normally. The shim is dormant until a workflow is loaded.
+The default App Server transport applies model and reasoning settings to
+subsequent turns at authoritative workflow boundaries. The optional legacy
+restart transport resumes the same session with the state's `--model` and
+`model_reasoning_effort`, owning only that terminal's child process group.
+Other terminals are never signalled.
 
-This is a process boundary, not a hot swap inside a turn. A session started
+Neither transport changes a model halfway through a response. A session started
 before the plugin bootstrap runs continues to receive tool enforcement but
 cannot change its current model automatically. Disable with
 `statewright-managed-client --disable --host codex`.
@@ -292,7 +298,10 @@ value only if the launchd value still points to the recorded Statewright shim;
 otherwise it refuses to overwrite the user's setting. Plugin startup refreshes
 production and already-configured staging/development launchers together, keeping
 their gateway, client identity, and disabled status. It does not create private
-profiles or start OAuth during setup. On first launch, if that Desktop profile
+profiles or start OAuth during setup. Default setup keeps a verified,
+content-addressed runtime outside the plugin cache, so cache cleanup cannot
+remove the Desktop broker or its imports. Existing snapshots are not overwritten.
+On first launch, if that Desktop profile
 has no gateway credential, it explains that Statewright will open in the
 browser, starts the device-authorization flow for the profile's configured
 authorization service, and starts ChatGPT only after the gateway-keyed OS
@@ -329,13 +338,11 @@ on mobile. A passing Codex App Server resume does not satisfy that gate.
 ### Native workflow approvals (experimental App Server mode)
 
 The standalone Statewright managed client owns the native approval controller,
-private resolver, and restart-safe journal. `codex-local-models`, a local model
-endpoint, and Qwen configuration are not required. For the source-checkout
-road test, launch the Statewright shim directly, rather than an `ascodex` alias
-that may point to the companion:
+private resolver, and restart-safe journal. A local model endpoint is not
+required. For a source-checkout test, launch the Statewright shim directly:
 
 ```bash
-STATEWRIGHT_CODEX_TRANSPORT=app-server STATEWRIGHT_QWEN_ENABLED=false ~/.statewright/bin/codex
+STATEWRIGHT_CODEX_TRANSPORT=app-server ~/.statewright/bin/codex
 ```
 
 At a human gate, Statewright saves the exact run/session/approval identity,

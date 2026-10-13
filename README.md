@@ -4,7 +4,7 @@
 
 State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://docs.statewright.ai)
 
-> **Statewright Codex Plugin 0.3.4 release candidate:** bounded command classification now follows proven effects across path-qualified runners, local and cloud workflow ownership stay isolated, and invalid credentials remain noninteractive unless OAuth is explicitly requested. [Read the release notes →](docs/releases/codex-0.3.4.md)
+> **0.3.4 release candidate:** Claude gains a native Arbiter, Desktop sidebar and compact results. Codex adds browser onboarding and managed Desktop continuity. [Claude notes](docs/releases/claude-0.3.4.md) · [Codex notes](docs/releases/codex-0.3.4.md). Not yet published.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
@@ -28,7 +28,8 @@ Works on frontier and local models alike. Below 13GB, models can produce tool ca
 <summary><strong>Codex</strong></summary>
 
 ```
-npx statewright-codex@latest init
+codex plugin marketplace add statewright/statewright
+codex plugin add statewright@statewright
 ```
 </details>
 
@@ -37,7 +38,7 @@ npx statewright-codex@latest init
 
 ```
 /plugin marketplace add statewright/statewright
-/plugin install statewright
+/plugin install statewright@statewright
 ```
 </details>
 
@@ -57,14 +58,28 @@ npx statewright-cursor@latest init
 ```
 </details>
 
-Your browser opens → sign up at [statewright.ai](https://statewright.ai) → generate a key → paste it → done.
+In Codex, restart after installation and ask for `statewright_connect`; approve
+the matching device code in your browser. In Claude Code 2.1.295 or newer,
+open the Arbiter's connection status and choose **Connect**. Claude manages its
+native OAuth login. Neither flow requires pasting a key into the conversation.
+Other hosts have their own connection instructions.
 
-Then start a workflow:
+Existing Claude manual-hook installs must complete the
+[migration](plugins/claude-code/README.md#upgrade-from-manual-hooks) before
+starting a workflow; updating the plugin does not remove old settings hooks.
+
+Desktop guides: [Claude Code → Local](https://docs.statewright.ai/plugins/claude-desktop)
+uses the ordinary Claude app; [ChatGPT with Codex](https://docs.statewright.ai/plugins/codex-desktop)
+uses the macOS **ChatGPT + Statewright** launcher. Ordinary cloud chats are a
+separate integration and cannot enforce model routing.
+
+Then ask for a workflow. This is an illustrative bugfix sequence; actual states,
+events and tools come from the selected workflow:
 
 ```
 ❯ start the bugfix workflow — fix the failing tests in calc.py
 
-◆ statewright — statewright_start (workflow: bugfix)
+◆ statewright — statewright_load_workflow (name: bugfix)
 ◆ [statewright] Workflow activated: bugfix
 
 ◆ statewright — statewright_get_state (MCP)
@@ -86,10 +101,11 @@ Then start a workflow:
   Bash: pytest -x — 7 passed
 
   [statewright] testing => completed
-◆ [statewright] Workflow complete. 46 seconds.
+◆ [statewright] Workflow complete.
 ```
 
-You can also use the slash command directly: `/statewright start bugfix`.
+In Claude, `/statewright` opens the sidebar: choose a workflow, then
+**Start workflow**. Selection alone does not start a run.
 
 ## Research results
 
@@ -126,7 +142,12 @@ The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface th
 
 ### Per-state model routing
 
-States can specify which model to use via the `model` field. A `default_model` in `meta` applies to states without an explicit override. The executor uses the strongest deterministic boundary each host exposes: Pi and OpenCode switch live, Claude Code and Cursor resume the same session after a route change, OMX applies the route at startup, and the Codex app-server adapter routes each turn.
+States can specify a `model`; `meta.default_model` applies where no state
+override is present. The native Claude 0.3.4 plugin routes subsequent
+main-conversation requests without restarting the app. Codex's managed App
+Server adapter routes turns. Pi and OpenCode switch live, Cursor's executor
+resumes the same chat, and OMX applies its route at startup. Requested settings
+are not execution receipts: use the response's observed model when available.
 
 ```json
 {
@@ -153,7 +174,7 @@ In this example, `diagnose` uses Haiku (fast, cheap reconnaissance), `propose_fi
 
 | Guardrail | What it does |
 |-----------|-------------|
-| Per-state tool enforcement | Agent can't see or call tools outside `allowed_tools` for the current state |
+| Per-state tool enforcement | Rejects tools outside `allowed_tools` on the integration's intercepted paths |
 | Bash discernment | Blocks `echo > file`, `rm -rf`, `sed -i`, and scripting interpreters (`python`, `node`) when Write/Edit aren't allowed. Even if Bash itself is permitted. |
 | Edit guards | Rejects diffs exceeding `max_edit_lines`, caps files edited per state |
 | Command allow-lists | Only prefix-matched commands run (e.g. `pytest`, `cargo test`) |
@@ -183,9 +204,14 @@ approval through the gateway callback/API.
 
 Codex and Claude Code refresh their cached workflow state after a transition.
 Codex presents an authorized native decision dialog and links the review page.
-Claude's persistent supervisor uploads the same packet and opens the review
-page while its Stop hook leaves the workflow parked. An `external` approval
-mode leaves the decision to the configured integration.
+Claude's native sidebar exposes **Review this step** for a pending gate.
+Native host permissions and Statewright review decisions remain separate.
+An `external` approval mode leaves the decision to the configured integration.
+
+Additional workflow controls:
+
+| Guardrail | What it does |
+|-----------|-------------|
 | Interrupts | Edit a file matching a glob pattern? Auto-transition to a validation state, then return where you were |
 | Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
 | Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |
@@ -239,18 +265,25 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 ## Supported agents
 
-**Hard** enforcement means tool calls are intercepted before execution. **Live**, **resume**, and **startup** describe when a host can apply a state model route. The managed `codex` and `claude` shims provide transparent terminal routing after a one-time opt-in; each boundary resumes the managed CLI process, so it is not a hot swap inside an existing model turn. Launch other hosts through [`statewright-exec`](plugins/executor/) when the workflow requires isolated delivery or executor-owned routing.
+Enforcement and model routing depend on the host. Claude 0.3.4 is a native
+plugin; it needs no shim. Codex uses a managed App Server adapter. Neither
+changes a model midway through a response. The separate
+[`statewright-exec`](plugins/executor/) transport supports executor-owned
+delivery and other hosts; it is not Claude's consumer Desktop integration.
 
 | Agent | Release line | Executor integration | Tool enforcement | Route boundary |
 |-------|--------------|----------------------|------------------|----------------|
-| [Claude Code](plugins/claude-code/) | 0.3.1 | Hooks + executor MCP bridge | Hard | Managed restart with forked session |
-| [Codex](plugins/codex/) | 0.3.4 | App-server hooks + shared executor bridge | Hard | Managed restart of the same thread |
+| [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.4 candidate | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
+| [Codex](plugins/codex/) | 0.3.4 candidate | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
 | [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
 | [Pi](plugins/pi/) | 0.3.0 | Native extension + executor MCP bridge | Hard* | Live |
 | [OpenCode](plugins/opencode/) | 0.3.0 | Native plugin + executor MCP bridge | Hard | Live |
 | [Cursor](plugins/cursor/) | 0.2.0 | Native hooks + executor MCP bridge | Hard in executor mode | Resume same chat |
 
-*\*Pi includes tool name normalization and tool-call recovery for local models (Ollama, LM Studio).*
+*Claude checks the call before permission settlement. A later host-side argument
+rewrite may execute without another pre-check; post-call comparison detects
+that case but does not prevent it. Pi includes tool-name normalization and
+tool-call recovery for local models (Ollama, LM Studio).*
 
 ### Isolated delivery
 

@@ -8,6 +8,10 @@ Use Claude Code 2.1.295 or newer. Desktop bundles its own Code engine: check
 `/status` inside a Code conversation, not only the Desktop application version.
 This integration is not for the ordinary Chat tab or Cowork.
 
+See the [Claude Desktop guide](https://docs.statewright.ai/plugins/claude-desktop)
+for the first-message startup, clickable pills, workflow map, result details
+and connection recovery.
+
 ## Install and connect
 
 In Claude Code:
@@ -20,6 +24,11 @@ In Claude Code:
 For an existing install, run `claude plugin update statewright@statewright`
 in a terminal. Reload an open conversation with `/reload-plugins`.
 Installation is shared with Desktop Code.
+
+If the old installation used `setup.sh` or hooks added directly to settings,
+complete [Upgrade from manual hooks](#upgrade-from-manual-hooks) before starting
+a workflow. Plugin updates do not remove those hooks; do not run the native
+and legacy integrations together.
 
 The Arbiter appears when the Code conversation starts. Select its connection
 status to open the sidebar, then **Connect**. Finish Statewright sign-in and

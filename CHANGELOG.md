@@ -3,7 +3,7 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Codex Plugin 0.3.5] — Unreleased
+## [Codex Plugin 0.3.5] — 2026-10-14
 
 ### Fixed
 - **[codex]** Bind managed TUI routing ownership after a successful native

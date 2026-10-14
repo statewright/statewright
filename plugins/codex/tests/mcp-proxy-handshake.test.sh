@@ -19,12 +19,16 @@ chmod +x "$TMP/bin/desktop-node"
 printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "$TMP/bin/ChatGPT"
 chmod +x "$TMP/bin/ChatGPT"
 
+# Initialization also bootstraps local client files. A disposable HOME alone
+# does not isolate a managed session's named profile, credentials, or CODEX_HOME.
+# Give the proxy only this fixture's environment, never the caller's identity.
 RESPONSE=$(
   printf '%s\n' \
     '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test-client","version":"1"}},"id":"init-1"}' |
-    HOME="$TMP/home" \
+    env -i HOME="$TMP/home" \
     SHELL="/bin/zsh" \
     PATH="$TMP/bin:$PATH" \
+    LANG=C LC_ALL=C \
     STATEWRIGHT_GATEWAY_URL="http://127.0.0.1:1" \
     STATEWRIGHT_ADAPTER_URL="" \
     STATEWRIGHT_ADAPTER_TOKEN="" \

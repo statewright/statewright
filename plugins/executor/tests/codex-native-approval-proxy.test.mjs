@@ -26,7 +26,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai", rejectObjectiveGoal = false } = {}) {
+async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai", rejectObjectiveGoal = false, approvedState = destination } = {}) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(server, "listening");
   const calls = [], timeline = [], errors = [], statuses = [], serviceCalls = [], injected = [], readStatuses = [], idleEvents = [];
@@ -133,7 +133,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     resolve: async (ticket, value) => {
       serviceCalls.push({ method: "resolve", ticket, decision: value });
       decision = value;
-      state = structuredClone(destination);
+      state = structuredClone(approvedState);
       return receipt(ticket);
     },
     openReview: async url => { serviceCalls.push({ method: "openReview", url }); },
@@ -396,6 +396,70 @@ test("beforeTurn releases native turn/start with the authoritative destination w
   assert.equal(released.params.effort, destination.thinking_level);
   assert.equal(released.params.input[0].text, "Preserve this gated user request");
   assert.equal(f.saved.size, 0);
+});
+
+test("model-neutral approval releases the explicit native user selection only after acceptance", async t => {
+  const f = await fixture(t, {approvedState: {...destination, model: null}});
+  await f.rpc("thread/start");
+  f.armPending();
+  const id = f.request("turn/start", {threadId, model: "user-selected-model", effort: "low",
+    input: [{type: "text", text: "continue"}]});
+  await until(() => form(f), "approval");
+  assert.equal(starts(f).length, 0);
+  f.respond(form(f), "accept");
+  await f.response(id);
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "user-selected-model");
+  assert.equal(starts(f)[0].params.effort, "high");
+  assert.equal(f.saved.size, 0);
+});
+
+test("automatic approved model-neutral continuation retains the native model", async t => {
+  const f = await fixture(t, {approvedState: {...destination, model: null}});
+  await f.observePending();
+  assert.equal(starts(f).length, 1);
+  f.respond(form(f), "accept");
+  await until(() => starts(f).length === 2, "approved continuation");
+  assert.equal(starts(f)[1].params.model, "fixture-origin-model");
+  assert.equal(starts(f)[1].params.effort, "high");
+  assert.deepEqual(f.errors, []);
+});
+
+test("invalid route selection refuses one request without destroying the native connection", async t => {
+  const f = await fixture(t);
+  await f.rpc("thread/start");
+  f.setState({...destination, model: " "});
+  const id = f.request("turn/start", {threadId, input: [{type: "text", text: "continue"}]});
+  const rejected = await f.response(id, {allowError: true});
+  assert.match(rejected.error.message, /missing a model/);
+  assert.equal(starts(f).length, 0);
+  assert.equal(f.client.readyState, WebSocket.OPEN);
+  f.setState({...destination, model: null});
+  await f.rpc("turn/start", {threadId, input: [{type: "text", text: "retry after correction"}]});
+  assert.equal(starts(f).length, 1);
+  assert.equal(starts(f)[0].params.model, "fixture-origin-model");
+});
+
+for (const automatic of [false, true]) test(`model-neutral approved goal applies explicit tier reset (automatic=${automatic})`, async t => {
+  const f = await fixture(t, {approvedState: {...destination, model: null, service_tier: null},
+    nativeGoal: {...pausedGoal, status: automatic ? "active" : "paused"}});
+  let id;
+  if (automatic) await f.observePending();
+  else {
+    await f.rpc("thread/start");
+    f.armPending();
+    id = f.request("thread/goal/set", {threadId, status: "active"});
+    await until(() => form(f), "goal approval");
+  }
+  assert.equal(f.goal.status, "paused");
+  f.respond(form(f), "accept");
+  if (id) await f.response(id);
+  await until(() => f.goal.status === "active", "approved goal");
+  assert.equal(f.settings.model, "fixture-origin-model");
+  assert.equal(f.settings.effort, "high");
+  assert.ok(Object.hasOwn(f.settings, "serviceTier"));
+  assert.equal(f.settings.serviceTier, null);
+  assert.deepEqual(f.errors, []);
 });
 
 test("approved user turn retires only the exact origin routes before applying the destination", { timeout: 8000 }, async t => {

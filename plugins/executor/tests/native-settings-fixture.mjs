@@ -26,7 +26,7 @@ export async function nativeSettingsFixture(t, threadId, notify) {
       pending.clear(); resolve();
     });
   });
-  let sequence = 0, nativeId, settings, deliver = false;
+  let sequence = 0, nativeId, settings, deliver = false, settingsChanged;
   const settingsByThread = new Map();
   const lines = createInterface({input: child.stdout});
   lines.on("line", line => {
@@ -37,6 +37,7 @@ export async function nativeSettingsFixture(t, threadId, notify) {
       settingsByThread.set(message.params.threadId, message.params.threadSettings);
       if (message.params.threadId === nativeId) {
         settings = message.params.threadSettings;
+        settingsChanged?.();
         if (deliver) notify({...message, params: {...message.params, threadId}});
       }
     }
@@ -67,7 +68,18 @@ export async function nativeSettingsFixture(t, threadId, notify) {
   await rpc("thread/settings/update", {threadId: nativeId, model: "gpt-6-sol", effort: "high", serviceTier: "priority",
     collaborationMode: {mode: "default", settings: {model: "gpt-6-sol", reasoning_effort: "high", developer_instructions: null}}});
   await rpc("thread/read", {threadId: nativeId, includeTurns: false});
-  if (!settings) throw new Error("Native settings baseline was not observed");
+  const baselineObserved = () => settings?.model === "gpt-6-sol" && settings?.modelProvider === "openai"
+    && settings?.effort === "high" && settings?.serviceTier === "priority";
+  // RPC replies and notifications are independent streams. An ordered read
+  // reply is not a guarantee that the settings notification was delivered.
+  if (!baselineObserved()) await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {settingsChanged = null; reject(new Error("Native settings baseline was not observed"));}, 8_000);
+    settingsChanged = () => {
+      if (!baselineObserved()) return;
+      clearTimeout(timer); settingsChanged = null; resolve();
+    };
+    settingsChanged();
+  });
   deliver = true;
   return {
     settings,

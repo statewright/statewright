@@ -26,7 +26,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
   });
   await once(server, "listening");
   let socket, state = null, active = false, turnId, sequence = 0, heldRead, heldStart, heldOwner, ownerEntered = false, wrongModel = false;
-  let heldSettings, rejectSettings = false, readbackMismatch = false;
+  let heldSettings, rejectSettings = false, readbackMismatch = false, rejectedModel;
   let settings = {model: "gpt-6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority"};
   const native = nativeSettings ? await (await import("./native-settings-fixture.mjs"))
     .nativeSettingsFixture(t, threadId, message => socket?.send(JSON.stringify(message))) : null;
@@ -66,6 +66,17 @@ async function fixture(t, {nativeSettings = false} = {}) {
       }
       if (r.method === "turn/start") {
         if (sequence > 0 && heldStart) await heldStart;
+        if (r.params.model === rejectedModel && rejectedModel) {
+          return ws.send(JSON.stringify({id: r.id, error: {code: -32603, message: "fixture model rejected"}}));
+        }
+        if (!native) {
+          const updates = Object.fromEntries(["model", "effort", "serviceTier", "collaborationMode"]
+            .filter(key => Object.hasOwn(r.params, key)).map(key => [key, r.params[key]]));
+          const next = {...settings, ...updates};
+          if (!isDeepStrictEqual(settings, next)) {
+            settings = next; notify("thread/settings/updated", {threadId, threadSettings: settings});
+          }
+        }
         active = true; turnId = `turn-${++sequence}`;
         reply({turn: {id: turnId}});
         return notify("turn/started", {threadId, turn: {id: turnId}});
@@ -88,10 +99,11 @@ async function fixture(t, {nativeSettings = false} = {}) {
   client.on("message", raw => frames.push(JSON.parse(String(raw))));
   await once(client, "open");
   let id = 0;
-  const rpc = async (method, params = {}) => {
+  const rpc = async (method, params = {}, {allowError = false} = {}) => {
     const key = ++id; client.send(JSON.stringify({id: key, method, params}));
     await until(() => frames.some(f => f.id === key));
     const response = frames.find(f => f.id === key);
+    if (allowError) return response;
     assert.equal(response.error, undefined); return response.result;
   };
   await rpc("initialize"); client.send(JSON.stringify({method: "initialized"}));
@@ -101,6 +113,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
     threadId, turnId, item: {type: "mcpToolCall", id: `item-${sequence}-${tool}`, server: "statewright", tool,
       status: "completed", result: {structuredContent: result}, ...overrides}}}));
   return {calls, frames, confirmed, injected, errors, usage, rpc, completeTool, setState: v => {state = v;},
+    rejectModel: model => {rejectedModel = model;},
     tokens: (id = turnId) => socket.send(JSON.stringify({method: "thread/tokenUsage/updated", params: {
       threadId, turnId: id, tokenUsage: {
         total: {inputTokens: 1000, cachedInputTokens: 50, outputTokens: 100, reasoningOutputTokens: 10, totalTokens: 1100},
@@ -162,6 +175,68 @@ test("Desktop load and transition cut over native turns and restore the original
   await until(() => f.confirmed.some(r => r.confirmed && r.route.restored_original));
   assert.equal(f.calls.filter(c => c.method === "thread/settings/update").at(-1).params.model, "gpt-6-sol");
   assert.equal(f.calls.filter(c => c.method === "turn/start").length, 3);
+});
+
+test("model-neutral workflow inherits the native model through handoffs and restores effort", async t => {
+  const f = await fixture(t);
+  const diagnose = stateFor("diagnose", 1, null, "medium");
+  f.setState(diagnose);
+  f.completeTool("statewright_load_workflow", {loaded: true, state_snapshot: diagnose});
+  await until(() => f.injected.some(r => r.turnId === "turn-2") || f.errors.length);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.injected.at(-1).effectiveModel, "gpt-6-sol");
+  assert.equal(f.injected.at(-1).effectiveEffort, "medium");
+  const review = stateFor("review", 2, null, "high");
+  f.setState(review);
+  f.completeTool("statewright_transition", {transitioned: true, from: "diagnose", to: "review"});
+  await until(() => f.injected.some(r => r.turnId === "turn-3") || f.errors.length);
+  assert.deepEqual(f.errors, []);
+  assert.equal(f.injected.at(-1).effectiveModel, "gpt-6-sol");
+  assert.equal(f.injected.at(-1).effectiveEffort, "high");
+  f.setState({...review, state: "complete", state_epoch: 3, is_final: true});
+  f.completeTool("statewright_transition", {transitioned: true, from: "review", to: "complete"});
+  f.finish();
+  await until(() => f.confirmed.some(r => r.confirmed && r.route.restored_original));
+  const restored = f.confirmed.find(r => r.confirmed && r.route.restored_original);
+  assert.equal(restored.actualModel, "gpt-6-sol");
+  assert.equal(restored.actualEffort, "high");
+});
+
+test("ordinary turn in a model-neutral workflow preserves native selection and its connection", async t => {
+  const f = await fixture(t);
+  f.setState(stateFor("diagnose", 1, null, "medium"));
+  f.finish();
+  await f.rpc("turn/start", {threadId, model: "gpt-6-astra", effort: "high",
+    collaborationMode: {mode: "default", settings: {model: "gpt-6-astra", reasoning_effort: "high", developer_instructions: "keep"}}});
+  assert.deepEqual(f.errors, []);
+  const turn = f.calls.filter(c => c.method === "turn/start").at(-1);
+  assert.equal(turn.params.model, "gpt-6-astra");
+  assert.equal(turn.params.effort, "medium");
+  assert.equal(turn.params.collaborationMode.settings.model, "gpt-6-astra");
+  assert.equal(turn.params.collaborationMode.settings.developer_instructions, "keep");
+  await f.rpc("thread/read", {threadId, includeTurns: false});
+});
+
+for (const rejected of [false, true]) test(`model-neutral completion preserves only accepted explicit native choices (rejected=${rejected})`, async t => {
+  const f = await fixture(t);
+  const state = stateFor("diagnose", 1, null, "medium");
+  f.setState(state);
+  f.completeTool("statewright_load_workflow", {loaded: true, state_snapshot: state});
+  await until(() => f.injected.some(r => r.turnId === "turn-2"));
+  f.finish();
+  if (rejected) f.rejectModel("user-selected");
+  const response = await f.rpc("turn/start", {threadId, model: "user-selected", effort: "high"}, {allowError: true});
+  if (rejected) {
+    assert.match(response.error.message, /model rejected/);
+    await f.rpc("turn/start", {threadId});
+  } else assert.equal(response.error, undefined);
+  f.setState({...state, state: "complete", state_epoch: 2, is_final: true});
+  f.completeTool("statewright_transition", {transitioned: true, from: "diagnose", to: "complete"});
+  f.finish();
+  await until(() => f.confirmed.some(r => r.confirmed && r.route.restored_original));
+  const restored = f.confirmed.find(r => r.confirmed && r.route.restored_original);
+  assert.equal(restored.actualModel, rejected ? "gpt-6-sol" : "user-selected");
+  assert.equal(restored.actualEffort, "high");
 });
 
 test("consecutive phases with unchanged native settings still start distinct turns", async t => {

@@ -15,6 +15,9 @@ if (process.env.STATEWRIGHT_HANDOFF_CANARY !== "1") {
   process.exit(0);
 }
 const home = await mkdtemp(join(tmpdir(), "statewright-native-handoff-"));
+// Optional fifth turn covers a starter phase that deliberately inherits the
+// selected model, before the existing explicit model-routing/restoration test.
+const inheritedPhase = process.env.STATEWRIGHT_HANDOFF_CANARY_INHERIT === "1";
 const codexHome = join(home, ".codex");
 const clientId = "swc_0123456789abcdef0123456789abcdef";
 let runtime, socket, threadId, state = null, sequence = 0;
@@ -41,11 +44,13 @@ const mcp = createServer(async (req, res) => {
   else if (r.method === "tools/call") {
     let value;
     if (r.params.name === "statewright_load_workflow" && state === null) {
-      state = makeState("intake", 1, "openai-codex/gpt-5.6-terra", "low");
+      state = inheritedPhase ? makeState("diagnose", 0, null, "low")
+        : makeState("intake", 1, "openai-codex/gpt-5.6-terra", "low");
       value = {loaded: true, state_snapshot: state};
     } else if (r.params.name === "statewright_transition" && state && !state.is_final) {
       const from = state.state;
-      state = state.state === "intake" ? makeState("review", 2, "openai-codex/gpt-6-astra", "high")
+      state = state.state === "diagnose" ? makeState("intake", 1, "openai-codex/gpt-5.6-terra", "low")
+        : state.state === "intake" ? makeState("review", 2, "openai-codex/gpt-6-astra", "high")
         : makeState("complete", 3, null, null, true);
       value = {transitioned: true, from, to: state.state};
     } else value = state;
@@ -104,15 +109,15 @@ try {
   await waitFor(() => telemetry.find(r => r.event === "app_server_route_confirmed" && r.confirmed && r.route?.restored_original), "terminal restoration");
   assert.equal(state.state, "complete");
   const routed = telemetry.filter(r => r.event === "app_server_route_injected" && r.turnId);
-  assert.deepEqual(routed.map(r => r.effectiveModel), ["gpt-5.6-terra", "gpt-6-astra"]);
+  assert.deepEqual(routed.map(r => r.effectiveModel), [...(inheritedPhase ? ["gpt-6-sol"] : []), "gpt-5.6-terra", "gpt-6-astra"]);
   const baseline = await rpc("turn/start", {threadId, input: [{type: "text", text: "The workflow is complete. Reply exactly ROUTING_BASELINE_OK. No tools."}]});
   await waitFor(() => frames.find(f => f.method === "turn/completed" && f.params.turn?.id === baseline.turn.id), "baseline reply");
   const files = await readdir(join(codexHome, "sessions"), {recursive: true});
   const rollout = files.find(f => f.endsWith(`${threadId}.jsonl`)); assert.ok(rollout);
   const records = (await readFile(join(codexHome, "sessions", rollout), "utf8")).trim().split("\n").map(JSON.parse);
   const turns = records.filter(r => r.type === "turn_context").map(r => ({turnId: r.payload.turn_id, model: r.payload.model, effort: r.payload.effort}));
-  assert.deepEqual(turns.map(r => r.model), ["gpt-6-sol", "gpt-5.6-terra", "gpt-6-astra", "gpt-6-sol"]);
-  assert.deepEqual(turns.map(r => r.effort), ["high", "low", "high", "high"]);
+  assert.deepEqual(turns.map(r => r.model), ["gpt-6-sol", ...(inheritedPhase ? ["gpt-6-sol"] : []), "gpt-5.6-terra", "gpt-6-astra", "gpt-6-sol"]);
+  assert.deepEqual(turns.map(r => r.effort), ["high", ...(inheritedPhase ? ["low"] : []), "low", "high", "high"]);
   console.log(JSON.stringify({status: "NATIVE_WORKFLOW_HANDOFF_PASS", threadId, turns, fixture: true, liveGateway: false}));
 } catch (error) {
   console.error(JSON.stringify({status: "NATIVE_WORKFLOW_HANDOFF_NOT_PASSED", message: error.message, fixture: true}));

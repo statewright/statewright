@@ -152,9 +152,19 @@ function qualifiedRouteModel(model, provider) {
 
 function firstOwn(...candidates) {
   for (const [source, key] of candidates) {
-    if (source && Object.hasOwn(source, key)) return { available: true, value: source[key] ?? null };
+    if (source && Object.hasOwn(source, key) && source[key] !== undefined) return { available: true, value: source[key] ?? null };
   }
   return { available: false, value: undefined };
+}
+
+function workflowStateRoute(threadId, state) {
+  const tier = firstOwn([state.env_overrides, "STATEWRIGHT_CODEX_SERVICE_TIER"], [state, "service_tier"]);
+  return {session_id: threadId, run_id: state.run_id,
+    ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
+    state: state.state, state_epoch: state.state_epoch, workflow: state.workflow,
+    model: state.model, effort: state.thinking_level,
+    ...(tier.available ? {service_tier: tier.value} : {}),
+    ...(Array.isArray(state.model_ladder) ? {model_ladder: state.model_ladder} : {})};
 }
 
 export function nativeThreadRouteSettings(result) {
@@ -206,7 +216,7 @@ function sameRouteValue(actual, expected) {
   return String(actual ?? "").trim() === String(expected ?? "").trim();
 }
 
-export function applyRouteToTurnStart(message, route, environment = process.env) {
+export function applyRouteToTurnStart(message, route, environment = process.env, nativeSelection = {}) {
   if (message?.method !== "turn/start" || !route) return { message, receipt: null };
   const threadId = String(message.params?.threadId ?? "");
   const routeSessionId = String(route.session_id ?? "");
@@ -215,12 +225,30 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
   // persistent Codex connection must honor that selected provider instead of
   // replacing it with an OpenAI same-provider fallback.
   const selectedRoute = route;
-  const identity = routeIdentity(selectedRoute.model, environment);
+  // A missing workflow model means keep the owning native selection, not
+  // choose a default model or provider. The declaration stays unchanged in
+  // receipts/checkpoint comparisons; only execution uses the resolved pair.
+  const inheritedModel = selectedRoute.model == null;
+  let identity;
+  try {
+    if (inheritedModel) {
+      const selected = captureWorkflowOrigin(message, nativeSelection);
+      if (!selected?.model || !selected.provider) {
+        throw new Error("The current chat's model is unavailable. Select a model in this chat and retry; the workflow has not advanced.");
+      }
+      identity = {model: routeModel(selected.model), provider: selected.provider, config: {}};
+    } else identity = routeIdentity(selectedRoute.model, environment);
+  } catch (error) {
+    error.code = "STATEWRIGHT_ROUTE_SELECTION";
+    throw error;
+  }
   const params = { ...(message.params ?? {}), model: identity.model };
-  const effortSpecified = Object.hasOwn(selectedRoute, "effort");
+  const effortSpecified = Object.hasOwn(selectedRoute, "effort") && selectedRoute.effort !== undefined
+    && (!inheritedModel || selectedRoute.effort !== null);
   if (effortSpecified) params.effort = selectedRoute.effort ?? null;
-  const selectedServiceTier = selectedRoute.service_tier ?? selectedRoute.serviceTier;
-  if (selectedServiceTier) params.serviceTier = selectedServiceTier;
+  const serviceTier = firstOwn([selectedRoute, "service_tier"], [selectedRoute, "serviceTier"]);
+  const selectedServiceTier = serviceTier.value;
+  if (serviceTier.available) params.serviceTier = selectedServiceTier;
   // Desktop's collaborationMode.settings takes precedence over the top-level
   // turn fields. Keep its unrelated mode/instructions intact, but make the
   // model selection atomic across both representations.
@@ -243,12 +271,14 @@ export function applyRouteToTurnStart(message, route, environment = process.env)
     receipt: {
       route: selectedRoute,
       threadId,
-      requestedModel: String(selectedRoute.model),
+      requestedModel: inheritedModel ? null : String(selectedRoute.model),
+      ...(inheritedModel ? {modelSource: "native_selection"} : {}),
       effectiveProvider: identity.provider,
       effectiveModel: identity.model,
       effectiveEffort: selectedRoute.effort ?? null,
       effortSpecified,
       effectiveServiceTier: selectedServiceTier ?? null,
+      serviceTierSpecified: serviceTier.available,
       collaborationModeApplied,
       providerConfig: identity.config,
     },
@@ -286,7 +316,7 @@ function nativeSettingsReceipt(receipt, settings = {}) {
       && (!receipt.effectiveProvider || sameRouteValue(actualProvider, receipt.effectiveProvider))
       && (!receipt.effortSpecified || actualEffort.available
         && sameRouteValue(actualEffort.value, receipt.effectiveEffort))
-      && (!receipt.effectiveServiceTier || actualServiceTier.available
+      && (!(receipt.serviceTierSpecified ?? Boolean(receipt.effectiveServiceTier)) || actualServiceTier.available
         && sameRouteValue(actualServiceTier.value, receipt.effectiveServiceTier))
       && (!receipt.collaborationModeApplied || (
         actualCollaborationModel.available
@@ -613,10 +643,7 @@ export async function startCodexAppServerRouteProxy({
       try {
         await checkOwner();
         const route = reservation?.route ?? reservation;
-        if (!route) return { route: { session_id: threadId, run_id: state.run_id,
-          ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
-          state: state.state, state_epoch: state.state_epoch, workflow: state.workflow,
-          model: state.model, effort: state.thinking_level } };
+        if (!route) return {route: workflowStateRoute(threadId, state)};
         // A route queued before the human decision cannot override the approved
         // destination. Retire only this exact run's known origin; all other
         // mismatches still fail closed in the caller's identity check.
@@ -648,13 +675,7 @@ export async function startCodexAppServerRouteProxy({
       const reservation = await takePendingRoute(threadId);
       if (!reservation) {
         if (!authoritative || authoritative.is_final === true) return null;
-        return { route: { session_id: threadId, run_id: authoritative.run_id,
-          ...(authoritative.run_session_id ? {run_session_id: authoritative.run_session_id} : {}),
-          state: authoritative.state, state_epoch: authoritative.state_epoch, workflow: authoritative.workflow,
-          model: authoritative.model, effort: authoritative.thinking_level,
-          ...(authoritative.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER
-            ? {service_tier: authoritative.env_overrides.STATEWRIGHT_CODEX_SERVICE_TIER} : {}),
-          ...(Array.isArray(authoritative.model_ladder) ? { model_ladder: authoritative.model_ladder } : {}) } };
+        return {route: workflowStateRoute(threadId, authoritative)};
       }
       try {
         await checkOwner();
@@ -922,6 +943,12 @@ export async function startCodexAppServerRouteProxy({
         await confirmation;
         throw error;
       }
+    };
+    const nativeSelectionFor = threadId => {
+      const settings = activeSettings.get(threadId) ?? {};
+      return {provider: activeProviders.get(threadId), model: activeModels.get(threadId),
+        ...(Object.hasOwn(settings, "effort") ? {effort: settings.effort} : {}),
+        ...(Object.hasOwn(settings, "serviceTier") ? {service_tier: settings.serviceTier} : {})};
     };
     const waitForRequiredMcpTool = async (threadId, checkCurrentRequest) => {
       if (!requiredMcpToolSuffix || requiredMcpReadyTimeoutMs <= 0 || mcpReadyThreads.has(threadId)) return;
@@ -1240,11 +1267,8 @@ export async function startCodexAppServerRouteProxy({
         interrupted = true;
         await waitForApprovalIdle(threadId, check);
         if (state.pending_approval) throw new Error("Workflow approval is pending; no model continuation was started");
-        if (!state.model) throw new Error("Workflow destination has no selected model");
         await checkState();
-        const route = {session_id: threadId, run_id: state.run_id, run_session_id: state.run_session_id,
-          state: state.state, state_epoch: state.state_epoch, model: state.model, effort: state.thinking_level,
-          service_tier: state.env_overrides?.STATEWRIGHT_CODEX_SERVICE_TIER ?? state.service_tier};
+        const route = workflowStateRoute(threadId, state);
         const binding = await boundRoute(route, threadId);
         const settings = activeSettings.get(threadId) ?? {};
         const capture = await workflowOriginStore.capture(binding, captureWorkflowOrigin({method: "turn/start", params: {threadId}}, {
@@ -1256,7 +1280,7 @@ export async function startCodexAppServerRouteProxy({
         const applied = applyRouteToTurnStart({method: "turn/start", params: {threadId,
           input: [{type: "text", text: `Statewright entered '${state.state}'. Call the local statewright_get_state tool first, then follow the current phase's tools and transitions.`}],
           ...(settings.collaborationMode ? {collaborationMode: settings.collaborationMode} : {}),
-        }}, route);
+        }}, route, process.env, nativeSelectionFor(threadId));
         applied.receipt.origin_binding = binding;
         await switchProvider(threadId, applied.receipt);
         await checkState();
@@ -1321,10 +1345,10 @@ export async function startCodexAppServerRouteProxy({
           reservation = await takeApprovedRoute(threadId, state, fromState, checkOwner);
           const route = reservation.route;
           if (route.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
-              || !route.model || route.model !== state.model
+              || route.model !== state.model
               || route.effort !== state.thinking_level) throw new Error("Approval continuation lacks the authoritative destination route");
           const params = { threadId, input: [{ type: "text", text: `Statewright entered '${state.state}'. Call statewright_get_state first and continue the current phase.` }] };
-          const applied = applyRouteToTurnStart({ method: "turn/start", params }, route);
+          const applied = applyRouteToTurnStart({ method: "turn/start", params }, route, process.env, nativeSelectionFor(threadId));
           await switchProvider(threadId, applied.receipt);
           await checkOwner();
           receipts.set(threadId, applied.receipt);
@@ -1333,8 +1357,8 @@ export async function startCodexAppServerRouteProxy({
             const current = (await internalRpc("thread/goal/get", { threadId })).goal;
             await checkOwner();
             if (current?.status !== "paused" || current.objective !== goal.objective || current.createdAt !== goal.createdAt) throw new Error("Native goal changed during approval");
-            await internalRpc("thread/settings/update", { threadId, model: applied.message.params.model,
-              effort: applied.message.params.effort });
+            const {input, ...settingsUpdate} = applied.message.params;
+            await internalRpc("thread/settings/update", settingsUpdate);
             await checkOwner();
             const resumed = (await internalRpc("thread/goal/set", { threadId, status: "active" })).goal;
             forwarded = true;
@@ -1510,11 +1534,9 @@ export async function startCodexAppServerRouteProxy({
           releasePendingRoute = pendingRoute?.release ?? null;
           await checkReleaseOwner();
           const state = approvedRelease?.state;
-          let route = pendingRoute?.route ?? pendingRoute ?? (state && { session_id: threadId,
-            run_id: state.run_id, ...(state.run_session_id ? {run_session_id: state.run_session_id} : {}),
-            state: state.state, model: state.model, effort: state.thinking_level });
+          let route = pendingRoute?.route ?? pendingRoute ?? (state && workflowStateRoute(threadId, state));
           if (state && (route?.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
-              || !route.model || route.model !== state.model || route.effort !== state.thinking_level)) {
+              || route.model !== state.model || route.effort !== state.thinking_level)) {
             const error = new Error("Approval release lacks the authoritative destination route");
             error.code = "STATEWRIGHT_APPROVAL_ROUTE";
             throw error;
@@ -1548,7 +1570,7 @@ export async function startCodexAppServerRouteProxy({
               // foreign origin record for its real owner.
               route = null;
             }
-          } else if (route?.run_id && route?.model) {
+          } else if (route?.run_id) {
             originBinding = await boundRoute(route, threadId);
             const active = activeSettings.get(threadId);
             capturedOrigin = captureWorkflowOrigin(
@@ -1564,9 +1586,21 @@ export async function startCodexAppServerRouteProxy({
               throw error;
             }
             capturedOrigin = capture.record?.origin ?? capturedOrigin;
+            // A user can choose a model on turn/start without a separate
+            // settings RPC. An inheriting workflow must not later restore
+            // over that explicit choice as if Statewright had selected it.
+            if (route.model == null && capture.status === "existing"
+                && (message.params?.model != null || message.params?.collaborationMode?.settings?.model != null)) {
+              const selected = captureWorkflowOrigin(message, nativeSelectionFor(threadId));
+              if (selected?.model && selected.model !== (capture.record.routed?.model ?? capture.record.origin.model)) {
+                if (provisionalTurn) provisionalTurn.manualSelection = {
+                  binding: originBinding, model: selected.model,
+                };
+              }
+            }
           }
           const applied = applyRouteToTurnStart(message.method === "turn/start" ? message
-            : { method: "turn/start", params: { threadId } }, route, process.env);
+            : { method: "turn/start", params: { threadId } }, route, process.env, nativeSelectionFor(threadId));
           if (applied.receipt) {
             applied.receipt.origin_binding = originBinding;
             if (restoration) applied.receipt.restoration = restoration;
@@ -1585,8 +1619,8 @@ export async function startCodexAppServerRouteProxy({
             await switchProvider(threadId, applied.receipt);
             await checkReleaseOwner();
             if (startsGoalExecution) {
-              await internalRpc("thread/settings/update", { threadId, model: applied.message.params.model,
-                effort: applied.message.params.effort });
+              const {input, ...settingsUpdate} = applied.message.params;
+              await internalRpc("thread/settings/update", settingsUpdate);
               await checkReleaseOwner();
             }
           } else if (restoration) {
@@ -1658,6 +1692,7 @@ export async function startCodexAppServerRouteProxy({
         if ((providerRouteAttempted || approvedRelease || error.code === "STATEWRIGHT_SUPERSEDED"
             || error.code === "STATEWRIGHT_THREAD_OWNERSHIP" || error.code === "STATEWRIGHT_MCP_NOT_READY"
             || error.code === "STATEWRIGHT_ROUTE_ORIGIN_OWNER"
+            || error.code === "STATEWRIGHT_ROUTE_SELECTION"
             || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_INVALID"
             || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_UNREPRESENTABLE")
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
@@ -1701,7 +1736,7 @@ export async function startCodexAppServerRouteProxy({
             Promise.resolve().then(() => peekPendingRoute(terminal.threadId, terminal.turn.id)),
             new Promise(resolveLookup => { lookupTimer = setTimeout(() => resolveLookup(null), 250); }),
           ]).catch(() => null).finally(() => clearTimeout(lookupTimer));
-          if (route?.session_id === terminal.threadId && route.turn_id === terminal.turn.id && route.run_id && route.state
+          if (route?.model && route.session_id === terminal.threadId && route.turn_id === terminal.turn.id && route.run_id && route.state
               && operatorActivity.get(terminal.threadId) === epoch) {
             const destination = routeIdentity(route.model);
             const origin = turnOrigins.get(terminal.threadId);
@@ -1824,6 +1859,13 @@ export async function startCodexAppServerRouteProxy({
             removeActivity(pendingTurn.threadId, pendingTurn.reason);
             await sendPresentation(presentation.cancel(pendingTurn.threadId, responseId));
           } else {
+            if (notification.result?.turn?.id && pendingTurn.manualSelection
+                && operatorActivity.get(pendingTurn.threadId) === pendingTurn.activityEpoch
+                && sameWorkflowRouteBinding(pendingTurn.manualSelection.binding,
+                  await workflowOriginStore.binding(pendingTurn.threadId))) {
+              await workflowOriginStore.relinquish(pendingTurn.threadId, ["model"],
+                {model: pendingTurn.manualSelection.model});
+            }
             if (notification.result?.turn?.id) turnOrigins.set(pendingTurn.threadId, {
               turnId: notification.result.turn.id, binding: pendingTurn.binding,
               activityEpoch: pendingTurn.activityEpoch,

@@ -86,7 +86,7 @@ jobs:
 
   package:
     needs: [credential-helper, native-desktop-launcher]
-    if: always() && needs.credential-helper.result == 'success' && (startsWith(github.ref_name, 'claude-v') || needs.native-desktop-launcher.result == 'success')
+    if: ${{ !cancelled() && needs.credential-helper.result == 'success' && (startsWith(github.ref_name, 'claude-v') || needs.native-desktop-launcher.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -160,6 +160,8 @@ jobs:
       - name: Install plugin dependencies
         if: steps.plugin.outputs.directory == 'plugins/codex'
         run: npm ci --ignore-scripts --prefix plugins/codex
+      - name: Install shared executor test dependencies
+        run: npm ci --ignore-scripts --prefix plugins/executor
       - name: Download native credential helpers
         uses: actions/download-artifact@v4
         with:
@@ -220,6 +222,7 @@ jobs:
 
   artifact-smoke:
     needs: package
+    if: ${{ !cancelled() && needs.package.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -287,6 +290,7 @@ jobs:
 
   publish:
     needs: [package, artifact-smoke]
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs['artifact-smoke'].result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

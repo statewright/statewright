@@ -69,6 +69,25 @@ function successfulRuns(event = "push") {
   };
 }
 
+test("release tests install shared executor dependencies before exercising Desktop fixtures", async () => {
+  const workflow = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
+  const packageJob = workflow.split("\n  package:\n")[1].split("\n  artifact-smoke:\n")[0];
+  const install = packageJob.indexOf("npm ci --ignore-scripts --prefix plugins/executor");
+  assert.ok(install >= 0, "Desktop fixture imports resolve shared executor dependencies");
+  assert.ok(install < packageJob.indexOf("name: Run plugin contract tests"));
+});
+
+test("Claude's skipped Desktop build cannot skip downstream smoke or weaken publish gates", async () => {
+  const workflow = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
+  const packageJob = workflow.split("\n  package:\n")[1].split("\n  artifact-smoke:\n")[0];
+  const smoke = workflow.split("\n  artifact-smoke:\n")[1].split("\n  publish:\n")[0];
+  const publish = workflow.split("\n  publish:\n")[1];
+  assert.match(packageJob, /^\s+needs: \[credential-helper, native-desktop-launcher\]\n\s+if: \$\{\{ !cancelled\(\) && needs\.credential-helper\.result == 'success' && \(startsWith\(github\.ref_name, 'claude-v'\) \|\| needs\.native-desktop-launcher\.result == 'success'\) \}\}\n/);
+  assert.match(smoke, /^\s+needs: package\n\s+if: \$\{\{ !cancelled\(\) && needs\.package\.result == 'success' \}\}\n/);
+  assert.match(publish, /^\s+needs: \[package, artifact-smoke\]\n\s+if: \$\{\{ !cancelled\(\) && needs\.package\.result == 'success' && needs\['artifact-smoke'\]\.result == 'success' \}\}\n/);
+  assert.doesNotMatch(packageJob + smoke + publish, /continue-on-error|^    if: .*always\(\)/m);
+});
+
 test("plugin release workflow resolves distinct names and curated notes", async () => {
   const workflow = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
   const unixCanary = await readFile(

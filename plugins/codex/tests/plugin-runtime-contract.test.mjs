@@ -3,12 +3,49 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { managedClientVersion } from "../scripts/statewright-managed-client.mjs";
 
 const codexRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 async function readJson(path) {
   return JSON.parse(await readFile(resolve(codexRoot, path), "utf8"));
 }
+
+test("release metadata and npm lock agree on the Codex maintenance version", async () => {
+  const manifest = await readJson(".codex-plugin/plugin.json");
+  const version = manifest.version.split("+")[0];
+  assert.match(version, /^\d+\.\d+\.\d+$/);
+  assert.equal((await readJson("package.json")).version, version);
+  const lock = await readJson("package-lock.json");
+  assert.equal(lock.version, version);
+  assert.equal(lock.packages[""].version, version);
+  await readFile(resolve(codexRoot, `../../docs/releases/codex-${version}.md`));
+});
+
+test("managed diagnostic versions follow the host without interpreting child arguments", async () => {
+  const codex = (await readJson(".codex-plugin/plugin.json")).version.split("+")[0];
+  const claude = (await readJson("../claude-code/.claude-plugin/plugin.json")).version;
+  assert.equal(managedClientVersion([]), codex);
+  assert.equal(managedClientVersion(["--host", "codex"]), codex);
+  assert.equal(managedClientVersion(["--host", "claude"]), claude);
+  assert.equal(managedClientVersion(["--host", "codex", "--", "--host", "claude"]), codex);
+  assert.equal(managedClientVersion(["--host", "claude", "--", "--host", "codex"]), claude);
+  assert.equal(managedClientVersion(["--", "--host", "claude"]), codex);
+  const supervisor = await readFile(resolve(codexRoot, "scripts/lib/desktop-runtime/managed-client-supervisor.mjs"), "utf8");
+  assert.ok(supervisor.includes(`version: host === "claude" ? "${claude}" : "${codex}"`));
+});
+
+test("Codex connection telemetry and native reporters use the release version", async () => {
+  const version = (await readJson(".codex-plugin/plugin.json")).version.split("+")[0];
+  const entry = await readFile(resolve(codexRoot, "scripts/statewright-codex.mjs"), "utf8");
+  assert.equal(entry.match(/const PLUGIN_VERSION = "([^"]+)"/)[1], version);
+  for (const path of ["scripts/statewright-desktop-setup.mjs", "scripts/lib/desktop-runtime/codex-app-server-resident.mjs", "scripts/lib/desktop-runtime/codex-app-server-transport.mjs"]) {
+    const source = await readFile(resolve(codexRoot, path), "utf8");
+    const reporters = [...source.matchAll(/plugin: "codex", version: "([^"]+)"/g)];
+    assert.ok(reporters.length > 0, path);
+    for (const match of reporters) assert.equal(match[1], version, path);
+  }
+});
 
 test("plugin hooks resolve commands from the Codex-provided plugin root", async () => {
   const manifest = await readJson(".codex-plugin/plugin.json");

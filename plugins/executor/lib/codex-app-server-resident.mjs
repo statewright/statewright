@@ -245,7 +245,7 @@ async function main() {
   const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
   const threadListCwd = values["thread-list-cwd"] || null;
   const terminalLabel = values["terminal-label"] || null;
-  const reporter = createErrorReporter({ plugin: "codex", version: "0.3.4" });
+  const reporter = createErrorReporter({ plugin: "codex", version: "0.3.5" });
   reporter.installProcessHandlers();
   if (!clientId || !command || !cwd) throw new Error("resident requires client-id, command, and cwd");
   const root = process.env.STATEWRIGHT_CODEX_RESIDENT_ROOT ?? residentRoot(home, clientId);
@@ -324,7 +324,7 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === RESIDENT_ENTRYPOINT) {
   main().catch(async (error) => {
-    const reporter = createErrorReporter({ plugin: "codex", version: "0.3.4" });
+    const reporter = createErrorReporter({ plugin: "codex", version: "0.3.5" });
     if (!isExpectedPluginError(error)) await reporter.report(error, { mechanism: "entrypoint", operation: "resident_app_server" });
     process.stderr.write(`[statewright] resident App Server failed: ${error.message}\n`);
     process.exitCode = 2;

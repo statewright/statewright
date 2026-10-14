@@ -3,7 +3,18 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Codex and Claude Plugins 0.3.4] — Unreleased
+## [Codex Plugin 0.3.5] — Unreleased
+
+### Fixed
+- **[codex]** Bind managed TUI routing ownership after a successful native
+  resume or fork, so loading history does not leave the first send disconnected.
+- **[codex]** Preserve the previous owner and pending classifier approval when
+  attachment fails or is cancelled; bind a successful fork to its child thread.
+- **[codex]** Return recoverable thread-attachment errors with consented,
+  privacy-bounded diagnostics instead of closing the transport. Messages are
+  never automatically resent.
+
+## [Codex and Claude Plugins 0.3.4] — 2026-10-14
 
 ### Added
 - **[claude]** Native TUI and Desktop Code → Local integration: Arbiter

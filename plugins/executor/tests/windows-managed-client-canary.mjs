@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { spawn } from "node:child_process";
@@ -278,7 +278,15 @@ try {
   const uninstall = await runNode([fileURLToPath(launcher), "--uninstall"], environment, "uninstall managed shims");
   assert.equal(uninstall.code, 0, uninstall.stderr);
   const removed = JSON.parse(uninstall.stdout);
-  assert.equal(removed.removed.length, 2, "uninstall must remove both managed Windows shims");
+  const expectedRemoved = ["codex.cmd", "claude.cmd", "statewright-git-closeout.cmd"]
+    .map((name) => join(home, ".statewright", "bin", name));
+  assert.deepEqual(
+    [...removed.removed].sort(), expectedRemoved.sort(),
+    "uninstall must remove both managed Windows shims and the Git closeout helper",
+  );
+  for (const path of expectedRemoved) {
+    await assert.rejects(access(path), { code: "ENOENT" }, `uninstall left ${path} on disk`);
+  }
   for (const host of ["codex", "claude"]) {
     const source = await shellVersion(host, environment);
     assert.doesNotMatch(

@@ -12,6 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install Linux Secret Service headers
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: Check
         run: cargo check --workspace
       - name: Test

@@ -199,6 +199,18 @@ test("hosted plugin contracts expose installed Task to nested adapter tests", as
   assert.match(workflow, /task test:plugin-release/);
 });
 
+test("workspace CI and release builds install the Linux credential helper prerequisites", async () => {
+  for (const [file, buildStep] of [
+    ["ci.yml", "cargo check --workspace"],
+    ["plugin-release.yml", "cargo test --target"],
+  ]) {
+    const workflow = await readFile(resolve(root, ".github/workflows", file), "utf8");
+    const install = "sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config";
+    assert.ok(workflow.includes(install), `${file} must install Secret Service build headers`);
+    assert.ok(workflow.indexOf(install) < workflow.indexOf(buildStep), `${file} must install headers before compiling`);
+  }
+});
+
 test("release gate accepts successful exact-commit hosted canaries", async () => {
   const messages = [];
   const evidence = await requirePluginCanaries({

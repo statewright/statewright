@@ -1432,7 +1432,7 @@ export async function startCodexAppServerRouteProxy({
             if (message.id === undefined || threadAuthorization?.version !== 1
                 || threadAuthorization?.kind !== "statewright_thread_adoption"
                 || threadAuthorization.method !== message.method
-                || threadAuthorization.threadId !== message.params?.threadId
+                || threadAuthorization.threadId !== (message.params?.threadId ?? null)
                 || typeof threadAuthorization.commit !== "function"
                 || typeof threadAuthorization.cancel !== "function") {
               await threadAuthorization?.cancel?.();
@@ -1685,7 +1685,8 @@ export async function startCodexAppServerRouteProxy({
           removeActivity(provisionalTurn.threadId, provisionalTurn.reason);
           if (provisionalTurn.requestKey !== null) pendingTurnStarts.delete(provisionalTurn.requestKey);
         }
-        void onProtocolError({ side: "native_to_upstream", message: error instanceof Error ? error.message : String(error) });
+        void Promise.resolve(onProtocolError({ side: "native_to_upstream", code: error.code,
+          message: error instanceof Error ? error.message : String(error) })).catch(() => {});
         // A rejected route is a turn-level failure, not a corrupted transport.
         // Closing the WebSocket here makes native Codex lose its session and
         // defeats retry/recovery after a provider configuration mistake.
@@ -1796,7 +1797,6 @@ export async function startCodexAppServerRouteProxy({
           );
         }
         const threadAuthorization = responseKey === null ? null : pendingThreadAuthorizations.get(responseKey);
-        if (threadAuthorization) pendingThreadAuthorizations.delete(responseKey);
         const approvalRelease = responseKey === null ? null : pendingApprovalReleases.get(responseKey);
         if (approvalRelease) {
           pendingApprovalReleases.delete(responseKey);
@@ -1806,7 +1806,7 @@ export async function startCodexAppServerRouteProxy({
             await approvalService.clear(approvalRelease.threadId, approvalRelease.approvalId);
           }
         }
-        if (responseTo === "thread/start" && notification?.result?.thread?.id) {
+        if (responseTo === "thread/start" && notification?.result?.thread?.id && !notification.error && !threadAuthorization) {
           try {
             // Native thread creation is the authoritative first point at which
             // an opaque managed client ID can be bound to a durable thread.
@@ -1820,25 +1820,34 @@ export async function startCodexAppServerRouteProxy({
           }
         }
         if (threadAuthorization) {
-          const resumedThreadId = String(notification?.result?.thread?.id ?? "");
+          const attached = notification?.result?.thread;
+          const resumedThreadId = attached?.id;
           try {
             if (responseTo !== threadAuthorization.method) {
               throw new Error("native response method did not match the prepared thread adoption");
             }
-            if (notification.error || resumedThreadId !== threadAuthorization.threadId) {
+            const validId = typeof resumedThreadId === "string" && resumedThreadId.trim() === resumedThreadId && resumedThreadId.length > 0;
+            const validTarget = responseTo === "thread/start" ? validId
+              : responseTo === "thread/fork" ? validId && resumedThreadId !== threadAuthorization.threadId
+                && (!attached.forkedFromId || attached.forkedFromId === threadAuthorization.threadId)
+              : validId && resumedThreadId === threadAuthorization.threadId;
+            if (notification.error || !validTarget || downstream.readyState !== WebSocket.OPEN) {
               await threadAuthorization.cancel();
-              if (!notification.error) throw new Error("native resume returned a different thread");
+              if (!notification.error) throw new Error("native attachment returned a different thread or invalid identity, or the client disconnected");
             } else {
-              await threadAuthorization.commit();
+              await threadAuthorization.commit({threadId: resumedThreadId});
+              bindClassifierThread(resumedThreadId);
             }
           } catch (error) {
             await threadAuthorization.cancel().catch(() => {});
             notification = { jsonrpc: "2.0", id: notification.id, error: { code: -32603,
-              message: `Statewright could not adopt the resumed Codex thread: ${error.message}` } };
+              message: `Statewright could not adopt the Codex thread: ${error.message}` } };
             payload = JSON.stringify(notification);
-          }
+            void Promise.resolve(onProtocolError({side: "upstream_to_native", code: "STATEWRIGHT_THREAD_OWNERSHIP",
+              message: error.message})).catch(() => {});
+          } finally { pendingThreadAuthorizations.delete(responseKey); }
         }
-        if ((responseTo === "thread/start" || responseTo === "thread/resume") && notification?.result?.thread?.id) {
+        if (["thread/start", "thread/resume", "thread/fork"].includes(responseTo) && notification?.result?.thread?.id && !notification.error) {
           attachedThreadId = notification.result.thread.id;
           const settings = nativeThreadRouteSettings(notification.result);
           const provider = settings.modelProvider;

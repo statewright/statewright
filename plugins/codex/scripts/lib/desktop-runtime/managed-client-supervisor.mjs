@@ -767,7 +767,8 @@ export async function runManagedClient({ host, command, args, environment = proc
           terminalLabel,
         });
         const residentRoutes = residentControlDir(home, routedClientId);
-        await resetCodexRootSession(residentRoutes, { sessionId: codexRootSessionId, clientId: routedClientId });
+        // The resident binds only after a successful native start/resume/fork.
+        // Pre-seeding here can clobber a running thread even if resume fails.
         const { prepareCodexResidentTui } = await import("./codex-resume-relay.mjs");
         const residentTui = await prepareCodexResidentTui({ proxyUrl: resident.proxyUrl, args, yoloOverride });
         const tuiEnvironment = {

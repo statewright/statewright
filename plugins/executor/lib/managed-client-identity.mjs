@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { renameSync } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -216,6 +217,41 @@ export async function claimCodexRootSession(controlDir, { sessionId, clientId })
   });
 }
 
+// Native-confirmed TUI attachment, not a Desktop cross-project transfer.
+// The caller captures expectedRoot before issuing the native RPC. Hooks or a
+// competing attachment must not be overwritten while that RPC is in flight.
+export async function commitCodexRootAttachment(controlDir, { sessionId, clientId,
+  expectedRoot, assertPending = () => {}, beforeCommit = async () => {} }) {
+  const reject = () => { throw Object.assign(new Error("Statewright thread ownership changed during attachment. Resume the conversation again."), {code: "STATEWRIGHT_THREAD_OWNERSHIP"}); };
+  if (typeof sessionId !== "string" || !sessionId.trim() || !validId(clientId)) reject();
+  return withCodexRootMutationLock(controlDir, async () => {
+    assertPending();
+    const path = join(controlDir, CODEX_ROOT_SESSION_FILE);
+    const existing = await readCodexRootSession(controlDir);
+    const present = await readFile(path).then(() => true, error => {
+      if (error.code === "ENOENT") return false;
+      throw error;
+    });
+    if (present && !existing || existing?.clientId && existing.clientId !== clientId
+        || (existing?.sessionId ?? null) !== (expectedRoot?.sessionId ?? null)
+        || (existing?.clientId ?? null) !== (expectedRoot?.clientId ?? null)) reject();
+    await beforeCommit();
+    assertPending();
+    const registration = {version: 1, session_id: sessionId, client_id: clientId};
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(registration)}\n`, {mode: 0o600, flag: "wx"});
+      assertPending();
+      // Linearization point: cancellation cannot run between the final check
+      // and replacement. An awaited rename would reopen that race window.
+      renameSync(temporary, path);
+      return registration;
+    } finally {
+      await unlink(temporary).catch(error => { if (error.code !== "ENOENT") throw error; });
+    }
+  });
+}
+
 export function codexRouteOwnsRoot(request, registration) {
   if (!registration) return false;
   const requestSessionId = String(request?.session_id ?? "").trim();
@@ -382,13 +418,16 @@ export async function resolveManagedClientIdentity({ host, args, home = homedir(
   });
 }
 
-export async function bindManagedClientIdentity({ host, sessionId, clientId, home = homedir(), cwd = process.cwd() }) {
+export async function bindManagedClientIdentity({ host, sessionId, clientId, home = homedir(), cwd = process.cwd(), preserveExisting = false }) {
   if (!sessionId || !validId(clientId)) return false;
   return withStoreLock(home, async () => {
     const store = await loadStore(home);
     const key = bindingKey(host, sessionId, cwd);
     if (store.bindings[key] === clientId) return true;
     if (store.bindings[key] && store.bindings[key] !== clientId) {
+      // A native picker can attach a historical thread through a new resident.
+      // Keep its original durable client mapping and approval continuity.
+      if (preserveExisting) return false;
       throw new Error(`Statewright managed identity conflict for ${host} session '${sessionId}'.`);
     }
     store.bindings[key] = clientId;

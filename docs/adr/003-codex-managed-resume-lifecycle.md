@@ -98,6 +98,39 @@ inspect or rewrite prompt text, titles, rollout contents, or session metadata.
   [Codex CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
   and [Codex App Server reference](https://learn.chatgpt.com/docs/app-server).
 
+## Native attachment binding (October 2026)
+
+The TUI resident uses the same acknowledged attachment boundary for
+`thread/start`, `thread/resume`, and `thread/fork`. History loading alone is not
+sufficient: the returned native thread must own the resident's routing record
+before its first `turn/start`. A fork binds the returned child ID, not its
+source. This managed routing root is not Codex's historical `thread.sessionId`.
+
+Attachment is serialized per resident and captures the previous root before
+forwarding. A matching successful native response commits a compare-and-swap
+under the existing root mutation lock. Resume must return the requested ID;
+fork must return a distinct child. Failed or malformed replies, concurrent root
+changes, and cancellation before commit do not replace the record. The final
+cancellation check and atomic rename are synchronous so disconnect cannot
+interleave between them. The supervisor no longer pre-seeds the resident root.
+
+Historical durable client mappings are preserved. Native picker attachment is
+not authority to migrate another client's saved workflows or approvals. Native
+writer refusal and existing explicit-resume leases remain intact; this change
+does not introduce a stronger cross-process writer lease. Desktop keeps its
+existing same-project adoption policy.
+
+Classifier ownership changes only after successful attachment. Missing routing
+ownership returns an actionable JSON-RPC error without closing the transport.
+Consented diagnostics use the fixed `session_unbound` category, never a thread
+ID, prompt, path, or command. Messages are never automatically resent.
+
+Regression coverage includes first-send after start/resume/fork, restart/resume,
+native refusal, response mismatch, cancellation and root races, historical
+mapping preservation, and pending classifier approval preservation. The optional
+native canary uses a deliberately rejecting loopback provider: it proves native
+turn acceptance, not model inference, live gateway behavior, or visual TUI UX.
+
 ## Rollback
 
 Revert the supervisor signal forwarding and App Server proxy lifecycle changes,

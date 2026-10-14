@@ -196,6 +196,12 @@ restart transport resumes the same session with the state's `--model` and
 `model_reasoning_effort`, owning only that terminal's child process group.
 Other terminals are never signalled.
 
+Starting, resuming, or forking a conversation binds routing only after Codex
+confirms the selected thread. A failed resume leaves the previous binding
+unchanged. If attachment fails, Statewright reports it without dropping the
+connection; resume the conversation again before sending. It never resends an
+uncertain message automatically.
+
 Neither transport changes a model halfway through a response. A session started
 before the plugin bootstrap runs continues to receive tool enforcement but
 cannot change its current model automatically. Disable with

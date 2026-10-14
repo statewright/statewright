@@ -361,8 +361,15 @@ export async function startCodexAppServerRuntime({
           mechanism: "transport", host: "codex", operation: "app_server_proxy", transport: "websocket", side, close_code: code,
         });
       },
-      onProtocolError: async ({ side, message }) => {
-        if (!closing) await reporter.report(new Error(message), {
+      onProtocolError: async ({ side, message, code }) => {
+        // Fixed local text and closed-vocabulary telemetry: never log a native
+        // payload or carry a thread ID, command, or credential to diagnostics.
+        if (code === "STATEWRIGHT_THREAD_OWNERSHIP") {
+          stderr.write("[statewright] Thread attachment needs attention; resume the conversation again before sending.\n");
+          if (!closing) await reporter.reportFailure?.("session_unbound", {
+            host: "codex", operation: "app_server_proxy", transport: "websocket", mechanism: "protocol",
+          });
+        } else if (!closing) await reporter.report(new Error(message), {
           mechanism: "protocol", host: "codex", operation: "app_server_proxy", transport: "websocket", side,
         });
       },

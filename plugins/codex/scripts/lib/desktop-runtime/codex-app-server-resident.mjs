@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
-import { bindManagedClientIdentity, bindManagedSessionLabel, claimCodexRootSession, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
+import { residentThreadAuthorizer } from "./codex-resident-thread-owner.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { resolveApiKey } from "./remote-client.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
@@ -34,6 +35,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "model-ladder.mjs"),
   join(EXECUTOR_ROOT, "error-reporting.mjs"),
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
+  join(EXECUTOR_ROOT, "codex-resident-thread-owner.mjs"),
   join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
   join(EXECUTOR_ROOT, "workflow-route-origin.mjs"),
   join(EXECUTOR_ROOT, "desktop-workflow-services.mjs"),
@@ -297,10 +299,7 @@ async function main() {
     getThreadLabels: () => readManagedSessionLabels(home),
     getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, codexHome, metadataCache: knownThreadCwds }),
     resolveResumePermissions: (threadId) => readCodexResumePermissions({ threadId, home, codexHome }),
-    onThreadStarted: async ({ threadId }) => {
-      await claimCodexRootSession(controlDir, { sessionId: threadId, clientId });
-      await bindManagedClientIdentity({ host: "codex", sessionId: threadId, clientId, home, cwd });
-    },
+    authorizeThread: residentThreadAuthorizer({controlDir, clientId, home, cwd}),
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,

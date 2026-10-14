@@ -27,9 +27,9 @@ export function codexWorkflowServices({home, controlDir, clientId, ownsThread, g
     workflowService: {
       ownsThread: owns,
       getState: async threadId => {
-        if (!await owns(threadId)) throw new Error("Statewright workflow is not owned by this thread");
+        if (!await owns(threadId)) throw Object.assign(new Error("Statewright workflow is not owned by this thread. Resume the conversation again before sending."), {code: "STATEWRIGHT_THREAD_OWNERSHIP"});
         const state = await getState(threadId);
-        if (!await owns(threadId)) throw new Error("Statewright workflow owner changed during state lookup");
+        if (!await owns(threadId)) throw Object.assign(new Error("Statewright workflow owner changed during state lookup. Resume the conversation again before sending."), {code: "STATEWRIGHT_THREAD_OWNERSHIP"});
         return state;
       },
     },

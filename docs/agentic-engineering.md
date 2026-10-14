@@ -7,10 +7,10 @@ to fixes, small features, refactors and investigations. You can also ask for
 Try one of these after connecting Statewright:
 
 ```
-Use engineering to fix the failing test and verify the regression.
-Use engineering to add input validation to this form.
-Use engineering to refactor this parser without changing its behavior.
-Use engineering to investigate this error. Do not edit anything.
+Use the engineering workflow to fix the failing test and verify the regression.
+Use the engineering workflow to add input validation to this form.
+Use the engineering workflow to refactor this parser without changing its behavior.
+Use the engineering workflow to investigate this error. Do not edit anything.
 ```
 
 ## What it does

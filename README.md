@@ -2,7 +2,7 @@
 
 > Agents are suggestions, states are laws.
 
-State machine guardrails that control which tools your AI agent can use in each phase. Define a workflow once, enforce it across Claude Code, Codex, Cursor, opencode, and Pi. [Full docs →](https://docs.statewright.ai)
+Your workflows, in the harness you choose. Statewright defines tools, checks, and transitions for each phase of agent work. Use it with Claude Code, Codex, Cursor, OpenCode, Pi, or OMX, or connect a custom MCP host. Tool enforcement and model routing depend on the integration. [Full docs →](https://docs.statewright.ai)
 
 > **0.3.4 release candidate:** Claude gains a native Arbiter, Desktop sidebar and compact results. Codex adds browser onboarding and managed Desktop continuity. [Claude notes](docs/releases/claude-0.3.4.md) · [Codex notes](docs/releases/codex-0.3.4.md). Not yet published.
 
@@ -10,59 +10,56 @@ State machine guardrails that control which tools your AI agent can use in each 
 
 ## The problem
 
-AI agents are brittle. Give a model 40+ tools and an open-ended problem and it re-reads the same file five times, calls Edit during review, deploys before tests pass. The common fix is bigger models and longer prompts... it helps sometimes. Observability tells you what went wrong after the fact; it doesn't prevent it.
+An agent with the same tools throughout a task can edit during review or deploy before checks finish. A workflow needs a way to make those boundaries explicit and, where the host supports it, enforce them before a tool runs.
 
 ## The approach
 
-Instead of making the model bigger, make the problem smaller.
+Define the tools and checks each phase needs. Planning can allow reading, implementation can enable edits, and testing can permit designated commands. On intercepted tool paths, the integration rejects calls outside the current phase and explains which tools and transitions are available. Managed shell checks also screen writes and destructive operations when edits are disallowed.
 
-State machines constrain the tool and solution spaces so the model reasons in a focused context at each step. A planning state gets read-only tools. When the agent transitions to implementation, edit tools unlock with limited shell access. Write-via-redirect and destructive ops are still blocked even when Bash is allowed. Testing only permits designated test commands.
-
-Call a tool that's not in the current phase and you get rejected with a message telling you what IS available and how to transition. State machines loop and retry (unlike DAGs), which is what agentic work actually needs.
-
-Works on frontier and local models alike. Below 13GB, models can produce tool calls but can't retain enough file content to make accurate edits. Above that threshold, the guardrails start turning failures into completions.
+State machines support retries, loops, and approval gates. You can keep your selected model throughout a workflow or configure phase-specific routes on supported clients. The [research results](#research-results) below report a small local-model experiment, not a general model-size requirement.
 
 ## Quickstart
 
 <details open>
-<summary><strong>Codex</strong></summary>
-
-```
-codex plugin marketplace add statewright/statewright
-codex plugin add statewright@statewright
-```
-</details>
-
-<details>
 <summary><strong>Claude Code</strong></summary>
 
-```
+```text
 /plugin marketplace add statewright/statewright
 /plugin install statewright@statewright
 ```
 </details>
 
 <details>
-<summary><strong>opencode</strong></summary>
+<summary><strong>Codex</strong></summary>
 
+```sh
+codex plugin marketplace add statewright/statewright
+codex plugin add statewright@statewright
 ```
-npx statewright-opencode@latest init
-```
+</details>
+
+<details>
+<summary><strong>OpenCode</strong></summary>
+
+Use the [OpenCode setup guide](https://docs.statewright.ai/plugins/opencode)
+to load the native plugin through the shared executor.
 </details>
 
 <details>
 <summary><strong>Cursor</strong></summary>
 
-```
-npx statewright-cursor@latest init
-```
+Choose [Cursor Agent through the executor or standalone IDE mode](https://docs.statewright.ai/plugins/cursor).
+The IDE's MCP/rules mode is advisory; the Agent integration adds native tool hooks.
 </details>
 
-In Codex, restart after installation and ask for `statewright_connect`; approve
-the matching device code in your browser. In Claude Code 2.1.295 or newer,
-open the Arbiter's connection status and choose **Connect**. Claude manages its
-native OAuth login. Neither flow requires pasting a key into the conversation.
-Other hosts have their own connection instructions.
+Also available: [Pi](https://docs.statewright.ai/plugins/pi), [OMX](https://docs.statewright.ai/plugins/omx), and [custom MCP connections](https://docs.statewright.ai/getting-started/install#other-mcp-hosts). The [install guide](https://docs.statewright.ai/getting-started/install) covers every adapter and its connection requirements.
+
+In Claude Code 2.1.295 or newer, run the plugin commands at Claude's prompt,
+then open the Arbiter's connection status and choose **Connect**. Claude manages
+its native OAuth login. In Codex, restart after installation and ask for
+`statewright_connect`; approve the matching device code in your browser.
+Neither flow requires pasting a key into the conversation. Other hosts have
+their own connection instructions.
 
 Existing Claude manual-hook installs must complete the
 [migration](plugins/claude-code/README.md#upgrade-from-manual-hooks) before
@@ -78,7 +75,7 @@ feature, refactor or investigation. This illustrative sequence shows the normal
 change path; actual states, events and tools come from the selected workflow:
 
 ```
-❯ use the engineering workflow to fix the failing tests in calc.py
+❯ Use the engineering workflow to fix the failing tests in calc.py
 
 ◆ statewright — statewright_load_workflow (name: agentic-engineering)
 ◆ [statewright] Workflow activated: agentic-engineering
@@ -111,7 +108,7 @@ It does not automatically commit or deploy. See the
 
 ## Research results
 
-In our 5-task SWE-bench subset (not the full 2294-instance benchmark), two local models **went from 2 of 10 attempts passing to 10 of 10** with statewright constraints. Same tasks, same hardware.
+In the reported experiment, two local models completed 2 of 10 attempts without Statewright constraints and 10 of 10 with them, using the same tasks and hardware. This covered a 5-task SWE-bench subset, not the full 2294-instance benchmark.
 
 | Model | Size | Bug Fix (26 lines) | SWE-bench (5 tasks) |
 |-------|------|--------------------|---------------------|
@@ -124,9 +121,7 @@ In our 5-task SWE-bench subset (not the full 2294-instance benchmark), two local
 *\*with specialized edit_line tool adaptation*
 *†tested on 2 of the 5 tasks (added after initial experiment run)*
 
-The floor is around 13GB. Below that, models identify bugs correctly but can't serialize surgical edits (they rewrite entire files). That's a model limitation, not ours.
-
-The structural win on larger models is breaking read-loop death spirals and keeping the tool space small enough that the model reasons instead of flailing. [Research brief →](https://statewright.ai/research)
+In this sample, the two models completing all five tasks were 13.8GB and 19.9GB; the smaller tested models did not complete that subset. These observations do not establish a minimum model size or isolate why a model failed. Outcomes depend on the tested tasks, model, tools, and configuration. [Research brief →](https://statewright.ai/research)
 
 ## How it works
 
@@ -145,11 +140,14 @@ The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface th
 ### Per-state model routing
 
 States can specify a `model`; `meta.default_model` applies where no state
-override is present. The native Claude 0.3.4 plugin routes subsequent
+override is present. This is optional: the default engineering starter retains
+your selected model. The native Claude 0.3.4 plugin routes subsequent
 main-conversation requests without restarting the app. Codex's managed App
 Server adapter routes turns. Pi and OpenCode switch live, Cursor's executor
 resumes the same chat, and OMX applies its route at startup. Requested settings
 are not execution receipts: use the response's observed model when available.
+
+This configuration excerpt illustrates Haiku for diagnosis, Opus for a proposed fix, and Sonnet as the default. It omits transitions and other required workflow fields; use the [complete starter](workflows/agentic-engineering.json) or [authoring guide](https://docs.statewright.ai/workflows/create-your-own) for a runnable definition. It is not a measurement of token use or savings.
 
 ```json
 {
@@ -170,7 +168,7 @@ are not execution receipts: use the response's observed model when available.
 }
 ```
 
-In this example, `diagnose` uses Haiku (fast, cheap reconnaissance), `propose_fix` escalates to Opus (high-stakes reasoning), and `execute` inherits the `default_model` (Sonnet). The `sw-agent` binary also accepts a `--config` file with a `model_routing` block for per-state Ollama URL, temperature, and context window overrides.
+Here, `diagnose` requests Haiku, `propose_fix` requests Opus, and `execute` inherits the `default_model` (Sonnet). The `sw-agent` binary also accepts a `--config` file with a `model_routing` block for per-state Ollama URL, temperature, and context window overrides.
 
 ### Guardrails
 
@@ -218,7 +216,7 @@ Additional workflow controls:
 | Fork/join | Run branches sequentially or in parallel, join when all (or any) complete |
 | Environment scoping | Hide `PROD_DB_URL` via `blocked_env`, substitute with `env_overrides` |
 | Session isolation | Per-session state via `CLAUDE_SESSION_ID` |
-| Per-state model routing | Route cheap states to small models, expensive states to frontier models. `model` per state, `default_model` in `meta`. |
+| Per-state model routing | Request a model per state on supported clients, using `model` per state and `default_model` in `meta`. |
 | Thinking level control | Per-state `thinking_level` field (`high`, `medium`, `low`, `off`) for clients that support reasoning effort tuning. |
 | Tool escalation detection | Validator warns when a state jumps 2+ privilege levels without an approval gate |
 
@@ -286,6 +284,8 @@ delivery and other hosts; it is not Claude's consumer Desktop integration.
 rewrite may execute without another pre-check; post-call comparison detects
 that case but does not prevent it. Pi includes tool-name normalization and
 tool-call recovery for local models (Ollama, LM Studio).*
+
+Custom MCP hosts can use the gateway's workflow tools. A remote connection alone does not intercept every native tool or change the host's model. Check the integration guide for the controls available in your setup; native permissions remain in effect.
 
 ### Isolated delivery
 

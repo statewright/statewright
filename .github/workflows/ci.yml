@@ -44,7 +44,7 @@ jobs:
       - name: Check starter workflow artifacts
         run: |
           node scripts/generate-engineering-workflow.mjs --check
-          node --test scripts/engineering-workflow.test.mjs scripts/workflow-aliases.test.mjs
+          node --test scripts/engineering-workflow.test.mjs scripts/engineering-accounts.test.mjs scripts/workflow-aliases.test.mjs
       - name: Install zsh regression dependency
         run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Install Task

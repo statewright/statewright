@@ -47,12 +47,15 @@ advisory; the single-repair bound comes from the state graph itself.
 
 ## Existing installations
 
-The onboarding migration adds this starter without rewriting old workflows
-or their run history. Owners of an unchanged, enabled default `bugfix` receive
-the new starter if the canonical name is free. Customized or disabled defaults
-are not replaced. A downgrade retains added workflows rather than deleting
-user data. New accounts receive `agentic-engineering` through normal signup or
-connection onboarding.
+The onboarding migrations add this starter to every existing account, including
+accounts with customized workflows or no workflows. It becomes the default;
+old workflows and run history are not rewritten. You can delete the old `bugfix`
+workflow when you no longer need it. New accounts receive `agentic-engineering`
+through normal signup or connection onboarding.
+
+An existing definition with the canonical name is retained, not overwritten.
+An explicitly disabled definition stays disabled and is not selected as the
+default. A downgrade retains added workflows rather than deleting user data.
 
 An exact custom workflow named `engineering` takes precedence over the alias,
 including when disabled. The alias never redirects around a disabled workflow.
@@ -67,7 +70,7 @@ engine; migration tests use a disposable PocketBase database when installed.
 
 ```
 node scripts/generate-engineering-workflow.mjs --check
-node --test scripts/engineering-workflow.test.mjs
+node --test scripts/engineering-workflow.test.mjs scripts/engineering-accounts.test.mjs scripts/workflow-aliases.test.mjs
 cargo test -p statewright-engine --test default_engineering
 ```
 

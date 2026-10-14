@@ -9,6 +9,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **[workflows]** Add `agentic-engineering` (alias `engineering`) as the
   provider-neutral starter for fixes, features, refactors and investigations,
   with baseline evidence, validation, review and one bounded repair round.
+  New and existing accounts receive the default starter alongside their existing
+  workflows; the old `bugfix` workflow can be deleted.
 - **[codex]** Add an explicit development Desktop profile alongside staging and
   production profiles.
 - **[gateway]** Record privacy-bounded classifier denials with a short retention

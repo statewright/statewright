@@ -7,7 +7,7 @@
  * GET /api/gateway/workflows
  * Authorization: Bearer sw_...
  *
- * Response: { default: "bugfix", workflows: { ... }, owner_id: "", plan_limit: null }
+ * Response: { default: "agentic-engineering", workflows: { ... }, owner_id: "", plan_limit: null }
  */
 routerAdd('GET', '/api/gateway/workflows', (e) => {
   // Extract API key from Authorization header
@@ -42,7 +42,7 @@ routerAdd('GET', '/api/gateway/workflows', (e) => {
   for (var i = 0; i < records.length; i++) {
     var r = records[i]
     var name = r.get('name')
-    var def = r.get('definition')
+    var def = JSON.parse(r.getString('definition'))
     // Keep exact names, including disabled entries, for gateway alias lookup.
     // The gateway filters discovery and rejects disabled loads.
     workflows[name] = def
@@ -55,6 +55,10 @@ routerAdd('GET', '/api/gateway/workflows', (e) => {
 
   // If no active workflow, use first available
   if (!defaultName) defaultName = firstEnabledName
+  var starter = workflows['agentic-engineering']
+  if (starter && (!starter.meta || starter.meta.enabled !== false)) {
+    defaultName = 'agentic-engineering'
+  }
 
   return e.json(200, {
     default: defaultName,

@@ -368,7 +368,8 @@ async function connect($, v, epoch, allowSignIn) {
     const names = catalog.workflows;
     v.names = names;
     v.workflowAliases = catalog.workflowAliases;
-    if (!names.includes(v.selected)) v.selected = names[0] ?? '';
+    if (!names.includes(v.selected)) v.selected = names.includes('agentic-engineering')
+      ? 'agentic-engineering' : names[0] ?? '';
     v.page = Math.max(0, Math.floor(names.indexOf(v.selected) / PAGE_SIZE));
     v.connected = true;
     v.manual = false;

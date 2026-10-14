@@ -804,6 +804,19 @@ for (const stop of ['cancel', 'resume', 'timeout']) test(`${stop} then retry sha
   assert.equal(h.state.calls.length, 1);
   assert.ok(h.find(await h.pane(), 'workflow'));
 });
+test('initial selection prefers engineering, refresh preserves a deliberate choice, unavailable starter is not invented', async () => {
+  const h = await host();
+  h.state.catalog = wire(['aaa-custom', 'agentic-engineering', 'bugfix']);
+  await h.press('connect'); await h.flush();
+  assert.equal(h.find(await h.pane(), 'workflow').props.value, 'agentic-engineering');
+  await h.find(await h.pane(), 'workflow').props.onSelect('aaa-custom');
+  await h.press('refresh'); await h.flush();
+  assert.equal(h.find(await h.pane(), 'workflow').props.value, 'aaa-custom');
+  await h.find(await h.pane(), 'workflow').props.onSelect('agentic-engineering');
+  h.state.catalog = wire(['aaa-custom', 'bugfix']);
+  await h.press('refresh'); await h.flush();
+  assert.equal(h.find(await h.pane(), 'workflow').props.value, 'aaa-custom');
+});
 test('local selection makes no workflow call, empty catalog shows a useful state', async () => {
   const h = await host(); await h.press('connect'); await h.flush();
   await h.find(await h.pane(), 'workflow').props.onSelect('plan');

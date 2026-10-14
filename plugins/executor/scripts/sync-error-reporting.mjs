@@ -22,6 +22,10 @@ export async function errorReportingDrift() {
     let target = null;
     try { target = await readFile(resolve(PLUGINS_ROOT, relative)); } catch { /* missing is stale */ }
     if (!target?.equals(source)) stale.push(relative);
+    const helper = relative.replace('error-reporting.mjs', 'diagnostic-event.mjs');
+    let helperBytes = null;
+    try { helperBytes = await readFile(resolve(PLUGINS_ROOT, helper)); } catch { /* missing */ }
+    if (!helperBytes?.equals(await readFile(resolve(PLUGINS_ROOT, 'executor/lib/diagnostic-event.mjs')))) stale.push(helper);
   }
   return stale;
 }
@@ -31,6 +35,7 @@ export async function syncErrorReporting() {
     const target = resolve(PLUGINS_ROOT, relative);
     await mkdir(dirname(target), { recursive: true });
     await copyFile(SOURCE, target);
+    await copyFile(resolve(PLUGINS_ROOT, 'executor/lib/diagnostic-event.mjs'), target.replace('error-reporting.mjs', 'diagnostic-event.mjs'));
   }
 }
 

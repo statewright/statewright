@@ -12,139 +12,230 @@ import { minimatch } from "minimatch";
 
 // src/error-reporting.mjs
 import { randomUUID } from "crypto";
+import { spawnSync } from "child_process";
+
+// src/diagnostic-event.mjs
 var DEFAULT_SENTRY_DSN = "https://3c30b803a5b44d74bf9657db7a89f033@glitch.enhasa.cloud/12";
-var MAX_VALUE_BYTES = 2048;
-var SAFE_CONTEXT_FIELDS = /* @__PURE__ */ new Set([
-  "mechanism",
-  "operation",
-  "host",
-  "transport",
-  "side",
-  "close_code",
-  "exit_code",
-  "signal",
-  "phase",
-  "runtime",
-  "reason"
-]);
-var SECRET_PATTERNS = [
-  /\b(?:sw_(?:live|test)_[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]+)\b/g,
-  /(authorization\s*[:=]\s*(?:bearer\s+)?)\S+/gi,
-  /\b((?:api[_-]?key|token|secret|password|cookie|session)[A-Za-z0-9_-]*\s*[:=]\s*)[^\s,;]+/gi,
-  /([?&](?:api[_-]?key|token|secret|password|access_token)=)[^&#\s]+/gi,
-  /(["']?(?:prompt|tool_input|tool_response|payload|arguments|messages|content|input|output)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[^,}\]\n]+)/gi
-];
-function redactString(value, limit = MAX_VALUE_BYTES) {
-  let result = String(value ?? "");
-  for (const pattern of SECRET_PATTERNS) {
-    result = result.replace(pattern, (_match, prefix) => prefix ? `${prefix}[redacted]` : "[redacted]");
+var words = (value) => new Set(value.split(" "));
+var fields = {
+  mechanism: words("test entrypoint child_exit child_spawn transport protocol shutdown approval_evidence unhandled_rejection uncaught_exception handled"),
+  operation: words("unknown managed_client unmanaged_client managed_exec resident_tui native_tui app_server app_server_proxy resident_app_server prepare_review statewright_exec statewright_codex connect login catalog control get_state load_workflow transition deactivate request_approval pre_tool post_tool stop command native_ui canary hook mcp.connect mcp.call tool.call tool.check"),
+  host: words("codex claude claude-code pi opencode omx"),
+  transport: words("websocket http stdio"),
+  side: words("native_close upstream_close native_error upstream_error native upstream"),
+  phase: words("check login reconnect identity catalog catalog_decode complete control"),
+  runtime: words("node claude-native"),
+  reason: words("unknown oauth_failed credential_unavailable permission_refused auto_review_unavailable helper_unavailable login_timeout login_incomplete auth policy disabled unapproved unlisted failed session_unbound tool_unavailable control_hook_failed module_unavailable capability_unavailable request_timeout server_identity catalog_invalid native_error command_failed workflow_failed ui_failed synthetic_canary"),
+  signal: words("SIGINT SIGTERM SIGKILL SIGABRT SIGSEGV SIGHUP SIGPIPE")
+};
+var classes = words("Error TypeError RangeError SyntaxError ReferenceError URIError EvalError AggregateError AbortError");
+var plugins = words("codex claude-code managed-client executor pi opencode omx");
+function sanitizeContext(context = {}) {
+  const safe = {};
+  for (const [key, value] of Object.entries(context)) {
+    if (Object.hasOwn(fields, key) && fields[key].has(value)) safe[key] = value;
+    else if (["exit_code", "close_code", "http_status"].includes(key) && Number.isSafeInteger(value) && value >= 0 && value <= 4294967295) safe[key] = value;
   }
-  return result.length > limit ? `${result.slice(0, limit)}\u2026[truncated]` : result;
+  return safe;
+}
+function sanitizeError(error) {
+  return {
+    type: classes.has(error?.name) ? error.name : "Error",
+    value: "Unexpected plugin failure (message withheld)."
+  };
+}
+function diagnosticsAllowed({ enabled, disabled, consent } = {}) {
+  if (disabled === true || disabled === "true" || enabled === false || enabled === "false") return false;
+  if (consent?.version === 2 && consent.enabled === false) return false;
+  return enabled === true || enabled === "true" || consent?.version === 2 && consent?.enabled === true;
+}
+function validTelemetryConsent(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => ["version", "enabled", "updated_at"].includes(key)) && value.version === 2 && typeof value.enabled === "boolean" && typeof value.updated_at === "string" && value.updated_at.length < 40 && Number.isFinite(Date.parse(value.updated_at));
 }
 function sentryEndpoint(dsn) {
   try {
-    const parsed = new URL(dsn);
-    const parts = parsed.pathname.split("/").filter(Boolean);
-    const projectId = parts.at(-1);
-    if (!parsed.username || !projectId) return null;
-    const prefix = parts.slice(0, -1).join("/");
-    return `${parsed.protocol}//${parsed.host}${prefix ? `/${prefix}` : ""}/api/${projectId}/envelope/?sentry_version=7&sentry_key=${encodeURIComponent(parsed.username)}`;
+    const parsed = new URL(dsn), parts = parsed.pathname.split("/").filter(Boolean), project = parts.pop();
+    if (!["https:", "http:"].includes(parsed.protocol) || !parsed.username || !/^\d+$/.test(project ?? "") || parsed.password || parsed.search || parsed.hash) return null;
+    return `${parsed.protocol}//${parsed.host}${parts.length ? `/${parts.join("/")}` : ""}/api/${project}/envelope/?sentry_version=7&sentry_key=${encodeURIComponent(parsed.username)}`;
   } catch {
     return null;
   }
 }
-function sanitizeError(error) {
-  const source = error instanceof Error ? error : new Error(String(error));
+function diagnosticEvent({ plugin, version, platform, environment, eventId, error, context = {}, handled = false }) {
+  const tags = sanitizeContext(context);
+  tags.plugin = plugins.has(plugin) ? plugin : "unknown";
+  if (["darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64", "win32-x64", "win32-arm64", "claude-native"].includes(platform)) tags.platform = platform;
+  const release = `statewright-${tags.plugin}@${/^\d+\.\d+\.\d+(?:\.\d+)?$/.test(version ?? "") ? version : "unknown"}`;
+  const failure = handled ? tags.reason ?? "unknown" : sanitizeError(error).type;
   return {
-    type: redactString(source.name || "Error", 120),
-    // Error messages frequently include upstream bodies, prompts, or the
-    // serialized JSON-RPC request. Keep the class for grouping and send the
-    // operation/mechanism tags below, but never export arbitrary message text.
-    value: "Unexpected plugin failure (message withheld).",
-    // Error stacks can embed a rejected request body or prompt through a
-    // dependency's error formatting. The mechanism/operation tags identify
-    // the runtime locus without exporting that unbounded, user-controlled text.
-    stacktrace: void 0
+    ...eventId ? { event_id: eventId } : {},
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    platform: "node",
+    level: handled && tags.reason === "permission_refused" ? "warning" : "error",
+    release,
+    environment: ["production", "staging", "development", "test"].includes(environment) ? environment : "production",
+    tags,
+    fingerprint: ["statewright-plugin-v1", tags.plugin, tags.operation ?? "unknown", failure],
+    ...handled ? { message: `Statewright ${tags.operation ?? "unknown"}: ${failure}` } : { exception: { values: [{ ...sanitizeError(error), mechanism: { type: tags.mechanism ?? "generic", handled: !["uncaught_exception", "unhandled_rejection"].includes(tags.mechanism) } }] } }
   };
-}
-function sanitizeContext(context = {}) {
-  const safe = {};
-  for (const [key, value] of Object.entries(context)) {
-    if (!SAFE_CONTEXT_FIELDS.has(key) || value == null) continue;
-    if (typeof value === "number" || typeof value === "boolean") safe[key] = value;
-    else safe[key] = redactString(value, 512);
-  }
-  return safe;
-}
-function isExpectedPluginError(error) {
-  const message = String(error instanceof Error ? error.message : error ?? "");
-  return error?.name === "AbortError" || /^(?:--(?:host|real-bin|workflow|sandbox|approval-policy|approvals-reviewer|delivery-run-id)|Unknown option:)/.test(message) || /^(?:Choose either|Unsupported managed client host|Statewright cannot translate OpenAI model|Provide the task)/.test(message) || message.startsWith("[statewright] BLOCKED:") || message.includes("requires isolated delivery") || message.includes("Native-tool adapter unavailable");
-}
-function createErrorReporter({
-  plugin,
-  version = process.env.npm_package_version ?? "unknown",
-  environment = process.env,
-  send = defaultSend
-} = {}) {
-  const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN;
-  const endpoint = sentryEndpoint(dsn);
-  const enabled = environment.STATEWRIGHT_SENTRY_ENABLED === "true" && environment.STATEWRIGHT_SENTRY_DISABLED !== "true" && Boolean(endpoint);
-  const seen = /* @__PURE__ */ new Set();
-  const tags = {
-    plugin: redactString(plugin ?? "unknown", 120),
-    release: `statewright-${redactString(plugin ?? "unknown", 120)}@${redactString(version, 120)}`,
-    platform: `${process.platform}-${process.arch}`,
-    runtime: "node"
-  };
-  async function report(error, context = {}) {
-    const safeContext = sanitizeContext(context);
-    const safeError = sanitizeError(error);
-    const fingerprint = `${safeError.type}:${safeError.value}:${safeContext.mechanism ?? ""}:${safeContext.operation ?? ""}`;
-    if (!enabled || seen.has(fingerprint)) return false;
-    const eventId = randomUUID().replace(/-/g, "");
-    const event = {
-      event_id: eventId,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      platform: "node",
-      level: "error",
-      release: tags.release,
-      environment: redactString(environment.NODE_ENV || "production", 120),
-      tags: { ...tags, ...safeContext },
-      exception: { values: [safeError] }
-    };
-    try {
-      await send({ endpoint, dsn, event, environment });
-      seen.add(fingerprint);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  function installProcessHandlers() {
-    process.on("unhandledRejection", (reason) => {
-      void report(reason, { mechanism: "unhandled_rejection" });
-    });
-    process.on("uncaughtExceptionMonitor", (error) => {
-      void report(error, { mechanism: "uncaught_exception" });
-    });
-  }
-  return { report, installProcessHandlers, tags };
 }
 function formatEnvelope({ dsn, event }) {
-  return `${JSON.stringify({ event_id: event.event_id, sent_at: event.timestamp, dsn, sdk: { name: "statewright.plugin", version: "1" } })}
+  return `${JSON.stringify({ ...event.event_id ? { event_id: event.event_id } : {}, sent_at: event.timestamp, dsn, sdk: { name: "statewright.plugin", version: "1" } })}
 ${JSON.stringify({ type: "event", content_type: "application/json" })}
 ${JSON.stringify(event)}
 `;
 }
+
+// src/error-reporting.mjs
+function isExpectedPluginError(error) {
+  const message = String(error instanceof Error ? error.message : error ?? "");
+  return error?.name === "AbortError" || error?.code === "CREDENTIAL_UNLOCK_CANCELLED" || /^(?:--(?:host|real-bin|workflow|sandbox|approval-policy|approvals-reviewer|delivery-run-id)|Unknown option:)/.test(message) || /^(?:Choose either|Unsupported managed client host|Statewright cannot translate OpenAI model|Provide the task)/.test(message) || message.startsWith("[statewright] BLOCKED:") || message.includes("requires isolated delivery") || message.includes("Native-tool adapter unavailable");
+}
+var timeout = (env) => Math.min(2e3, Math.max(100, Number(env.STATEWRIGHT_SENTRY_TIMEOUT_MS) || 1e3));
+function createErrorReporter({
+  plugin,
+  version = process.env.npm_package_version ?? "unknown",
+  environment = process.env,
+  send = defaultSend,
+  consent
+} = {}) {
+  const seen = /* @__PURE__ */ new Set(), pending = /* @__PURE__ */ new Set();
+  let last = { outcome: "idle" }, attempts = 0, installed = false;
+  const tags = { plugin, release: `statewright-${plugin}@${version}` };
+  async function prepare(error, context, handled) {
+    if (environment.STATEWRIGHT_SENTRY_DISABLED === "true" || environment.STATEWRIGHT_SENTRY_ENABLED === "false") {
+      last = { outcome: "disabled" };
+      return null;
+    }
+    const source = environment, identity = [source.STATEWRIGHT_API_KEY, source.STATEWRIGHT_PB_URL, source.STATEWRIGHT_GATEWAY_URL];
+    const grant = await (consent ? consent() : readAccountConsent(environment));
+    if (source !== environment || identity.some((value, i) => value !== [environment.STATEWRIGHT_API_KEY, environment.STATEWRIGHT_PB_URL, environment.STATEWRIGHT_GATEWAY_URL][i])) {
+      last = { outcome: "disabled" };
+      return null;
+    }
+    const enabled = diagnosticsAllowed({
+      enabled: environment.STATEWRIGHT_SENTRY_ENABLED,
+      disabled: environment.STATEWRIGHT_SENTRY_DISABLED,
+      consent: grant
+    });
+    if (!enabled) {
+      last = { outcome: "disabled" };
+      return null;
+    }
+    const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN, endpoint = sentryEndpoint(dsn);
+    if (!endpoint) {
+      last = { outcome: "invalid_dsn" };
+      return null;
+    }
+    return packet(error, context, handled, dsn, endpoint);
+  }
+  function packet(error, context, handled, dsn, endpoint) {
+    const event = diagnosticEvent({
+      plugin,
+      version,
+      platform: `${process.platform}-${process.arch}`,
+      environment: environment.NODE_ENV,
+      eventId: randomUUID().replaceAll("-", ""),
+      error,
+      context,
+      handled
+    });
+    const key = JSON.stringify(event.fingerprint);
+    if (seen.has(key) || pending.has(key) || attempts >= 20) return null;
+    attempts++;
+    pending.add(key);
+    return { endpoint, dsn, event, environment, key };
+  }
+  async function dispatch(error, context, handled) {
+    let payload;
+    try {
+      payload = await prepare(error, context, handled);
+      if (!payload) return false;
+      await send(payload);
+      seen.add(payload.key);
+      last = { outcome: "sent", eventId: payload.event.event_id };
+      return true;
+    } catch {
+      last = { outcome: "delivery_failed" };
+      return false;
+    } finally {
+      if (payload) pending.delete(payload.key);
+    }
+  }
+  const report = (error, context = {}) => {
+    const reason = error?.code === "EACCES" || error?.code === "EPERM" ? "permission_refused" : /^DESKTOP_CONNECT_(?:UNAVAILABLE|PROTOCOL|REJECTED|EXPIRED)$/.test(error?.code ?? "") ? "oauth_failed" : /^CREDENTIAL_|^DESKTOP_CONNECT_STORE$/.test(error?.code ?? "") ? "credential_unavailable" : null;
+    return dispatch(error, reason ? { ...context, reason, mechanism: "handled" } : context, Boolean(reason));
+  };
+  const reportFailure = (reason, context = {}) => dispatch(null, { ...context, reason, mechanism: "handled" }, true);
+  function installProcessHandlers() {
+    if (installed) return;
+    installed = true;
+    process.on("uncaughtExceptionMonitor", (error, origin) => {
+      try {
+        if (!diagnosticsAllowed({ enabled: environment.STATEWRIGHT_SENTRY_ENABLED, disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) return;
+        const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN, endpoint = sentryEndpoint(dsn);
+        if (!endpoint) return;
+        const payload = packet(error, { mechanism: origin === "unhandledRejection" ? "unhandled_rejection" : "uncaught_exception" }, false, dsn, endpoint);
+        if (payload) sendFatal(payload);
+      } catch {
+      }
+    });
+  }
+  return {
+    report,
+    reportFailure,
+    installProcessHandlers,
+    tags,
+    status: () => ({ ...last }),
+    setEnvironment: (value) => {
+      environment = value;
+    }
+  };
+}
+async function readAccountConsent(environment, fetchImpl = fetch) {
+  const key = environment.STATEWRIGHT_API_KEY, base = environment.STATEWRIGHT_PB_URL;
+  if (!key || !base || !environment.STATEWRIGHT_GATEWAY_URL) return null;
+  try {
+    const url = new URL(base);
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
+    const response = await fetchImpl(`${base.replace(/\/$/, "")}/api/gateway/telemetry`, {
+      headers: { Authorization: `Bearer ${key}`, "X-Statewright-OAuth-Resource": environment.STATEWRIGHT_GATEWAY_URL },
+      redirect: "error",
+      signal: AbortSignal.timeout(1e3)
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return null;
+    }
+    const value = await response.json();
+    return validTelemetryConsent(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 async function defaultSend({ endpoint, dsn, event, environment }) {
-  if (!endpoint) return;
   const response = await fetch(endpoint, {
     method: "POST",
+    redirect: "error",
     headers: { "Content-Type": "application/x-sentry-envelope" },
     body: formatEnvelope({ dsn, event }),
-    signal: AbortSignal.timeout(Number(environment.STATEWRIGHT_SENTRY_TIMEOUT_MS ?? 1e3))
+    signal: AbortSignal.timeout(timeout(environment))
   });
-  if (!response.ok) throw new Error(`Sentry envelope rejected with HTTP ${response.status}.`);
+  await response.body?.cancel();
+  if (!response.ok) throw new Error("Diagnostic delivery rejected");
+}
+function sendFatal({ endpoint, dsn, event, environment }) {
+  const ms = timeout(environment);
+  const child = `import { readFileSync } from 'node:fs';
+const p = JSON.parse(readFileSync(0, 'utf8'));
+try { const r = await fetch(p.endpoint, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/x-sentry-envelope' }, body: p.body, signal: AbortSignal.timeout(p.ms) }); await r.body?.cancel(); process.exitCode = r.ok ? 0 : 1; } catch { process.exitCode = 1; }`;
+  spawnSync(process.execPath, ["--input-type=module", "-e", child], {
+    input: JSON.stringify({ endpoint, body: formatEnvelope({ dsn, event }), ms }),
+    timeout: ms + 500,
+    stdio: ["pipe", "ignore", "ignore"],
+    windowsHide: true,
+    env: { ...environment.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: environment.NODE_EXTRA_CA_CERTS } : {} }
+  });
 }
 
 // src/hook.ts
@@ -582,7 +673,7 @@ async function handleUserPrompt(input, opts) {
       return {
         hookSpecificOutput: {
           hookEventName: "UserPromptSubmit",
-          additionalContext: "Statewright API key saved automatically. The user can now activate a workflow with: statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows."
+          additionalContext: "Statewright API key saved automatically. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task."
         }
       };
     }
@@ -599,7 +690,7 @@ async function handleUserPrompt(input, opts) {
     return {
       hookSpecificOutput: {
         hookEventName: "UserPromptSubmit",
-        additionalContext: "Statewright plugin active. No workflow running. To start one, use statewright_start(workflow='bugfix') or statewright_list_workflows() to see available workflows."
+        additionalContext: "Statewright plugin active. No workflow running. Call statewright_list_workflows first, then load only an exact workflow explicitly selected by the user or governing skill. Never guess a workflow name from the task."
       }
     };
   }

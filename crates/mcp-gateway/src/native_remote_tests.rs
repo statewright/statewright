@@ -72,7 +72,13 @@ async fn fixture() -> Fixture {
                 workflows["engineering"] = definition;
             }
         }
-        (StatusCode::OK, Json(json!({"default":"canary","owner_id":owner,"plan_limit":17,
+        let telemetry = match key {
+            "Bearer telemetry-allow" => json!({"version":2,"enabled":true,"updated_at":"2026-10-14T12:00:00.000Z"}),
+            "Bearer telemetry-deny" => json!({"version":2,"enabled":false,"updated_at":"2026-10-14T12:00:01.000Z"}),
+            "Bearer telemetry-invalid" => json!({"version":2,"enabled":true,"updated_at":"invalid"}),
+            _ => Value::Null,
+        };
+        (StatusCode::OK, Json(json!({"default":"canary","owner_id":owner,"plan_limit":17,"telemetry_consent":telemetry,
           "native_session":identity, "oauth_client_id": if key == "Bearer legacy" { "" } else { "statewright-claude" },
           "workflows":workflows})))
     }));
@@ -146,6 +152,43 @@ fn action_outcome(snapshot: &Value) -> Value {
 
 fn connect_args(chat: &str) -> Value {
     json!({"context":{"version":1,"conversation_id":chat}})
+}
+
+#[tokio::test]
+async fn native_consent_transport_preserves_current_withdrawal_without_changing_workflow() {
+    let f = fixture().await;
+    let catalog = decoded(&rpc(&f, "telemetry-allow", "tools/call", json!({"name":"statewright_list_workflows","arguments":{}})).await.1);
+    assert_eq!(catalog["telemetry_consent"]["enabled"], true);
+    let initial = decoded(&connect(&f, "telemetry-allow", connect_args(CHAT_A)).await.1);
+    assert_eq!(initial["snapshot"]["telemetry_consent"]["enabled"], true);
+    let revision = initial["snapshot"]["revision"].clone();
+    for (key, expected) in [("telemetry-deny", json!(false)), ("telemetry-allow", json!(false)),
+        ("telemetry-invalid", Value::Null), ("telemetry-allow", Value::Null)] {
+        let receipt = decoded(&call(&f, key, args(CHAT_A, "get_state", json!({}), None)).await.1);
+        assert_eq!(receipt["telemetry_consent"]["enabled"], expected);
+        assert_eq!(receipt["revision"], revision);
+    }
+}
+
+#[test]
+fn optional_telemetry_metadata_is_closed_and_cannot_break_workflow_loading() {
+    let grant = json!({"version":2,"enabled":true,"updated_at":"2026-10-14T12:00:00.000Z"});
+    assert!(decode_telemetry_consent(Some(grant.clone())).unwrap().enabled);
+    for invalid in [json!(null), json!({"version":1,"enabled":true}), json!({"version":2,"enabled":true,"updated_at":"invalid"}),
+        json!({"version":2,"enabled":true,"updated_at":"2026-10-14T12:00:00.000Z","secret":"private"})] {
+        assert!(decode_telemetry_consent(Some(invalid)).is_none());
+    }
+    let mut current = decode_telemetry_consent(Some(grant.clone()));
+    let mut watermark = current.clone();
+    let mut declined = grant.clone(); declined["enabled"] = json!(false); declined["updated_at"] = json!("2026-10-14T12:00:01.000Z");
+    observe_telemetry_consent(&mut current, &mut watermark, decode_telemetry_consent(Some(declined)));
+    assert!(!current.as_ref().unwrap().enabled);
+    observe_telemetry_consent(&mut current, &mut watermark, decode_telemetry_consent(Some(grant.clone())));
+    assert!(!current.as_ref().unwrap().enabled);
+    observe_telemetry_consent(&mut current, &mut watermark, None);
+    assert!(current.is_none());
+    observe_telemetry_consent(&mut current, &mut watermark, decode_telemetry_consent(Some(grant)));
+    assert!(current.is_none(), "unknown must preserve withdrawal watermark");
 }
 
 #[tokio::test]

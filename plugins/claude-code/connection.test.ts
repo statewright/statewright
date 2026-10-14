@@ -176,10 +176,12 @@ function setup(on) {
     model: 'claude-opus-5-5', opens: [] as any[],
     refusal: 'auth', completeLogin: true, selected: '', names: ['bugfix', 'plan'],
     native: false, revision: 1, workflow: null as any, failRouteStore: false,
-    catalogError: false as boolean | string, diagnostic: null as any };
+    catalogError: false as boolean | string, diagnostic: null as any,
+    telemetry: null as any, diagnostics: [] as any[], diagnosticEnv: {} as any };
   const clock = mock.clock(on);
   on('session.id', () => ({ value: state.session }));
   on('session.model', () => ({ value: state.model }));
+  on('http.fetch', (_, e) => { state.diagnostics.push(e); return { value: { status: 200, ok: true, headers: {}, text: '' } }; });
   on('command.register', () => ({ value: undefined }));
   on('tool.register', ($, e) => ({ value: { tool: `mcp__statewright__${e.name}` } }));
   on('tool.check', () => ({ decision: 'allow' }));
@@ -194,6 +196,7 @@ function setup(on) {
   on('ui.log', () => ({ value: undefined }));
   on('classic.Stop', () => ({}));
   on('classic.SessionStart', () => ({}));
+  on('classic.PostToolUseFailure', () => ({}));
   on('ui.open', (_, e) => { state.opens.push(e); return { value: { isPlaced: true } }; });
   on('ui.close', () => ({ value: undefined }));
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => $.ui.resolve(e).Text({ children: [] }));
@@ -225,7 +228,7 @@ function setup(on) {
         snapshot: { protocol_version: 1, conversation_id: state.session,
           revision: `22222222-2222-4222-8222-${String(state.revision).padStart(12, '0')}`,
           capabilities: { workflow_control: state.native, native_tool_enforcement: state.native, human_approval: state.native, model_routing: false },
-          state: state.workflow, outcome: null },
+          state: state.workflow, outcome: null, telemetry_consent: state.telemetry },
       }) }] } };
     }
     if (state.native && e.tool === 'statewright_native_request') {
@@ -249,16 +252,38 @@ function setup(on) {
         protocol_version: 1, conversation_id: state.session,
         revision: `22222222-2222-4222-8222-${String(state.revision).padStart(12, '0')}`,
         capabilities: { workflow_control: true, native_tool_enforcement: true, human_approval: true, model_routing: false },
-        state: state.workflow, outcome: action.operation === 'get_state' ? null : { content: [{ type: 'text', text: '{}' }], isError: false },
+        state: state.workflow, telemetry_consent: state.telemetry, outcome: action.operation === 'get_state' ? null : { content: [{ type: 'text', text: '{}' }], isError: false },
       }) }] } };
     }
     if (e.tool === 'statewright_native_request') throw new Error('Native control not available in this fixture');
     expect(e.tool).toBe('statewright_list_workflows');
-    return { value: { content: [{ type: 'text', text: JSON.stringify({ workflows: state.names, active: 'foreign',
+    return { value: { content: [{ type: 'text', text: JSON.stringify({ workflows: state.names, active: 'foreign', telemetry_consent: state.telemetry,
       ...(state.native ? { native_control: { version: 1 } } : {}) }) }] } };
   });
   return { state, clock };
 }
+for (const permitted of [false, true]) test(`native engine emits only granted scrubbed diagnostic envelopes: ${permitted}`, async ($, on) => {
+  const { state, clock } = setup(on); state.connected = true; state.native = true;
+  state.telemetry = { version: 2, enabled: permitted, updated_at: '2026-10-14T12:00:00.000Z' };
+  mock.env(on, {});
+  await $.session.start({ cwd: '/work' }); await clock.settle();
+  await $.classic.PostToolUseFailure({ session_id: state.session, transcript_path: '/PRIVATE', cwd: '/PRIVATE',
+    hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'fixture', tool_input: { command: 'PRIVATE_COMMAND' }, error: 'PRIVATE_ERROR' } as any);
+  await clock.settle();
+  expect(state.diagnostics.length).toBe(permitted ? 1 : 0);
+  if (permitted) {
+    const serialized = JSON.stringify(state.diagnostics[0]);
+    expect(serialized).toContain('command_failed');
+    expect(serialized).not.toContain('PRIVATE');
+    expect(serialized).not.toContain(state.session);
+    state.telemetry = { version: 2, enabled: false, updated_at: '2026-10-13T12:00:00.000Z' };
+    await $.tool.call({ tool: 'mcp__statewright__statewright_get_state' });
+    await $.classic.PostToolUseFailure({ session_id: state.session, transcript_path: '/PRIVATE', cwd: '/PRIVATE',
+      hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'second', tool_input: {}, error: 'PRIVATE' } as any);
+    await clock.settle();
+    expect(state.diagnostics.length).toBe(1);
+  }
+});
 test('native request hook applies all equivalents, follows state changes, records evidence and restores baseline', async ($, on) => {
   const { state, clock } = setup(on); state.connected = true; state.native = true;
   const dispatched: any[] = [];

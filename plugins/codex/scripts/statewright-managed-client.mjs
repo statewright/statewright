@@ -13,8 +13,7 @@ import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./li
 const launcherPath = fileURLToPath(import.meta.url);
 
 function managedClientVersion(argv = process.argv.slice(2)) {
-  const hostIndex = argv.indexOf("--host");
-  return hostIndex >= 0 && argv[hostIndex + 1] === "claude" ? "0.3.1" : "0.3.4";
+  return "0.3.4";
 }
 
 function parseArgs(argv) {
@@ -96,6 +95,7 @@ export async function killProjectAppServers({ cwd = process.cwd(), home = homedi
   return [selected[0].pid];
 }
 
+let activeReporter;
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   const reporter = createErrorReporter({
@@ -103,6 +103,7 @@ async function main() {
     version: managedClientVersion(),
   });
   reporter.installProcessHandlers();
+  activeReporter = reporter;
   if (options.help) return process.stdout.write(`${usage()}\n`);
   if (options.bootstrap) {
     process.stdout.write(`${JSON.stringify(await bootstrapManagedClients({ launcherPath }))}\n`);
@@ -139,6 +140,7 @@ async function main() {
   if (!options.realBin) throw new Error("--real-bin is required when launching a managed client.");
   const nativeDestination = codexNativeDestinationInvocation(options.host, options.args);
   const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
+  reporter.setEnvironment(environment);
   if (!nativeDestination && await managedClientEnabled(options.host)) {
     try {
       environment.STATEWRIGHT_API_KEY = await resolveTuiGatewayApiKey(environment, {
@@ -172,7 +174,7 @@ async function main() {
 
 if (process.argv[1] && resolve(process.argv[1]) === launcherPath) {
   main().catch(async (error) => {
-    const reporter = createErrorReporter({ plugin: "managed-client", version: managedClientVersion() });
+    const reporter = activeReporter ?? createErrorReporter({ plugin: "managed-client", version: managedClientVersion() });
     if (!isExpectedPluginError(error)) await reporter.report(error, { mechanism: "entrypoint", operation: "managed_client" });
     process.stderr.write(`[statewright] ${error.message}\n`);
     process.exitCode = 2;

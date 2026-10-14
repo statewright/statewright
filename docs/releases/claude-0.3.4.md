@@ -22,6 +22,10 @@ no Statewright app wrapper is needed. This candidate has not been published.
   responses, ordinary errors and permission refusals are not replayed.
 - **A smaller status display.** Desktop uses clickable pills. Terminal users
   can opt into Powerline and override that preference for the current session.
+- **Optional failure reports.** Native connection, permission and command
+  failures can send a small diagnostic report under your Statewright telemetry
+  choice, with a plugin-local opt-out. Reports never include command contents,
+  prompts or credentials. [Details](../guides/optional-telemetry.md).
 
 ## Install or upgrade
 

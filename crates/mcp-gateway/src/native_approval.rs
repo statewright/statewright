@@ -363,6 +363,9 @@ async fn begin(
         );
     };
     let mut locked = session.lock().await;
+    // Approval waits may outlive a telemetry grant. Do not advertise cached
+    // consent as freshly verified on any approval reply; get_state refreshes it.
+    locked.telemetry_consent = None;
     if native.expected_revision.as_deref() != Some(&locked.native_revision) {
         return fail(
             request.id,
@@ -529,6 +532,7 @@ async fn begin(
                     }
                 }
                 _ => {
+                    locked.telemetry_consent = None;
                     locked.native_revision = uuid::Uuid::new_v4().to_string();
                     let status = match answer {
                         Ok(Ok(Answer::Cancel)) => "cancelled",
@@ -568,6 +572,7 @@ async fn finish(
     receipt: Value,
     id: Option<Value>,
 ) -> Response {
+    session.telemetry_consent = None;
     session.native_revision = uuid::Uuid::new_v4().to_string();
     if session
         .gateway

@@ -1,4 +1,5 @@
 // Consumer connection identity. Native Claude owns OAuth, tokens and refresh.
+import { validTelemetryConsent } from './diagnostic-event.mjs';
 export const SERVER = 'statewright';
 export const GATEWAY = 'https://mcp.statewright.ai/mcp';
 export const NATIVE_SERVER = `plugin:statewright:${SERVER}`;
@@ -59,7 +60,7 @@ export function decodeCatalogConnection(result) {
   if (result?.isError || !Array.isArray(result?.content) || result.content.length !== 1 ||
       result.content[0]?.type !== 'text' || typeof result.content[0].text !== 'string' ||
       result.content[0].text.length > 131072) throw new Error('Invalid catalog');
-  const { workflows, workflow_aliases = {}, native_control } = JSON.parse(result.content[0].text);
+  const { workflows, workflow_aliases = {}, native_control, telemetry_consent } = JSON.parse(result.content[0].text);
   if (!Array.isArray(workflows) || workflows.length > 1000 || !workflows.every(validName) ||
       new Set(workflows).size !== workflows.length) throw new Error('Invalid catalog');
   if (!validWorkflowAliases(workflow_aliases) ||
@@ -69,5 +70,6 @@ export function decodeCatalogConnection(result) {
   const supported = native_control !== null && typeof native_control === 'object' &&
     !Array.isArray(native_control) && native_control.version === 1;
   return { workflows, workflowAliases: workflow_aliases, nativeControl: supported,
+    telemetryConsent: validTelemetryConsent(telemetry_consent) ? telemetry_consent : null,
     unsupportedControl: native_control !== undefined && native_control !== null && !supported };
 }

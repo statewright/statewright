@@ -6,6 +6,7 @@ import { createExecutionAdapter, outcome } from './native-execution.mjs';
 import { ARBITER_PURPLE, ARBITER_ACCENT, STATE_BACKGROUND, observeJourney, statusPresentation, graphRows, eventSymbol } from './workflow-ui.mjs';
 import { registerResultUI } from './result-ui.mjs';
 import { desktopGraph, desktopTitle } from './desktop-ui.mjs';
+import { DEFAULT_SENTRY_DSN, diagnosticEvent, diagnosticsAllowed, formatEnvelope, observeTelemetryConsent as observeConsent } from './diagnostic-event.mjs';
 import { claudeRoute, routeEvent, routeReceipt, blockedStep, routingView, fableCreditGate, fableFallback, fallbackPermitted } from './native-routing.mjs';
 
 const PANE = 'statewright';
@@ -17,6 +18,35 @@ const fresh = conversation => ({ conversation, desktopNavigationRevision: ++navi
   native: null, control: null, controlError: '', generation: 0, requiresEnforcement: false, controlConsent: false, consentEpoch: 0,
   runningTool: null, actionBusy: false, journey: null, showGraph: true, routes: [], routeError: '', modelActivity: null, baseRequest: null, fallback: null });
 let view = fresh('');
+let diagnosticOptions = {};
+const diagnosticSeen = new Set();
+let diagnosticAttempts = 0;
+function reportDiagnostic($, v, reason, operation, phase) {
+  if (['auth', 'request_aborted'].includes(reason)) return; // Signed-out/cancelled is not a malfunction.
+  const event = diagnosticEvent({ plugin: 'claude-code', version: '0.3.4', platform: 'claude-native',
+    handled: true, context: { mechanism: 'handled', runtime: 'claude-native', reason, operation, phase } });
+  const key = JSON.stringify(event.fingerprint);
+  if (diagnosticSeen.has(key) || diagnosticAttempts >= 20) return;
+  diagnosticSeen.add(key);
+  // Sending must not stall the connection or native permission result.
+  $.clock.after(0, async () => {
+    let delivered = false;
+    try {
+      if (view !== v || diagnosticOptions.diagnostics === false) return;
+      const disabled = await $.env.get('STATEWRIGHT_SENTRY_DISABLED');
+      const enabled = await $.env.get('STATEWRIGHT_SENTRY_ENABLED');
+      if (view !== v || !diagnosticsAllowed({ disabled, enabled,
+        consent: Date.now() - (v.telemetryCheckedAt ?? 0) <= 60000 ? v.telemetryConsent : null })) return;
+      diagnosticAttempts++;
+      const response = await $.http.fetch('https://glitch.enhasa.cloud/api/12/envelope/?sentry_version=7&sentry_key=3c30b803a5b44d74bf9657db7a89f033', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-sentry-envelope' },
+        body: formatEnvelope({ dsn: DEFAULT_SENTRY_DSN, event }),
+      });
+      delivered = response.ok;
+    } catch { /* Never recurse, log secrets or affect host decisions. */ }
+    finally { if (!delivered) diagnosticSeen.delete(key); }
+  });
+}
 let connectTool = '';
 const workflowTools = new Map();
 const permissionFrames = new Map();
@@ -63,6 +93,7 @@ async function callControl($, args, permission) {
     };
     controlDiagnosticWrites = controlDiagnosticWrites.then(write, write).catch(() => {});
     await controlDiagnosticWrites;
+    reportControlDiagnostic($, v, diagnostic.code, args.operation);
     const message = diagnostic.code === 'auto_review_unavailable'
       ? 'Claude couldn’t review this workflow action.'
       : diagnostic.code === 'permission_refused' ? 'Claude did not permit this workflow action.'
@@ -72,6 +103,7 @@ async function callControl($, args, permission) {
   }
   finally { if (permissionFrames.get(key) === frame) permissionFrames.delete(key); }
 }
+function reportControlDiagnostic($, v, code, operation) { reportDiagnostic($, v, code, operation, 'control'); }
 function controlFailure(error) {
   const { code } = connectionFailure('control', error);
   // Error text is diagnostic only. Even native deny can withhold a result
@@ -88,6 +120,7 @@ async function nativeRequest($, operation, input, permission, fenceRead = false,
     ...(operation === 'get_state' && !fenceRead ? {} : { expectedRevision: v.native?.revision }) }, permission);
   if (await current($) !== v || v.generation !== generation) throw new Error('This request was superseded by a newer workflow action.');
   v.native = result;
+  observeConsent(v, result.telemetry_consent);
   v.journey = observeJourney(v.journey, result);
   v.requiresEnforcement = Boolean(result.state && !result.state.is_final);
   await $.store.set(`workflow-active:${v.conversation}`, v.requiresEnforcement);
@@ -276,6 +309,7 @@ async function recordConnection($, v, epoch, stage, outcome, code, operation = '
   connectionDiagnosticWrites = connectionDiagnosticWrites.then(write, write).catch(() => {});
   await connectionDiagnosticWrites;
   if (outcome === 'failed' && await live($, v, epoch)) {
+    reportDiagnostic($, v, code, stage === 'login' ? 'login' : 'connect', stage);
     v.connectionIssue = code;
     if (code === 'auto_review_unavailable')
       v.error = 'Claude couldn’t review this request. Choose Connect to approve this connection in Claude’s permission prompt. Your permission mode stays unchanged.';
@@ -290,6 +324,7 @@ async function connect($, v, epoch, allowSignIn) {
   let stage = 'check';
   try {
     if (!await live($, v, epoch)) return;
+    v.telemetryConsent = null; v.telemetryCheckedAt = 0;
     await recordConnection($, v, epoch, stage, 'running', 'checking');
     if (!await live($, v, epoch)) return;
     let result;
@@ -365,6 +400,7 @@ async function connect($, v, epoch, allowSignIn) {
     stage = 'catalog_decode';
     const catalog = allowSignIn ? decodeNativeConnection(resultCatalog, v.conversation) : decodeCatalogConnection(resultCatalog);
     if (!await live($, v, epoch)) return;
+    observeConsent(v, catalog.snapshot?.telemetry_consent ?? catalog.telemetryConsent);
     const names = catalog.workflows;
     v.names = names;
     v.workflowAliases = catalog.workflowAliases;
@@ -390,6 +426,7 @@ async function connect($, v, epoch, allowSignIn) {
           : await control.request({ operation: 'get_state', input: {} });
         if (!await live($, v, epoch)) return;
         v.native = snapshot;
+        observeConsent(v, snapshot.telemetry_consent);
         v.journey = observeJourney(v.journey, snapshot);
         v.requiresEnforcement = Boolean(snapshot.state && !snapshot.state.is_final);
         await $.store.set(`workflow-active:${v.conversation}`, v.requiresEnforcement);
@@ -463,6 +500,7 @@ async function restore($) {
 }
 
 export function register(on, options = {}) {
+  diagnosticOptions = options;
   registerResultUI(on, ARBITER_PURPLE);
   on('ui.message', async ($, e, next) => {
     if (e.surface === 'desktop' && e.component === 'AbovePrompt' &&
@@ -485,9 +523,11 @@ export function register(on, options = {}) {
   on('ui.fault', async ($, e, next) => {
     if (e.surface === 'desktop' && e.component === 'AbovePrompt' && e.element === 'status-sidebar' && e.module === 'hooks/desktop-action.js') {
       const v = await current($); v.desktopStatusClientFailed = true;
+      reportDiagnostic($, v, 'ui_failed', 'native_ui');
     }
     if (e.surface === 'desktop' && e.component === 'Pane' && e.requestId === PANE && e.module === 'hooks/desktop-action.js') {
       const v = await current($); v.desktopClientFailed = true;
+      reportDiagnostic($, v, 'ui_failed', 'native_ui');
     }
     return next(e);
   });
@@ -683,7 +723,9 @@ export function register(on, options = {}) {
   on('tool.check', { tool: /^(?!mcp__plugin[:_]statewright[:_]statewright__)/ }, async ($, e, next) => {
     if (await isControlQuestion($, e, next, e.input)) return next(e);
     if (e.tool === connectTool || workflowTools.has(e.tool)) return next(e);
-    return executionFor($).check(null, e, next);
+    const verdict = await executionFor($).check(null, e, next);
+    if (verdict?.decision === 'deny') reportDiagnostic($, await current($), 'permission_refused', 'pre_tool', 'control');
+    return verdict;
   }).catch(async ($, e, next) => next.error?.kind === 're-entry' && await isControlQuestion($, e, next, e.input)
     ? next(e) : { decision: 'deny', reason: 'Statewright could not verify this tool request. Refresh its connection.' });
   on('tool.call', async ($, e, next) => {
@@ -776,7 +818,12 @@ export function register(on, options = {}) {
   })
     .catch(($, e, next) => gatewayServer(e.server) ? { deny: 'Statewright control is unavailable.' } : next(e));
   on('classic.PostToolUse', async ($, e, next) => { await executionFor($).observe(null, e, false); return next(e); });
-  on('classic.PostToolUseFailure', async ($, e, next) => { await executionFor($).observe(null, e, true); return next(e); });
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    await executionFor($).observe(null, e, true);
+    if (['Bash', 'Shell', 'shell_command', 'exec_command'].includes(e.tool_name))
+      reportDiagnostic($, await current($), 'command_failed', 'command');
+    return next(e);
+  });
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e), v = await current($);
     if (result?.block || v.routeError || !v.requiresEnforcement || v.native?.state?.pending_approval) return result;

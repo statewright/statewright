@@ -691,7 +691,7 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  const reporter = createErrorReporter({ plugin: "executor", version: "0.3.1" });
+  const reporter = createErrorReporter({ plugin: "executor", version: "0.3.4" });
   reporter.installProcessHandlers();
   main().catch(async (error) => {
     if (!isExpectedPluginError(error)) await reporter.report(error, { mechanism: "entrypoint", operation: "statewright_exec" });

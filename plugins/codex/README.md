@@ -123,6 +123,13 @@ Statewright key. Each destination supplies its own Statewright integration and
 credential. This does not rebind an already-running shared daemon or enable
 Statewright on an unconfigured remote server.
 
+### Optional diagnostic reports
+
+Plugin failure reports follow your current Statewright account telemetry choice.
+Set `STATEWRIGHT_SENTRY_DISABLED=true` to opt out locally. Reports exclude prompts,
+commands, code and credentials. Pre-login and fatal-exit coverage has additional
+consent limits; see [telemetry and privacy](../../docs/guides/optional-telemetry.md).
+
 ### Exact native token telemetry
 
 Native Codex hooks expose tool metadata but not provider token totals. Exact

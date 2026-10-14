@@ -261,6 +261,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const statePath = ${JSON.stringify(statePath)};
+let diagnosticReporter;
 const waitForStartup = child => new Promise((resolve, reject) => {
   let settled = false;
   let spawned = false;
@@ -292,6 +293,11 @@ try {
   const runtimeUrl = pathToFileURL(join(dirname(state.wrapper), "lib", "desktop-runtime", "codex-desktop-app-server-launcher.mjs"));
   const { connectDesktopProfile, desktopProfileEnvironment, startProfileDesktopMcpBridge } = await import(runtimeUrl);
   const profileEnvironment = await desktopProfileEnvironment(state, process.env);
+  // Optional diagnostics must never become a launcher dependency.
+  try {
+    const { createErrorReporter } = await import(new URL("./error-reporting.mjs", runtimeUrl));
+    diagnosticReporter = createErrorReporter({ plugin: "codex", version: "0.3.4", environment: profileEnvironment });
+  } catch {}
   const profile = state.profile ?? "production";
   if (!["production", "staging", "development"].includes(profile)) throw new Error("Unknown Desktop profile in launcher state.");
   const laneRoot = join(dirname(statePath), "desktop-lanes", profile);
@@ -336,6 +342,9 @@ try {
     await bridge.close();
   }
 } catch (error) {
+  if (!["DESKTOP_CONNECT_CANCELLED", "CREDENTIAL_UNLOCK_CANCELLED", "DESKTOP_CONNECT_DENIED"].includes(error.code)) {
+    try { await diagnosticReporter?.report(error, { operation: "login", mechanism: "entrypoint" }); } catch {}
+  }
   process.stderr.write(\`ChatGPT + Statewright could not start: \${error.message}\\n\`);
   process.exitCode = error.code === "CREDENTIAL_MISSING" ? 20
     : ["CREDENTIAL_STORE_UNAVAILABLE", "CREDENTIAL_HELPER_MISSING", "CREDENTIAL_HELPER_FAILED", "CREDENTIAL_HELPER_TIMEOUT"].includes(error.code) ? 21

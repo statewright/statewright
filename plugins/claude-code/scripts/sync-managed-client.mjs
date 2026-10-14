@@ -10,6 +10,8 @@ const EXECUTOR_ROOT = resolve(CLAUDE_ROOT, "..", "executor");
 
 export const MANAGED_CLIENT_FILES = [
   ["lib/error-reporting.mjs", "executor/lib/error-reporting.mjs"],
+  ["lib/diagnostic-event.mjs", "executor/lib/diagnostic-event.mjs"],
+  ["lib/diagnostic-event.mjs", "hooks/diagnostic-event.mjs"],
   ["statewright-managed-client.mjs", "executor/statewright-managed-client.mjs"],
   ["lib/git-closeout.mjs", "executor/lib/git-closeout.mjs"],
   ["lib/managed-client-supervisor.mjs", "executor/lib/managed-client-supervisor.mjs"],

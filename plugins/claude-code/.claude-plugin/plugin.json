@@ -17,6 +17,12 @@
     "workflow"
   ],
   "userConfig": {
+    "diagnostics": {
+      "type": "boolean",
+      "title": "Diagnostic reports",
+      "description": "Follow your optional Statewright account telemetry choice. Turn off here to stop this plugin's reports even when account telemetry is allowed. Reports exclude prompts, code, commands and credentials.",
+      "default": true
+    },
     "gateway_url": {
       "type": "string",
       "title": "Statewright gateway",

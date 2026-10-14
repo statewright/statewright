@@ -248,7 +248,7 @@ pub(super) fn discovery(
                 })
                 .map(|_| json!({"version":1}));
             serde_json::to_value(ToolCallResult::text(
-                json!({"workflows":names,"workflow_aliases":crate::config::workflow_aliases(&validated.workflows),"active":null,"native_control":native_control})
+                json!({"workflows":names,"workflow_aliases":crate::config::workflow_aliases(&validated.workflows),"active":null,"native_control":native_control,"telemetry_consent":validated.telemetry_consent})
                     .to_string(),
             ))
             .unwrap()
@@ -365,12 +365,16 @@ pub(super) async fn handle(
                 tx,
                 resource: resource.into(),
                 native_revision: uuid::Uuid::new_v4().to_string(),
+                telemetry_consent: None,
+                telemetry_watermark: None,
             }));
             sessions.insert(session_key, session.clone());
             session
         }
     };
     let mut session = session.lock().await;
+    // Do not let an older in-flight catalog restore a withdrawn preference.
+    session.observe_consent(validated.telemetry_consent);
     // An empty-catalog conversation has no machine yet. Seed it once a current
     // definition exists so load_workflow preserves the authenticated plan limit.
     let machine_id = session.gateway.session_id().to_string();
@@ -467,6 +471,7 @@ pub(super) async fn snapshot(
     let result = json!({"protocol_version":1,"conversation_id":chat,
         "revision":session.native_revision,"state":current,"outcome":outcome,
         "workflow_aliases":session.gateway.workflow_aliases(),
+        "telemetry_consent":session.telemetry_consent,
         "capabilities":{"workflow_control":true,"native_tool_enforcement":true,"human_approval":true,"model_routing":false},
         "enforcement_scope":"native_pre_permission_hooks"});
     JsonRpcResponse::success(

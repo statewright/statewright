@@ -7,5 +7,7 @@ describe("published OMX hook", () => {
     const source = await readFile(resolve("dist/hook.js"), "utf8")
     expect(source).toMatch(/Unexpected plugin failure \(message withheld\)/)
     expect(source).toMatch(/uncaughtExceptionMonitor/)
+    expect(source).toContain('/api/gateway/telemetry')
+    expect(source).toContain('synthetic_canary')
   })
 })

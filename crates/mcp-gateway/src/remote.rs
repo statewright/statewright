@@ -75,6 +75,59 @@ struct RemoteSession {
     tx: mpsc::Sender<String>,
     resource: String,
     native_revision: String,
+    telemetry_consent: Option<TelemetryConsent>,
+    telemetry_watermark: Option<TelemetryConsent>,
+}
+
+impl RemoteSession {
+    fn observe_consent(&mut self, next: Option<TelemetryConsent>) {
+        observe_telemetry_consent(
+            &mut self.telemetry_consent,
+            &mut self.telemetry_watermark,
+            next,
+        );
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TelemetryConsent {
+    version: u32,
+    enabled: bool,
+    updated_at: String,
+}
+
+fn decode_telemetry_consent(value: Option<serde_json::Value>) -> Option<TelemetryConsent> {
+    let consent: TelemetryConsent = serde_json::from_value(value?).ok()?;
+    (consent.version == 2
+        && consent.updated_at.len() < 40
+        && chrono::DateTime::parse_from_rfc3339(&consent.updated_at).is_ok())
+        .then_some(consent)
+}
+
+fn observe_telemetry_consent(
+    current: &mut Option<TelemetryConsent>,
+    watermark: &mut Option<TelemetryConsent>,
+    next: Option<TelemetryConsent>,
+) {
+    // Missing, malformed or old-purpose grants turn reporting off. A late valid
+    // response cannot restore a grant withdrawn by a newer account decision.
+    if next.as_ref().is_none_or(|new| {
+        !new.enabled || watermark.as_ref().is_none_or(|old| {
+            new.updated_at > old.updated_at || (new.updated_at == old.updated_at && old.enabled)
+        })
+    }) {
+        if let Some(new) = &next {
+            let mut observed = new.clone();
+            if let Some(old) = watermark.as_ref() {
+                if old.updated_at > observed.updated_at {
+                    observed.updated_at = old.updated_at.clone();
+                }
+            }
+            *watermark = Some(observed);
+        }
+        *current = next;
+    }
 }
 
 #[derive(Deserialize)]
@@ -523,6 +576,8 @@ async fn handle_sse(
             tx,
             resource,
             native_revision: uuid::Uuid::new_v4().to_string(),
+            telemetry_consent: None,
+            telemetry_watermark: None,
         })),
     );
 
@@ -660,6 +715,8 @@ async fn handle_streamable_http(
             tx,
             resource,
             native_revision: uuid::Uuid::new_v4().to_string(),
+            telemetry_consent: None,
+            telemetry_watermark: None,
         })))
     } else {
         None
@@ -776,6 +833,7 @@ struct FetchResult {
     plan_limit: Option<u64>,
     oauth_client_id: String,
     native_session: Option<native::Identity>,
+    telemetry_consent: Option<TelemetryConsent>,
 }
 
 async fn fetch_workflows(
@@ -808,6 +866,7 @@ async fn fetch_workflows(
         #[serde(default)]
         oauth_client_id: String,
         native_session: Option<native::Identity>,
+        telemetry_consent: Option<serde_json::Value>,
     }
 
     let data: GatewayResponse = resp
@@ -828,6 +887,7 @@ async fn fetch_workflows(
         workflows: data.workflows,
         owner_id: data.owner_id.unwrap_or_default(),
         plan_limit: data.plan_limit,
+        telemetry_consent: decode_telemetry_consent(data.telemetry_consent),
         oauth_client_id: data.oauth_client_id,
         native_session: data.native_session,
     })
@@ -947,6 +1007,8 @@ async fn handle_runtime_approval(
             tx,
             resource,
             native_revision: uuid::Uuid::new_v4().to_string(),
+            telemetry_consent: None,
+            telemetry_watermark: None,
         }));
         let mut sessions = state.sessions.write().await;
         session = Some(
@@ -1579,6 +1641,8 @@ mod tests {
                 tx,
                 resource: "https://mcp.statewright.example/mcp".into(),
                 native_revision: uuid::Uuid::new_v4().to_string(),
+                telemetry_consent: None,
+                telemetry_watermark: None,
             })),
         );
 

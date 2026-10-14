@@ -346,6 +346,10 @@ The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, em
 
 [docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows), and [isolated delivery](https://docs.statewright.ai/features/isolated-delivery/).
 
+Optional plugin diagnostics follow your Statewright account telemetry choice,
+with local opt-outs. Reports exclude prompts, code, commands and credentials.
+See [telemetry and privacy](docs/guides/optional-telemetry.md).
+
 ## Contributing
 
 Workflow definitions, templates, and bug reports welcome. See [Create Your Own](https://docs.statewright.ai/workflows/create-your-own/) for how to write workflows.

@@ -163,6 +163,41 @@ for (const pauseStage of ['check', 'catalog']) test(`cancellation during ${pause
   assert.equal(h.state.connects, pauseStage === 'check' ? 0 : 1);
 });
 
+for (const allowed of [false, true]) test(`native handled failures respect account grant: ${allowed}`, async () => {
+  const h = await host({ startup: false });
+  const catalog = JSON.parse(h.state.catalog.content[0].text);
+  catalog.telemetry_consent = { version: 2, enabled: allowed, updated_at: new Date().toISOString() };
+  h.state.catalog = { content: [{ type: 'text', text: JSON.stringify(catalog) }] };
+  await h.flush();
+  await h.fire('classic.PostToolUseFailure', { tool_name: 'Bash', tool_input: { command: 'PRIVATE_COMMAND' }, error: 'PRIVATE_PAYLOAD' });
+  await h.flush();
+  assert.equal(h.state.diagnostics?.length ?? 0, allowed ? 1 : 0);
+  if (allowed) {
+    const body = h.state.diagnostics[0].init.body;
+    assert.doesNotMatch(body, /PRIVATE|11111111|tool_input/);
+    assert.match(body, /command_failed/);
+    assert.match(body, /statewright-claude-code@0.3.4/);
+  }
+});
+test('native local opt-out defeats explicit enable; network errors do not retry workflow', async () => {
+  const h = await host({ options: { diagnostics: false } });
+  h.state.env = { STATEWRIGHT_SENTRY_ENABLED: 'true' };
+  h.state.read = async () => { throw new Error('PRIVATE permission denied'); };
+  await h.press('connect'); await h.flush(); await h.flush();
+  assert.equal(h.state.diagnostics?.length ?? 0, 0);
+  assert.equal(h.state.calls.length, 1);
+});
+test('native reporting failure never replaces connection diagnosis or retries MCP', async () => {
+  const h = await host();
+  h.state.env = { STATEWRIGHT_SENTRY_ENABLED: 'true' };
+  let attempted = 0;
+  h.$.http.fetch = async () => { attempted++; throw new Error('offline'); };
+  h.state.read = async () => { throw new Error('PRIVATE permission denied'); };
+  await h.press('connect'); await h.flush(); await h.flush();
+  assert.equal(attempted, 1); assert.equal(h.state.calls.length, 1);
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'permission_refused');
+});
+
 async function host({ startup = true, options = {} } = {}) {
   const hooks = [], timers = [], events = [], stored = new Map();
   const state = { session: CHAT, connects: 0, calls: [], commands: [], slashCommands: [], copies: [], copied: true, native: null,
@@ -175,7 +210,8 @@ async function host({ startup = true, options = {} } = {}) {
     store: { get: async key => stored.get(key), set: async (key, value) => stored.set(key, value) },
     session: { id: async () => state.sessionId ? state.sessionId() : state.session, model: async () => state.model ?? 'claude-opus-5-5' },
     settings: { read: async () => state.settings ?? {} },
-    env: { get: async () => state.noFallback },
+    env: { get: async key => key === 'CLAUDE_CODE_NO_MODEL_FALLBACK' ? state.noFallback : state.env?.[key] },
+    http: { fetch: async (url, init) => { (state.diagnostics ??= []).push({ url, init }); return { ok: true, status: 200 }; } },
     command: { register: async () => {}, run: async args => { state.slashCommands.push(args); return {}; } },
     process: { run: async (argv, init) => { state.commands.push({ argv, init }); return { exitCode: 0, ...await state.run?.({ argv, init }) }; } },
     tool: { check: async args => state.toolPermission ? state.toolPermission(args) : { decision: 'allow' },

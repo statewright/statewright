@@ -41,6 +41,8 @@ export const RUNTIME_FILES = [
   "scripts/transcript-telemetry.mjs",
   "executor/statewright-managed-client.mjs",
   "executor/lib/error-reporting.mjs",
+  "executor/lib/diagnostic-event.mjs",
+  "hooks/diagnostic-event.mjs",
   "executor/lib/git-closeout.mjs",
   "executor/lib/approval-evidence.mjs",
   "executor/lib/managed-client-supervisor.mjs",

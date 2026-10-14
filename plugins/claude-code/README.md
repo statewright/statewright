@@ -42,6 +42,11 @@ It does not override file/command permission rules or workflow approvals.
 
 ## Use a workflow
 
+Optional diagnostic reports follow your current Statewright account telemetry
+choice. `/statewright configure` → **Diagnostic reports** turns them off for this
+plugin even when the account allows them. Reports exclude prompts, commands,
+code and credentials. See [telemetry and privacy](../../docs/guides/optional-telemetry.md).
+
 Select a workflow in the sidebar and choose **Start**, or ask Claude to use a
 named workflow. Selecting its name alone does not start it. The Arbiter shows
 current state, available events, and model/effort when known. Expand tool-result

@@ -55,6 +55,7 @@ tasks:
       - node --test plugins/cursor/tests/*.test.mjs
       - npm test --prefix plugins/pi
       - npm test --prefix plugins/opencode
+      - npm run build --prefix plugins/omx
       - npm test --prefix plugins/omx
       - bash plugins/codex/tests/tool-policy.test.sh
       - bash plugins/codex/tests/mcp-proxy-handshake.test.sh

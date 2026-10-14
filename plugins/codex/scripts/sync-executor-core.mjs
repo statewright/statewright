@@ -12,6 +12,7 @@ export const EXECUTOR_CORE_FILES = [
   ["lib/command-evidence.mjs", "scripts/lib/command-evidence.mjs"],
   ["lib/command-yaml.generated.mjs", "scripts/lib/command-yaml.generated.mjs"],
   ["lib/error-reporting.mjs", "scripts/lib/error-reporting.mjs"],
+  ["lib/diagnostic-event.mjs", "scripts/lib/diagnostic-event.mjs"],
   ["lib/delivery-config.mjs", "scripts/lib/delivery-config.mjs"],
   ["lib/delivery-controller.mjs", "scripts/lib/delivery-controller.mjs"],
   ["lib/hook-process.mjs", "scripts/lib/hook-process.mjs"],

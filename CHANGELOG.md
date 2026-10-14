@@ -3,9 +3,15 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Codex Plugin 0.3.4] — 2026-10-01
+## [Codex and Claude Plugins 0.3.4] — Unreleased
 
 ### Added
+- **[claude]** Native TUI and Desktop Code → Local integration: Arbiter
+  status/sidebar, workflow selection and execution, compact result summaries,
+  OAuth, per-state model/effort routing and scoped approval recovery.
+- **[plugins]** Optional scrubbed diagnostic reports follow one versioned
+  Statewright account telemetry choice. Local opt-outs override an account
+  grant; older recording-only approvals do not enable plugin diagnostics.
 - **[workflows]** Add `agentic-engineering` (alias `engineering`) as the
   provider-neutral starter for fixes, features, refactors and investigations,
   with baseline evidence, validation, review and one bounded repair round.
@@ -26,6 +32,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   treating a transport failure as inactivity.
 
 ### Fixed
+- **[codex]** Restore managed services across workflow handoffs and preserve
+  the host model when a starter workflow inherits the user's selected model.
+- **[claude]** Request native approval when updated workflow permissions are
+  needed, without requiring a manual sidebar catalog refresh.
 - **[codex]** Stop automatic browser launches after `invalid_api_key`; OAuth
   starts only through the explicit connection command, while invalid
   credentials continue to fail closed.

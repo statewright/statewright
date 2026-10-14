@@ -1,11 +1,15 @@
-# Statewright for Claude 0.3.4 (Draft)
+# Statewright for Claude 0.3.4
 
 Statewright now runs as a native Claude plugin in the terminal and in
 **Claude Desktop → Code → Local**. Keep using the ordinary Claude app and CLI;
-no Statewright app wrapper is needed. This candidate has not been published.
+no Statewright app wrapper is needed.
 
 ## What changed
 
+- **Start with engineering.** Ask to use the engineering workflow for a fix,
+  feature, refactor or investigation. The `agentic-engineering` starter includes
+  baseline evidence, validation, review and a bounded repair round. Your existing
+  workflows stay available; the old `bugfix` starter can be deleted.
 - **An Arbiter in your conversation.** See the current workflow state, available
   events, model and effort. Open the sidebar to choose and start a workflow,
   reconnect, or turn it Off. Named workflow requests use the same integration.
@@ -51,11 +55,11 @@ Native pre-permission checks also cannot prevent a later host-side argument
 rewrite from executing without another check; post-call comparison detects that
 case but is not prevention.
 
-## Candidate validation
+## Validation scope
 
-Source and native plugin contract tests cover connection recovery, scoped
-consent, workflow controls, model routing, cancellation, result rendering and
-migration. These tests do not establish live OAuth or platform acceptance.
-Fresh consumer-identity TUI and Desktop journeys, the documentation/demo review,
-and the full release and disclosure audit remain release gates. Legacy shell
-transport canaries are not acceptance evidence for the new native plugin.
+Validation includes consumer-plugin workflow completion in the TUI and macOS
+Desktop Code → Local, plus native model-routing and result-rendering checks.
+Staging account consent, OAuth and installed Node diagnostic delivery were
+tested separately; native Claude diagnostic dispatch is covered by engine
+contract tests, not a fresh live Desktop failure injection. Legacy shell
+transport tests are not acceptance evidence for the native plugin.

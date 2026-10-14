@@ -1,10 +1,14 @@
-# Statewright for Codex 0.3.4 (Draft)
+# Statewright for Codex 0.3.4
 
-This release candidate adds browser onboarding, managed Desktop continuity and
-more precise shell-command classification. It has not been tagged or published.
+This release adds browser onboarding, managed Desktop continuity and
+more precise shell-command classification.
 
 ## What changed
 
+- **Start with engineering.** Ask to use the engineering workflow for a fix,
+  feature, refactor or investigation. The `agentic-engineering` starter includes
+  baseline evidence, validation, review and a bounded repair round. Existing
+  workflows are preserved; the old `bugfix` starter can be deleted.
 - **Connect in a browser.** Confirm a device code and sign in to Statewright.
   The plugin verifies the returned credential and stores it in macOS Keychain,
   Windows Credential Manager or Linux Secret Service, keyed by gateway.
@@ -34,6 +38,11 @@ more precise shell-command classification. It has not been tagged or published.
 - **Keep ownership and recovery scoped.** Local hooks, remote connectors,
   workflow approvals and credentials stay bound to their owning session.
   Explicit remote destinations do not inherit another managed session's identity.
+- **Choose whether to send diagnostics.** Supported plugin failures can send a
+  small report under your Statewright account's optional telemetry choice.
+  Older recording-only approvals do not enable plugin reports, and local
+  opt-outs take precedence. Reports exclude commands, prompts, credentials and
+  exception text. [Details and opt-out](../guides/optional-telemetry.md).
 
 ## Install or upgrade
 
@@ -74,9 +83,10 @@ present the decision. Cancellation, disconnect, expiry, identity mismatch or an
 unsupported host leaves work pending or denied. Provider telemetry is exact
 only when a supported native event is present; missing data is not zero usage.
 
-## Candidate status
+## Validation scope
 
-Automated source, packaging and native protocol tests do not establish live
-OAuth, rendered Desktop behavior or provider model execution. Native TUI and
-Desktop acceptance, documentation/demo review and the exact-artifact release
-audit remain separate release gates.
+Validation includes native TUI workflow completion and model handoffs, macOS
+Desktop historical-chat recovery and workflow completion, plus staging OAuth
+and account-authorized diagnostic delivery. Source, packaging and native
+protocol checks complement those journeys; they are not substitutes for them.
+Cross-platform release assets have their own build and artifact-smoke gates.

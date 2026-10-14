@@ -19,6 +19,9 @@ test("tracked public sources contain no private model-infrastructure references"
     ["wey", "oun"].join(""),
     ["cor", "tana"].join(""),
     ["andu", "ril"].join(""),
+    ["ae", "rith"].join(""),
+    ["/Users/", "ben"].join(""),
+    ["auld", "wyrm"].join(""),
   ];
   const violations = [];
   for (const path of paths) {

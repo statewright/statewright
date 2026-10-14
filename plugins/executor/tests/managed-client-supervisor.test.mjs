@@ -211,7 +211,7 @@ test("managed identity isolates a resumed thread across project directories", as
   const home = await mkdtemp(join(tmpdir(), "statewright-managed-identity-scope-"));
   try {
     const first = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/harbringer" });
-    const second = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/auldwyrm" });
+    const second = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/example" });
     assert.notEqual(first.clientId, second.clientId);
     assert.equal(first.restored, false);
     assert.equal(second.restored, false);
@@ -244,9 +244,9 @@ test("same-directory resumed sessions retain independent owners while a duplicat
 test("managed resumed session persists its tmux label without changing identity bindings", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-managed-label-"));
   try {
-    assert.equal(await bindManagedSessionLabel({ host: "codex", sessionId: "adv-thread", label: "adv", cwd: "/workspace/auldwyrm", home }), true);
+    assert.equal(await bindManagedSessionLabel({ host: "codex", sessionId: "adv-thread", label: "adv", cwd: "/workspace/example", home }), true);
     assert.deepEqual(await readManagedSessionLabels(home), {
-      "codex:adv-thread": { label: "adv", cwd: "/workspace/auldwyrm", recorded_at: (await readManagedSessionLabels(home))["codex:adv-thread"].recorded_at },
+      "codex:adv-thread": { label: "adv", cwd: "/workspace/example", recorded_at: (await readManagedSessionLabels(home))["codex:adv-thread"].recorded_at },
     });
   } finally { await rm(home, { recursive: true, force: true }); }
 });

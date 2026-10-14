@@ -2434,15 +2434,15 @@ mod tests {
             assessment(RiskBand::Low, ExposureBand::Local, "shell")
         );
         assert_eq!(
-            assess_shell("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            assess_shell("git -C /Users/example/dev/example-app status --short --branch"),
             assessment(RiskBand::Low, ExposureBand::Local, "shell")
         );
         assert_eq!(
-            assess_shell("git init /Users/ben/dev/panoply"),
+            assess_shell("git init /Users/example/dev/example-app"),
             assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
-            assess_shell("git init -b main /Users/ben/dev/panoply"),
+            assess_shell("git init -b main /Users/example/dev/example-app"),
             assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell", "Write",)
         );
         assert_eq!(
@@ -4752,7 +4752,7 @@ mod tests {
             ResolvedEffect::BoundedLocalExecution
         );
         assert_eq!(
-            resolved("/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway"),
+            resolved("/Users/example/.cargo/bin/cargo test --offline -p statewright-mcp-gateway"),
             ResolvedEffect::BoundedLocalExecution
         );
         assert_eq!(resolved("npm test"), ResolvedEffect::BoundedLocalExecution);

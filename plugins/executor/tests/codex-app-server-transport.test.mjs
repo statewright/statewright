@@ -1278,7 +1278,7 @@ test("resume rows replace stale titles with only the original directory and last
     id: 1,
     result: {
       data: [
-        { id: "auldwyrm", cwd: "/home/tester/dev/auldwyrm", name: "auldwyrm", status: { type: "active" } },
+        { id: "example", cwd: "/home/tester/dev/example", name: "example", status: { type: "active" } },
         { id: "resume", cwd: "/home/tester/dev/resume", name: "Frame faith alignment", status: { type: "notLoaded" } },
         { id: "legacy", cwd: null, preview: "Untouched legacy entry" },
         { id: "fallback", cwd: "/home/tester/dev/nomad", name: null, preview: "What is next?" },
@@ -1286,22 +1286,22 @@ test("resume rows replace stale titles with only the original directory and last
     },
   };
   const metadata = {
-    auldwyrm: { cwd: "/home/tester/dev/auldwyrm", lastUserMessage: "fix statewright_get_state please" },
+    example: { cwd: "/home/tester/dev/example", lastUserMessage: "fix statewright_get_state please" },
     resume: { cwd: "/home/tester/dev/resume", lastUserMessage: "My latest\nmessage" },
     fallback: { cwd: "/home/tester/dev/nomad", lastUserMessage: "Read-only validation, please" },
   };
   const labelled = labelThreadListResponse(source, "/home/tester", {}, metadata);
   assert.equal(labelled.result.data.length, 3, "omit sessions without submitted input, never use stale titles");
-  assert.equal(labelled.result.data[0].name, "[~/dev/auldwyrm] fix statewright_get_state please");
+  assert.equal(labelled.result.data[0].name, "[~/dev/example] fix statewright_get_state please");
   assert.equal(labelled.result.data[1].name, "[~/dev/resume] My latest message");
   assert.equal(labelled.result.data[2].preview, "[~/dev/nomad] Read-only validation, please");
-  assert.equal(labelled.result.data[0].id, "auldwyrm");
+  assert.equal(labelled.result.data[0].id, "example");
   assert.equal(labelled.result.data[0].status.type, "active");
   assert.equal(labelThreadListResponse(labelled, "/home/tester", {}, metadata), labelled);
-  assert.equal(labelThreadListResponse(source, "/home/tester", { "codex:auldwyrm": { label: "adv" } }, metadata).result.data[0].name, labelled.result.data[0].name);
-  assert.equal(source.result.data[0].name, "auldwyrm", "display changes must not mutate saved metadata");
+  assert.equal(labelThreadListResponse(source, "/home/tester", { "codex:example": { label: "adv" } }, metadata).result.data[0].name, labelled.result.data[0].name);
+  assert.equal(source.result.data[0].name, "example", "display changes must not mutate saved metadata");
   const onlyFork = {result: {data: [source.result.data[0]], nextCursor: "page-2"}};
-  const hidden = labelThreadListResponse(onlyFork, "/home/tester", {}, {auldwyrm: {...metadata.auldwyrm, threadSource: "subagent"}});
+  const hidden = labelThreadListResponse(onlyFork, "/home/tester", {}, {example: {...metadata.example, threadSource: "subagent"}});
   assert.deepEqual(hidden.result, {data: [], nextCursor: "page-2"});
 });
 

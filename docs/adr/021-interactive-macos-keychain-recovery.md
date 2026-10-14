@@ -1,12 +1,12 @@
 # ADR 021: Interactive macOS Keychain recovery for managed TUI launchers
 
-Status: Accepted locally; user-reported SSH resume succeeded on 2026-10-11
+Status: Accepted for 0.3.4
 
 ## Context
 
 The 0.3.4 managed Codex launcher resolves its gateway-scoped credential before
-starting a resumed TUI. On aerith.local the same staging credential is readable
-from the graphical login, while `scodex resume` over SSH exits with “OS
+starting a resumed TUI. A gateway credential may be readable
+from the graphical login, while `codex resume` over SSH exits with “OS
 credential store could not read this gateway credential.” The helper currently
 maps every keyring error other than `NoEntry` to that message, so the exact
 macOS status is not established by the existing output.
@@ -46,23 +46,14 @@ The existing gateway identity and helper remain authoritative after unlock.
 
 ## Consequences and validation
 
-Fixture tests cover fixed executable/argv, one retry, cancellation, unlock
-failure, missing credentials, noninteractive macOS, and Linux/Windows no-op
-behavior. The actual readline confirmation and a one-shot Codex TTY are also
-covered. Generated Codex and Claude runtime copies match the source; the full
-`task test:plugin-release` gate exited 0 on the reviewed candidate
-`0.3.4+codex.20261011140803`. Live SSH acceptance must use the normal
-`scodex resume` launcher and remains separate from those tests; an untrusted
-SSH host key must not be bypassed to manufacture that evidence. The user
-subsequently reported that the normal SSH retry worked. This is user-reported
-live acceptance, not an independently captured terminal trace.
+Fixture coverage includes fixed executable/argv, one retry, cancellation,
+unlock failure, missing credentials, noninteractive macOS, and Linux/Windows
+no-op behavior. Live SSH acceptance must use the normal managed launcher and
+remains separate from fixture checks. A version smoke does not exercise the
+keychain lookup. Do not bypass an untrusted SSH host key to obtain evidence.
 
-The supported managed-client installer placed this candidate at
-`~/.statewright/runtime/codex/0.3.4+codex.20261011140803` and switched only
-the local Codex shim. Installed launcher and credential-store bytes match the
-tested source, and `scodex --version` reaches Codex CLI 0.160.0. That version
-smoke does not exercise the keychain lookup; the separate user SSH test above
-provides the live acceptance signal.
+See the [Codex guide](../../plugins/codex/README.md) for installation and
+credential recovery. Operational installation receipts are not part of this ADR.
 
 ## Rollback
 

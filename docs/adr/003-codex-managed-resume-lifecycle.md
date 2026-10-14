@@ -82,7 +82,7 @@ inspect or rewrite prompt text, titles, rollout contents, or session metadata.
 
 ## Validation and review
 
-- The original Auldwyrm and Nomad resume failures were traced to live Codex
+- The original cross-project resume failures were traced to live Codex
   writer processes with no controlling terminal, rather than a false lock.
 - The affected App Server transport file passed 20/20. The complete executor
   suite passed 97/97 with inherited `CODEX_HOME` and

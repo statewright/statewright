@@ -3,7 +3,7 @@
 Statewright provides protocol-level state-machine guardrails for AI coding
 agents. This repository contains the public implementation and its public
 documentation; private research, operational notes, credentials, and release
-coordination belong in the Auldwyrm repository.
+coordination belong in the private operations repository.
 
 ## Repository layout
 
@@ -20,7 +20,7 @@ coordination belong in the Auldwyrm repository.
 - Keep benchmark/release evidence reproducible and label provisional results
   clearly.
 - Do not place private research or deployment coordination in this repository;
-  keep it in Auldwyrm.
+  keep it in the private operations repository.
 - Preserve existing user changes and use focused commits.
 
 ## Quick start

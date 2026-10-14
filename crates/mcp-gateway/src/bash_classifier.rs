@@ -2351,7 +2351,7 @@ mod tests {
     #[test]
     fn git_global_working_directory_preserves_the_real_subcommand() {
         assert_eq!(
-            classify("git -C /Users/ben/dev/anytype-heart status --short --branch"),
+            classify("git -C /Users/example/dev/example-app status --short --branch"),
             vec![OpClass::GitRead]
         );
         assert_eq!(
@@ -2380,11 +2380,11 @@ mod tests {
     fn git_init_is_only_a_bounded_literal_local_write() {
         for command in [
             "git init",
-            "git init /Users/ben/dev/panoply",
-            "git init -b main /Users/ben/dev/panoply",
-            "git init --initial-branch main /Users/ben/dev/panoply",
-            "git init --initial-branch=main --quiet /Users/ben/dev/panoply",
-            "git -C /Users/ben/dev init panoply",
+            "git init /Users/example/dev/example-app",
+            "git init -b main /Users/example/dev/example-app",
+            "git init --initial-branch main /Users/example/dev/example-app",
+            "git init --initial-branch=main --quiet /Users/example/dev/example-app",
+            "git -C /Users/example/dev init example-app",
         ] {
             assert_eq!(classify(command), vec![OpClass::LocalWrite], "{command}");
         }
@@ -2393,10 +2393,10 @@ mod tests {
             "git init first second",
             "git init -template",
             "git init -b",
-            "git init -b --quiet /Users/ben/dev/panoply",
-            "git init -b main -b trunk /Users/ben/dev/panoply",
-            "git init --template=/private/template /Users/ben/dev/panoply",
-            "git init --separate-git-dir /private/git /Users/ben/dev/panoply",
+            "git init -b --quiet /Users/example/dev/example-app",
+            "git init -b main -b trunk /Users/example/dev/example-app",
+            "git init --template=/private/template /Users/example/dev/example-app",
+            "git init --separate-git-dir /private/git /Users/example/dev/example-app",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
         }
@@ -2407,7 +2407,7 @@ mod tests {
         for command in [
             "git add -- README.md",
             "git add -- docs/research/001-anytype.md docs/adr/0002-boundary.md fixtures/compatibility/cases.json",
-            "git -C /Users/ben/dev/panoply add -- README.md docs/plan/001-plan.md",
+            "git -C /Users/example/dev/example-app add -- README.md docs/plan/001-plan.md",
             "git add -- 'docs/a file.md'",
         ] {
             assert_eq!(classify(command), vec![OpClass::Passthrough], "{command}");
@@ -2550,7 +2550,7 @@ mod tests {
             "cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline --workspace",
             "cargo test --workspace --all-targets --all-features --offline",
-            "/Users/ben/.cargo/bin/cargo test --offline -p statewright-mcp-gateway",
+            "/Users/example/.cargo/bin/cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline -p statewright-mcp-gateway allowed_commands_admit_only_ast_proven_read_only_composition",
         ] {
             assert_eq!(
@@ -3257,7 +3257,7 @@ mod tests {
         }
         for command in [
             "git status",
-            "git -C /Users/ben/dev/anytype-heart status --short --branch",
+            "git -C /Users/example/dev/example-app status --short --branch",
             "git --no-pager diff --no-ext-diff --no-textconv",
             "git --no-pager diff --no-ext-diff --no-textconv -- README.md",
             "git --no-pager branch --list",

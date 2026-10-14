@@ -13,7 +13,7 @@ import { resolveApiKey } from "./remote-client.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
-import { WorkflowRouteOriginStore } from "./workflow-route-origin.mjs";
+import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -36,6 +36,9 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "managed-client-identity.mjs"),
   join(EXECUTOR_ROOT, "statewright-tool-summary.mjs"),
   join(EXECUTOR_ROOT, "workflow-route-origin.mjs"),
+  join(EXECUTOR_ROOT, "desktop-workflow-services.mjs"),
+  join(EXECUTOR_ROOT, "desktop-native-usage.mjs"),
+  join(EXECUTOR_ROOT, "local-telemetry-agent.mjs"),
   join(EXECUTOR_ROOT, "gateway-profile.mjs"),
   join(EXECUTOR_ROOT, "credential-store.mjs"),
 ];
@@ -255,22 +258,26 @@ async function main() {
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
       ownsThread: async threadId => (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId });
   const knownThreadCwds = new Map();
-  const workflowOriginStore = new WorkflowRouteOriginStore({
-    root: join(root, "workflow-origins"),
-    clientId,
-    ownsBinding: async binding => (await readCodexRootSession(controlDir, clientId))?.sessionId === binding.thread_id,
+  const services = codexWorkflowServices({home, controlDir, clientId,
+    // TUI retains its existing OTLP ingestion. Native receipts stay local so
+    // two independently identified sources cannot double-count usage.
+    ownsThread: approvalService.ownsThread,
+    getState: () => approvalService.getState(),
+    peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
   });
   let runtime = null;
   let stopping = false;
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    services.closeNativeUsage();
     await runtime?.close();
     await bridge.close();
     await unlink(manifestPath).catch(() => {});
     process.exit(0);
   };
   runtime = await startCodexAppServerRuntime({
+    ...services,
     command,
     cwd,
     home,
@@ -286,7 +293,6 @@ async function main() {
     },
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     approvalService,
-    peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
     threadListCwd,
     getThreadLabels: () => readManagedSessionLabels(home),
     getThreadCwds: (threadIds) => readCodexThreadCwds({ threadIds, home, codexHome, metadataCache: knownThreadCwds }),
@@ -298,14 +304,6 @@ async function main() {
     onThreadResumed: terminalLabel
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,
-    workflowOriginStore,
-    routeOwner: async threadId => {
-      const registration = await readCodexRootSession(controlDir, clientId);
-      return {
-        client_id: clientId,
-        root_session_id: registration?.sessionId === threadId ? registration.sessionId : null,
-      };
-    },
     onIdle: stop,
     telemetry: telemetryWriter(process.env),
     reporter,

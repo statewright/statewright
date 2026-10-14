@@ -1,15 +1,16 @@
 import { join } from "node:path";
 import { readCodexRootSession } from "./managed-client-identity.mjs";
-import { peekCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { WorkflowRouteOriginStore } from "./workflow-route-origin.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
-import { DesktopUsageRelay } from "./desktop-native-usage.mjs";
+import { DesktopUsageRelay, projectDesktopUsage } from "./desktop-native-usage.mjs";
 
 // Keep per-thread workflow ownership separate from the profile-wide Desktop
 // dispatcher. The loopback bridge supplies state; no gateway key enters here.
-export function desktopWorkflowServices({home, controlDir, clientId, ownsThread, getState, bridge}) {
+export function codexWorkflowServices({home, controlDir, clientId, ownsThread, getState, bridge,
+  peekRouteRequest = async () => null}) {
   const owns = async threadId => Boolean(await ownsThread(threadId))
     && (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId;
+  const telemetry = createTelemetryWriter(join(home, ".statewright", "telemetry", "codex-routing.jsonl"));
   const usage = bridge ? new DesktopUsageRelay({
     path: join(controlDir, "..", "native-usage-relay.jsonl"),
     deliver: async event => {
@@ -26,9 +27,9 @@ export function desktopWorkflowServices({home, controlDir, clientId, ownsThread,
     workflowService: {
       ownsThread: owns,
       getState: async threadId => {
-        if (!await owns(threadId)) throw new Error("Desktop workflow is not owned by this thread");
+        if (!await owns(threadId)) throw new Error("Statewright workflow is not owned by this thread");
         const state = await getState(threadId);
-        if (!await owns(threadId)) throw new Error("Desktop workflow owner changed during state lookup");
+        if (!await owns(threadId)) throw new Error("Statewright workflow owner changed during state lookup");
         return state;
       },
     },
@@ -37,11 +38,14 @@ export function desktopWorkflowServices({home, controlDir, clientId, ownsThread,
       ownsBinding: binding => owns(binding.thread_id),
     }),
     routeOwner: async threadId => ({client_id: clientId, root_session_id: await owns(threadId) ? threadId : null}),
-    peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
-    telemetry: createTelemetryWriter(join(home, ".statewright", "telemetry", "codex-routing.jsonl")),
+    peekRouteRequest,
+    telemetry,
     onNativeUsage: async event => {
-      if (!usage || !await owns(event.conversation_id)) return;
-      usage.append(event);
+      if (!await owns(event.conversation_id)) return;
+      if (usage) usage.append(event);
+      else await telemetry("app_server_native_usage", projectDesktopUsage(event));
     },
   };
 }
+
+export const desktopWorkflowServices = codexWorkflowServices;

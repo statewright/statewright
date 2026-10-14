@@ -7,7 +7,7 @@ import { desktopLaneClientId, requestDesktopLaneBridge } from "./desktop-bridge-
 import { claimCodexRootSession, claimManagedControlIdentity, claimManagedSessionOwner,
   readCodexRootSession, releaseManagedSessionOwner } from "./managed-client-identity.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
-import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
+import { nextCodexResidentRouteRequest, peekCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
 
 const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -100,6 +100,7 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
       };
       try {
         services = !discovery ? desktopWorkflowServices({home, controlDir, clientId, bridge,
+          peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
           ownsThread: async id => confirmed === id && !pending && !closed,
           getState: () => classifierState({bridge, clientId}),
         }) : null;

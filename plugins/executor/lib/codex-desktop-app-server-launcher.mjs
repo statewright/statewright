@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { WebSocket } from "ws";
-import { nextCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
+import { nextCodexResidentRouteRequest, peekCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { ManagedMcpBridge } from "./managed-mcp-bridge.mjs";
 import { readCodexThreadCwds } from "./codex-session-metadata.mjs";
@@ -280,6 +280,7 @@ export async function runDesktopAppServerBroker({
       getState: () => desktopClassifierState({ bridge, clientId: plan.clientId }),
     };
     services = desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId, bridge,
+      peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId, turnId),
       ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState});
     runtime = await startRuntime({
       command: plan.command,

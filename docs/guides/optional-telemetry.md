@@ -1,10 +1,14 @@
 # Optional telemetry
 
 Statewright asks for one optional telemetry choice on its website. The current
-wording covers website session recordings, usage analytics and diagnostic
+wording covers website session recordings and diagnostic
 reports from connected plugins. Declining does not limit workflows or change
 your host's permissions. An older recording-only approval does not authorize
 plugin diagnostics; accept the new wording if you want to enable them.
+
+Basic website analytics through Umami runs independently of this choice.
+Declining optional telemetry stops session recording and diagnostic reports,
+not basic website analytics.
 
 When signed in, **Telemetry preferences** saves this choice to your Statewright
 account. Supported plugins follow that account's choice for the gateway they

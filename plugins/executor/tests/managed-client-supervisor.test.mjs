@@ -210,7 +210,7 @@ test("approved detached Codex identity recovery requires matching live receipts 
 test("managed identity isolates a resumed thread across project directories", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-managed-identity-scope-"));
   try {
-    const first = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/harbringer" });
+    const first = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/project-a" });
     const second = await resolveManagedClientIdentity({ host: "codex", args: ["resume", "shared-thread"], home, cwd: "/workspace/example" });
     assert.notEqual(first.clientId, second.clientId);
     assert.equal(first.restored, false);

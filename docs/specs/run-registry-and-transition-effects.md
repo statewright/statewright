@@ -594,7 +594,7 @@ avoids accidental behavior changes in currently deployed proof machines.
    external command/MCP profiles only after prepared-effect CAS,
    capability-policy, artifact-redaction, and executable-guard tests exist.
 7. **Typed subflow input/output.** Add the opt-in object form without changing
-   legacy `input`; migrate the Magent proof machines and verify blocked proofs
+   legacy `input`; migrate the subflow proof fixtures and verify blocked proofs
    reach `on_fail`.
 8. **Durable backing store.** Reuse the operator roadmap's transactional
    state/context/log persistence for registry values and effect ledgers. Add a

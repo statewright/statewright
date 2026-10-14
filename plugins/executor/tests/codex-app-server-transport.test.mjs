@@ -1279,22 +1279,22 @@ test("resume rows replace stale titles with only the original directory and last
     result: {
       data: [
         { id: "example", cwd: "/home/tester/dev/example", name: "example", status: { type: "active" } },
-        { id: "resume", cwd: "/home/tester/dev/resume", name: "Frame faith alignment", status: { type: "notLoaded" } },
+        { id: "resume", cwd: "/home/tester/dev/resume", name: "Stale conversation title", status: { type: "notLoaded" } },
         { id: "legacy", cwd: null, preview: "Untouched legacy entry" },
-        { id: "fallback", cwd: "/home/tester/dev/nomad", name: null, preview: "What is next?" },
+        { id: "fallback", cwd: "/home/tester/dev/project-b", name: null, preview: "What is next?" },
       ],
     },
   };
   const metadata = {
     example: { cwd: "/home/tester/dev/example", lastUserMessage: "fix statewright_get_state please" },
     resume: { cwd: "/home/tester/dev/resume", lastUserMessage: "My latest\nmessage" },
-    fallback: { cwd: "/home/tester/dev/nomad", lastUserMessage: "Read-only validation, please" },
+    fallback: { cwd: "/home/tester/dev/project-b", lastUserMessage: "Read-only validation, please" },
   };
   const labelled = labelThreadListResponse(source, "/home/tester", {}, metadata);
   assert.equal(labelled.result.data.length, 3, "omit sessions without submitted input, never use stale titles");
   assert.equal(labelled.result.data[0].name, "[~/dev/example] fix statewright_get_state please");
   assert.equal(labelled.result.data[1].name, "[~/dev/resume] My latest message");
-  assert.equal(labelled.result.data[2].preview, "[~/dev/nomad] Read-only validation, please");
+  assert.equal(labelled.result.data[2].preview, "[~/dev/project-b] Read-only validation, please");
   assert.equal(labelled.result.data[0].id, "example");
   assert.equal(labelled.result.data[0].status.type, "active");
   assert.equal(labelThreadListResponse(labelled, "/home/tester", {}, metadata), labelled);

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, symlink } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactedApprovalRequest, requestClassifierApproval } from "../scripts/classifier-approval.mjs";
@@ -23,6 +25,46 @@ const input = {
     arguments: {secret: true},
   },
 };
+
+test("approval CLI responds through a managed Codex home's symlinked plugin directory", async t => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-approval-cli-"));
+  t.after(() => rm(home, {recursive: true, force: true}));
+  await mkdir(join(home, "codex-home"));
+  const plugin = fileURLToPath(new URL("../", import.meta.url));
+  await symlink(plugin, join(home, "codex-home", "plugins"), "junction");
+  for (const path of [join(plugin, "scripts", "classifier-approval.mjs"),
+    join(home, "codex-home", "plugins", "scripts", "classifier-approval.mjs")]) {
+    const result = spawnSync(process.execPath, [path], {
+      input: "{}", encoding: "utf8", timeout: 5000,
+      env: {PATH: process.env.PATH},
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.trim(), `approval CLI returned no response: ${path}`);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      schema: "statewright/classifier-approval/v2", action: "deny",
+      reason: "invalid_redacted_classifier_receipt",
+    });
+  }
+});
+
+test("approval CLI redacts parser failures from a malformed private runtime receipt", async t => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-approval-error-"));
+  t.after(() => rm(home, {recursive: true, force: true}));
+  const receipt = join(home, "private-runtime.json");
+  await writeFile(receipt, '{"proxyToken":"private-token-sentinel", invalid-private-json');
+  const result = spawnSync(process.execPath,
+    [fileURLToPath(new URL("../scripts/classifier-approval.mjs", import.meta.url))], {
+      input: JSON.stringify(input), encoding: "utf8", timeout: 5000,
+      env: {PATH: process.env.PATH, STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: receipt},
+    });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    schema: "statewright/classifier-approval/v2", action: "unavailable",
+    reason: "classifier_approval_helper_error",
+  });
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stdout, /private-|proxyToken/);
+});
 
 test("classifier approval helper forwards only bounded redacted identity", async t => {
   const runDir = await mkdtemp(join(tmpdir(), "statewright-classifier-"));

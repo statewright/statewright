@@ -1607,16 +1607,25 @@ fn bounded_node_local_execution(invocation: &LiteralInvocation) -> bool {
                     .is_some_and(|value| !value.is_empty())
                 && !paths.is_empty() =>
         {
-            paths
-                .iter()
-                .all(|path| bounded_relative_path(path, ".test.mjs"))
+            paths.iter().all(|path| bounded_node_path(path, true))
         }
-        [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => paths
-            .iter()
-            .all(|path| bounded_relative_path(path, ".test.mjs")),
-        [flag, path] if flag == "--check" => bounded_relative_path(path, ".mjs"),
+        [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => {
+            paths.iter().all(|path| bounded_node_path(path, true))
+        }
+        [flag, path] if flag == "--check" => bounded_node_path(path, false),
         _ => false,
     }
+}
+
+fn bounded_node_path(path: &str, test: bool) -> bool {
+    let suffixes = if test {
+        [".test.mjs", ".test.cjs", ".test.js"]
+    } else {
+        [".mjs", ".cjs", ".js"]
+    };
+    suffixes
+        .iter()
+        .any(|suffix| bounded_relative_path(path, suffix))
 }
 
 /// Native command evidence may bind a literal repository entrypoint to fresh
@@ -2578,6 +2587,55 @@ mod tests {
             "cargo test --offline --workspace --target-dir /tmp/outside",
             "cargo test --offline --workspace --config net.offline=false",
             "cargo test --offline -p statewright-mcp-gateway -- --nocapture",
+        ] {
+            assert_ne!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_validation_supports_all_javascript_module_extensions_without_broadening_effects() {
+        for extension in ["mjs", "cjs", "js"] {
+            for command in [
+                format!("node --test tests/plugin-versions.test.{extension}"),
+                format!("node --test --test-name-pattern='a test' tests/a.test.{extension}"),
+                format!("node --check src/module.{extension}"),
+            ] {
+                assert_eq!(
+                    classify(&command),
+                    vec![OpClass::BoundedLocalExecution],
+                    "{command}"
+                );
+            }
+            for command in [
+                format!("node --test ../outside.test.{extension}"),
+                format!("node --test /tmp/outside.test.{extension}"),
+                format!("node --test --require=fixture tests/a.test.{extension}"),
+                format!("node --test tests/a.test.{extension} > receipt.txt"),
+                format!("node --test tests/a.test.{extension} && curl https://example.invalid"),
+                format!("NODE_OPTIONS=--require=fixture node --test tests/a.test.{extension}"),
+                format!("node --check ../outside.{extension}"),
+                format!("node --check /tmp/outside.{extension}"),
+                format!("node --check --require=fixture src/module.{extension}"),
+            ] {
+                assert_ne!(
+                    classify(&command),
+                    vec![OpClass::BoundedLocalExecution],
+                    "{command}"
+                );
+            }
+        }
+        assert_eq!(
+            classify("node --test tests/a.test.mjs tests/b.test.cjs tests/c.test.js"),
+            vec![OpClass::BoundedLocalExecution]
+        );
+        for command in [
+            "node --test src/arbitrary.cjs",
+            "node --check src/module.jsx",
+            "node --test tests/a.test.cjs.bak",
         ] {
             assert_ne!(
                 classify(command),

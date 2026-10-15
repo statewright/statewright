@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile, symlink } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -406,8 +406,13 @@ test("native Codex hook leaves malformed workflow-load results inactive", async 
   }
 });
 
-test("native Codex hook delegates denylist policy to the authoritative gateway", async () => {
+for (const host of ["companion", "managed-symlink"]) {
+test(`native Codex hook delegates denylist policy to the authoritative gateway (${host})`, async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
+  const sourceRoot = fileURLToPath(new URL("../", import.meta.url));
+  const codexRoot = host === "managed-symlink" ? resolve(home, "codex-home", "plugins") : sourceRoot;
+  await mkdir(resolve(home, "codex-home"), {recursive: true});
+  if (host === "managed-symlink") await symlink(sourceRoot, codexRoot, "junction");
   const gateway = await startNativeGateway();
   const classifierApproval = await startClassifierApprovalProxy();
   const localRun = resolve(home, "local-models-run");
@@ -417,7 +422,9 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
   }));
   const environment = {
     HOME: home,
-    LOCAL_MODELS_RUN_DIR: localRun,
+    CODEX_HOME: resolve(home, "codex-home"),
+    LOCAL_MODELS_RUN_DIR: host === "companion" ? localRun : "",
+    STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: host === "managed-symlink" ? resolve(localRun, "runtime.json") : "",
     STATEWRIGHT_API_KEY: "fixture-key",
     STATEWRIGHT_GATEWAY_URL: gateway.url,
     STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
@@ -593,14 +600,48 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
 
     const approvalUnavailable = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id, tool_name: "classifier_denied_four", tool_input: {command: "private-input-sentinel"},
-    }, {...environment, LOCAL_MODELS_RUN_DIR: resolve(home, "missing-local-models-run")});
+    }, {...environment, STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: resolve(home, "missing-runtime.json")});
     assert.equal(approvalUnavailable.status, 0, approvalUnavailable.stderr);
     const unavailableApprovalOutput = JSON.parse(approvalUnavailable.stdout).hookSpecificOutput;
     assert.equal(unavailableApprovalOutput.permissionDecision, "deny");
     assert.match(unavailableApprovalOutput.permissionDecisionReason,
-      /Native human approval is unavailable in this client or runtime/);
-    assert.match(unavailableApprovalOutput.permissionDecisionReason,
-      /reformulate instead of replaying it/);
+      /could not read its human-approval connection/);
+    assert.doesNotMatch(unavailableApprovalOutput.permissionDecisionReason, /unsupported|unavailable in this client/);
+    assert.match(unavailableApprovalOutput.additionalContext, /classifier_approval_runtime_receipt_unreadable/);
+    assert.doesNotMatch(unavailableApprovalOutput.additionalContext, /missing-runtime.json/);
+
+    // Inject failures only at the subprocess boundary; run the real hook,
+    // argument collector and gateway client unchanged.
+    const nodeFixture = resolve(home, "fixture-node");
+    await writeFile(nodeFixture, `#!/bin/sh
+case "$1" in
+  */classifier-approval.mjs)
+    cat >/dev/null
+    case "$APPROVAL_FIXTURE" in
+      empty) exit 0 ;;
+      malformed) printf '%s' 'private-invalid-output'; exit 0 ;;
+      invalid_action) printf '%s' '{"schema":"statewright/classifier-approval/v2","action":"approve_forever"}'; exit 0 ;;
+      failed) printf '%s' '{"schema":"statewright/classifier-approval/v2","action":"allow_once"}'; exit 7 ;;
+    esac ;;
+esac
+exec "${process.execPath}" "$@"
+`, {mode: 0o700});
+    for (const [mode, reason, message] of [
+      ["empty", "classifier_approval_helper_empty_response", /returned no response/],
+      ["malformed", "classifier_approval_helper_invalid_response", /returned an invalid response/],
+      ["invalid_action", "classifier_approval_helper_invalid_response", /returned an invalid response/],
+      ["failed", "classifier_approval_helper_failed", /could not complete its human-approval request/],
+    ]) {
+      const failure = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name: `classifier_denied_${mode}`, tool_input: {},
+      }, {...environment, STATEWRIGHT_NODE_BIN: nodeFixture, APPROVAL_FIXTURE: mode});
+      assert.equal(failure.status, 0, failure.stderr);
+      const output = JSON.parse(failure.stdout).hookSpecificOutput;
+      assert.equal(output.permissionDecision, "deny");
+      assert.match(output.permissionDecisionReason, message);
+      assert.match(output.additionalContext, new RegExp(reason));
+      assert.doesNotMatch(failure.stdout, /private-invalid-output|unavailable in this client/);
+    }
 
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
       session_id,
@@ -693,6 +734,7 @@ test("native Codex hook delegates denylist policy to the authoritative gateway",
     await rm(home, {recursive: true, force: true});
   }
 });
+}
 
 test("native gateway calls stream request JSON instead of placing it in argv", async () => {
   const hookSource = await readFile(resolve(codexRoot, "hook.sh"), "utf8");

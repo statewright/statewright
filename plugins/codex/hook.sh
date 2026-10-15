@@ -6,7 +6,10 @@ set -o pipefail
 
 ENDPOINT="${1:-user-prompt}"
 HOOK_INPUT=$(cat 2>/dev/null || true)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Managed Codex homes symlink the plugin cache. Launch every packaged helper
+# from the physical root so profile, credentials and approval entrypoints agree
+# with Node's realpath-based module identity.
+SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Codex may launch hooks with a narrower PATH than the interactive shell that
 # started the app server. Resolve the JavaScript runtime once from an explicit
@@ -1012,9 +1015,30 @@ case "$ENDPOINT" in
           ' 2>/dev/null || true)
       fi
       APPROVAL_RESULT=""
+      APPROVAL_HELPER_FAILURE=""
+      APPROVAL_EXIT_STATUS=0
       if [ -n "$APPROVAL_REQUEST" ] && [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
         APPROVAL_RESULT=$(printf '%s' "$APPROVAL_REQUEST" \
-          | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null || true)
+          | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/classifier-approval.mjs" 2>/dev/null) \
+          || APPROVAL_EXIT_STATUS=$?
+        if [ "$APPROVAL_EXIT_STATUS" -ne 0 ]; then
+          APPROVAL_HELPER_FAILURE="classifier_approval_helper_failed"
+        elif [ -z "$APPROVAL_RESULT" ]; then
+          APPROVAL_HELPER_FAILURE="classifier_approval_helper_empty_response"
+        elif ! printf '%s' "$APPROVAL_RESULT" | jq -es '
+          length == 1 and (.[0] | type == "object"
+            and .schema == "statewright/classifier-approval/v2"
+            and (.action == "allow_once" or .action == "rework"
+              or .action == "deny" or .action == "unavailable"))' >/dev/null 2>&1; then
+          APPROVAL_HELPER_FAILURE="classifier_approval_helper_invalid_response"
+        fi
+      elif [ -n "$APPROVAL_REQUEST" ]; then
+        APPROVAL_HELPER_FAILURE="classifier_approval_node_unavailable"
+      fi
+      if [ -n "$APPROVAL_HELPER_FAILURE" ]; then
+        APPROVAL_RESULT=$(jq -cn --arg reason "$APPROVAL_HELPER_FAILURE" \
+          --argjson exit_code "$APPROVAL_EXIT_STATUS" \
+          '{schema:"statewright/classifier-approval/v2",action:"unavailable",reason:$reason,exit_code:$exit_code}')
       fi
       APPROVAL_ACTION=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.action // empty' 2>/dev/null || true)
       if [ "$APPROVAL_ACTION" = "allow_once" ]; then
@@ -1095,7 +1119,27 @@ case "$ENDPOINT" in
         esac
       elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ -n "$APPROVAL_REQUEST" ] \
           && { [ "$APPROVAL_ACTION" = "unavailable" ] || [ -z "$APPROVAL_ACTION" ]; }; then
-        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval is unavailable in this client or runtime; the invocation remains denied. Use a supported managed local App Server session or reformulate instead of replaying it."
+        APPROVAL_FAILURE_REASON=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.reason // empty' 2>/dev/null || true)
+        case "$APPROVAL_FAILURE_REASON" in
+          classifier_approval_runtime_unavailable)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} No managed runtime is connected for human approval. Reconnect through the Statewright launcher; the invocation remains denied."
+            ;;
+          classifier_approval_runtime_receipt_unreadable|classifier_approval_runtime_receipt_incomplete)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Statewright could not read its human-approval connection. Reconnect through the Statewright launcher; the invocation remains denied."
+            ;;
+          classifier_approval_helper_empty_response)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Statewright's human-approval helper returned no response. Repair or update the plugin; the invocation remains denied."
+            ;;
+          classifier_approval_helper_invalid_response)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Statewright's human-approval helper returned an invalid response. Repair or update the plugin; the invocation remains denied."
+            ;;
+          classifier_approval_node_unavailable)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Statewright could not find Node.js to request human approval; the invocation remains denied."
+            ;;
+          *)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Statewright could not complete its human-approval request. Reconnect or update the plugin; the invocation remains denied."
+            ;;
+        esac
       fi
       ADAPTER_RECEIPT=$(printf '%s' "$ADAPTER_RESULT" | jq -c '
         .risk_assessment? as $risk

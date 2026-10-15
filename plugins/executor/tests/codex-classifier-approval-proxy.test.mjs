@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
@@ -159,6 +164,54 @@ test("classifier uncertainty reaches one exact native approval after two rewrite
 
   const consumed = await (await fixture.post(approvalRequest("three"))).json();
   assert.equal(consumed.action, "rework", "one approval cannot persist beyond its held invocation");
+});
+
+test("packaged symlinked approval CLI reaches native elicitation with S1 disabled", async t => {
+  for (const action of ["accept", "decline", "cancel"]) {
+    await t.test(action, {timeout: 10_000}, async t => {
+      const fixture = await setup(t);
+      const {client, messages} = await fixture.connectAndOwn();
+      const home = await mkdtemp(join(tmpdir(), "statewright-native-cli-"));
+      t.after(() => rm(home, {recursive: true, force: true}));
+      await mkdir(join(home, "codex-home"));
+      await symlink(fileURLToPath(new URL("../../codex/", import.meta.url)),
+        join(home, "codex-home", "plugins"), "junction");
+      const receipt = join(home, "manifest.json");
+      await writeFile(receipt, JSON.stringify({
+        proxyUrl: fixture.endpoint.replace(/^http/, "ws"), proxyToken: token,
+      }));
+      async function invokeCli(invocation) {
+        const child = spawn(process.execPath,
+          [join(home, "codex-home", "plugins", "scripts", "classifier-approval.mjs")], {
+            env: {PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, "codex-home"),
+              STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: receipt},
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+        t.after(() => { if (child.exitCode === null) child.kill(); });
+        let stdout = "", stderr = "";
+        child.stdout.on("data", chunk => { stdout += chunk; });
+        child.stderr.on("data", chunk => { stderr += chunk; });
+        const exited = once(child, "close");
+        child.stdin.end(JSON.stringify(approvalRequest(invocation)));
+        const [status] = await exited;
+        assert.equal(status, 0, stderr);
+        assert.ok(stdout.trim(), "packaged approval CLI must not silently exit");
+        return JSON.parse(stdout);
+      }
+      assert.equal((await invokeCli("one")).action, "rework");
+      assert.equal((await invokeCli("two")).action, "rework");
+      const pending = invokeCli("three");
+      const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"),
+        "packaged CLI's native approval form");
+      assert.equal(modal.params.threadId, threadId);
+      client.send(JSON.stringify({id: modal.id, result: {action}}));
+      const result = await pending;
+      assert.equal(result.action, action === "accept" ? "allow_once" : "deny");
+      if (action !== "accept") assert.equal(result.reason, action === "decline" ? "human_declined" : "human_cancelled");
+      assert.equal(result.basis, "semantic_authorization_disabled");
+      assert.equal(result.invocation_fingerprint, "invocation_v1_three");
+    });
+  }
 });
 
 test("classifier approval endpoint authenticates and fails closed without one exact owner", async t => {

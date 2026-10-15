@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -137,9 +138,30 @@ async function main() {
   process.stdout.write(`${JSON.stringify(await requestClassifierApproval(value))}\n`);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+function isEntrypoint() {
+  // Managed Codex homes symlink the plugin cache; Node resolves import.meta.url
+  // to the real file but leaves argv[1] as the caller's logical path.
+  try {
+    return Boolean(process.argv[1])
+      && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+function failureReason(error) {
+  const message = String(error?.message ?? "");
+  if (message.length <= 128 && /^classifier_approval_(?:[a-z_]+|http_[0-9]{3})$/.test(message)) return message;
+  if (["ENOENT", "EACCES", "EPERM"].includes(error?.code)) {
+    return "classifier_approval_runtime_receipt_unreadable";
+  }
+  // Do not expose filesystem paths, runtime tokens, or response bodies.
+  return "classifier_approval_helper_error";
+}
+
+if (isEntrypoint()) {
   main().catch(error => process.stdout.write(`${JSON.stringify({
     schema: "statewright/classifier-approval/v2", action: "unavailable",
-    reason: String(error?.message ?? error).slice(0, 128),
+    reason: failureReason(error),
   })}\n`));
 }

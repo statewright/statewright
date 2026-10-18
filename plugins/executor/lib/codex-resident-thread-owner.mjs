@@ -7,7 +7,23 @@ const ownershipError = message => Object.assign(new Error(message), {code: "STAT
 // still decides whether a thread can be resumed (including active writers).
 export function residentThreadAuthorizer({controlDir, clientId, home, cwd}) {
   let pending = null;
-  return async ({method, threadId}) => {
+  return async ({method, threadId, ephemeral = false}) => {
+    // Ephemeral native helpers are not a user selecting a new conversation.
+    // They have no durable managed identity and must not reserve the root while
+    // native Codex starts them. The proxy validates the matching native reply.
+    if (ephemeral && ["thread/start", "thread/fork"].includes(method)) {
+      let settled = false;
+      return {
+        version: 1, kind: "statewright_thread_adoption", method, threadId: threadId ?? null,
+        async commit({threadId: attachedThreadId, ephemeral: confirmed}) {
+          if (settled || confirmed !== true) throw ownershipError("Native background thread attachment was not confirmed.");
+          const root = await readCodexRootSession(controlDir);
+          if (settled || root?.sessionId === attachedThreadId) throw ownershipError("Background thread cannot replace the foreground conversation.");
+          settled = true;
+        },
+        async cancel() { settled = true; },
+      };
+    }
     if (pending) throw ownershipError("Statewright is waiting for native thread attachment to finish. Try again after it completes.");
     if (!ATTACH.has(method)) return;
     const reservation = {};
@@ -25,7 +41,8 @@ export function residentThreadAuthorizer({controlDir, clientId, home, cwd}) {
       };
       const lifecycle = {
         version: 1, kind: "statewright_thread_adoption", method, threadId: threadId ?? null,
-        async commit({threadId: attachedThreadId}) {
+        async commit({threadId: attachedThreadId, ephemeral: confirmed}) {
+          if (confirmed === true) throw ownershipError("Background thread cannot become the foreground conversation.");
           if (status !== "pending") throw ownershipError("Statewright thread attachment is already settled.");
           status = "committing";
           try {

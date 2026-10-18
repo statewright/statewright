@@ -771,6 +771,13 @@ export async function startCodexAppServerRouteProxy({
     const receipts = new Map();
     const requestMethods = new Map();
     const pendingThreadAuthorizations = new Map();
+    // Connection-local native helpers (for example TUI catch-up summaries).
+    // Ephemeral is a lifecycle distinction, NOT a new permission grant: native
+    // sandbox, approvals and tool hooks remain unchanged. Never use a client
+    // turn's ephemeral flag as authority; require the matching native attachment.
+    const backgroundThreads = new Set();
+    const backgroundAttachments = new Map();
+    const backgroundRequests = new Map();
     const pendingApprovalReleases = new Map();
     const pendingManualSettings = new Map();
     const internalRequests = new Map();
@@ -1393,6 +1400,7 @@ export async function startCodexAppServerRouteProxy({
       let requestEpoch;
       let startsGoalExecution = false;
       let threadAuthorization = null;
+      let ownsRequestSlot = false;
       const checkCurrentRequest = () => {
         if (requestEpoch !== undefined && (operatorActivity.get(message.params.threadId) !== requestEpoch
             || downstream.readyState !== WebSocket.OPEN)) {
@@ -1416,6 +1424,32 @@ export async function startCodexAppServerRouteProxy({
         if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
           throw new Error("Statewright rejected a duplicate in-flight native JSON-RPC request ID.");
         }
+        if (message.id !== undefined && message.method) {
+          // Reserve before authorization awaits: pipelined helper and foreground
+          // requests must never share response correlation state.
+          requestMethods.set(rpcIdKey(message.id), message.method);
+          ownsRequestSlot = true;
+        }
+        if (backgroundThreads.has(message.params?.threadId)
+            && !["thread/start", "thread/resume", "thread/fork"].includes(message.method)) {
+          if (message.id !== undefined && message.method) {
+            const key = rpcIdKey(message.id);
+            requestMethods.set(key, message.method);
+            backgroundRequests.set(key, {threadId: message.params.threadId, method: message.method, completedTurns: new Set()});
+            if (message.method === "turn/start") addActivity(message.params.threadId, `background:${key}`);
+            if (message.method === "thread/unsubscribe" && activeThreads.has(message.params.threadId)) {
+              // Keep the native subscription until active work terminates. An
+              // unsubscribe is not evidence of completion and must not allow
+              // resident retirement to kill a detached helper.
+              backgroundRequests.get(key).deferredPayload = payload;
+              return;
+            }
+          }
+          // Do not consume foreground route queues, approval gates, MCP-ready
+          // barriers, origin restoration or workflow telemetry for this helper.
+          await forwardPayload(upstream, payload);
+          return;
+        }
         if (message.method === "thread/resume" && message.params?.threadId) {
           // An explicit CLI override must win even when the historical profile
           // is unreadable or cannot be represented by the remote protocol.
@@ -1427,6 +1461,7 @@ export async function startCodexAppServerRouteProxy({
           threadAuthorization = await authorizeThread({
             method: message.method,
             threadId: message.params?.threadId ?? null,
+            ephemeral: message.params?.ephemeral === true,
           });
           if (threadAuthorization) {
             if (message.id === undefined || threadAuthorization?.version !== 1
@@ -1441,6 +1476,10 @@ export async function startCodexAppServerRouteProxy({
               throw error;
             }
             pendingThreadAuthorizations.set(rpcIdKey(message.id), threadAuthorization);
+          }
+          if (["thread/start", "thread/fork"].includes(message.method) && message.params?.ephemeral === true) {
+            if (message.id === undefined) throw new Error("Background attachment requires a native request identity.");
+            backgroundAttachments.set(rpcIdKey(message.id), {method: message.method, threadId: message.params?.threadId ?? null});
           }
         }
         if (isActiveGoalSet(message)) {
@@ -1669,6 +1708,13 @@ export async function startCodexAppServerRouteProxy({
           await sendPresentation(presentation.cancel(message.params?.threadId, String(message.id))).catch(() => {});
         }
         if (!routeForwarded) {
+          if (ownsRequestSlot) {
+            const key = rpcIdKey(message.id);
+            requestMethods.delete(key);
+            backgroundAttachments.delete(key);
+            backgroundRequests.delete(key);
+            removeActivity(message.params?.threadId, `background:${key}`);
+          }
           if (threadAuthorization && message?.id !== undefined) {
             pendingThreadAuthorizations.delete(rpcIdKey(message.id));
             await threadAuthorization.cancel().catch(() => {});
@@ -1783,6 +1829,45 @@ export async function startCodexAppServerRouteProxy({
         if (isResponse && ownsInternalId(notification.id)) return;
         const responseTo = responseKey === null ? null : requestMethods.get(responseKey);
         if (responseTo) requestMethods.delete(responseKey);
+        const backgroundRequest = responseKey === null ? null : backgroundRequests.get(responseKey);
+        const backgroundId = notification.params?.threadId ?? notification.params?.thread?.id;
+        if (backgroundRequest || backgroundThreads.has(backgroundId)) {
+          if (backgroundRequest) {
+            backgroundRequests.delete(responseKey);
+            if (backgroundRequest.method === "turn/start") {
+              removeActivity(backgroundRequest.threadId, `background:${responseKey}`);
+              if (!notification.error && notification.result?.turn?.id
+                  && !backgroundRequest.completedTurns.has(notification.result.turn.id)
+                  && !["completed", "interrupted", "failed"].includes(notification.result.turn.status)) addActivity(backgroundRequest.threadId, `background-turn:${notification.result.turn.id}`);
+            }
+          }
+          if (notification.method === "turn/started" && notification.params.turn?.id) addActivity(backgroundId, `background-turn:${notification.params.turn.id}`);
+          if (notification.method === "thread/status/changed" && notification.params?.status?.type === "active") addActivity(backgroundId, "background-status");
+          if (notification.method === "turn/completed") {
+            removeActivity(backgroundId, `background-turn:${notification.params.turn?.id}`);
+            for (const request of backgroundRequests.values()) {
+              if (request.threadId === backgroundId && request.method === "turn/start") request.completedTurns.add(notification.params.turn?.id);
+            }
+          }
+          if (notification.method === "thread/closed") {
+            for (const reason of activeThreads.get(backgroundId) ?? []) {
+              if (reason.startsWith("background-turn:")) removeActivity(backgroundId, reason);
+            }
+          }
+          if (["turn/completed", "thread/closed"].includes(notification.method)
+              || notification.method === "thread/status/changed" && notification.params?.status?.type !== "active") removeActivity(backgroundId, "background-status");
+          for (const request of backgroundRequests.values()) {
+            if (request.deferredPayload && !activeThreads.has(request.threadId)) {
+              const deferred = request.deferredPayload;
+              delete request.deferredPayload;
+              await forwardPayload(upstream, deferred);
+            }
+          }
+          syncActivity();
+          if (downstreamClosed && activeThreads.size === 0 && parkingCount === 0 && upstream.readyState === WebSocket.OPEN) upstream.close();
+          await forwardWhenOpen(downstream, payload);
+          return;
+        }
         if (responseTo === "initialize" && !notification.error && classifierOwner) {
           classifierOwner.initialized = true;
         }
@@ -1797,6 +1882,30 @@ export async function startCodexAppServerRouteProxy({
           );
         }
         const threadAuthorization = responseKey === null ? null : pendingThreadAuthorizations.get(responseKey);
+        const backgroundAttachment = responseKey === null ? null : backgroundAttachments.get(responseKey);
+        if (backgroundAttachment || ["thread/start", "thread/resume", "thread/fork"].includes(responseTo) && notification.result?.thread?.ephemeral === true) {
+          backgroundAttachments.delete(responseKey);
+          const thread = notification.result?.thread;
+          const valid = backgroundAttachment?.method === responseTo && thread?.ephemeral === true
+            && typeof thread.id === "string" && thread.id.length > 0 && thread.id.trim() === thread.id
+            && (responseTo !== "thread/fork" || thread.id !== backgroundAttachment.threadId
+              && (!thread.forkedFromId || thread.forkedFromId === backgroundAttachment.threadId))
+            && !classifierThreads.has(thread.id) && downstream.readyState === WebSocket.OPEN;
+          try {
+            if (notification.error) await threadAuthorization?.cancel();
+            else {
+              if (!valid) throw new Error("Native background thread attachment did not match the request.");
+              await threadAuthorization?.commit({threadId: thread.id, ephemeral: true});
+              backgroundThreads.add(thread.id);
+            }
+          } catch (error) {
+            await threadAuthorization?.cancel().catch(() => {});
+            notification = {id: notification.id, error: {code: -32603, message: error.message}};
+          } finally { pendingThreadAuthorizations.delete(responseKey); }
+          // No foreground adoption callbacks, classifier rebinding or gate.reopen.
+          await forwardWhenOpen(downstream, JSON.stringify(notification));
+          return;
+        }
         const approvalRelease = responseKey === null ? null : pendingApprovalReleases.get(responseKey);
         if (approvalRelease) {
           pendingApprovalReleases.delete(responseKey);
@@ -1835,7 +1944,7 @@ export async function startCodexAppServerRouteProxy({
               await threadAuthorization.cancel();
               if (!notification.error) throw new Error("native attachment returned a different thread or invalid identity, or the client disconnected");
             } else {
-              await threadAuthorization.commit({threadId: resumedThreadId});
+              await threadAuthorization.commit({threadId: resumedThreadId, ephemeral: attached.ephemeral});
               bindClassifierThread(resumedThreadId);
             }
           } catch (error) {

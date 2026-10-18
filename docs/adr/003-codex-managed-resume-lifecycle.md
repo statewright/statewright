@@ -131,6 +131,37 @@ mapping preservation, and pending classifier approval preservation. The optional
 native canary uses a deliberately rejecting loopback provider: it proves native
 turn acceptance, not model inference, live gateway behavior, or visual TUI UX.
 
+## Background ephemeral threads
+
+Native Codex can start an ephemeral thread on the same connection to summarize
+an idle conversation. That is not a user selecting a new foreground thread.
+Adopting its ID as the routing root leaves the next foreground turn unowned.
+
+The proxy correlates `ephemeral: true` start/fork requests with successful native
+responses confirming both the thread identity and ephemeral flag. Helpers are
+connection-local and never bind a durable managed-client identity, replace the
+root, displace classifier approvals, or reopen workflow approval gates. Their
+native traffic does not consume foreground routes, workflow origins, MCP-ready
+barriers, or workflow execution telemetry. Activity is still tracked so detached
+helper work does not falsely retire an active resident. Foreground start,
+resume, and fork retain acknowledged adoption and native writer exclusion.
+
+This is lifecycle isolation, not a permission mode. Native sandbox settings,
+permission requests, and tool hooks are forwarded unchanged. The ephemeral
+flag alone is not proof that a thread is tool-free, and this change makes no
+such guarantee. It grants no access to the foreground workflow or its approval
+decisions. A client-supplied turn flag or unsolicited native reply cannot enroll
+a thread as a helper. Pending helper attachment does not reserve the foreground
+root; cancellation and failed native replies cannot change it.
+
+Regression tests cover return to the foreground without resume, absent and
+active workflow routing, pending classifier prompts, malformed confirmation,
+unsolicited replies, and the legacy adoption callback path. Native acceptance
+must additionally complete foreground -> helper -> foreground model turns;
+unit protocol fixtures alone are not that proof. Initial rollout is an isolated
+development plugin. Existing processes retain their loaded code until a normal
+client restart; upgrading never kills another resident or replays a user turn.
+
 ## Rollback
 
 Revert the supervisor signal forwarding and App Server proxy lifecycle changes,

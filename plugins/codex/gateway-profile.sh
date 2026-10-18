@@ -20,7 +20,7 @@ statewright_load_api_key() {
     printf '%s' "$STATEWRIGHT_API_KEY"
     return 0
   fi
-  "$STATEWRIGHT_NODE_RUNTIME" "$STATEWRIGHT_CREDENTIAL_ADAPTER" get "$STATEWRIGHT_GATEWAY_URL" 2>/dev/null
+  "$STATEWRIGHT_NODE_RUNTIME" "$STATEWRIGHT_CREDENTIAL_ADAPTER" resolve "$STATEWRIGHT_GATEWAY_URL" 2>/dev/null
 }
 
 statewright_store_api_key() {

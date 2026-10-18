@@ -3,6 +3,7 @@ import { open, opendir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
+import { isDeepStrictEqual } from "node:util";
 import { findCodexRollout } from "./codex-history-integrity.mjs";
 
 const MAX_SESSION_META_BYTES = 1024 * 1024;
@@ -93,6 +94,15 @@ function restoredSandbox(settings) {
   const activeProfile = settings?.active_permission_profile?.id;
   if (typeof activeProfile === "string" && activeProfile.trim()) return { permissions: activeProfile.trim() };
   if (settings?.permission_profile?.type === "disabled") return { sandbox: "danger-full-access" };
+  // Codex 0.160 records -s read-only as an unnamed managed profile, not a
+  // sandbox_policy. Project only the exact native preset: extra rules/fields
+  // or enabled networking must not silently lose restrictions on resume.
+  if (isDeepStrictEqual(settings?.permission_profile, {
+    type: "managed", network: "restricted",
+    file_system: { type: "restricted", entries: [
+      { path: { type: "special", value: { kind: "root" } }, access: "read" },
+    ] },
+  })) return { sandbox: "read-only" };
   if (settings?.permission_profile != null) unrepresentable();
   const policy = settings?.sandbox_policy;
   if (policy == null) return {};

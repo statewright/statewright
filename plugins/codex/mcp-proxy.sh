@@ -1,11 +1,23 @@
 #!/usr/bin/env bash
-# Stdio MCP proxy — forwards JSON-RPC to statewright gateway with auth from disk
+# Stdio MCP proxy — forwards JSON-RPC with gateway-scoped OS credentials
 # Used as `type: "command"` MCP server in plugin .mcp.json
 # Browser device authorization provisions the local key; authenticated calls
-# continue to read it dynamically from ~/.statewright/api_key.
+# continue to resolve it at call time from the credential store.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_RESPONSE_SUMMARIZER="${SCRIPT_DIR}/scripts/summarize-mcp-response.mjs"
+MCP_TOOL_CATALOG="${SCRIPT_DIR}/mcp-tool-catalog.json"
+
+stable_tool_catalog_response() {
+  local id="$1" response="${2:-}"
+  [ -n "$response" ] || response='{}'
+  jq -cn --slurpfile tools "$MCP_TOOL_CATALOG" --argjson id "$id" --argjson response "$response" '
+    [($response.result.tools // [])[] | select(type == "object") |
+      select((.name | type) == "string" and (.inputSchema | type) == "object")] as $live |
+    (if $response.error then {_meta:{statewright:{recovery:$response.error}}} else ($response.result // {}) end) as $result |
+    {jsonrpc:"2.0",id:$id,result:($result + {tools:
+      (reduce ($tools[0] + $live)[] as $tool ({}; .[$tool.name] = $tool) | [.[]])})}'
+}
 MCP_RECOVERY="${SCRIPT_DIR}/scripts/lib/desktop-runtime/mcp-recovery.mjs"
 DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # GUI MCP launches do not inherit the terminal PATH. Keep the launcher's pinned
@@ -92,7 +104,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
       printf '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":%s}\n' "$(printf '%s' "$line" | jq -c '.id')"
     else
       response=$(normalize_transport_response "$line" "$response" --managed)
-      [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/list" ] && response=$(stable_tool_catalog_response "$(printf '%s' "$line" | jq -c '.id')" "$response")
       [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     fi
@@ -122,7 +134,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
     fi
     response=$(normalize_transport_response "$line" "$response" --managed)
     if [ -n "$response" ]; then
-      [ "$method" = "tools/list" ] && response=$(inject_codex_local_tools "$response")
+      [ "$method" = "tools/list" ] && response=$(stable_tool_catalog_response "$(printf '%s' "$line" | jq -c '.id')" "$response")
       [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     else
@@ -158,8 +170,22 @@ GATEWAY_STATE_DIR="${STATEWRIGHT_DIR}/gateways/${STATEWRIGHT_GATEWAY_IDENTITY}"
 INVALID_KEY_SENTINEL="${GATEWAY_STATE_DIR}/invalid_api_key"
 MISSING_KEY_SENTINEL="${GATEWAY_STATE_DIR}/missing_api_key_prompted"
 
+CREDENTIAL_STATUS="missing"
+
 load_api_key() {
-  statewright_load_api_key 2>/dev/null || true
+  API_KEY=""
+  if [ -n "${STATEWRIGHT_API_KEY:-}" ]; then
+    API_KEY="$STATEWRIGHT_API_KEY"
+    CREDENTIAL_STATUS="available"
+    return 0
+  fi
+  API_KEY=$(statewright_load_api_key 2>/dev/null)
+  local status=$?
+  case "$status" in
+    0) CREDENTIAL_STATUS="available" ;;
+    3) CREDENTIAL_STATUS="missing" ;;
+    *) API_KEY=""; CREDENTIAL_STATUS="unavailable" ;;
+  esac
 }
 
 key_fingerprint() {
@@ -625,8 +651,16 @@ while IFS= read -r line; do
     continue
   fi
 
-  API_KEY="$(load_api_key)"
+  load_api_key
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
+
+  # Codex snapshots the initial inventory. Always expose the fixed core, even
+  # before device approval or when storage is unavailable. Healthy discovery
+  # may also advertise configured upstream tools; never drop those extensions.
+  if [ "$METHOD" = "tools/list" ] && { [ -z "$API_KEY" ] || invalid_key_matches "$API_KEY"; }; then
+    stable_tool_catalog_response "$ID"
+    continue
+  fi
 
   # Handle statewright_search_docs locally (no gateway round-trip)
   TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
@@ -693,8 +727,10 @@ while IFS= read -r line; do
   fi
 
   if [ -z "$API_KEY" ] || { [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_connect" ]; }; then
-    if [ "$METHOD" = "tools/list" ]; then
-      echo '{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_search_docs","description":"Search Statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Available without a local credential.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}},{"name":"statewright_list_workflows","description":"Report local Statewright connectivity and available workflows. Without a local credential it reports connected:false and an empty workflow list.","inputSchema":{"type":"object","properties":{}}},{"name":"statewright_connect","description":"Connect this client through secure browser approval. The plugin verifies and stores the resulting credential without asking you to copy an API key.","inputSchema":{"type":"object","properties":{}}}]},"id":'"$ID"'}'
+    if [ "$CREDENTIAL_STATUS" = "unavailable" ]; then
+      if [ "$METHOD" != "notifications/initialized" ]; then
+        jq -cn --argjson id "$ID" '{jsonrpc:"2.0",error:{code:-32003,message:"Statewright could not read the OS credential store. Unlock or repair the store, then retry; use statewright_connect only when no credential is configured."},id:$id}'
+      fi
     elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_list_workflows" ]; then
       echo '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"connected\":false,\"credential\":\"missing\",\"workflows\":[],\"active\":null,\"reason\":\"No local Statewright credential is configured. Use statewright_connect for account setup.\"}"}]},"id":'"$ID"'}'
     elif [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_connect" ]; then
@@ -729,7 +765,7 @@ while IFS= read -r line; do
       fi
     elif [ "$METHOD" = "notifications/initialized" ]; then
       : # notification, no response
-    else
+    elif [ "$METHOD" != "tools/list" ]; then
       echo '{"jsonrpc":"2.0","error":{"code":-32001,"message":"Statewright is not connected. Use statewright_connect to open account setup in your browser; do not paste credentials into chat."},"id":'"$ID"'}'
     fi
     continue
@@ -769,14 +805,7 @@ while IFS= read -r line; do
   RESPONSE=$(normalize_transport_response "$line" "$HTTP_RESPONSE")
 
   if [ -n "$RESPONSE" ]; then
-    # Recovery catalogs must not advertise unavailable protected tools.
-    if [ "$METHOD" = "tools/list" ] && ! printf '%s' "$RESPONSE" | jq -e '.result._meta.statewright.recovery' >/dev/null 2>&1; then
-      SEARCH_TOOL='{"name":"statewright_search_docs","description":"Search statewright documentation for workflow schema fields, MCP tools, patterns, and troubleshooting. Returns relevant doc snippets.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query (e.g. guard operators, allowed_tools, approval gate)"}},"required":["query"]}}'
-      REFERENCE_TOOL='{"name":"statewright_search_references","description":"Search the incremental local repository index with deterministic lexical ranking. Returns read-only provenance, source hashes, rank reasons, and excerpts; ignored and secret material is excluded.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Task, identifier, changed path, failed hypothesis, or validation signature to find"},"limit":{"type":"integer","minimum":1,"maximum":20,"default":8}},"required":["query"]}}'
-      PAUSE_TOOL='{"name":"statewright_pause","description":"Pause the current workflow. State and context are saved. Resume later with statewright_load_workflow(name, resume=true).","inputSchema":{"type":"object","properties":{}}}'
-      FORCE_TOOL='{"name":"statewright_force_state","description":"Force the state machine to a specific state, bypassing guards and transitions. Only works when meta.debug is true.","inputSchema":{"type":"object","properties":{"state":{"type":"string","description":"Target state name to jump to"},"context":{"type":"object","description":"Optional context to merge (e.g. set guard fields)"}},"required":["state"]}}'
-      RESPONSE=$(echo "$RESPONSE" | jq -c --argjson s "$SEARCH_TOOL" --argjson r "$REFERENCE_TOOL" --argjson p "$PAUSE_TOOL" --argjson f "$FORCE_TOOL" '.result.tools = ([.result.tools[] | select(.name != "statewright_search_docs" and .name != "statewright_search_references" and .name != "statewright_pause" and .name != "statewright_force_state")] + [$s, $r, $p, $f])' 2>/dev/null || echo "$RESPONSE")
-    fi
+    [ "$METHOD" = "tools/list" ] && RESPONSE=$(stable_tool_catalog_response "$ID" "$RESPONSE")
     [ "$METHOD" = "tools/call" ] && RESPONSE=$(summarize_transition_response "$TOOL_NAME" "$RESPONSE")
     echo "$RESPONSE"
   else

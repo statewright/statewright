@@ -60,14 +60,14 @@ test("managed MCP discovery uses the bundled fallback when no Node is pinned or 
   assert.ok(result.responses.find(value => value.id === 2)?.result?.tools.length);
 });
 
-test("unavailable pinned Node returns an immediate correlated MCP error, not an empty reply", async t => {
+test("unavailable pinned Node still serves the fixed discovery catalog", async t => {
   const result = await fixture(t, { pinned: "/missing-statewright-node", pathNode: true });
   const response = result.responses.find(value => value.id === 2);
-  assert.ok(response?.error);
-  assert.match(response.error.message, /Node|runtime|helper/);
+  assert.ok(response?.result?.tools.some(tool => tool.name === "statewright_load_workflow"), result.stderr);
+  assert.match(response.result._meta.statewright.recovery.message, /Node response helper/);
 });
 
-test("missing Node without a pinned or bundled runtime returns a correlated MCP error", async t => {
+test("missing Node without a pinned or bundled runtime still serves the fixed discovery catalog", async t => {
   const result = await fixture(t, { pinned: "" });
-  assert.ok(result.responses.find(value => value.id === 2)?.error);
+  assert.ok(result.responses.find(value => value.id === 2)?.result?.tools.some(tool => tool.name === "statewright_get_state"));
 });

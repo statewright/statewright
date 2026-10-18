@@ -74,7 +74,7 @@ async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   }
 }
 
-test("codex exposes only safe setup tools and opens device approval on explicit connect", async (t) => {
+test("codex advertises a stable catalog but opens device approval only on explicit connect", async (t) => {
   const name = "codex";
   const proxy = resolve("plugins/codex/mcp-proxy.sh");
     const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-test-`));
@@ -125,6 +125,7 @@ esac
         STATEWRIGHT_SENTRY_DISABLED: "true",
       });
 
+      await installCredentialHelper(root, environment);
       const disabled = await runProxy(proxy, { ...environment, STATEWRIGHT_NO_BROWSER: "true" });
       assert.equal(disabled.code, 0, disabled.stderr);
       const disabledConnect = responseById(disabled.stdout, 4);
@@ -189,11 +190,8 @@ esac
       const result = await runProxy(proxy, environment);
       assert.equal(result.code, 0, result.stderr);
       const setupCatalog = responseById(result.stdout, 2);
-      assert.deepEqual(setupCatalog.result.tools.map((tool) => tool.name), [
-        "statewright_search_docs",
-        "statewright_list_workflows",
-        "statewright_connect",
-      ]);
+      assert.equal(setupCatalog.result.tools.length, 15);
+      assert.ok(setupCatalog.result.tools.some(tool => tool.name === "statewright_load_workflow"));
       const ordinaryCall = responseById(result.stdout, 3);
       assert.equal(ordinaryCall.error.code, -32001);
       assert.match(ordinaryCall.error.message, /Statewright is not connected/);
@@ -259,6 +257,7 @@ printf '503'
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
+    await installCredentialHelper(root, environment);
     const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
@@ -319,6 +318,7 @@ esac
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
+    await installCredentialHelper(root, environment);
     const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_connect", arguments: {} } },
@@ -516,7 +516,7 @@ esac
   }
 });
 
-test("codex rejected explicit key stays non-interactive and offers only recovery tools", async () => {
+test("codex rejected explicit key stays non-interactive with stable discovery and typed call failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-codex-invalid-explicit-key-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -549,6 +549,7 @@ printf '%s\\n401' '{"error":"invalid_api_key"}'
     const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
       { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } },
     ]);
     const gatewayIdentity = createHash("sha256").update(gateway).digest("hex");
     const invalidMarker = join(home, ".statewright", "gateways", gatewayIdentity, "invalid_api_key");
@@ -558,13 +559,10 @@ printf '%s\\n401' '{"error":"invalid_api_key"}'
     await assert.rejects(readFile(browserCapture));
     assert.match(result.stderr, /credential from STATEWRIGHT_API_KEY was rejected/);
     assert.doesNotMatch(result.stderr, /sw_live_fixture_invalid_key/);
-    const recovery = responseById(result.stdout, 2).result;
-    assert.equal(recovery._meta.statewright.recovery.code, -32001);
-    assert.deepEqual(recovery.tools.map((tool) => tool.name), [
-      "statewright_search_docs",
-      "statewright_list_workflows",
-      "statewright_connect",
-    ]);
+    assert.equal(responseById(result.stdout, 3).error.code, -32001);
+    const catalog = responseById(result.stdout, 2).result.tools;
+    assert.equal(catalog.length, 15);
+    assert.ok(catalog.some(tool => tool.name === "statewright_load_workflow"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -609,7 +607,7 @@ for (const [name, proxy] of legacyProxies) {
   });
 }
 
-test("codex refreshes its catalog after a local credential is provisioned without restarting", async () => {
+test("codex adopts a local credential at call time without catalog refresh or restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-codex-key-adoption-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -650,16 +648,13 @@ test("codex refreshes its catalog after a local credential is provisioned withou
     await waitForOutput(() => stdout, /\"id\":1/, 10_000);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
     await waitForOutput(() => stdout, /\"id\":2/, 10_000);
-    assert.deepEqual(responseById(stdout, 2).result.tools.map((tool) => tool.name), [
-      "statewright_search_docs",
-      "statewright_list_workflows",
-      "statewright_connect",
-    ]);
+    assert.equal(responseById(stdout, 2).result.tools.length, 15);
+    assert.ok(responseById(stdout, 2).result.tools.some(tool => tool.name === "statewright_get_state"));
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
     await waitForOutput(() => stdout, /\"id\":3/, 10_000);
     assert.equal(responseById(stdout, 3).error.code, -32001);
     await setGatewayCredential("https://mcp.statewright.ai", "sw_live_new_key", { environment, home });
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} })}\n`);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } })}\n`);
     child.stdin.end();
     const code = await new Promise((resolveClose, rejectClose) => {
       child.once("error", rejectClose);
@@ -710,11 +705,8 @@ test("codex offers OAuth reconnect after an OS-stored gateway credential is reje
     ]);
 
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(responseById(result.stdout, 2).result.tools.map((tool) => tool.name), [
-      "statewright_search_docs",
-      "statewright_list_workflows",
-      "statewright_connect",
-    ]);
+    assert.equal(responseById(result.stdout, 2).result.tools.length, 15);
+    assert.ok(responseById(result.stdout, 2).result.tools.some(tool => tool.name === "statewright_connect"));
     assert.equal(responseById(result.stdout, 3).error.code, -32001);
   } finally {
     await rm(root, { recursive: true, force: true });

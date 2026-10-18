@@ -1,5 +1,24 @@
 # ADR 003: Bound managed Codex resume ownership to the usable client lifecycle
 
+## Cold read-only resume compatibility
+
+Codex 0.160 records the standard read-only sandbox as an unnamed managed
+permission profile. Restore that exact profile to the native `read-only`
+sandbox on cold resume. Do not project custom rules, enabled networking, or
+unknown fields: those still require an explicit user-selected override.
+Approval policy and thread-owned location restoration retain their existing
+precedence. Tests cover both turn-context and settings-event snapshots.
+
+## Discovery across authentication
+
+The local proxy advertises its core workflow catalog before authentication.
+Codex snapshots that inventory, so signing in later must not require another
+discovery to expose load/state tools. Calls still enforce authentication and
+managed ownership. Healthy discovery additionally retains gateway-provided
+tools and their descriptors; extensions unavailable during initial discovery
+may require a normal client restart. Missing credentials, unavailable storage,
+and rejected credentials remain distinct failures.
+
 Status: Accepted
 
 ## Context

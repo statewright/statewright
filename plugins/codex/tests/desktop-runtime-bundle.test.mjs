@@ -31,4 +31,8 @@ test("Desktop broker runtime is a complete synchronized Codex plugin bundle", as
   const proxy = await readFile("plugins/codex/mcp-proxy.sh", "utf8");
   assert.match(proxy, /scripts\/statewright-managed-client\.mjs/);
   assert.doesNotMatch(proxy, /\.\.\/executor\/statewright-managed-client\.mjs/);
+  const mcp = JSON.parse(await readFile("plugins/codex/.mcp.json", "utf8"));
+  for (const name of ["STATEWRIGHT_CREDENTIAL_HELPER", "STATEWRIGHT_CREDENTIAL_OS_HOME"]) {
+    assert.ok(mcp.mcpServers.statewright.env_vars.includes(name), `MCP must forward ${name}`);
+  }
 });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { CredentialStoreError, getGatewayCredential, resolveGatewayApiKey, resolveTuiGatewayApiKey, setGatewayCredential, unlockMacKeychain } from "../lib/credential-store.mjs";
+import { CredentialStoreError, credentialProcessEnvironment, getGatewayCredential, invokeCredentialHelper, resolveGatewayApiKey, resolveTuiGatewayApiKey, setGatewayCredential, unlockMacKeychain } from "../lib/credential-store.mjs";
 import { codexOneShotInvocation } from "../lib/managed-client-supervisor.mjs";
 import { managedClientTuiInvocation } from "../statewright-managed-client.mjs";
 
@@ -71,7 +71,8 @@ function unavailable() {
 
 test("macOS TUI unlocks via the fixed system executable without a password argument", async () => {
   const calls = [];
-  const unlocked = await unlockMacKeychain({ spawnProcess(command, args, options) {
+  const environment = { HOME: "/isolated/dev1", STATEWRIGHT_CREDENTIAL_OS_HOME: "/os/account" };
+  const unlocked = await unlockMacKeychain({ environment, platform: "darwin", spawnProcess(command, args, options) {
     calls.push({ command, args, options });
     const child = new EventEmitter();
     queueMicrotask(() => child.emit("exit", 0));
@@ -81,8 +82,44 @@ test("macOS TUI unlocks via the fixed system executable without a password argum
   assert.deepEqual(calls, [{
     command: "/usr/bin/security",
     args: ["unlock-keychain"],
-    options: { stdio: "inherit", shell: false },
+    options: { env: { ...environment, HOME: "/os/account" }, stdio: "inherit", shell: false },
   }]);
+  assert.equal(environment.HOME, "/isolated/dev1");
+});
+
+test("credential account-home override is macOS-only, explicit, and absolute", () => {
+  const environment = { HOME: "/isolated/dev1" };
+  assert.equal(credentialProcessEnvironment(environment, "darwin"), environment);
+  for (const platform of ["linux", "win32"]) {
+    const configured = { ...environment, STATEWRIGHT_CREDENTIAL_OS_HOME: "/os/account" };
+    assert.equal(credentialProcessEnvironment(configured, platform), configured);
+  }
+  assert.throws(() => credentialProcessEnvironment({ ...environment, STATEWRIGHT_CREDENTIAL_OS_HOME: "relative" }, "darwin"), { code: "CREDENTIAL_HOME_INVALID" });
+});
+
+test("credential lookup uses the same OS account home as unlock without changing the client HOME", async () => {
+  const environment = {
+    HOME: "/isolated/dev1", CODEX_HOME: "/isolated/dev1/.codex",
+    STATEWRIGHT_CREDENTIAL_OS_HOME: "/os/account",
+    STATEWRIGHT_CREDENTIAL_HELPER: "/isolated/dev1/helper",
+  };
+  const response = await invokeCredentialHelper({ operation: "status", gateway: "https://fixture.invalid" }, {
+    environment, platform: "darwin",
+    spawnProcess(command, args, options) {
+      assert.equal(command, environment.STATEWRIGHT_CREDENTIAL_HELPER);
+      assert.deepEqual(args, []);
+      assert.deepEqual(options.env, { ...environment, HOME: "/os/account" });
+      const child = new EventEmitter();
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.stdin.on("finish", () => {
+        child.stdout.write(JSON.stringify({ ok: false, status: "missing" }));
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+  });
+  assert.equal(response.status, "missing");
+  assert.equal(environment.HOME, "/isolated/dev1");
 });
 
 test("macOS TUI asks before unlocking and retries the same gateway lookup exactly once", async () => {
@@ -90,7 +127,8 @@ test("macOS TUI asks before unlocking and retries the same gateway lookup exactl
   let prompts = 0;
   let unlocks = 0;
   let written = "";
-  const result = await resolveTuiGatewayApiKey({ STATEWRIGHT_ENV: "staging" }, {
+  const environment = { STATEWRIGHT_ENV: "staging", HOME: "/isolated/dev1", STATEWRIGHT_CREDENTIAL_OS_HOME: "/os/account" };
+  const result = await resolveTuiGatewayApiKey(environment, {
     platform: "darwin",
     input: { isTTY: true },
     output: { isTTY: true, write(value) { written += value; } },
@@ -100,7 +138,7 @@ test("macOS TUI asks before unlocking and retries the same gateway lookup exactl
       return "fixture-secret";
     },
     confirm: async () => { prompts++; return true; },
-    unlock: async () => { unlocks++; return true; },
+    unlock: async (options) => { assert.deepEqual(options, { environment, platform: "darwin" }); unlocks++; return true; },
   });
   assert.equal(result, "fixture-secret");
   assert.deepEqual([lookups, prompts, unlocks], [2, 1, 1]);

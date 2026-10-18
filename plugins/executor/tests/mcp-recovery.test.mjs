@@ -77,9 +77,11 @@ test("actual Codex proxy uses exact canonical endpoint and keeps explicit connec
     res.writeHead(req.url === "/mcp" ? 200 : 404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { tools: [{ name: "protected_tool", inputSchema: { type: "object" } }] } }));
   });
-  const [response] = await proxy(env, [list]);
-  assert.deepEqual(paths, ["/mcp"]);
+  const [response, result] = await proxy(env, [list, call]);
+  assert.deepEqual(paths, ["/mcp", "/mcp"]);
   assert.ok(response.result.tools.some(t => t.name === "protected_tool"));
+  assert.ok(result.result.tools.some(t => t.name === "protected_tool"));
+  assert.ok(response.result.tools.some(t => t.name === "statewright_load_workflow"));
   assert.ok(response.result.tools.some(t => t.name === "statewright_connect"));
 });
 test("actual proxy keeps 401 discovery alive, never retries writes, and starts login only explicitly", async t => {
@@ -118,7 +120,7 @@ for (const status of [403, 404, 503]) test(`actual proxy preserves HTTP ${status
   assert.equal(failure.error.data.httpStatus, status);
   assert.equal(failure.error.data.kind, status === 403 ? "permission_denied" : "http_error");
   assert.equal(failure.error.data.recoveryTool, undefined);
-  assert.equal(catalog.result.tools.some(tool => tool.name === "statewright_transition"), false);
+  assert.equal(catalog.result.tools.some(tool => tool.name === "statewright_transition"), true);
   assert.doesNotMatch(JSON.stringify([catalog, failure]), /not for diagnostics/);
   assert.deepEqual(paths, ["/mcp", "/mcp"]);
 });

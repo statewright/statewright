@@ -11,7 +11,7 @@ const clients = [
   { name: "claude", proxy: resolve("plugins/claude-code/mcp-proxy.sh"), local: ["statewright_search_docs"] },
 ];
 
-async function startUpstream() {
+async function startUpstream(malformed = false) {
   const server = createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
@@ -20,7 +20,11 @@ async function startUpstream() {
     response.end(JSON.stringify({
       jsonrpc: "2.0",
       id: message.id,
-      result: { tools: [{ name: "statewright_get_state", inputSchema: { type: "object" } }] },
+      result: { tools: [
+        { name: "statewright_get_state", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
+        { name: "fixture_extra_tool", inputSchema: { type: "object" } },
+        ...(malformed ? [17, "malformed descriptor"] : []),
+      ] },
     }));
   });
   await new Promise((resolveStart, rejectStart) => {
@@ -93,6 +97,7 @@ for (const client of clients) {
             : { STATEWRIGHT_ADAPTER_URL: upstream.url, STATEWRIGHT_ADAPTER_TOKEN: "bridge-token" };
         const names = await listTools(client.proxy, environment);
         assert.ok(names.includes("statewright_get_state"));
+        assert.ok(names.includes("fixture_extra_tool"), `Gateway extension missing from ${client.name}/${transport}`);
         for (const local of client.local) assert.ok(names.includes(local), `${local} missing from ${client.name}/${transport}`);
       } finally {
         await upstream.close();
@@ -111,7 +116,15 @@ for (const client of clients) {
       });
       // Codex owner loss is not authority to establish a different session.
       // Claude's existing fallback contract is outside this Codex repair.
-      assert.equal(names.includes("statewright_get_state"), client.name !== "codex");
+      assert.equal(names.includes("statewright_get_state"), true);
+      if (client.name === "codex") {
+        const denied = await invokeProxy(client.proxy, { jsonrpc: "2.0", id: 2, method: "tools/call",
+          params: { name: "statewright_get_state", arguments: {} } }, {
+          STATEWRIGHT_GATEWAY_URL: upstream.url, STATEWRIGHT_MANAGED_MCP_URL: "http://127.0.0.1:1",
+          STATEWRIGHT_MANAGED_MCP_TOKEN: "stale-token",
+        });
+        assert.equal(denied.error.data.kind, "managed_binding_unavailable");
+      }
       if (client.name === "codex") assert.ok(names.includes("statewright_connect"));
       for (const local of client.local) assert.ok(names.includes(local));
     } finally {
@@ -119,6 +132,15 @@ for (const client of clients) {
     }
   });
 }
+
+test("Codex preserves explicit live annotations and ignores malformed extra descriptors", async () => {
+  const upstream = await startUpstream(true);
+  try {
+    const response = await invokeProxy(clients[0].proxy, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      { STATEWRIGHT_GATEWAY_URL: upstream.url });
+    assert.equal(response.result.tools.find(t => t.name === "statewright_get_state").annotations.readOnlyHint, false);
+  } finally { await upstream.close(); }
+});
 
 test("Codex reference search executes locally through managed transport", async () => {
   const upstream = await startUpstream();

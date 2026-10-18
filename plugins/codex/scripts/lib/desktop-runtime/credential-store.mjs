@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { canonicalGateway, PRODUCTION_GATEWAY } from "./gateway-profile.mjs";
@@ -35,6 +35,18 @@ export function credentialHelperPath(environment = process.env, home = homedir()
   return join(home, ".statewright", "bin", platform === "win32" ? "statewright-credentials.exe" : "statewright-credentials");
 }
 
+// A client may isolate its config HOME without changing the macOS account that
+// owns Keychain. Apply this explicit account-home override only to credential
+// subprocesses, never to the client's config, plugin, or legacy-key lookup.
+export function credentialProcessEnvironment(environment = process.env, platform = process.platform) {
+  const accountHome = environment.STATEWRIGHT_CREDENTIAL_OS_HOME?.trim();
+  if (platform !== "darwin" || !accountHome) return environment;
+  if (!isAbsolute(accountHome)) {
+    throw new CredentialStoreError("macOS credential home must be an absolute path", "CREDENTIAL_HOME_INVALID");
+  }
+  return { ...environment, HOME: accountHome };
+}
+
 export function invokeCredentialHelper(request, {
   environment = process.env,
   home = homedir(),
@@ -44,7 +56,7 @@ export function invokeCredentialHelper(request, {
   return new Promise((resolve, reject) => {
     const helper = credentialHelperPath(environment, home, platform);
     const child = spawnProcess(helper, [], {
-      env: environment,
+      env: credentialProcessEnvironment(environment, platform),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -140,11 +152,12 @@ async function confirmKeychainUnlock({ input, output }) {
   }
 }
 
-export function unlockMacKeychain({ spawnProcess = spawn } = {}) {
+export function unlockMacKeychain({ spawnProcess = spawn, environment = process.env, platform = process.platform } = {}) {
   return new Promise((resolveUnlock, rejectUnlock) => {
     // Let Apple's tool own the password prompt. Never receive the password in
     // Node, pass it in argv, or substitute a shell command for this binary.
     const child = spawnProcess("/usr/bin/security", ["unlock-keychain"], {
+      env: credentialProcessEnvironment(environment, platform),
       stdio: "inherit",
       shell: false,
     });
@@ -179,7 +192,7 @@ export async function resolveTuiGatewayApiKey(environment = process.env, {
       throw new CredentialStoreError("Keychain unlock was cancelled", "CREDENTIAL_UNLOCK_CANCELLED");
     }
     let unlocked = false;
-    try { unlocked = await unlock(); } catch { /* preserve a bounded, secret-free error */ }
+    try { unlocked = await unlock({ environment, platform }); } catch { /* preserve a bounded, secret-free error */ }
     if (!unlocked) {
       throw new CredentialStoreError("Keychain unlock did not complete; gateway credential remains unavailable", "CREDENTIAL_UNLOCK_FAILED");
     }
@@ -198,8 +211,11 @@ export async function resolveTuiGatewayApiKey(environment = process.env, {
 async function cli() {
   const operation = process.argv[2];
   const gateway = process.argv[3];
-  if (!gateway || !["get", "set", "status", "delete"].includes(operation)) process.exit(2);
+  if (!gateway || !["get", "set", "status", "delete", "resolve"].includes(operation)) process.exit(2);
   if (operation === "get") process.stdout.write(`${await getGatewayCredential(gateway)}\n`);
+  else if (operation === "resolve") {
+    process.stdout.write(`${await resolveGatewayApiKey({ ...process.env, STATEWRIGHT_GATEWAY_URL: gateway })}\n`);
+  }
   else if (operation === "set") {
     let secret = "";
     for await (const chunk of process.stdin) {

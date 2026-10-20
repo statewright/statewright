@@ -1211,6 +1211,16 @@ fn readonly_sed_args(args: &[String]) -> bool {
 }
 
 fn readonly_sed_print_program(program: &str) -> bool {
+    let mut commands = program.split(';');
+    let Some(first) = commands.next() else {
+        return false;
+    };
+    readonly_sed_single_print_program(first)
+        && commands.take(15).all(readonly_sed_single_print_program)
+        && program.split(';').count() <= 16
+}
+
+fn readonly_sed_single_print_program(program: &str) -> bool {
     let Some(addresses) = program.strip_suffix('p') else {
         return false;
     };
@@ -2552,10 +2562,14 @@ mod tests {
     fn bounded_local_execution_requires_a_small_literal_grammar() {
         for command in [
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.js",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.cjs",
             "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "/opt/toolchains/bin/node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.js",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.cjs",
             "cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline --workspace",
             "cargo test --workspace --all-targets --all-features --offline",
@@ -2570,11 +2584,16 @@ mod tests {
         }
         for command in [
             "node arbitrary-script.mjs",
+            "node --test plugins/executor/tests/not-a-test.js",
+            "node --test plugins/executor/tests/browser-onboarding.test.ts",
             "node --test ../outside.test.mjs",
             "node --test --test-name-pattern= plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex",
             "node --test --test-name-pattern=codex /tmp/outside.test.mjs",
             "node --test --test-name-pattern=codex ../outside.test.mjs",
+            "node --test --require fixture plugins/executor/tests/codex-native-approval-proxy.test.js",
+            "node --check ../outside.js",
+            "node --check /tmp/outside.cjs",
             "node --test --test-name-pattern=codex --watch plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex --require=fixture plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex --test-name-pattern=other plugins/executor/tests/browser-onboarding.test.mjs",
@@ -2860,6 +2879,27 @@ mod tests {
         let classes = classify("cargo test 2>/dev/null");
         // 2> is stderr redirect, should NOT trigger FileWrite
         assert!(!classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn readonly_sed_accepts_only_bounded_print_program_lists() {
+        for command in [
+            "sed -n '1,20p;40,60p' README.md",
+            "sed -n '1p;20p;$p' README.md",
+            "sed -n -e '1,20p;40,60p' README.md",
+        ] {
+            assert_eq!(readonly_capabilities(command), Some(vec!["Read"]), "{command}");
+        }
+        for command in [
+            "sed -n '1,20p;w receipt.txt' README.md",
+            "sed -n '1,20p;e id' README.md",
+            "sed -n '1,20p;r script.sed' README.md",
+            "sed -n '1,20p;;40p' README.md",
+            "sed -n '1p;2p;3p;4p;5p;6p;7p;8p;9p;10p;11p;12p;13p;14p;15p;16p;17p' README.md",
+            "sed -n '1,20p;40d' README.md",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
     }
 
     #[test]

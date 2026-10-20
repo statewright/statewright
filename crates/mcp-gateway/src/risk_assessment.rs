@@ -4776,6 +4776,57 @@ mod tests {
             resolved("node --test ../outside.test.mjs"),
             ResolvedEffect::DenyUncertain
         );
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn denial_audit_regression_preserves_bounded_execution_and_read_boundaries() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+
+        for command in [
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.js",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.cjs",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.js",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.cjs",
+        ] {
+            assert_eq!(
+                resolved(command),
+                ResolvedEffect::BoundedLocalExecution,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            resolved("rg --files crates 2>/dev/null | sed -n '1,20p;40,60p'"),
+            ResolvedEffect::ReadOnly
+        );
+        for command in [
+            "node --check /tmp/outside.js",
+            "node --test --require fixture plugins/executor/tests/codex-native-approval-proxy.test.js",
+        ] {
+            assert_eq!(resolved(command), ResolvedEffect::DenyUncertain, "{command}");
+        }
+        assert_eq!(
+            resolved("rg --files crates 2>/tmp/receipt | sed -n '1,20p;40,60p'"),
+            ResolvedEffect::LocalWrite
+        );
 
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);

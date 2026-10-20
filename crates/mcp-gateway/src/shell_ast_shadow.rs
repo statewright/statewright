@@ -782,6 +782,13 @@ fn classify_file_redirect(redirect: Node<'_>, source: &[u8], assessment: &mut As
         assessment.push_class(OpClass::Opaque);
         return;
     };
+    // Keep this exception byte-for-byte aligned with the bounded read proof in
+    // `strip_readonly_stderr_sink`. Do not compact whitespace here: a spaced,
+    // appended, expanded, or otherwise different redirect remains evidence of
+    // a possible file write.
+    if text == "2>/dev/null" {
+        return;
+    }
     let compact: String = text
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -905,6 +912,25 @@ mod tests {
         assert_eq!(result.shell_heredocs, 0);
         assert!(!result.classes.contains(&OpClass::GitWrite));
         assert!(result.classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn exact_stderr_null_sink_is_not_a_file_write() {
+        let discard = assess("rg --files crates 2>/dev/null | sed -n '1,20p'");
+        assert_eq!(discard.status, ParseStatus::Parsed);
+        assert!(!discard.classes.contains(&OpClass::FileWrite));
+
+        for command in [
+            "rg --files crates 2> /dev/null | sed -n '1,20p'",
+            "rg --files crates 2>>/dev/null | sed -n '1,20p'",
+            "rg --files crates 2>/tmp/receipt | sed -n '1,20p'",
+            "rg --files crates >/dev/null | sed -n '1,20p'",
+        ] {
+            assert!(
+                assess(command).classes.contains(&OpClass::FileWrite),
+                "{command}"
+            );
+        }
     }
 
     #[test]

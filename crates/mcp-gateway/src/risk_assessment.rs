@@ -4781,6 +4781,81 @@ mod tests {
     }
 
     #[test]
+    fn rust_validation_family_effects_survive_ast_and_disabled_semantics() {
+        set_test_shell_ast_shadow_enabled(Some(false));
+        set_test_shell_ast_authority_enabled(Some(true));
+        let resolved = |command: &str| {
+            let deterministic = assess_invocation(
+                None,
+                "exec_command",
+                &json!({"cmd": command}),
+                Some("validate"),
+            );
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                true,
+            )
+            .resolve_effect()
+        };
+        for command in ["rustfmt --edition 2024 crates/core/src/lib.rs"] {
+            assert_eq!(resolved(command), ResolvedEffect::LocalWrite, "{command}");
+        }
+        for command in ["rustfmt --check src/lib.rs", "command -v cargo-nextest"] {
+            assert_eq!(resolved(command), ResolvedEffect::ReadOnly, "{command}");
+        }
+        for command in [
+            "cargo fmt --all",
+            "cargo fmt --all -- --check",
+            "cargo check --offline --manifest-path crates/core/Cargo.toml --tests",
+            "cargo test --offline --manifest-path crates/core/Cargo.toml --lib adaptation -- --exact",
+            "cargo build --offline --workspace",
+        ] {
+            assert_eq!(
+                resolved(command),
+                ResolvedEffect::BoundedLocalExecution,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            resolved("rustfmt --check src/lib.rs; rustfmt src/lib.rs"),
+            ResolvedEffect::LocalWrite,
+        );
+        assert_eq!(
+            resolved("rustfmt src/lib.rs && cargo test --offline --lib"),
+            ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+        );
+        for command in [
+            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
+            "cargo check --manifest-path crates/core/Cargo.toml --tests",
+            "cargo fmt --all -- --check --emit files",
+            "cargo test --offline --config net.offline=false",
+            "cargo fmt --all; arbitrary_program",
+            "RUSTC_WRAPPER=other cargo test --offline",
+            "cargo fmt --manifest-path $(pick_manifest)",
+            "/tmp/attacker/.cargo/bin/rustfmt --check src/lib.rs",
+            "/tmp/attacker/.cargo/bin/cargo fmt --check",
+        ] {
+            assert_eq!(
+                resolved(command),
+                ResolvedEffect::DenyUncertain,
+                "{command}"
+            );
+        }
+        assert_eq!(
+            resolved("cargo fmt --all -- --check; rm src/lib.rs"),
+            ResolvedEffect::DenyKnownRisk,
+        );
+        assert_eq!(
+            resolved("cargo test --offline --lib; curl https://example.invalid"),
+            ResolvedEffect::DenyKnownRisk,
+        );
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
     fn denial_audit_regression_preserves_bounded_execution_and_read_boundaries() {
         set_test_shell_ast_shadow_enabled(Some(false));
         set_test_shell_ast_authority_enabled(Some(true));
@@ -4821,7 +4896,11 @@ mod tests {
             "node --check /tmp/outside.js",
             "node --test --require fixture plugins/executor/tests/codex-native-approval-proxy.test.js",
         ] {
-            assert_eq!(resolved(command), ResolvedEffect::DenyUncertain, "{command}");
+            assert_eq!(
+                resolved(command),
+                ResolvedEffect::DenyUncertain,
+                "{command}"
+            );
         }
         assert_eq!(
             resolved("rg --files crates 2>/tmp/receipt | sed -n '1,20p;40,60p'"),

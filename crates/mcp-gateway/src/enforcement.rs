@@ -806,6 +806,59 @@ mod tests {
     }
 
     #[test]
+    fn cargo_formatter_requires_execution_authority_even_in_check_mode() {
+        let session = |allowed: &[&str], denied: &[&str]| {
+            GatewaySession::new(
+                "formatter".into(),
+                serde_json::from_value(json!({
+                    "id": "formatter", "initial": "validate",
+                    "context": {"tool_policy_mode":"denylist_heuristic_v1"},
+                    "states": {
+                        "validate": {
+                            "allowed_tools": allowed, "disallowed_tools": denied,
+                            "classifier_policy": {"risk_tolerance":"moderate_local"},
+                            "on": {"DONE":"done"}
+                        },
+                        "done": {"type":"final"}
+                    }
+                }))
+                .unwrap(),
+            )
+        };
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        for command in ["cargo fmt --all", "cargo fmt --all -- --check"] {
+            let pipeline = semantic_pipeline(command, None);
+            assert_eq!(
+                pipeline.resolve_effect(),
+                ResolvedEffect::BoundedLocalExecution
+            );
+            for allowed in [vec!["Read", "Bash"], vec!["Write", "Bash"]] {
+                assert!(
+                    semantic_effect_capability_denial(&session(&allowed, &[]), &pipeline).is_some()
+                );
+            }
+            assert!(
+                semantic_effect_capability_denial(
+                    &session(&["BoundedLocalExecution", "Bash"], &[]),
+                    &pipeline,
+                )
+                .is_none()
+            );
+            assert!(
+                semantic_effect_capability_denial(
+                    &session(
+                        &["BoundedLocalExecution", "Bash"],
+                        &["BoundedLocalExecution"]
+                    ),
+                    &pipeline,
+                )
+                .is_some()
+            );
+        }
+        crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
     fn combined_local_effects_require_every_capability_in_the_union() {
         let session = |allowed_tools: &[&str]| {
             let definition: MachineDefinition = serde_json::from_value(json!({

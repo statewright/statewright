@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_formatter_requires_execution_authority_even_in_check_mode() {
+    fn repository_execution_contract_requires_explicit_authority_for_every_runner() {
         let session = |allowed: &[&str], denied: &[&str]| {
             GatewaySession::new(
                 "formatter".into(),
@@ -826,13 +826,31 @@ mod tests {
             )
         };
         crate::risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
-        for command in ["cargo fmt --all", "cargo fmt --all -- --check"] {
-            let pipeline = semantic_pipeline(command, None);
+        for command in [
+            "cargo fmt --all",
+            "cargo fmt --all -- --check",
+            "cargo check -p statewright-engine -p statewright-mcp-gateway",
+            "cargo test --lib filter -- --exact",
+            "cargo build --workspace",
+            "cargo test --offline --lib",
+            "node --test tests/unit.test.cjs",
+            "npm test",
+            "pnpm run test",
+            "vite build",
+            "node_modules/.bin/vitest run src/unit.spec.ts",
+        ] {
+            let mut pipeline = semantic_pipeline(command, None);
+            pipeline.semantic_authorization_enabled = false;
             assert_eq!(
                 pipeline.resolve_effect(),
                 ResolvedEffect::BoundedLocalExecution
             );
-            for allowed in [vec!["Read", "Bash"], vec!["Write", "Bash"]] {
+            for allowed in [
+                vec!["Read", "Bash"],
+                vec!["Write", "Bash"],
+                vec!["Bash"],
+                vec![],
+            ] {
                 assert!(
                     semantic_effect_capability_denial(&session(&allowed, &[]), &pipeline).is_some()
                 );
@@ -855,6 +873,16 @@ mod tests {
                 .is_some()
             );
         }
+        let mut read_only = session(&["BoundedLocalExecution", "Bash"], &[]);
+        read_only
+            .definition
+            .states
+            .get_mut("validate")
+            .unwrap()
+            .classifier_policy =
+            Some(serde_json::from_value(json!({"risk_tolerance":"low_local"})).unwrap());
+        let pipeline = semantic_pipeline("cargo check", None);
+        assert!(semantic_effect_risk_denial(&read_only, &pipeline).is_some());
         crate::risk_assessment::set_test_shell_ast_authority_enabled(None);
     }
 

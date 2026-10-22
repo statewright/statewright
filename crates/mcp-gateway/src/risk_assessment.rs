@@ -4403,7 +4403,8 @@ mod tests {
             "npm build",
             "pnpm lint",
             "cargo run -- inspect",
-            "cargo test",
+            "cargo test --config build.rustc-wrapper=other",
+            "cargo unknown-plugin",
             "docker exec container inspect",
             "podman run image",
             "kubectl exec pod -- inspect",
@@ -4770,12 +4771,109 @@ mod tests {
         );
         assert_eq!(
             resolved("cargo test -p statewright-mcp-gateway"),
-            ResolvedEffect::DenyUncertain
+            ResolvedEffect::BoundedLocalExecution
         );
         assert_eq!(
             resolved("node --test ../outside.test.mjs"),
             ResolvedEffect::DenyUncertain
         );
+        set_test_shell_ast_shadow_enabled(None);
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn repository_execution_contract_preserves_composition_without_system_one() {
+        // Inert fixture strings only: none of these commands are executed.
+        // Exercise the same policy intent through different runner adapters,
+        // option bindings, wrappers and AST compositions.
+        for ast_enabled in [false, true] {
+            set_test_shell_ast_shadow_enabled(Some(false));
+            set_test_shell_ast_authority_enabled(Some(ast_enabled));
+            let resolved = |command: &str| {
+                let deterministic = assess_invocation(
+                    None,
+                    "exec_command",
+                    &json!({"cmd": command}),
+                    Some("validate"),
+                );
+                let request = deterministic.semantic_request.as_ref().unwrap().clone();
+                pipeline_from_parts(
+                    deterministic,
+                    semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                    false,
+                )
+                .resolve_effect()
+            };
+            for command in [
+                "cargo check -p statewright-engine -p statewright-mcp-gateway",
+                "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation -- --exact",
+                "cargo build --locked --workspace --all-targets",
+                "cargo check --offline --tests",
+                "cargo check --frozen --tests",
+                "CI=true command cargo check --package=core --features alpha,beta",
+                "env -- CI=true cargo build --lib",
+                "node --test tests/unit.test.cjs",
+                "npm test",
+                "pnpm run test",
+                "node_modules/.bin/vitest run src/unit.spec.ts",
+                "vite build",
+            ] {
+                assert_eq!(
+                    resolved(command),
+                    ResolvedEffect::BoundedLocalExecution,
+                    "ast={ast_enabled}: {command}"
+                );
+                assert_eq!(
+                    resolved(&format!("{command}; mkdir artifacts")),
+                    ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+                    "{command}"
+                );
+                assert_eq!(
+                    resolved(&format!("{command}; opaque_program")),
+                    ResolvedEffect::DenyUncertain,
+                    "{command}"
+                );
+                for companion in [
+                    "rm artifact",
+                    "curl https://example.invalid",
+                    "git push origin main",
+                ] {
+                    assert_eq!(
+                        resolved(&format!("{command}; {companion}")),
+                        ResolvedEffect::DenyKnownRisk,
+                        "{command}; {companion}"
+                    );
+                }
+            }
+            for command in [
+                "cargo publish",
+                "cargo install tool",
+                "cargo run",
+                "cargo arbitrary-plugin",
+                "cargo check --config net.offline=false",
+                "cargo check --target-dir /tmp/outside",
+                "cargo check --manifest-path ../Cargo.toml",
+                "cargo check --package",
+                "cargo check --package=",
+                "cargo check --offline=false",
+                "cargo check -- $(opaque)",
+                "cargo check -- --exact",
+                "cargo build unexpected_filter",
+                "RUSTC_WRAPPER=other cargo check",
+                "CARGO_HOME=/tmp/other cargo check",
+                "node --test --require other tests/unit.test.cjs",
+                "npm run deploy",
+                "env -S 'cargo check'",
+                "command -p cargo check",
+                "/tmp/cargo check",
+            ] {
+                assert_eq!(
+                    resolved(command),
+                    ResolvedEffect::DenyUncertain,
+                    "ast={ast_enabled}: {command}"
+                );
+            }
+        }
         set_test_shell_ast_shadow_enabled(None);
         set_test_shell_ast_authority_enabled(None);
     }
@@ -4811,6 +4909,8 @@ mod tests {
             "cargo check --offline --manifest-path crates/core/Cargo.toml --tests",
             "cargo test --offline --manifest-path crates/core/Cargo.toml --lib adaptation -- --exact",
             "cargo build --offline --workspace",
+            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
+            "cargo check --manifest-path crates/core/Cargo.toml --tests",
         ] {
             assert_eq!(
                 resolved(command),
@@ -4827,8 +4927,6 @@ mod tests {
             ResolvedEffect::LocalWriteAndBoundedLocalExecution,
         );
         for command in [
-            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
-            "cargo check --manifest-path crates/core/Cargo.toml --tests",
             "cargo fmt --all -- --check --emit files",
             "cargo test --offline --config net.offline=false",
             "cargo fmt --all; arbitrary_program",

@@ -27,9 +27,12 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
-    /// A narrowly parsed local validation command. The command may execute
-    /// repository code, but its launcher grammar forbids network-enabling,
-    /// installation, redirection, substitution, and path-escape forms.
+    /// A narrowly parsed repository build/test entrypoint. This authorizes
+    /// repository code (including build scripts, test code and configuration),
+    /// not a filesystem/network sandbox. Ordinary dependency resolution may
+    /// access configured registries. Installation/publication, configuration
+    /// injection and path-escape forms are not part of this launcher contract;
+    /// redirects and other shell leaves retain their own required capabilities.
     /// Requires explicit BoundedLocalExecution workflow authority.
     BoundedLocalExecution,
     /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
@@ -1685,6 +1688,11 @@ pub(crate) fn bounded_node_repository_entrypoint(invocation: &LiteralInvocation)
     Some(entrypoint)
 }
 
+// Offline is a dependency-resolution choice, not proof that repository code
+// has only local effects: build.rs, proc macros and test executables may all
+// perform arbitrary I/O even with --offline. Use the same explicit execution
+// capability as Node/npm/Vite, rather than requiring an offline spelling for
+// one runner. This does not grant Read, generic Bash, or remote-write authority.
 fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
     let args = invocation.args.as_slice();
     let Some(operation @ ("test" | "check" | "build")) = args.first().map(String::as_str) else {
@@ -1693,12 +1701,10 @@ fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
 
     let mut index = 1;
     let mut positional_filters = 0;
-    let mut offline = false;
     while index < args.len() {
         let (flag, inline) = option_parts(&args[index]);
         match flag {
             "--offline" | "--frozen" if inline.is_none() => {
-                offline = true;
                 index += 1;
             }
             "--locked"
@@ -1733,7 +1739,7 @@ fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
                 }
             }
             "--" if operation == "test" && inline.is_none() => {
-                return offline && bounded_libtest_options(&args[index + 1..]);
+                return bounded_libtest_options(&args[index + 1..]);
             }
             value
                 if operation == "test"
@@ -1750,7 +1756,7 @@ fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
             _ => return false,
         }
     }
-    offline
+    true
 }
 
 // Preserve option/value binding, including --flag=value, across Rust adapters.
@@ -2712,9 +2718,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_is_passthrough() {
+    fn cargo_test_is_explicit_repository_execution() {
         let classes = classify("cargo test");
-        assert!(classes.contains(&OpClass::Passthrough));
+        assert_eq!(classes, vec![OpClass::BoundedLocalExecution]);
+        assert_eq!(readonly_capabilities("cargo test"), None);
     }
 
     #[test]
@@ -2787,6 +2794,11 @@ mod tests {
             "cargo test --offline --features alpha,beta --lib filter -- --exact",
             "cargo test --offline --lib -- --nocapture --test-threads=1",
             "cargo test --offline --lib -- --test-threads 2",
+            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
+            "cargo check --manifest-path crates/core/Cargo.toml --tests",
+            "cargo check --locked",
+            "cargo test -p statewright-mcp-gateway",
+            "cargo test --workspace",
         ] {
             assert_eq!(
                 classify(command),
@@ -2819,9 +2831,6 @@ mod tests {
             "cargo build --offline --features",
             "cargo install --offline anything",
             "cargo publish --offline",
-            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
-            "cargo check --manifest-path crates/core/Cargo.toml --tests",
-            "cargo check --locked",
             "RUSTC_WRAPPER=other cargo check --offline",
             "RUSTFMT=other cargo fmt --all",
         ] {
@@ -2875,9 +2884,7 @@ mod tests {
             "node --test --test-name-pattern=codex plugins/executor/tests/browser-onboarding.test.mjs > receipt.txt",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs && curl https://example.invalid",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
-            "cargo test -p statewright-mcp-gateway",
             "cargo test --offline --manifest-path ../outside/Cargo.toml",
-            "cargo test --workspace",
             "cargo test --offline --workspace --target-dir /tmp/outside",
             "cargo test --offline --workspace --config net.offline=false",
             "cargo test --offline -p statewright-mcp-gateway -- --logfile output.txt",
@@ -3238,8 +3245,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_allowed_with_just_bash() {
+    fn cargo_test_requires_execution_even_under_legacy_tool_policy() {
         let allowed = vec!["Bash".into()];
+        assert!(check_against_allowed("cargo test", &allowed).is_err());
+        let allowed = vec!["Bash".into(), "BoundedLocalExecution".into()];
         assert!(check_against_allowed("cargo test", &allowed).is_ok());
     }
 

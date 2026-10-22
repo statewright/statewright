@@ -28,10 +28,10 @@ test("formats classifier denials for display without discarding machine evidence
   });
 
   assert.match(denial.display, /^Statewright guard: denied/);
-  assert.match(denial.display, /bounded native operation/);
-  assert.match(denial.display, /heredoc or inline interpreter/);
+  assert.match(denial.display, /semantic_threshold_not_met/);
+  assert.match(denial.display, /configured effect thresholds/);
   assert.match(denial.display, /Rework attempt 1\/2/);
-  assert.match(denial.display, /System One signals: read-only 0%, write 86%, destructive 0%, external 56%/);
+  assert.match(denial.display, /System One signals \(uncalibrated\): read-only unknown, write 86%, destructive unknown, external 56%/);
   assert.doesNotMatch(denial.display, /0\.86|internal scoring/);
   assert.match(denial.machine, /"may_write":0\.86/);
   assert.match(denial.machine, /"action":"rework"/);
@@ -532,8 +532,10 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     assert.equal(classifierOutput.permissionDecision, "deny",
       "classifier rework must remain a PreToolUse denial, not an unsupported ask");
     assert.match(classifierOutput.permissionDecisionReason, /^Statewright guard: denied/);
-    assert.match(classifierOutput.permissionDecisionReason, /could not prove a safe local effect/);
-    assert.match(classifierOutput.permissionDecisionReason, /System One signals: read-only 4%, write 96%, destructive 1%, external 1%/);
+    assert.match(classifierOutput.permissionDecisionReason, /semantic_threshold_not_met/);
+    assert.match(classifierOutput.permissionDecisionReason, /configured effect thresholds/);
+    assert.match(classifierOutput.permissionDecisionReason, /System One signals \(uncalibrated\): read-only 4%, write 96%, destructive 1%, external 1%/);
+    assert.doesNotMatch(classifierOutput.permissionDecisionReason, /will be sent|heredoc|inline interpreter/);
     assert.match(classifierOutput.permissionDecisionReason, /Rework attempt 1\/2/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /basis=|p\(read=|private-(command|input)-sentinel/);
     assert.match(classifierOutput.additionalContext, /"final_denial_basis":"semantic_threshold_not_met"/);

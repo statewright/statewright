@@ -1048,33 +1048,16 @@ case "$ENDPOINT" in
       if [ "$UNMANAGED_DELEGATION" = "true" ]; then
         ADAPTER_DISPLAY="Statewright guard: denied · a raw delegated agent would receive a separate, unbounded tool surface. Continue inline by default so evidence stays attached to the current workflow. If the task requires a model change or an isolated execution boundary, use a Statewright-managed fork attached to this workflow."
       else
-        ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" | jq -r '
-        def pct($value): (((($value // 0) * 100) | round | tostring) + "%");
-        .risk_assessment? as $risk
-        | if ($risk | type) != "object" then empty else
-            (($risk.final_denial_basis // $risk.resolution_basis // "unknown") | tostring) as $basis
-            | (($risk.required_authority // "approved execution path") | tostring) as $required
-            | (if $basis == "semantic_threshold_not_met"
-              or $basis == "incomplete_structural_evidence"
-              or $basis == "semantic_vector_unavailable"
-              or $basis == "semantic_assessment_incomplete"
-              then "Statewright guard: denied · System One could not prove a safe local effect. Next: prefer one bounded native operation (for example rg, git diff, or a project task) instead of a heredoc or inline interpreter; use the approved execution path when code must run."
-              elif $basis == "deterministic_nonlocal_risk"
-              then "Statewright guard: denied · known non-local effect. Next: use the approved execution path."
-              elif ($basis | startswith("workflow_capability_"))
-              then "Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants " + $required + "."
-              elif ($basis | startswith("classifier_policy_"))
-              then "Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with " + $required + "."
-              else "Statewright guard: denied · classifier policy requires " + $required + "."
-              end) as $message
-            | if $risk.semantic_status == "Assessed" and (($risk.semantic_vector? | type) == "object")
-              then $message + " System One signals: read-only " + pct($risk.semantic_vector.read_only)
-                + ", write " + pct($risk.semantic_vector.may_write)
-                + ", destructive " + pct($risk.semantic_vector.destructive)
-                + ", external " + pct($risk.semantic_vector.external_or_account_effect) + "."
-              else $message end
-          end
-        ' 2>/dev/null || true)
+        # Share receipt-only wording with the executor hook. Formatting cannot
+        # change the decision; a missing helper retains a safe denial below.
+        ADAPTER_DISPLAY=""
+        if [ -n "$STATEWRIGHT_NODE_RUNTIME" ]; then
+          ADAPTER_DISPLAY=$(printf '%s' "$ADAPTER_RESULT" \
+            | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/guard-denial.mjs" 2>/dev/null) || ADAPTER_DISPLAY=""
+        fi
+        if [ -z "$ADAPTER_DISPLAY" ] && printf '%s' "$ADAPTER_RESULT" | jq -e '.risk_assessment | type == "object"' >/dev/null 2>&1; then
+          ADAPTER_DISPLAY="Statewright guard: denied · detailed classifier explanation unavailable. Inspect the machine classifier receipt; do not retry this invocation without the required authority."
+        fi
       fi
       if [ -z "$ADAPTER_DISPLAY" ]; then
         ADAPTER_DISPLAY="$ADAPTER_REASON"
@@ -1082,7 +1065,7 @@ case "$ENDPOINT" in
       if [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "rework" ]; then
         REWORK_ATTEMPTS=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.attempts // 0' 2>/dev/null || echo 0)
         REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
-        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}; after this budget, the same classified intent will be sent for native human approval."
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}. No approval has been granted; reaching the budget does not itself submit or approve this invocation."
       elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "deny" ]; then
         APPROVAL_REASON=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.reason // empty' 2>/dev/null || true)
         case "$APPROVAL_REASON" in

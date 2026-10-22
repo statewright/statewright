@@ -16,7 +16,7 @@ async function until(check) {
   }
   assert.fail("workflow did not hand off to a new native turn");
 }
-async function fixture(t, {nativeSettings = false} = {}) {
+async function fixture(t, {nativeSettings = false, missingProvider = null, providerError = null} = {}) {
   const server = new WebSocketServer({port: 0, host: "127.0.0.1"});
   let proxy, client;
   t.after(async () => {
@@ -39,6 +39,10 @@ async function fixture(t, {nativeSettings = false} = {}) {
       if (!r.method || r.id === undefined) return;
       const reply = result => ws.send(JSON.stringify({id: r.id, result}));
       const notify = (method, params) => ws.send(JSON.stringify({method, params}));
+      if (r.method === "thread/resume" && missingProvider && r.params.modelProvider === missingProvider) {
+        return ws.send(JSON.stringify({id: r.id, error: {code: -32603,
+          message: providerError ?? `failed to load configuration: Model provider \`${missingProvider}\` not found`}}));
+      }
       if (native && r.method === "thread/settings/update") {
         try { reply(await native.update(r.params)); }
         catch (error) { ws.send(JSON.stringify({id: r.id, error: {code: -32603, message: error.message}})); }
@@ -295,6 +299,56 @@ test("unchanged native settings can confirm original-route restoration", async t
   assert.equal(f.confirmed.at(-1).confirmation_source, "native_settings_snapshot_and_update_ack");
   assert.equal(f.calls.filter(c => c.method === "turn/start").length, 2);
 });
+
+for (const provider of ["anth", "custom_disabled"]) {
+  test(`unavailable provider ${provider} explains the failed workflow handoff without fallback`, async t => {
+    const f = await fixture(t, {missingProvider: provider});
+    const initial = stateFor("frontier_review", 1, "openai-codex/gpt-6-sol", "high");
+    f.setState(initial); f.completeTool("statewright_load_workflow", {state_snapshot: initial});
+    await until(() => f.injected.length === 1);
+    const next = {...initial, workflow: "agentic-engineering-v2-turbo", state: "devils_advocate",
+      state_epoch: 2, model: `${provider}/review-model`};
+    f.setState(next);
+    f.completeTool("statewright_transition", {transitioned: true, from: "frontier_review", to: next.state});
+    await until(() => f.frames.some(frame => frame.method === "warning"));
+    const warning = f.frames.find(frame => frame.method === "warning").params.message;
+    assert.match(warning, /provider unavailable/i);
+    assert.ok(warning.includes(provider));
+    assert.match(warning, /agentic-engineering-v2-turbo/);
+    assert.match(warning, /devils_advocate/);
+    assert.match(warning, /model picker does not override/i);
+    assert.match(warning, /already.*advanced/i);
+    assert.match(warning, /no automatic fallback/i);
+    assert.equal(f.errors.at(-1).code, "STATEWRIGHT_PROVIDER_UNAVAILABLE");
+    assert.equal(f.calls.filter(c => c.method === "turn/start").length, 2);
+    assert.equal(f.injected.length, 1);
+    assert.equal(f.confirmed.filter(r => r.confirmed).length, 1);
+    assert.equal(f.calls.filter(c => c.method === "thread/resume").at(-1).params.modelProvider, "openai");
+    // A failed handoff must leave a usable native control connection.
+    assert.ok(await f.rpc("thread/read", {threadId}));
+    const retry = await f.rpc("turn/start", {threadId, model: "gpt-6-astra", effort: "high", input: []}, {allowError: true});
+    assert.match(retry.error.message, /provider unavailable/i);
+    assert.match(retry.error.message, /model picker does not override/i);
+    assert.equal(f.calls.filter(c => c.method === "turn/start").length, 2);
+    assert.equal(f.injected.length, 1);
+  });
+}
+
+for (const providerError of ["provider authentication failed", "upstream timed out",
+  "failed to load configuration: Model provider `different_provider` not found"]) {
+  test(`provider error is not misclassified as missing requested provider: ${providerError}`, async t => {
+    const f = await fixture(t, {missingProvider: "custom", providerError});
+    const state = {...stateFor("review", 1, "custom/review-model", "high"), workflow: "fixture-workflow"};
+    f.setState(state); f.completeTool("statewright_load_workflow", {state_snapshot: state});
+    await until(() => f.frames.some(frame => frame.method === "warning"));
+    const warning = f.frames.find(frame => frame.method === "warning").params.message;
+    assert.ok(warning.includes(providerError));
+    assert.doesNotMatch(warning, /Statewright provider unavailable/);
+    assert.notEqual(f.errors.at(-1).code, "STATEWRIGHT_PROVIDER_UNAVAILABLE");
+    assert.equal(f.calls.filter(c => c.method === "turn/start").length, 1);
+    assert.equal(f.injected.length, 0);
+  });
+}
 
 for (const failure of ["rejected-ack", "cancelled-ack", "readback-mismatch", "state-changed"]) {
   test(`unchanged-settings handoff fails closed for ${failure}`, async t => {

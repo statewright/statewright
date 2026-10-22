@@ -143,6 +143,25 @@ export function routeIdentity(model, environment = process.env) {
   return { provider: namespace === "openai-codex" ? "openai" : namespace, model: bareModel, config: {} };
 }
 
+function explainUnavailableProvider(error, receipt) {
+  // Classify only the native configuration failure for this exact attempted
+  // provider. Authentication, transport and settings failures keep their own
+  // diagnostics; this changes presentation, never route/admission policy.
+  const missing = /^failed to load configuration: Model provider [`'"]([^`'"\r\n]+)[`'"] not found$/.exec(error?.message ?? "");
+  if (!missing || missing[1] !== receipt.effectiveProvider) return error;
+  const label = value => JSON.stringify(String(value ?? "unspecified"));
+  const explained = new Error(
+    `Statewright provider unavailable: workflow ${label(receipt.route?.workflow)} state ${label(receipt.route?.state)} `
+    + `requests ${label(receipt.requestedModel)}, but provider ${label(receipt.effectiveProvider)} is not configured in this Codex App Server. `
+    + "No turn started on the requested route; no automatic fallback was used. The workflow may already have advanced. "
+    + "The model picker does not override this explicit workflow route. Enable/configure the requested provider, "
+    + "or explicitly revise the workflow route and resume through supported workflow recovery; then retry.",
+    {cause: error},
+  );
+  explained.code = "STATEWRIGHT_PROVIDER_UNAVAILABLE";
+  return explained;
+}
+
 function qualifiedRouteModel(model, provider) {
   const value = String(model ?? "").trim();
   if (!value || value.includes("/")) return value;
@@ -1039,7 +1058,7 @@ export async function startCodexAppServerRouteProxy({
         }).catch(() => {});
         activeProviders.set(threadId, prior.provider);
         activeModels.set(threadId, prior.model);
-        throw error;
+        throw explainUnavailableProvider(error, receipt);
       } finally {
         switchingThreads.delete(threadId);
         await sendPresentation(presentation.finishSwitch(threadId, verifiedSwitch));
@@ -1323,7 +1342,7 @@ export async function startCodexAppServerRouteProxy({
         try { await check(); if (!interrupted) await internalRpc("turn/interrupt", {threadId, turnId}); } catch {}
         receipts.delete(threadId);
         routeConfirmationWaiters.get(threadId)?.resolve({confirmed: false, reason: "workflow_handoff_failed"});
-        await onProtocolError({side: "workflow_handoff", message: error.message});
+        await onProtocolError({side: "workflow_handoff", code: error.code, message: error.message});
         await forwardWhenOpen(downstream, JSON.stringify({method: "warning", params: {threadId,
           message: `Statewright Arbiter: model handoff stopped. ${error.message}`}})).catch(() => {});
       } finally {

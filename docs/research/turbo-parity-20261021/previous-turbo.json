@@ -1,0 +1,394 @@
+{
+  "id": "agentic-engineering-v2-turbo",
+  "initial": "intake",
+  "context": {
+    "capability_contract": {
+      "normalized_capabilities": {
+        "Read": "Maps native Codex/Claude read, search, and glob invocations.",
+        "Write": "Maps native Codex/Claude file creation, replacement, patch, and edit invocations.",
+        "Bash": "Maps native shell invocation; allowed_commands remains a prefix allowlist, not a substitute for capabilities."
+      },
+      "invariant": "Do not require provider-specific tool names in a workflow. Adapter normalizes native tools to Read, Write, Bash."
+    },
+    "budget_enforcement": "observed_only",
+    "reserve_policy": "Preserve capacity for validation, one evidence-backed recovery loop, review, and handoff.",
+    "route_contract": "Requested model and effort must be honored or fail closed. No silent provider/model fallback or reroute.",
+    "profile": "agentic-engineering-v2-turbo",
+    "speed_policy": "priority (/fast) for Codex states; default for Anthropic devil's-advocate review",
+    "provider_policy": "Requested model and effort must be honored or fail closed; Anthropic Opus is allowed only for devils_advocate."
+  },
+  "states": {
+    "intake": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest",
+        "tmux capture-pane"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Capture the bounded objective, acceptance criteria, existing work, and exact next evidence. Do not implement. When a live terminal dialog is the reported evidence surface, capture the current pane once with tmux capture-pane -p; do not enumerate sessions, attach, send keys, alter tmux state, or treat an unavailable pane as a failure.",
+      "on": {
+        "INTAKE_COMPLETE": "localize",
+        "BLOCKED": "blocked"
+      }
+    },
+    "localize": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Collect only the minimum current code, tests, and runtime evidence. Produce a compact diagnosis packet; do not edit.",
+      "on": {
+        "LOCALIZED": "baseline",
+        "DECISION_REQUIRED": "decision",
+        "BLOCKED": "blocked"
+      }
+    },
+    "baseline": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Characterize the current behavior or red baseline and select the smallest valid slice. Do not edit.",
+      "on": {
+        "BASELINED": "implement",
+        "NO_CHANGE_NEEDED": "validate",
+        "DECISION_REQUIRED": "decision",
+        "BLOCKED": "blocked"
+      }
+    },
+    "decision": {
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking_level": "high",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Resolve only the bounded high-consequence decision from the compact packet. Return a plan, risks, and exact validation.",
+      "on": {
+        "DECIDED": "implement",
+        "SCOPE_CHANGED": "baseline",
+        "BLOCKED": "blocked"
+      }
+    },
+    "implement": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 6,
+      "instructions": "Implement only the accepted bounded slice. Native Codex or Claude edit/patch/write calls are authorized through Write. Preserve unrelated changes.",
+      "on": {
+        "IMPLEMENTED": "validate",
+        "HYPOTHESIS_REJECTED": "reconcile",
+        "BLOCKED": "blocked"
+      }
+    },
+    "validate": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 4,
+      "instructions": "Run the smallest relevant verification first and record exact results. A failed, skipped, or unavailable check is not a pass.",
+      "on": {
+        "VALIDATED": "crosscheck",
+        "VALIDATION_FAILED": "reconcile",
+        "BLOCKED": "blocked"
+      }
+    },
+    "reconcile": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Write",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Classify the failed evidence, form one new discriminating hypothesis, and make only a bounded repair. Do not repeat an identical failure.",
+      "on": {
+        "REPAIRED": "implement",
+        "SCOPE_CHANGED": "baseline",
+        "PRODUCT_DEFECT": "localize",
+        "BLOCKED": "blocked"
+      }
+    },
+    "crosscheck": {
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking_level": "medium",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Independently inspect the compact change and validation packet. Return cited findings only; do not edit.",
+      "on": {
+        "CROSSCHECKED": "frontier_review",
+        "REWORK_REQUIRED": "reconcile",
+        "BLOCKED": "blocked"
+      }
+    },
+    "frontier_review": {
+      "model": "openai-codex/gpt-6-astra",
+      "thinking_level": "high",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Perform one bounded adversarial review of the supplied packet and diff. Do not rediscover the repository or edit.",
+      "on": {
+        "APPROVED": "devils_advocate",
+        "REWORK_REQUIRED": "reconcile",
+        "BLOCKED": "blocked"
+      }
+    },
+    "record": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Record outcome, validation, residual risk, rollback, and exact next handoff. Do not claim unavailable evidence passed.",
+      "on": {
+        "RECORDED": "complete",
+        "BLOCKED": "blocked"
+      }
+    },
+    "complete": {
+      "type": "final"
+    },
+    "blocked": {
+      "type": "final"
+    },
+    "devils_advocate": {
+      "model": "anth/opus",
+      "thinking_level": "high",
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ],
+      "allowed_commands": [
+        "git status",
+        "git diff",
+        "git log",
+        "rg",
+        "find",
+        "ls",
+        "pwd",
+        "task",
+        "npm",
+        "pnpm",
+        "node",
+        "pytest"
+      ],
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "default"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Act as an independent devil's advocate after the Codex crosscheck and frontier review. Challenge their conclusions with cited, concrete findings only; do not rediscover the repository or edit.",
+      "on": {
+        "APPROVED": "record",
+        "REWORK_REQUIRED": "reconcile",
+        "BLOCKED": "blocked"
+      }
+    }
+  }
+}

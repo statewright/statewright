@@ -599,45 +599,59 @@ impl Gateway {
         self.usage.start(state, None);
     }
 
-    /// Create a workflow run record. Returns the generated run_id.
+    /// Persist the prepared session before publishing any live replacement.
+    /// A configured database failure is not a memory-only successful load.
     async fn record_run_start(
-        &mut self,
+        &self,
+        run_id: &str,
         workflow_name: &str,
-        initial_state: &str,
-    ) -> Option<String> {
+        project: &str,
+        session: &crate::session::GatewaySession,
+    ) -> Result<(), &'static str> {
         #[cfg(feature = "metering")]
-        {
-            let pool = self.db_pool.as_ref()?;
+        if let Some(pool) = &self.db_pool {
+            let checkpoint = session.checkpoint();
+            if session.instance_id != self.session_id
+                || serde_json::to_vec(&checkpoint).map_or(true, |v| v.len() > 524_288)
+            {
+                return Err("Initial workflow checkpoint is invalid or exceeds the storage limit");
+            }
             let now = chrono::Utc::now().to_rfc3339();
-            let project = self.project_id.clone().unwrap_or_default();
-            let result = sqlx::query_scalar::<_, String>(
-                "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, created, updated) \
-                 VALUES (gen_random_uuid()::text, $1, $2, 'running', $3, '[]'::jsonb, 0, $4, $5, $3, $3) RETURNING id"
+            let result = sqlx::query(
+                "INSERT INTO workflow_runs (id, owner, workflow_name, status, started_at, transitions, transition_count, session_id, project_id, created, updated, final_state, context_snapshot) \
+                 VALUES ($1, $2, $3, 'running', $4, '[]'::jsonb, $5, $6, $7, $4, $4, $8, $9)"
             )
+            .bind(run_id)
             .bind(&self.owner_id)
             .bind(workflow_name)
             .bind(&now)
+            .bind(session.transition_count as f64)
             .bind(&self.session_id)
-            .bind(&project)
-            .fetch_one(pool)
+            .bind(project)
+            .bind(&session.current_state)
+            .bind(&checkpoint)
+            .execute(pool)
             .await;
-            return match result {
-                Ok(run_id) => {
-                    tracing::info!(workflow = workflow_name, run_id = %run_id, "Run started");
-                    self.current_run_id = Some(run_id.clone());
-                    Some(run_id)
+            if !matches!(result, Ok(ref saved) if saved.rows_affected() == 1) {
+                // Do not resend an uncertain INSERT. A fresh read can prove
+                // that this exact attempt committed despite a lost response.
+                // Failure/absence/mismatch stays an error carrying its run ID.
+                let confirmed = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE id=$1 AND owner=$2 AND workflow_name=$3 AND session_id=$4 AND COALESCE(project_id,'')=$5 AND status='running' AND final_state=$6 AND transition_count=$7 AND context_snapshot::jsonb=$8::jsonb)",
+                )
+                .bind(run_id).bind(&self.owner_id).bind(workflow_name)
+                .bind(&self.session_id).bind(project).bind(&session.current_state)
+                .bind(session.transition_count as f64).bind(&checkpoint)
+                .fetch_one(pool).await;
+                if matches!(confirmed, Ok(true)) {
+                    return Ok(());
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to create run record");
-                    None
-                }
-            };
+                return Err("Workflow start could not be persisted; existing session unchanged. Check storage before retrying.");
+            }
         }
         #[cfg(not(feature = "metering"))]
-        {
-            let _ = (workflow_name, initial_state);
-            None
-        }
+        let _ = (run_id, workflow_name, project, session);
+        Ok(())
     }
 
     /// Advance the live usage boundary using the state actually exposed to the
@@ -2994,22 +3008,21 @@ impl Gateway {
                     .session_manager
                     .get(&self.session_id)
                     .and_then(|s| s.plan_limit);
+                // Prepare off to the side. Neither storage failure nor an
+                // invalid initial checkpoint may replace the current owner.
+                let prepared = SessionManager::new();
                 if let Some((_, session)) = &paused {
-                    self.session_manager.restore(session.clone());
+                    prepared.restore(session.clone());
                 } else {
-                    self.session_manager
-                        .create(self.session_id.clone(), definition.clone());
+                    prepared.create(self.session_id.clone(), definition.clone());
                 }
                 if let Some(limit) = old_limit {
-                    self.session_manager.set_plan_limit(&self.session_id, limit);
+                    prepared.set_plan_limit(&self.session_id, limit);
                 }
                 let execution_definition = Self::execution_definition(
                     definition,
                     paused.as_ref().map(|(_, session)| session),
                 );
-                self.active_workflow = Some(workflow_name.to_string());
-                self.project_id = requested_project;
-
                 let capture_output = execution_definition
                     .meta
                     .as_ref()
@@ -3024,12 +3037,9 @@ impl Gateway {
 
                 // Resume from paused run or start fresh
                 let (run_id, resumed_state) = if let Some((rid, session)) = paused {
-                    self.current_run_id = Some(rid.clone());
                     (Some(rid), Some(session.current_state))
                 } else {
-                    let rid = self
-                        .record_run_start(workflow_name, &execution_definition.initial)
-                        .await;
+                    let rid = self.db_pool.as_ref().map(|_| uuid::Uuid::new_v4().to_string());
                     (rid, None)
                 };
 
@@ -3042,7 +3052,7 @@ impl Gateway {
                         "../../../plugins/codex/workflows/adr-record.json"
                     ))
                     .expect("built-in adr-record workflow is valid JSON");
-                    self.session_manager.start_subflow(
+                    prepared.start_subflow(
                         &self.session_id,
                         "adr-record".to_string(),
                         child,
@@ -3054,6 +3064,21 @@ impl Gateway {
                 } else {
                     None
                 };
+                let prepared_session = prepared.get(&self.session_id).expect("prepared session");
+                if resumed_state.is_none() {
+                    if let Some(rid) = run_id.as_deref() {
+                        if let Err(error) = self.record_run_start(
+                            rid, workflow_name, requested_project.as_deref().unwrap_or(""),
+                            &prepared_session,
+                        ).await {
+                            return JsonRpcResponse::error(id, -32603, format!("{error} Candidate run: {rid}. If storage acknowledgement was lost, inspect this exact run before another load; automatic retry is unsafe."));
+                        }
+                    }
+                }
+                self.session_manager.restore(prepared_session);
+                self.active_workflow = Some(workflow_name.to_string());
+                self.project_id = requested_project;
+                self.current_run_id = run_id.clone();
                 let current_state = if adr_path.is_some() {
                     "record"
                 } else {
@@ -5953,6 +5978,8 @@ mod tests {
         // The remote catalog still supplies test_definition(), which has more
         // states. With durable storage configured, loading must execute the
         // same owner-scoped durable definition returned above.
+        sqlx::query("CREATE TEMP TABLE workflow_runs(id text PRIMARY KEY, owner text, workflow_name text, status text, started_at text, transitions json, transition_count numeric, session_id text, project_id text, created text, updated text, final_state text, context_snapshot json)")
+            .execute(&pool).await.unwrap();
         let response = gateway
             .handle_message(JsonRpcRequest {
                 jsonrpc: "2.0".into(),
@@ -5977,6 +6004,141 @@ mod tests {
                 .len(),
             1
         );
+        pool.close().await;
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires owned disposable PocketBase schema via Auldwyrm runtime harness"]
+    async fn workflow_start_matches_migrated_checkpoint_schema() {
+        assert_eq!(std::env::var("STATEWRIGHT_QUOTA_FIXTURE").unwrap(), "disposable");
+        let url = std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap();
+        assert!(url.contains("@127.0.0.1:"));
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&url).await.unwrap();
+        let mut gw = approval_gateway();
+        gw.db_pool = Some(pool.clone());
+        gw.owner_id = std::env::var("STATEWRIGHT_TEST_QUOTA_HOLD_OWNER").unwrap();
+        for adr in [false, true] {
+            let name = if adr { "quota-start-adr" } else { "quota-start-normal" };
+            let mut definition = serde_json::to_value(gw.workflows.get("approval-test").unwrap()).unwrap();
+            definition["meta"] = json!({"agent-decision-record":adr});
+            gw.workflows.insert(name.into(), serde_json::from_value(definition.clone()).unwrap());
+            sqlx::query("INSERT INTO workflows(id,owner,name,definition,active,created,updated) VALUES($1,$2,$3,$4,false,NOW()::text,NOW()::text)")
+                .bind(uuid::Uuid::new_v4().to_string()).bind(&gw.owner_id).bind(name).bind(&definition)
+                .execute(&pool).await.unwrap();
+            let response = gw.handle_message(JsonRpcRequest {jsonrpc:"2.0".into(),method:"tools/call".into(),id:Some(json!(1)),
+                params:Some(json!({"name":"statewright_load_workflow","arguments":{"name":name,"project_id":"quota-startup-fixture"}}))}).await.unwrap();
+            assert!(response.error.is_none(), "{response:?}");
+            let response = tool_result_json(response);
+            assert_eq!(response["loaded"],name);
+            let row: serde_json::Value = sqlx::query_scalar("SELECT to_jsonb(r) FROM workflow_runs r WHERE id=$1 AND owner=$2")
+                .bind(gw.current_run_id.as_ref().unwrap()).bind(&gw.owner_id).fetch_one(&pool).await.unwrap();
+            let session = gw.session_manager.get("approval-session").unwrap();
+            assert_eq!(row["context_snapshot"],session.checkpoint());
+            assert_eq!(row["final_state"],session.current_state);
+            assert_eq!(row["session_id"],"approval-session");
+            assert_eq!(row["project_id"],"quota-startup-fixture");
+            assert_eq!(session.subflow.is_some(),adr);
+            assert!(crate::session::GatewaySession::from_checkpoint(row["context_snapshot"].clone(),"approval-session",&session.current_state).is_ok());
+        }
+        pool.close().await;
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
+    async fn workflow_start_storage_failure_preserves_owner_and_checkpoint() {
+        let url = std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap();
+        assert!(url.contains("@127.0.0.1:"), "owned loopback fixture only");
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1)
+            .connect(&url).await.unwrap();
+        sqlx::query("SET search_path TO pg_temp").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TEMP TABLE workflows(owner text, name text, definition json)")
+            .execute(&pool).await.unwrap();
+        let mut gw = approval_gateway();
+        gw.db_pool = Some(pool.clone());
+        gw.current_run_id = Some("previous-run".into());
+        gw.project_id = Some("previous-project".into());
+        gw.session_manager.set_plan_limit("approval-session", 777);
+        let mut old = gw.session_manager.get("approval-session").unwrap();
+        old.pending_approval = Some(crate::session::PendingApproval {
+            approval_id: "previous-approval".into(), event: "DEPLOY".into(),
+            from_state: old.current_state.clone(), to_state: "deployed".into(),
+            new_context: json!({"reviewed":false}), message: None,
+        });
+        gw.session_manager.restore(old);
+        let mut definition = serde_json::to_value(gw.workflows.get("approval-test").unwrap()).unwrap();
+        for name in ["approval-test", "with-adr", "oversized"] {
+            if name == "with-adr" {
+                definition["meta"] = json!({"agent-decision-record":true});
+            } else if name == "oversized" {
+                definition["meta"] = json!({});
+                definition["context"] = json!({"large":"x".repeat(524_288)});
+            }
+            gw.workflows.insert(name.into(), serde_json::from_value(definition.clone()).unwrap());
+            sqlx::query("INSERT INTO workflows VALUES($1,$2,$3)")
+                .bind(&gw.owner_id).bind(name).bind(&definition).execute(&pool).await.unwrap();
+        }
+        async fn load(gw: &mut Gateway, name: &str) -> JsonRpcResponse {
+            gw.handle_message(JsonRpcRequest { jsonrpc:"2.0".into(), id:Some(json!(1)),
+                method:"tools/call".into(), params:Some(json!({"name":"statewright_load_workflow",
+                    "arguments":{"name":name,"project_id":"new-project"}})) }).await.unwrap()
+        }
+        fn identity(gw: &Gateway) -> serde_json::Value {
+            json!({"workflow":gw.active_workflow,"run":gw.current_run_id,"project":gw.project_id,
+                "checkpoint":gw.session_manager.get("approval-session").unwrap().checkpoint(),
+                "usage":gw.usage.summaries()})
+        }
+        let before = identity(&gw);
+        // The durable workflow catalog is available; only run persistence fails.
+        let failed = load(&mut gw, "approval-test").await;
+        assert!(failed.error.is_some(), "{failed:?}");
+        assert_eq!(identity(&gw), before);
+        sqlx::query("CREATE TEMP TABLE workflow_runs(id text PRIMARY KEY, owner text, workflow_name text, status text, started_at text, transitions json, transition_count numeric, session_id text, project_id text, created text, updated text, final_state text, context_snapshot json)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE FUNCTION pg_temp.skip_start() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER skip_start BEFORE INSERT ON workflow_runs FOR EACH ROW EXECUTE FUNCTION pg_temp.skip_start()")
+            .execute(&pool).await.unwrap();
+        assert!(load(&mut gw, "approval-test").await.error.is_some());
+        assert_eq!(identity(&gw), before);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM workflow_runs").fetch_one(&pool).await.unwrap(),0);
+        sqlx::query("DROP TRIGGER skip_start ON workflow_runs").execute(&pool).await.unwrap();
+        for name in ["approval-test", "with-adr"] {
+            let result = load(&mut gw, name).await;
+            assert!(result.error.is_none(), "{result:?}");
+            let response: serde_json::Value = serde_json::from_str(result.result.as_ref().unwrap()["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(response["loaded"], name);
+            let session = gw.session_manager.get("approval-session").unwrap();
+            let saved: serde_json::Value = sqlx::query_scalar("SELECT to_jsonb(r) FROM workflow_runs r WHERE id=$1")
+                .bind(gw.current_run_id.as_ref().unwrap()).fetch_one(&pool).await.unwrap();
+            assert_eq!(saved["context_snapshot"], session.checkpoint());
+            assert_eq!(saved["final_state"], session.current_state);
+            assert_eq!(saved["transition_count"], session.transition_count);
+            assert_eq!(saved["project_id"], "new-project");
+            assert_eq!(saved["session_id"], "approval-session");
+            assert_eq!(saved["owner"], gw.owner_id);
+            assert_eq!(session.plan_limit, Some(777));
+            assert_eq!(response["run_id"], saved["id"]);
+            assert_eq!(response["initial_state"], session.current_state);
+            assert_eq!(session.subflow.is_some(), name == "with-adr");
+            // A duplicate exact attempt is proved by a read, never another
+            // successful insert. Mismatched saved content cannot be adopted.
+            let exact_run = gw.current_run_id.as_ref().unwrap().clone();
+            assert!(gw.record_run_start(&exact_run, name, "new-project", &session).await.is_ok());
+            let mut changed = session.clone();
+            changed.context["changed"] = json!(true);
+            assert!(gw.record_run_start(&exact_run, name, "new-project", &changed).await.is_err());
+            assert!(gw.record_run_start(&exact_run, name, "foreign-project", &session).await.is_err());
+            if name == "with-adr" {
+                assert_eq!(session.current_state, "record");
+                assert!(session.context["adr_path"].as_str().unwrap().contains(gw.current_run_id.as_ref().unwrap()));
+            }
+        }
+        let before_oversize = identity(&gw);
+        assert!(load(&mut gw, "oversized").await.error.is_some());
+        assert_eq!(identity(&gw), before_oversize);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM workflow_runs").fetch_one(&pool).await.unwrap(),2);
         pool.close().await;
     }
 
@@ -6046,6 +6208,14 @@ mod tests {
             .unwrap();
         let mut gw = approval_gateway();
         gw.db_pool = Some(pool.clone());
+        // Catalog verification is a separate prerequisite; keep it available
+        // while this fixture isolates checkpoint/run-storage failures.
+        sqlx::query("CREATE TEMP TABLE workflows(owner text, name text, definition json)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO workflows VALUES($1,'approval-test',$2)")
+            .bind(&gw.owner_id)
+            .bind(serde_json::to_value(gw.workflows.get("approval-test").unwrap()).unwrap())
+            .execute(&pool).await.unwrap();
         gw.current_run_id = Some("fixture-run".into());
         let mut session = gw.session_manager.get("approval-session").unwrap();
         session.pending_approval = Some(crate::session::PendingApproval {

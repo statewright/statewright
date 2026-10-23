@@ -3336,7 +3336,17 @@ impl Gateway {
                         }
                         Err(e) => {
                             let msg = e.to_string();
-                            if msg.contains("unique") || msg.contains("duplicate") {
+                            if let Some(message) = workflow_quota_message(
+                                e.as_database_error().and_then(|db| db.code()).as_deref(),
+                            ) {
+                                Some(JsonRpcResponse::success(
+                                    id.clone(),
+                                    serde_json::to_value(crate::protocol::ToolCallResult::error(
+                                        message,
+                                    ))
+                                    .unwrap(),
+                                ))
+                            } else if msg.contains("unique") || msg.contains("duplicate") {
                                 Some(JsonRpcResponse::success(id.clone(),
                                     serde_json::to_value(crate::protocol::ToolCallResult::error(
                                         format!("Workflow '{}' already exists. Use overwrite=true to replace it.", name)
@@ -3565,10 +3575,115 @@ impl Gateway {
     }
 }
 
+// Storage enforces the same saved-workflow quota for MCP and PocketBase writes.
+// Match SQLSTATE, not arbitrary database text or an in-memory catalog count.
+#[cfg(any(feature = "metering", test))]
+fn workflow_quota_message(code: Option<&str>) -> Option<&'static str> {
+    match code {
+        Some("SWQ01") => Some(
+            "Workflow limit reached for your plan. Delete a saved workflow or upgrade at https://statewright.ai/billing. Updating an existing workflow with overwrite=true does not use another slot.",
+        ),
+        Some("SWQ02") => Some(
+            "Workflow quota could not be verified. No workflow was created. Contact support to check your plan configuration.",
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use statewright_engine::MachineDefinition;
+
+    #[test]
+    fn workflow_quota_errors_are_actionable_without_masking_other_failures() {
+        assert!(
+            workflow_quota_message(Some("SWQ01"))
+                .unwrap()
+                .contains("overwrite=true")
+        );
+        assert!(
+            workflow_quota_message(Some("SWQ02"))
+                .unwrap()
+                .contains("No workflow was created")
+        );
+        for code in [
+            None,
+            Some("23505"),
+            Some("40001"),
+            Some("08006"),
+            Some("SWQ010"),
+        ] {
+            assert_eq!(workflow_quota_message(code), None);
+        }
+    }
+
+    // Transport/error handling contract only. The Auldwyrm runtime harness
+    // separately tests the production quota migration against real owner data.
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary objects only"]
+    async fn workflow_quota_storage_errors_do_not_publish_unsaved_workflows() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::query("SET search_path TO pg_temp")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TEMP TABLE workflows (id text PRIMARY KEY, owner text, name text, definition json, active boolean, created text, updated text, UNIQUE(owner,name))")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE FUNCTION pg_temp.quota_error_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.name='quota-blocked' THEN RAISE EXCEPTION USING ERRCODE='SWQ01', MESSAGE='private database detail'; END IF; IF NEW.name='quota-unavailable' THEN RAISE EXCEPTION USING ERRCODE='SWQ02', MESSAGE='private database detail'; END IF; RETURN NEW; END; $$")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER quota_error_fixture BEFORE INSERT ON workflows FOR EACH ROW EXECUTE FUNCTION pg_temp.quota_error_fixture()")
+            .execute(&pool).await.unwrap();
+        let mut gateway = test_gateway();
+        gateway.db_pool = Some(pool.clone());
+        gateway.owner_id = "quota-test-owner".into();
+        let definition =
+            json!({"id":"quota-test", "initial":"done", "states":{"done":{"type":"final"}}});
+        for (name, overwrite, expected_error, expected_text) in [
+            ("quota-blocked", false, true, "Workflow limit reached"),
+            ("quota-blocked", true, true, "Workflow limit reached"),
+            (
+                "quota-unavailable",
+                false,
+                true,
+                "quota could not be verified",
+            ),
+            ("quota-saved", false, false, "created"),
+            ("quota-saved", false, true, "already exists"),
+            ("quota-saved", true, false, "updated"),
+        ] {
+            let response = gateway
+                .handle_message(JsonRpcRequest {
+                    jsonrpc: "2.0".into(),
+                    method: "tools/call".into(),
+                    id: Some(json!(1)),
+                    params: Some(json!({"name":"statewright_create_workflow", "arguments":{
+                        "name":name, "overwrite":overwrite, "definition":definition.clone()
+                    }})),
+                })
+                .await
+                .unwrap();
+            let result = response.result.unwrap();
+            assert_eq!(result["isError"].as_bool().unwrap_or(false), expected_error);
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains(expected_text), "{text}");
+            assert!(!text.contains("private database detail"));
+            assert!(!gateway.workflows.contains_key("quota-blocked"));
+            assert!(!gateway.workflows.contains_key("quota-unavailable"));
+        }
+        assert!(gateway.workflows.contains_key("quota-saved"));
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflows")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
+    }
 
     #[test]
     fn exploratory_read_only_tool_requires_adapter_or_read_only_hint() {

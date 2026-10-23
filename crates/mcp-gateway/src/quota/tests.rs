@@ -11,7 +11,7 @@ fn subscription() -> Value {
         "quota_period_price_id":"price_1","quota_period_event_id":"evt_1","quota_period_event_created":1790000000,
         "current_period_start":"2026-10-10 00:00:00Z","quota_period_end":"2026-11-10 00:00:00Z","current_period_end":"2026-11-10 00:00:00Z"})
 }
-fn request() -> (Value, DurableAdmissionRequest) {
+pub(super) fn request() -> (Value, DurableAdmissionRequest) {
     let definition =
         serde_json::from_value(json!({"id":"quota-fixture","initial":"ready","states":{
         "ready":{"on":{"NEXT":"ready","DONE":"done"}},"done":{"type":"final"}}}))
@@ -31,12 +31,13 @@ fn request() -> (Value, DurableAdmissionRequest) {
             request_digest: "a".repeat(64),
         },
         event: "NEXT".into(),
+        event_data: json!({}),
         candidate_checkpoint: session.checkpoint(),
     };
     (old, r)
 }
 
-async fn successor(
+pub(super) async fn successor(
     pool: &sqlx::PgPool,
     r: &DurableAdmissionRequest,
     operation: &str,
@@ -150,6 +151,51 @@ fn checkpoint_must_bind_session_revision_definition_and_approval() {
     let mut bad = r;
     bad.candidate_checkpoint["session"]["context"] = json!({"unapproved":true});
     assert!(candidate(&bad, &old).is_none());
+}
+
+#[test]
+fn ordinary_resume_cannot_discard_a_quota_hold() {
+    let (old, _) = request();
+    for marker in [
+        Value::Null,
+        json!({}),
+        json!({"schema":"statewright/quota-hold/v1"}),
+    ] {
+        let mut held = old.clone();
+        held["quota_hold"] = marker;
+        assert!(
+            GatewaySession::from_checkpoint(held, "quota-session", "ready")
+                .unwrap_err()
+                .contains("explicit Continue")
+        );
+    }
+    assert!(GatewaySession::from_checkpoint(old, "quota-session", "ready").is_ok());
+}
+
+#[test]
+fn ordinary_event_data_and_exact_session_mutation_are_verified() {
+    let (old, mut r) = request();
+    r.event_data = json!({"customer_result":"retained"});
+    r.candidate_checkpoint["session"]["context"] = r.event_data.clone();
+    assert!(candidate(&r, &old).is_some());
+    for (key, value) in [
+        ("plan_limit", json!(999999)),
+        ("iteration_count", json!(100)),
+        ("context_bytes", json!(100)),
+        ("files_edited", json!(["forged"])),
+    ] {
+        let mut forged = r.clone();
+        forged.candidate_checkpoint["session"][key] = value;
+        assert!(candidate(&forged, &old).is_none(), "{key}");
+    }
+    for key in ["_fork", "_interrupt_return"] {
+        let mut injected = r.clone();
+        injected.event_data[key] = json!("forged");
+        assert!(!valid_request(&injected));
+    }
+    let mut oversized = r.clone();
+    oversized.candidate_checkpoint["session"]["context"]["oversized"] = json!("x".repeat(524_288));
+    assert!(!valid_request(&oversized));
 }
 
 #[tokio::test]

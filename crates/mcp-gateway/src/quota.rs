@@ -24,7 +24,26 @@ pub struct OperationBinding {
 pub struct DurableAdmissionRequest {
     pub binding: OperationBinding,
     pub event: String,
+    pub event_data: Value,
     pub candidate_checkpoint: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuotaHold {
+    schema: String,
+    request: DurableAdmissionRequest,
+    source_checkpoint: Value,
+    period_id: String,
+    used: u64,
+    ceiling: u64,
+    held_at: String,
+}
+
+enum AdmissionInput<'a> {
+    Attempt(&'a DurableAdmissionRequest, bool),
+    Continue(&'a OperationBinding),
+    Cancel(&'a OperationBinding),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +63,17 @@ pub enum DurableAdmission {
         used: u64,
         ceiling: u64,
     },
+    QuotaHeld {
+        operation_id: String,
+        period_id: String,
+        used: u64,
+        ceiling: u64,
+    },
+    ResumeRequired {
+        operation_id: String,
+    },
+    Cancelled,
+    AlreadyApplied,
     EntitlementUnavailable,
     PeriodReconciliationRequired,
     BindingConflict,
@@ -151,6 +181,12 @@ fn valid_request(r: &DurableAdmissionRequest) -> bool {
         && b.expected_transition_count < MAX_LIMIT
         && !r.event.is_empty()
         && r.event.len() <= 255
+        && r.event_data.is_object()
+        && r.event_data.get("_interrupt_return").is_none()
+        && r.event_data.get("_fork").is_none()
+        && serde_json::to_vec(&r.candidate_checkpoint)
+            .map(|v| v.len() <= 524_288)
+            .unwrap_or(false)
         && serde_json::to_vec(r)
             .map(|v| v.len() <= 2_097_152)
             .unwrap_or(false)
@@ -182,7 +218,7 @@ fn candidate(r: &DurableAdmissionRequest, previous: &Value) -> Option<GatewaySes
     let resolved = statewright_engine::resolve_transition(
         old_state,
         &r.event,
-        &json!({}),
+        &r.event_data,
         &old.context,
         &old.definition,
     )
@@ -196,8 +232,21 @@ fn candidate(r: &DurableAdmissionRequest, previous: &Value) -> Option<GatewaySes
     {
         return None;
     }
-    // Independent guard/approval validation still belongs to the controller.
-    // This primitive currently supports ordinary pure progression only.
+    // Match the ordinary SessionManager update exactly. A candidate cannot
+    // silently rewrite a plan, pending approval, execution counter or context.
+    let mut expected = old;
+    expected.previous_state = Some(expected.current_state.clone());
+    expected.current_state = resolved.new_state;
+    expected.context = resolved.new_context;
+    expected.transition_count += 1;
+    expected.iteration_count = 0;
+    expected.files_edited.clear();
+    expected.context_bytes = 0;
+    expected.files_read.clear();
+    if serde_json::to_value(expected).ok()? != serde_json::to_value(&new).ok()? {
+        return None;
+    }
+    // Independent controller authority must still be checked by the caller.
     Some(new)
 }
 
@@ -207,15 +256,54 @@ pub async fn persist_durable_admission(
     pool: &sqlx::PgPool,
     r: &DurableAdmissionRequest,
 ) -> Result<DurableAdmission, sqlx::Error> {
+    admit(pool, AdmissionInput::Attempt(r, false)).await
+}
+
+/// Prepare the same-run durable hold before presenting a quota pause. This
+/// remains dormant until all progression paths use atomic admission.
+pub async fn admit_or_hold(
+    pool: &sqlx::PgPool,
+    r: &DurableAdmissionRequest,
+) -> Result<DurableAdmission, sqlx::Error> {
+    admit(pool, AdmissionInput::Attempt(r, true)).await
+}
+
+/// Explicit Continue: only the stored operation can be resumed. Entitlement,
+/// checkpoint, engine guards and binding are checked again under the row lock.
+pub async fn continue_held_admission(
+    pool: &sqlx::PgPool,
+    binding: &OperationBinding,
+) -> Result<DurableAdmission, sqlx::Error> {
+    admit(pool, AdmissionInput::Continue(binding)).await
+}
+
+/// Safe cancellation charges nothing and preserves the held checkpoint as
+/// evidence; it does not erase a receipt for an already committed operation.
+pub async fn cancel_held_admission(
+    pool: &sqlx::PgPool,
+    binding: &OperationBinding,
+) -> Result<DurableAdmission, sqlx::Error> {
+    admit(pool, AdmissionInput::Cancel(binding)).await
+}
+
+async fn admit(
+    pool: &sqlx::PgPool,
+    input: AdmissionInput<'_>,
+) -> Result<DurableAdmission, sqlx::Error> {
     use DurableAdmission::*;
-    if !valid_request(r) {
-        return Ok(BindingConflict);
-    }
+    let b = match input {
+        AdmissionInput::Attempt(r, _) => {
+            if !valid_request(r) {
+                return Ok(BindingConflict);
+            }
+            &r.binding
+        }
+        AdmissionInput::Continue(b) | AdmissionInput::Cancel(b) => b,
+    };
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *tx)
         .await?;
-    let b = &r.binding;
     let user: Option<Value> =
         sqlx::query_scalar("SELECT to_jsonb(u) FROM users u WHERE id=$1 FOR UPDATE")
             .bind(&b.owner)
@@ -229,7 +317,6 @@ pub async fn persist_durable_admission(
     let Some(run) = run else {
         return Ok(StaleOrForeignRun);
     };
-    let request_value = serde_json::to_value(r).expect("serializable request");
     let receipt: Option<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(r) FROM transition_quota_receipts r WHERE owner=$1 AND operation_id=$2",
     )
@@ -240,8 +327,16 @@ pub async fn persist_durable_admission(
     // Replay BEFORE revision/period checks: works after later transitions,
     // completion, upgrades or a reset, without overwriting the newer checkpoint.
     if let Some(receipt) = receipt {
-        if receipt["request"] != request_value {
+        if receipt["request"]["binding"] != serde_json::to_value(b).expect("binding") {
             return Ok(BindingConflict);
+        }
+        if let AdmissionInput::Attempt(r, _) = input {
+            if receipt["request"] != serde_json::to_value(r).expect("request") {
+                return Ok(BindingConflict);
+            }
+        }
+        if matches!(input, AdmissionInput::Cancel(_)) {
+            return Ok(AlreadyApplied);
         }
         let used_after = integer(&receipt["used_after"], MAX_COUNTER)
             .ok_or(sqlx::Error::Protocol("Invalid quota receipt".into()))?;
@@ -251,12 +346,90 @@ pub async fn persist_durable_admission(
             enforced: receipt["enforced"] == true,
         });
     }
-    if string(&run, "status") != "running"
-        || integer(&run["transition_count"], MAX_LIMIT) != Some(b.expected_transition_count)
-    {
+    if integer(&run["transition_count"], MAX_LIMIT) != Some(b.expected_transition_count) {
         return Ok(StaleOrForeignRun);
     }
-    let Some(next) = candidate(r, &run["context_snapshot"]) else {
+    let mut checkpoint = run["context_snapshot"].clone();
+    let held = if let Some(value) = checkpoint.get("quota_hold") {
+        let Ok(hold) = serde_json::from_value::<QuotaHold>(value.clone()) else {
+            return Ok(InvalidCheckpoint);
+        };
+        if hold.schema != "statewright/quota-hold/v1"
+            || !valid_request(&hold.request)
+            || date(&hold.held_at).is_none()
+            || hold.period_id.is_empty()
+            || hold.used < hold.ceiling
+            || hold.used > MAX_COUNTER
+            || hold.request.binding.owner != b.owner
+            || hold.request.binding.run_id != b.run_id
+            || hold.request.binding.session_id != b.session_id
+            || hold.request.binding.project_id != b.project_id
+            || hold.request.binding.expected_transition_count != b.expected_transition_count
+        {
+            return Ok(InvalidCheckpoint);
+        }
+        Some(hold)
+    } else {
+        None
+    };
+    let r = match input {
+        AdmissionInput::Attempt(r, _) => {
+            if let Some(held) = &held {
+                if string(&run, "status") != "paused" {
+                    return Ok(StaleOrForeignRun);
+                }
+                if held.request.binding.operation_id == b.operation_id && held.request != *r {
+                    return Ok(BindingConflict);
+                }
+                return Ok(ResumeRequired {
+                    operation_id: held.request.binding.operation_id.clone(),
+                });
+            }
+            if string(&run, "status") != "running" {
+                return Ok(StaleOrForeignRun);
+            }
+            r
+        }
+        AdmissionInput::Continue(_) | AdmissionInput::Cancel(_) => {
+            let Some(held) = &held else {
+                return Ok(StaleOrForeignRun);
+            };
+            if held.request.binding != *b {
+                return Ok(BindingConflict);
+            }
+            if matches!(input, AdmissionInput::Cancel(_)) {
+                if string(&run, "status") == "stopped" {
+                    return Ok(Cancelled);
+                }
+                if string(&run, "status") != "paused" {
+                    return Ok(StaleOrForeignRun);
+                }
+                let saved = sqlx::query("UPDATE workflow_runs SET status='stopped',completed_at=clock_timestamp()::text,updated=clock_timestamp()::text WHERE id=$1 AND owner=$2 AND session_id=$3 AND COALESCE(project_id,'')=$4 AND status='paused' AND transition_count=$5")
+                    .bind(&b.run_id).bind(&b.owner).bind(&b.session_id).bind(&b.project_id).bind(b.expected_transition_count as f64).execute(&mut *tx).await?;
+                if saved.rows_affected() != 1 {
+                    return Err(sqlx::Error::Protocol("Quota cancellation not saved".into()));
+                }
+                tx.commit().await?;
+                return Ok(Cancelled);
+            }
+            if string(&run, "status") != "paused" {
+                return Ok(StaleOrForeignRun);
+            }
+            checkpoint
+                .as_object_mut()
+                .ok_or(sqlx::Error::Protocol("Invalid held checkpoint".into()))?
+                .remove("quota_hold");
+            // Revision alone cannot detect a same-revision context/approval
+            // edit. Compare the entire durable source, including keys the
+            // event would overwrite, before resolving or consuming allowance.
+            if checkpoint != held.source_checkpoint {
+                return Ok(InvalidCheckpoint);
+            }
+            &held.request
+        }
+    };
+    let request_value = serde_json::to_value(r).expect("serializable request");
+    let Some(next) = candidate(r, &checkpoint) else {
         return Ok(InvalidCheckpoint);
     };
     let rollout: Option<Value> = sqlx::query_scalar(
@@ -332,6 +505,42 @@ pub async fn persist_durable_admission(
         if let Some(included) = e.included {
             let cap = ceiling(included).expect("bounded entitlement");
             if used >= cap {
+                if matches!(
+                    input,
+                    AdmissionInput::Attempt(_, true) | AdmissionInput::Continue(_)
+                ) {
+                    let hold = QuotaHold {
+                        schema: "statewright/quota-hold/v1".into(),
+                        request: r.clone(),
+                        source_checkpoint: checkpoint.clone(),
+                        period_id: e.period_id.clone(),
+                        used,
+                        ceiling: cap,
+                        held_at: now.to_rfc3339(),
+                    };
+                    checkpoint["quota_hold"] = serde_json::to_value(hold).expect("hold");
+                    // Existing PocketBase context_snapshot field limit. Never
+                    // bypass its size contract just because this is direct SQL.
+                    if serde_json::to_vec(&checkpoint)
+                        .map(|v| v.len() > 524_288)
+                        .unwrap_or(true)
+                    {
+                        return Ok(InvalidCheckpoint);
+                    }
+                    let saved = sqlx::query("UPDATE workflow_runs SET status='paused',context_snapshot=$1,final_state=$2,updated=$3 WHERE id=$4 AND owner=$5 AND session_id=$6 AND COALESCE(project_id,'')=$7 AND transition_count=$8 AND status=$9")
+                        .bind(&checkpoint).bind(string(&checkpoint["session"],"current_state")).bind(now.to_rfc3339())
+                        .bind(&b.run_id).bind(&b.owner).bind(&b.session_id).bind(&b.project_id).bind(b.expected_transition_count as f64).bind(string(&run,"status")).execute(&mut *tx).await?;
+                    if saved.rows_affected() != 1 {
+                        return Err(sqlx::Error::Protocol("Quota hold not saved".into()));
+                    }
+                    tx.commit().await?;
+                    return Ok(QuotaHeld {
+                        operation_id: b.operation_id.clone(),
+                        period_id: e.period_id,
+                        used,
+                        ceiling: cap,
+                    });
+                }
                 return Ok(QuotaExceeded { used, ceiling: cap });
             }
         }
@@ -346,11 +555,11 @@ pub async fn persist_durable_admission(
     if period_write.rows_affected() != 1 {
         return Err(sqlx::Error::Protocol("Quota period not saved".into()));
     }
-    let saved = sqlx::query("UPDATE workflow_runs SET context_snapshot=$1,transition_count=$2,final_state=$3,status=$4,updated=$5,transitions=(COALESCE(transitions::jsonb,'[]'::jsonb) || $6::jsonb)::json WHERE id=$7 AND owner=$8 AND session_id=$9 AND COALESCE(project_id,'')=$10 AND transition_count=$11 AND status='running'")
+    let saved = sqlx::query("UPDATE workflow_runs SET context_snapshot=$1,transition_count=$2,final_state=$3,status=$4,updated=$5,completed_at=CASE WHEN $4='completed' THEN $5 ELSE completed_at END,transitions=(COALESCE(transitions::jsonb,'[]'::jsonb) || $6::jsonb)::json WHERE id=$7 AND owner=$8 AND session_id=$9 AND COALESCE(project_id,'')=$10 AND transition_count=$11 AND status=$12")
         .bind(&r.candidate_checkpoint).bind((b.expected_transition_count+1) as f64).bind(&next.current_state)
         .bind(if next.is_final() { "completed" } else { "running" }).bind(&timestamp)
         .bind(json!([{ "from": next.previous_state, "to": next.current_state, "event": r.event, "timestamp": timestamp }]))
-        .bind(&b.run_id).bind(&b.owner).bind(&b.session_id).bind(&b.project_id).bind(b.expected_transition_count as f64).execute(&mut *tx).await?;
+        .bind(&b.run_id).bind(&b.owner).bind(&b.session_id).bind(&b.project_id).bind(b.expected_transition_count as f64).bind(string(&run,"status")).execute(&mut *tx).await?;
     if saved.rows_affected() != 1 {
         return Err(sqlx::Error::Protocol("Quota checkpoint not saved".into()));
     }
@@ -370,3 +579,6 @@ pub async fn persist_durable_admission(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod hold_tests;

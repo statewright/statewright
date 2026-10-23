@@ -73,6 +73,9 @@ impl GatewaySession {
         instance_id: &str,
         state: &str,
     ) -> Result<Self, String> {
+        if value.get("quota_hold").is_some() {
+            return Err("Quota hold requires explicit Continue and fresh entitlement verification; ordinary resume cannot release it".into());
+        }
         if value["schema"] != "statewright/paused-session/v1" {
             return Err("Legacy pause lacks an authoritative session/approval checkpoint; explicit recovery required".into());
         }

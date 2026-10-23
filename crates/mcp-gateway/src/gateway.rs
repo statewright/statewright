@@ -339,6 +339,26 @@ impl Gateway {
         Ok(())
     }
 
+    /// Internal M1b accounting seam.  It is intentionally uncalled by normal
+    /// transitions until every transition path has been converted to one
+    /// audited checkpoint/accounting transaction.  Keeping this boundary here
+    /// prevents a caller from supplying a different pool or owner identity.
+    #[cfg(feature = "metering")]
+    pub(crate) async fn persist_dormant_quota_admission(
+        &self,
+        request: &crate::quota::DurableAdmissionRequest,
+    ) -> Result<crate::quota::DurableAdmission, &'static str> {
+        if request.binding.owner != self.owner_id || request.binding.session_id != self.session_id
+            || self.current_run_id.as_deref() != Some(request.binding.run_id.as_str())
+            || self.project_id.as_deref().unwrap_or("") != request.binding.project_id {
+            return Ok(crate::quota::DurableAdmission::StaleOrForeignRun);
+        }
+        let pool = self.db_pool.as_ref().ok_or("Durable quota storage is unavailable")?;
+        crate::quota::persist_durable_admission(pool, request)
+            .await
+            .map_err(|_| "Durable quota admission could not be persisted")
+    }
+
     /// Restore only the exact pending approval owned by this transport. Never
     /// hydrate an arbitrary active run, or replace another live workflow.
     pub(crate) async fn recover_pending_approval(

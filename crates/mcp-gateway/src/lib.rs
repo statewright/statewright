@@ -6,6 +6,8 @@ pub mod gateway;
 pub mod hooks;
 pub mod interceptors;
 pub mod protocol;
+#[cfg(feature = "metering")]
+pub(crate) mod quota;
 pub mod remote;
 pub mod risk_assessment;
 pub mod session;

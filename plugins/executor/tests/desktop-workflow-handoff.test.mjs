@@ -4,6 +4,7 @@ import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { WorkflowRouteOriginStore } from "../lib/workflow-route-origin.mjs";
 
 const threadId = "handoff-thread";
 const stateFor = (state, epoch, model, effort) => ({state, state_epoch: epoch,
@@ -16,7 +17,7 @@ async function until(check) {
   }
   assert.fail("workflow did not hand off to a new native turn");
 }
-async function fixture(t, {nativeSettings = false} = {}) {
+async function fixture(t, {nativeSettings = false, workflowOriginStore, initialState = null, initialSettings = {}} = {}) {
   const server = new WebSocketServer({port: 0, host: "127.0.0.1"});
   let proxy, client;
   t.after(async () => {
@@ -25,9 +26,9 @@ async function fixture(t, {nativeSettings = false} = {}) {
     await new Promise(resolve => server.close(resolve));
   });
   await once(server, "listening");
-  let socket, state = null, active = false, turnId, sequence = 0, heldRead, heldStart, heldOwner, ownerEntered = false, wrongModel = false;
+  let socket, state = initialState, active = false, turnId, sequence = 0, heldRead, heldStart, heldOwner, ownerEntered = false, wrongModel = false;
   let heldSettings, rejectSettings = false, readbackMismatch = false, rejectedModel;
-  let settings = {model: "gpt-6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority"};
+  let settings = {model: "gpt-6-sol", modelProvider: "openai", effort: "high", serviceTier: "priority", ...initialSettings};
   const native = nativeSettings ? await (await import("./native-settings-fixture.mjs"))
     .nativeSettingsFixture(t, threadId, message => socket?.send(JSON.stringify(message))) : null;
   if (native) settings = native.settings;
@@ -85,6 +86,7 @@ async function fixture(t, {nativeSettings = false} = {}) {
     });
   });
   proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
+    workflowOriginStore,
     workflowService: {ownsThread: async id => {
       if (heldOwner && sequence > 1) {ownerEntered = true; await heldOwner;}
       return id === threadId;
@@ -125,6 +127,86 @@ async function fixture(t, {nativeSettings = false} = {}) {
     mismatchReadback: () => {readbackMismatch = true;},
     finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
 }
+
+for (const end of ["terminal", "deactivate"])
+test(`native turn accepts a verified successor and restores the carried origin on ${end}`, async t => {
+  const store = new WorkflowRouteOriginStore();
+  const old = {thread_id: threadId, root_session_id: threadId, client_id: "handoff-client", run_id: "old-run", run_session_id: "handoff-session"};
+  const original = {model: "openai-codex/gpt-6-astra", effort: "high", service_tier: "priority", provider: "openai"};
+  await store.capture(old, original);
+  await store.confirmRoute(old, {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"});
+  const next = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "medium");
+  const f = await fixture(t, {workflowOriginStore: store, initialState: next,
+    initialSettings: {model: "gpt-5.6-terra", effort: "medium"}});
+  assert.equal((await store.binding(threadId)).run_id, next.run_id);
+  assert.deepEqual((await store.inspect(threadId)).origin, original);
+  assert.equal(f.calls.filter(r => r.method === "turn/start").length, 1, "no nested-lease deadlock or extra inference");
+  if (end === "terminal") f.setState({...next, state: "complete", is_final: true});
+  else {
+    f.setState(null);
+    f.completeTool("statewright_deactivate", {deactivated: true});
+  }
+  f.finish();
+  await until(() => f.confirmed.some(r => r.route?.restored_original));
+  assert.equal(f.confirmed.at(-1).effectiveModel, "gpt-6-astra");
+  assert.equal(f.confirmed.at(-1).effectiveEffort, "high");
+  assert.equal(await store.inspect(threadId), null);
+});
+
+for (const rejected of [false, true])
+test(`first successor turn preserves only acknowledged inherited selections (rejected=${rejected})`, async t => {
+  const store = new WorkflowRouteOriginStore();
+  const f = await fixture(t, {workflowOriginStore: store});
+  const old = {thread_id: threadId, root_session_id: threadId, client_id: "handoff-client", run_id: "old-run", run_session_id: "handoff-session"};
+  await store.capture(old, {model: "openai-codex/gpt-6-astra", effort: "low", service_tier: "default", provider: "openai"});
+  await store.confirmRoute(old, {model: "openai-codex/gpt-6-sol", effort: "high", service_tier: "priority"});
+  const next = stateFor("intake", 1, null, null);
+  delete next.service_tier;
+  f.setState(next); f.finish();
+  if (rejected) f.rejectModel("user-selected");
+  const response = await f.rpc("turn/start", {threadId, model: "user-selected", effort: null, serviceTier: null}, {allowError: true});
+  if (rejected) {
+    assert.match(response.error.message, /model rejected/);
+    assert.deepEqual((await store.inspect(threadId)).manual, {});
+    await f.rpc("turn/start", {threadId});
+  } else {
+    assert.equal(response.error, undefined);
+    await until(() => f.calls.filter(r => r.method === "turn/start").length === 2);
+  }
+  f.setState({...next, state: "complete", is_final: true}); f.finish();
+  if (rejected) {
+    await until(() => f.confirmed.some(r => r.route?.restored_original));
+    const receipt = f.confirmed.find(r => r.route?.restored_original);
+    assert.equal(receipt.actualModel, "gpt-6-astra");
+    assert.equal(receipt.actualEffort, "low");
+    assert.equal(receipt.actualServiceTier, "default");
+  } else {
+    await until(() => f.injected.some(r => r.restoration?.status === "preserved_manual_override"));
+    const settings = f.frames.filter(r => r.method === "thread/settings/updated").at(-1).params.threadSettings;
+    assert.equal(settings.model, "user-selected");
+    assert.equal(Object.hasOwn(settings, "effort"), true);
+    assert.equal(settings.effort, null);
+    assert.equal(settings.serviceTier, null);
+    assert.equal(f.calls.filter(r => r.method === "thread/settings/update").length, 0);
+  }
+  assert.equal(await store.inspect(threadId), null);
+});
+
+test("successful workflow load hands off a different run without losing the original baseline", async t => {
+  const store = new WorkflowRouteOriginStore();
+  const old = stateFor("implement", 1, "openai-codex/gpt-5.6-terra", "medium");
+  const f = await fixture(t, {workflowOriginStore: store, initialState: old});
+  const next = {...stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "low"), run_id: "successor-run"};
+  f.setState(next);
+  f.completeTool("statewright_load_workflow", {loaded: true, state_snapshot: next});
+  await until(() => f.injected.some(r => r.turnId === "turn-2"));
+  assert.equal((await store.binding(threadId)).run_id, next.run_id);
+  assert.equal((await store.inspect(threadId)).origin.model, "openai-codex/gpt-6-sol");
+  assert.equal((await store.inspect(threadId)).predecessor.binding.run_id, old.run_id);
+  f.setState({...next, state: "complete", is_final: true}); f.finish();
+  await until(() => f.confirmed.some(r => r.route?.restored_original));
+  assert.equal(f.confirmed.at(-1).effectiveModel, "gpt-6-sol");
+});
 
 test("Desktop native usage stays bound to the actual turn across phase handoff", async t => {
   const f = await fixture(t);

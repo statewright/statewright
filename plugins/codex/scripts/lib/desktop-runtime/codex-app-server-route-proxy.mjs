@@ -1073,7 +1073,7 @@ export async function startCodexAppServerRouteProxy({
             throw new Error("Statewright terminal restoration was superseded by newer native activity.");
           }
           if (lifecycle.turnId ? turnOrigins.get(threadId)?.turnId !== lifecycle.turnId
-            : !lifecycle.allowPendingTurn && activeThreads.has(threadId)) {
+            : activeThreads.has(threadId)) {
             throw new Error("Statewright terminal restoration belongs to a superseded native turn.");
           }
           const authoritative = await routeStateService?.getState?.(threadId);
@@ -1173,27 +1173,28 @@ export async function startCodexAppServerRouteProxy({
         release();
       }
     };
-    const reconcileInactivePredecessorOrigin = async (threadId, prospectiveBinding) => {
-      const predecessor = await workflowOriginStore.binding(threadId);
-      if (!predecessor || sameWorkflowRouteBinding(predecessor, prospectiveBinding)) return false;
-      if (predecessor.thread_id !== prospectiveBinding.thread_id
-          || predecessor.client_id !== prospectiveBinding.client_id
-          || predecessor.root_session_id !== prospectiveBinding.root_session_id
-          || predecessor.run_session_id !== prospectiveBinding.run_session_id) return false;
-      let authoritative;
-      try { authoritative = await routeStateService?.getState?.(threadId); } catch { return false; }
-      let terminal = null;
-      if (authoritative === null) terminal = {kind: "deactivated"};
-      else if (authoritative?.is_final === true && authoritative.run_id === predecessor.run_id
-          && (!predecessor.run_session_id || !authoritative.run_session_id
-            || authoritative.run_session_id === predecessor.run_session_id)) terminal = {kind: "terminal", state: authoritative};
-      if (!terminal) return false;
-      await restoreTerminalOrigin(threadId, terminal, {
-        binding: predecessor,
-        activityEpoch: operatorActivity.get(threadId),
-        allowPendingTurn: true,
+    // Called with the routing lease already held. No settings RPC or nested
+    // lease acquisition: transfer only durable baseline ownership to a freshly
+    // verified successor in this exact native/client/gateway session.
+    const captureRouteOrigin = async (threadId, route, binding, origin, checkOwner) => {
+      const capture = await workflowOriginStore.capture(binding, origin);
+      if (capture.status !== "binding_conflict" || !routeStateService?.getState) return capture;
+      const observed = captureWorkflowOrigin({method: "turn/start", params: {threadId}}, nativeSelectionFor(threadId));
+      const successor = await workflowOriginStore.captureSuccessor(binding, observed, {
+        previousBinding: capture.record.binding,
+        isCurrent: async () => {
+          await checkOwner();
+          const state = await routeStateService.getState(threadId);
+          await checkOwner();
+          if (!state || state.is_final || state.pending_approval || state.run_id !== binding.run_id
+              || state.run_session_id !== binding.run_session_id || state.state !== route.state
+              || state.model !== route.model || state.thinking_level !== route.effort
+              || route.state_epoch !== undefined && state.state_epoch !== route.state_epoch
+              || Object.hasOwn(route, "service_tier") && workflowStateRoute(threadId, state).service_tier !== route.service_tier) return false;
+          return true;
+        },
       });
-      return (await workflowOriginStore.binding(threadId)) === null;
+      return successor.status === "captured" ? successor : {...capture, handoff_reason: successor.status};
     };
     const syncActivity = () => {
       if (activeThreads.size > 0 || parkingCount > 0) activeConnections.add(connection);
@@ -1275,7 +1276,7 @@ export async function startCodexAppServerRouteProxy({
             || !Number.isInteger(state.state_epoch)
             || loaded && (state.run_id !== result.state_snapshot.run_id
               || state.run_session_id !== result.state_snapshot.run_session_id)
-            || origin.binding && (state.run_id !== origin.binding.run_id
+            || !loaded && origin.binding && (state.run_id !== origin.binding.run_id
               || state.run_session_id !== origin.binding.run_session_id)) {
           throw new Error("Workflow handoff lacks a matching authoritative destination");
         }
@@ -1301,11 +1302,11 @@ export async function startCodexAppServerRouteProxy({
         const route = workflowStateRoute(threadId, state);
         const binding = await boundRoute(route, threadId);
         const settings = activeSettings.get(threadId) ?? {};
-        const capture = await workflowOriginStore.capture(binding, captureWorkflowOrigin({method: "turn/start", params: {threadId}}, {
+        const capture = await captureRouteOrigin(threadId, route, binding, captureWorkflowOrigin({method: "turn/start", params: {threadId}}, {
           provider: activeProviders.get(threadId), model: activeModels.get(threadId),
           ...(Object.hasOwn(settings, "effort") ? {effort: settings.effort} : {}),
           ...(Object.hasOwn(settings, "serviceTier") ? {service_tier: settings.serviceTier} : {}),
-        }));
+        }), checkState);
         if (!["captured", "existing"].includes(capture.status)) throw new Error(`Workflow origin capture failed: ${capture.status}`);
         const applied = applyRouteToTurnStart({method: "turn/start", params: {threadId,
           input: [{type: "text", text: `Statewright entered '${state.state}'. Call the local statewright_get_state tool first, then follow the current phase's tools and transitions.`}],
@@ -1641,15 +1642,7 @@ export async function startCodexAppServerRouteProxy({
                 ...(active && Object.hasOwn(active, "effort") ? { effort: active.effort } : {}),
                 ...(active && Object.hasOwn(active, "serviceTier") ? { service_tier: active.serviceTier } : {}) },
             );
-            let capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
-            if (capture.status === "binding_conflict"
-                && await reconcileInactivePredecessorOrigin(threadId, originBinding)) {
-              capturedOrigin = captureWorkflowOrigin(
-                message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
-                nativeSelectionFor(threadId),
-              );
-              capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
-            }
+            const capture = await captureRouteOrigin(threadId, route, originBinding, capturedOrigin, checkReleaseOwner);
             if (capture.status === "binding_conflict" || capture.status === "unowned_binding") {
               const error = new Error(`Statewright cannot replace a workflow route origin owned by another execution context (${capture.status}).`);
               error.code = "STATEWRIGHT_ROUTE_ORIGIN_OWNER";
@@ -1659,13 +1652,24 @@ export async function startCodexAppServerRouteProxy({
             // A user can choose a model on turn/start without a separate
             // settings RPC. An inheriting workflow must not later restore
             // over that explicit choice as if Statewright had selected it.
-            if (route.model == null && capture.status === "existing"
-                && (message.params?.model != null || message.params?.collaborationMode?.settings?.model != null)) {
+            if (route.model == null && (capture.status === "existing"
+                || capture.record?.capture_reason === "authoritative_successor")) {
               const selected = captureWorkflowOrigin(message, nativeSelectionFor(threadId));
-              if (selected?.model && selected.model !== (capture.record.routed?.model ?? capture.record.origin.model)) {
-                if (provisionalTurn) provisionalTurn.manualSelection = {
-                  binding: originBinding, model: selected.model,
-                };
+              const params = message.params ?? {};
+              const changes = {};
+              if (selected?.model && (params.model != null || params.collaborationMode?.settings?.model != null)) {
+                changes.model = selected.model;
+              }
+              if (route.effort == null && firstOwn([params.collaborationMode?.settings, "reasoning_effort"], [params, "effort"]).available) {
+                changes.effort = selected.effort;
+              }
+              if (!firstOwn([route, "service_tier"], [route, "serviceTier"]).available && firstOwn([params, "serviceTier"]).available) {
+                changes.service_tier = selected.service_tier;
+              }
+              // A requested choice becomes manual ownership only after the
+              // bound native turn is acknowledged, never on a rejected RPC.
+              if (provisionalTurn && Object.keys(changes).length) {
+                provisionalTurn.manualSelection = {binding: originBinding, changes};
               }
             }
           }
@@ -2012,8 +2016,8 @@ export async function startCodexAppServerRouteProxy({
                 && operatorActivity.get(pendingTurn.threadId) === pendingTurn.activityEpoch
                 && sameWorkflowRouteBinding(pendingTurn.manualSelection.binding,
                   await workflowOriginStore.binding(pendingTurn.threadId))) {
-              await workflowOriginStore.relinquish(pendingTurn.threadId, ["model"],
-                {model: pendingTurn.manualSelection.model});
+              await workflowOriginStore.relinquish(pendingTurn.threadId,
+                Object.keys(pendingTurn.manualSelection.changes), pendingTurn.manualSelection.changes);
             }
             if (notification.result?.turn?.id) turnOrigins.set(pendingTurn.threadId, {
               turnId: notification.result.turn.id, binding: pendingTurn.binding,

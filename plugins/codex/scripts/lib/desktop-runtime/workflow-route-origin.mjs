@@ -210,6 +210,52 @@ export class WorkflowRouteOriginStore {
     return { status: "confirmed", record: structuredClone(record) };
   }
 
+  // A verified new run may supersede a run whose teardown was missed. Carry
+  // its still-owned baseline forward instead of capturing our routed model
+  // as the new original. This does not claim that the predecessor completed.
+  async captureSuccessor(binding, current, {previousBinding, isCurrent} = {}) {
+    const record = await this.#load(previousBinding?.thread_id);
+    if (!record || !sameWorkflowRouteBinding(record.binding, previousBinding)
+        || !validBinding(binding) || binding.run_id === previousBinding.run_id
+        || ["thread_id", "client_id", "root_session_id", "run_session_id"].some(key => !binding[key] || binding[key] !== previousBinding[key])) {
+      return {status: "binding_mismatch"};
+    }
+    const snapshot = JSON.stringify(record);
+    const observed = normalizeOrigin(current);
+    if (!observed) return {status: "current_model_unknown"};
+    if (AXES.some(axis => Object.hasOwn(record.routed ?? record.origin, axis) && !Object.hasOwn(observed, axis))) {
+      return {status: "current_settings_unknown"};
+    }
+    const matches = target => target && AXES.every(axis => !Object.hasOwn(target, axis) || sameAxis(observed, target, axis));
+    const stillOwned = matches(record.routed) || record.status === "captured" && matches(record.origin)
+      || record.status === "restore_pending" && (matches(record.restore_attempt?.requested)
+        || ownedPartialRestore(record, observed, record.restore_attempt));
+    const baseline = {...observed};
+    if (stillOwned) {
+      for (const axis of AXES) {
+        if (record.ownership[axis] && Object.hasOwn(record.origin, axis)) baseline[axis] = record.origin[axis];
+        else if (Object.hasOwn(record.manual, axis)) baseline[axis] = record.manual[axis];
+      }
+      if (record.ownership.model) baseline.provider = record.origin.provider;
+    }
+    try {
+      if (typeof isCurrent !== "function" || !await this.#authorized(previousBinding)
+          || !await this.#authorized(binding) || !await isCurrent()) return {status: "unowned_binding"};
+    } catch { return {status: "unowned_binding"}; }
+    if (JSON.stringify(await this.#load(previousBinding.thread_id)) !== snapshot) return {status: "handoff_superseded"};
+    const timestamp = this.now();
+    const {predecessor: _older, ...predecessor} = structuredClone(record);
+    const next = {
+      version: 1, binding: structuredClone(binding), origin: baseline,
+      ownership: Object.fromEntries(AXES.map(axis => [axis, Object.hasOwn(baseline, axis)])),
+      manual: {}, routed: normalizeRoute(observed), restore_attempt: null,
+      status: "active", captured_at: timestamp, updated_at: timestamp,
+      predecessor, capture_reason: "authoritative_successor",
+    };
+    await this.#write(next);
+    return {status: "captured", record: structuredClone(next)};
+  }
+
   async relinquish(threadId, axes, changes = {}) {
     const selected = normalizeAxes(axes);
     const record = await this.#load(threadId);

@@ -37,6 +37,69 @@ test("route binding retains the exact thread, run, run-session, client, and root
   assert.equal(sameWorkflowRouteBinding(binding, { ...binding, client_id: "foreign-client" }), false);
 });
 
+test("verified successor keeps the pre-routing origin across missed teardown and reconnect", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-origin-successor-"));
+  const routed = {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"};
+  const successor = {...binding, run_id: "run-2"};
+  try {
+    const first = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+    await first.capture(binding, origin);
+    await first.confirmRoute(binding, routed);
+    const store = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+    assert.equal((await store.capture(successor, routed)).status, "binding_conflict");
+    const result = await store.captureSuccessor(successor, routed, {previousBinding: binding, isCurrent: async () => true});
+    assert.equal(result.status, "captured");
+    assert.deepEqual(result.record.origin, origin);
+    assert.deepEqual(result.record.predecessor.binding, binding);
+    assert.equal((await store.confirmRestore(binding)).status, "binding_mismatch");
+    const reconnected = new WorkflowRouteOriginStore({root, clientId: binding.client_id});
+    assert.equal((await reconnected.capture(successor, routed)).status, "existing");
+    const restore = await reconnected.prepareRestore(successor, routed);
+    assert.equal(restore.status, "ready");
+    assert.equal(restore.route.model, origin.model);
+    assert.equal(restore.route.effort, origin.effort);
+  } finally { await rm(root, {recursive: true, force: true}); }
+});
+
+test("successor capture preserves acknowledged manual choices and unobserved changes", async () => {
+  const routed = {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"};
+  for (const manual of [true, false]) {
+    const store = new WorkflowRouteOriginStore();
+    await store.capture(binding, {...origin, service_tier: "default"});
+    await store.confirmRoute(binding, routed);
+    if (manual) await store.relinquish(binding.thread_id, ["model", "effort"], routed);
+    const observed = manual ? routed : {...routed, model: "openai-codex/gpt-6-astra", effort: "high"};
+    const result = await store.captureSuccessor({...binding, run_id: "new-run"}, observed,
+      {previousBinding: binding, isCurrent: async () => true});
+    assert.equal(result.status, "captured");
+    assert.equal(result.record.origin.model, observed.model);
+    assert.equal(result.record.origin.effort, observed.effort);
+    assert.equal(result.record.origin.service_tier, manual ? "default" : observed.service_tier);
+  }
+});
+
+test("successor capture rejects foreign bindings, stale authority, missing settings and concurrent changes", async () => {
+  const routed = {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"};
+  for (const scenario of ["foreign-client", "foreign-session", "foreign-root", "foreign-thread", "same-run", "missing-authority", "stale", "unavailable", "unknown-effort", "concurrent-manual"]) {
+    const store = new WorkflowRouteOriginStore();
+    await store.capture(binding, origin);
+    await store.confirmRoute(binding, routed);
+    const next = {...binding, run_id: "new-run"};
+    if (scenario === "same-run") next.run_id = binding.run_id;
+    for (const [name, key] of [["foreign-client", "client_id"], ["foreign-session", "run_session_id"], ["foreign-root", "root_session_id"], ["foreign-thread", "thread_id"]]) if (scenario === name) next[key] = "foreign";
+    const observed = {...routed};
+    if (scenario === "unknown-effort") delete observed.effort;
+    const result = await store.captureSuccessor(next, observed, {previousBinding: binding,
+      ...(scenario === "missing-authority" ? {} : {isCurrent: async () => {
+        if (scenario === "unavailable") throw new Error("unavailable");
+        if (scenario === "concurrent-manual") await store.relinquish(binding.thread_id, ["effort"], {effort: "high"});
+        return scenario !== "stale";
+      }})});
+    assert.notEqual(result.status, "captured", scenario);
+    assert.deepEqual((await store.inspect(binding.thread_id)).binding, binding, scenario);
+  }
+});
+
 test("captured origins survive store reconstruction and clear only after confirmed restoration", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-route-origin-"));
   try {

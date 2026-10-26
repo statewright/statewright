@@ -1072,7 +1072,8 @@ export async function startCodexAppServerRouteProxy({
           if (operatorActivity.get(threadId) !== activityEpoch) {
             throw new Error("Statewright terminal restoration was superseded by newer native activity.");
           }
-          if (lifecycle.turnId ? turnOrigins.get(threadId)?.turnId !== lifecycle.turnId : activeThreads.has(threadId)) {
+          if (lifecycle.turnId ? turnOrigins.get(threadId)?.turnId !== lifecycle.turnId
+            : !lifecycle.allowPendingTurn && activeThreads.has(threadId)) {
             throw new Error("Statewright terminal restoration belongs to a superseded native turn.");
           }
           const authoritative = await routeStateService?.getState?.(threadId);
@@ -1171,6 +1172,28 @@ export async function startCodexAppServerRouteProxy({
         restoreInFlight.delete(key);
         release();
       }
+    };
+    const reconcileInactivePredecessorOrigin = async (threadId, prospectiveBinding) => {
+      const predecessor = await workflowOriginStore.binding(threadId);
+      if (!predecessor || sameWorkflowRouteBinding(predecessor, prospectiveBinding)) return false;
+      if (predecessor.thread_id !== prospectiveBinding.thread_id
+          || predecessor.client_id !== prospectiveBinding.client_id
+          || predecessor.root_session_id !== prospectiveBinding.root_session_id
+          || predecessor.run_session_id !== prospectiveBinding.run_session_id) return false;
+      let authoritative;
+      try { authoritative = await routeStateService?.getState?.(threadId); } catch { return false; }
+      let terminal = null;
+      if (authoritative === null) terminal = {kind: "deactivated"};
+      else if (authoritative?.is_final === true && authoritative.run_id === predecessor.run_id
+          && (!predecessor.run_session_id || !authoritative.run_session_id
+            || authoritative.run_session_id === predecessor.run_session_id)) terminal = {kind: "terminal", state: authoritative};
+      if (!terminal) return false;
+      await restoreTerminalOrigin(threadId, terminal, {
+        binding: predecessor,
+        activityEpoch: operatorActivity.get(threadId),
+        allowPendingTurn: true,
+      });
+      return (await workflowOriginStore.binding(threadId)) === null;
     };
     const syncActivity = () => {
       if (activeThreads.size > 0 || parkingCount > 0) activeConnections.add(connection);
@@ -1618,7 +1641,15 @@ export async function startCodexAppServerRouteProxy({
                 ...(active && Object.hasOwn(active, "effort") ? { effort: active.effort } : {}),
                 ...(active && Object.hasOwn(active, "serviceTier") ? { service_tier: active.serviceTier } : {}) },
             );
-            const capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
+            let capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
+            if (capture.status === "binding_conflict"
+                && await reconcileInactivePredecessorOrigin(threadId, originBinding)) {
+              capturedOrigin = captureWorkflowOrigin(
+                message.method === "turn/start" ? message : { method: "turn/start", params: { threadId } },
+                nativeSelectionFor(threadId),
+              );
+              capture = await workflowOriginStore.capture(originBinding, capturedOrigin);
+            }
             if (capture.status === "binding_conflict" || capture.status === "unowned_binding") {
               const error = new Error(`Statewright cannot replace a workflow route origin owned by another execution context (${capture.status}).`);
               error.code = "STATEWRIGHT_ROUTE_ORIGIN_OWNER";

@@ -86,3 +86,34 @@ manual edit is needed. Existing unrelated Claude changes are excluded.
 The previous immutable runtime remains available; existing residents are not
 hot-patched. A normal idle quit/resume is required to load the new runtime.
 Installation, loaded identity, and live behavior must be reported separately.
+
+## Observed local delivery
+
+Repair commit: `86189cb27b615314d3fb1aba217c91154ef02564`.
+The existing `installManagedClientShim` installed the exact package into
+`/Users/ben/.statewright/lanes/staging/installer-home/.statewright/runtime/codex/0.3.5+codex.20261026213425`.
+Source-package and installed SHA256 pairs were independently computed and equal:
+
+- proxy: `06a118cd557cf0cab29063764dbdfc17abede89af7ae651fa0cb022f7e3f56c9`
+- origin: `f43bd4f2326cd8a29d3be5351b1721a38fb10b668b3b04308b02bd0bf16d3fd0`
+
+The initial hash command failed in Perl's locale initialization, not policy
+review; the same check succeeded with `LC_ALL=C LANG=C` scoped to that command.
+
+Pane `%2` was verified idle. Normal `/quit` returned to zsh PID 6353; old
+launcher 2988 and resident 3091 exited. Only
+`scodex resume 01a156c6-7735-7c01-89da-4b31ca57cec2` was submitted afterward.
+New resident PID 62655 loaded this installed build, runtime revision
+`4381b5f1d32a2a77`, started `2026-10-26T21:36:22.080Z`, same managed client.
+An optional Codex upgrade was dismissed for this launch; no CLI upgrade occurred.
+
+Live acceptance stopped at the native human-only prompt: **Hooks need review;
+1 hook is new or changed**. No trust option was selected, no hook disabled,
+and no acceptance turn was submitted. The prompt does not yet name the hook;
+the user must review it. Package hook SHA256 is
+`7418d51c5bb95334b284260eb9daedccd2c5c62c75ea254796d71c866bacd783`;
+package hooks manifest SHA256 is
+`b64b6e529bc27576f54919e4c712f6b0bda1d9d727e28cca1600f70bba4be19b`.
+Those package hashes alone do not identify the unnamed native review item.
+Real first-turn admission/deactivation and native restoration remain pending
+that human gate. No gateway deployment or marketplace-cache update was performed.

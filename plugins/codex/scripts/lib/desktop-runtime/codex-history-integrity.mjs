@@ -225,7 +225,19 @@ function sameSourceIdentity(left, right) {
   return left.device === right.device && left.inode === right.inode && left.size === right.size && left.modified_ms === right.modified_ms;
 }
 
-async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFilename = true } = {}) {
+function historyStartOrdinal(metadata, expectedSessionId) {
+  const base = metadata?.history_base;
+  if (base == null) return 0;
+  if (typeof base !== "object" || Array.isArray(base)
+    || !SESSION_ID_PATTERN.test(String(base.thread_id ?? "")) || base.thread_id === expectedSessionId
+    || !Number.isSafeInteger(base.end_ordinal_exclusive) || base.end_ordinal_exclusive <= 0
+    || !Number.isSafeInteger(base.end_byte_offset) || base.end_byte_offset <= 0
+    || (metadata.forked_from_id != null && metadata.forked_from_id !== base.thread_id)
+    || (metadata.forked_from_ordinal_exclusive != null && metadata.forked_from_ordinal_exclusive !== base.end_ordinal_exclusive)) return null;
+  return base.end_ordinal_exclusive;
+}
+
+async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFilename = true, endByteExclusive = null } = {}) {
   const sourceStat = sourceIdentity(await stat(path));
   const normalizedSourceHash = createHash("sha256");
   const keptHash = createHash("sha256");
@@ -236,9 +248,12 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
   let lineNumber = 0;
   let priorOrdinal = null;
   let sessionMetaCount = 0;
+  let historyBase = null;
+  let startOrdinal = 0;
 
   if (requireCanonicalFilename && !recognizedFilename(path, expectedSessionId)) anomalies.push({ kind: "unrecognized_rollout_filename", line: 0 });
-  const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+  const prefixOptions = endByteExclusive === null ? {} : { end: endByteExclusive - 1 };
+  const lines = createInterface({ input: createReadStream(path, prefixOptions), crlfDelay: Infinity });
   for await (const line of lines) {
     lineNumber += 1;
     normalizedSourceHash.update(line).update("\n");
@@ -262,6 +277,9 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
         const camelMode = row?.payload?.historyMode;
         if (snakeMode != null && camelMode != null && snakeMode !== camelMode) anomalies.push({ kind: "conflicting_history_mode", line: lineNumber });
         historyMode = snakeMode ?? camelMode ?? null;
+        historyBase = row.payload?.history_base ?? null;
+        startOrdinal = historyStartOrdinal(row.payload, expectedSessionId);
+        if (startOrdinal === null || (historyBase !== null && historyMode !== "paginated")) anomalies.push({ kind: "invalid_history_base", line: lineNumber });
       }
     }
     if (historyMode === "legacy") {
@@ -269,8 +287,8 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
       keptHash.update(line).update("\n");
       continue;
     }
-    if (lineNumber === 1 && row?.ordinal !== 0) anomalies.push({ kind: "invalid_root_record", line: lineNumber });
-    if (!Number.isInteger(row?.ordinal)) {
+    if (lineNumber === 1 && row?.ordinal !== startOrdinal) anomalies.push({ kind: "invalid_root_record", line: lineNumber });
+    if (!Number.isSafeInteger(row?.ordinal) || row.ordinal < 0) {
       anomalies.push({ kind: "missing_ordinal", line: lineNumber });
       keptHash.update(line).update("\n");
       continue;
@@ -287,11 +305,14 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
     keptHash.update(line).update("\n");
   }
   if (sessionMetaCount !== 1) anomalies.push({ kind: "invalid_session_meta_count", line: 0, count: sessionMetaCount });
-  const sourceSha256 = await sha256(path);
+  const sourceDigest = createHash("sha256");
+  for await (const chunk of createReadStream(path, prefixOptions)) sourceDigest.update(chunk);
+  const sourceSha256 = sourceDigest.digest("hex");
   if (sourceSha256 !== normalizedSourceHash.digest("hex")) anomalies.push({ kind: "noncanonical_line_endings_or_final_newline", line: 0 });
+  if (endByteExclusive !== null && sourceStat.size < endByteExclusive) anomalies.push({ kind: "history_base_out_of_bounds", line: 0 });
   const status = anomalies.length > 0 ? "unsafe" : duplicateSettingsCount > 0 ? "repairable" : "healthy";
   return {
-    status, path, historyMode, lineCount: lineNumber, finalOrdinal, duplicateSettingsCount,
+    status, path, historyMode, historyBase, startOrdinal, lineCount: lineNumber, finalOrdinal, duplicateSettingsCount,
     unknownAnomalies: anomalies,
     sourceIdentity: sourceStat,
     sourceSha256,
@@ -302,7 +323,39 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
 export async function inspectCodexHistory({ home = homedir(), codexHome = join(home, ".codex"), sessionId }) {
   const path = await findCodexRollout({ home, codexHome, sessionId });
   if (!path) return { status: "not_found", path: null, historyMode: null, finalOrdinal: null, duplicateSettingsCount: 0, unknownAnomalies: [] };
-  return inspectRolloutPath(path, sessionId);
+  const inspection = await inspectRolloutPath(path, sessionId);
+  inspection.historyDependencies = [];
+  // A fork stores its local suffix at the inherited end ordinal, not at zero.
+  // Validate only the parent's referenced prefix: later parent turns are unrelated.
+  // Never repair an ancestor or silently accept a missing/cyclic ancestry chain.
+  let current = inspection;
+  const visited = new Set([sessionId]);
+  while (current.status === "healthy" || current.status === "repairable") {
+    const base = current.historyBase;
+    if (!base) break;
+    let failure = null;
+    if (visited.has(base.thread_id) || visited.size >= 64) failure = "history_base_cycle_or_depth";
+    else {
+      visited.add(base.thread_id);
+      const parentPath = await findCodexRollout({ codexHome, sessionId: base.thread_id });
+      if (!parentPath) failure = "history_base_missing";
+      else {
+        const parent = await inspectRolloutPath(parentPath, base.thread_id, { endByteExclusive: base.end_byte_offset });
+        if (parent.status !== "healthy" || parent.historyMode !== "paginated"
+          || parent.finalOrdinal !== base.end_ordinal_exclusive - 1) failure = "history_base_prefix_invalid";
+        else {
+          inspection.historyDependencies.push({ path: parentPath, endByteExclusive: base.end_byte_offset, sha256: parent.sourceSha256 });
+          current = parent;
+        }
+      }
+    }
+    if (failure) {
+      inspection.unknownAnomalies.push({ kind: failure, line: 1 });
+      inspection.status = "unsafe";
+      break;
+    }
+  }
+  return inspection;
 }
 
 function waitForWriterLock(child) {
@@ -501,6 +554,13 @@ async function repairCodexHistory({ sessionId, inspection, backupRoot, projectio
     const currentHash = await sha256(inspection.path);
     if (!sameSourceIdentity(currentIdentity, inspection.sourceIdentity) || currentHash !== inspection.sourceSha256) {
       throw new CodexHistoryIntegrityError("Codex history changed while Statewright prepared the repair. Nothing was replaced; retry after the writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+    }
+    for (const dependency of inspection.historyDependencies ?? []) {
+      const digest = createHash("sha256");
+      for await (const chunk of createReadStream(dependency.path, { end: dependency.endByteExclusive - 1 })) digest.update(chunk);
+      if (digest.digest("hex") !== dependency.sha256) {
+        throw new CodexHistoryIntegrityError("Inherited Codex history changed while Statewright prepared the repair. Nothing was replaced; retry after the writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+      }
     }
     await rename(temporary, inspection.path);
     rolloutReplaced = true;
@@ -725,6 +785,7 @@ export async function guardCodexResumeHistory({
     let inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
     let partialRepairResult = null;
     const partialWriteCandidate = inspection.status === "unsafe"
+      && inspection.historyBase === null
       && recognizedFilename(inspection.path, sessionId)
       && inspection.unknownAnomalies.some((item) => item.kind === "malformed_json");
     if (partialWriteCandidate) {
@@ -737,7 +798,7 @@ export async function guardCodexResumeHistory({
       partialRepairResult = await withWriterLock({ home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, sessionId, environment }, async () => {
         const lockedInspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
         if (!lockedInspection.path || !recognizedFilename(lockedInspection.path, sessionId)) return classifyInspection(lockedInspection);
-        if (lockedInspection.status !== "unsafe" || !lockedInspection.unknownAnomalies.some((item) => item.kind === "malformed_json")) return classifyInspection(lockedInspection);
+        if (lockedInspection.historyBase !== null || lockedInspection.status !== "unsafe" || !lockedInspection.unknownAnomalies.some((item) => item.kind === "malformed_json")) return classifyInspection(lockedInspection);
         return repairPartialWrite({ inspection: lockedInspection, sessionId, backupRoot: effectiveBackupRoot, operations: repairOperations });
       });
       inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });

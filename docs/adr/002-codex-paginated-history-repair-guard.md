@@ -50,13 +50,43 @@ opts into `auto` repair, Statewright:
 - records hashes, exact paths, thread identity, repair count, and rollback
   instructions in a manifest;
 - streams a candidate that omits only recognized duplicate settings records;
-- requires an ordinal-zero canonical `session_meta` whose embedded ID matches
-  the requested UUID, valid JSON, contiguous ordinals, the same final ordinal,
+- requires a canonical `session_meta` whose embedded ID matches the requested
+  UUID, starting at zero for standalone history or at the validated inherited
+  boundary for a fork, valid JSON, contiguous ordinals, the same final ordinal,
   and the expected semantic hash;
 - compares source identity and hash immediately before atomic replacement; and
 - transactionally removes only that thread from `thread_items`,
   `thread_turns`, `thread_realtime_items`, and
   `thread_history_projection_state`.
+
+Forked paginated rollouts may contain only a local suffix. Their `history_base`
+names a parent thread, exclusive ordinal boundary, and exclusive byte boundary;
+the local `session_meta` starts at that ordinal, not necessarily zero. Validate
+the reference shape and any accompanying `forked_from_*` fields, then validate
+the exact parent prefix (including identity, contiguous ordinals and a complete
+final line). Follow nested bases with cycle detection and a bounded depth. Later
+parent records are outside the inherited prefix and do not affect the child.
+Missing, ambiguous, malformed or inconsistent ancestry fails closed. Inspection
+never renumbers history, modifies an ancestor, or resets its projection. This
+contract is grounded in the native fork metadata observed during the October 26
+resume failure: local first ordinal and inherited exclusive boundary both
+47294. Regression fixtures cover local suffixes, nested ancestry, invalid
+references, and preserving parent bytes during the existing child-only repair.
+Ancestor prefix hashes are retained and rechecked immediately before child
+replacement; parent-tail appends are permitted. This is not a multi-ancestor
+atomic lock. Malformed fork records do not enter the standalone partial-write
+repair path.
+
+October 26 validation: the new positive fork fixture failed on the old guard;
+the repaired history and plugin-runtime contract suites passed 39/39. The
+actual affected history passed both inspection and the launcher's guard-mode
+preflight without mutation (SHA256
+`7d2481866a6d65baa13a6c04e503c5f61f5e2c9280d87524698761c7e9c9f0c1`).
+Codex and Claude generated-runtime consistency checks passed. Independent
+static review identified the ancestor CAS and malformed-fork repair cases;
+both were fixed and re-reviewed with no remaining blockers. This evidence
+does not claim a native interactive resume, whole-workspace suite, or gateway
+deployment. Local Codex runtime build identity: `0.3.5+codex.20261026200121`.
 
 The manifest journals preparation, rollout replacement, projection commit, and
 completion with file-synced artifacts and atomic manifest replacement. The

@@ -29,8 +29,8 @@ function legacyRecord(type, payload) {
   return JSON.stringify({ timestamp: "2026-08-30T00:00:00.000Z", type, payload });
 }
 
-async function writeRollout(home, lines) {
-  const path = join(home, ".codex", "sessions", "2026", "08", "30", `rollout-2026-08-30T00-00-00-${SESSION_ID}.jsonl`);
+async function writeRollout(home, lines, sessionId = SESSION_ID) {
+  const path = join(home, ".codex", "sessions", "2026", "08", "30", `rollout-2026-08-30T00-00-00-${sessionId}.jsonl`);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
   return path;
@@ -87,6 +87,141 @@ const duplicateSettingsRollout = () => [
   record(1, "event_msg", { type: "thread_settings_applied", thread_settings: { model: "gpt-test" } }),
   record(2, "event_msg", { type: "task_complete" }),
 ];
+
+const PARENT_ID = "01a0531f-2295-7852-b575-f9d4c2c1201c";
+
+async function writeFork(home, overrides = {}, parentLines = null) {
+  const lines = parentLines ?? [
+    record(0, "session_meta", { id: PARENT_ID, history_mode: "paginated" }),
+    record(1, "event_msg", { type: "task_complete" }),
+  ];
+  const parent = await writeRollout(home, lines, PARENT_ID);
+  const base = { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: Buffer.byteLength(`${lines.join("\n")}\n`) };
+  const metadata = { id: SESSION_ID, history_mode: "paginated", forked_from_id: PARENT_ID, forked_from_ordinal_exclusive: 2, history_base: base, ...overrides };
+  const child = await writeRollout(home, [record(2, "session_meta", metadata), record(3, "event_msg", { type: "task_complete" })]);
+  return { parent, child, base };
+}
+
+test("fork resume validates the inherited prefix and preserves both histories byte-for-byte", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-"));
+  try {
+    const { parent, child } = await writeFork(home);
+    // A later parent tail is not part of this fork's immutable prefix.
+    await appendFile(parent, "not part of the inherited prefix\n");
+    const before = await Promise.all([readFile(parent), readFile(child)]);
+    const inspection = await inspectCodexHistory({ home, sessionId: SESSION_ID });
+    assert.equal(inspection.status, "healthy");
+    assert.equal(inspection.finalOrdinal, 3);
+    assert.equal(inspection.historyBase.end_ordinal_exclusive, 2);
+    assert.deepEqual(await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }), { status: "healthy", finalOrdinal: 3 });
+    assert.deepEqual(await Promise.all([readFile(parent), readFile(child)]), before);
+    await assert.rejects(access(join(home, ".codex", "backups")));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("fork history rejects malformed, mismatched, missing and cyclic ancestry without repair", async () => {
+  const variants = [
+    ["wrong parent", { forked_from_id: SESSION_ID }],
+    ["wrong fork ordinal", { forked_from_ordinal_exclusive: 1 }],
+    ["invalid base", { history_base: "not a base" }],
+    ["negative offset", { history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: -1 } }],
+    ["mid-record offset", { history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: 10 } }],
+    ["beyond parent EOF", { history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: 99999 } }],
+    ["wrong start", { history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 3, end_byte_offset: 100 }, forked_from_ordinal_exclusive: 3 }],
+    ["missing parent", null],
+    ["parent identity mismatch", null],
+    ["parent ordinal gap", null],
+    ["cycle", null],
+  ];
+  for (const [name, overrides] of variants) {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-invalid-"));
+    try {
+      const { parent, child } = await writeFork(home, overrides ?? {});
+      if (name === "missing parent") await rm(parent);
+      if (name === "parent identity mismatch") await writeFile(parent, (await readFile(parent, "utf8")).replace(PARENT_ID, SESSION_ID));
+      if (name === "parent ordinal gap") await writeFile(parent, (await readFile(parent, "utf8")).replace('"ordinal":1', '"ordinal":5'));
+      if (name === "cycle") await writeFork(home, { history_base: { thread_id: SESSION_ID, end_ordinal_exclusive: 2, end_byte_offset: 100 }, forked_from_id: SESSION_ID });
+      const before = await readFile(child);
+      assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "unsafe", name);
+      await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment() }), /not safe for automatic repair/, name);
+      assert.deepEqual(await readFile(child), before, name);
+      await assert.rejects(access(join(home, ".codex", "backups")));
+    } finally { await rm(home, { recursive: true, force: true }); }
+  }
+});
+
+test("nested forks validate every referenced prefix and reject a foreign ancestor", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-chain-"));
+  const grandparentId = "01a0531f-2295-7852-b575-f9d4c2c1201d";
+  try {
+    const grandparentRows = [record(0, "session_meta", { id: grandparentId, history_mode: "paginated" })];
+    const grandparent = await writeRollout(home, grandparentRows, grandparentId);
+    const ancestorBase = { thread_id: grandparentId, end_ordinal_exclusive: 1, end_byte_offset: Buffer.byteLength(`${grandparentRows[0]}\n`) };
+    await writeFork(home, {}, [record(1, "session_meta", { id: PARENT_ID, history_mode: "paginated", history_base: ancestorBase })]);
+    assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "healthy");
+    await writeFile(grandparent, (await readFile(grandparent, "utf8")).replace(grandparentId, PARENT_ID));
+    const invalid = await inspectCodexHistory({ home, sessionId: SESSION_ID });
+    assert.equal(invalid.status, "unsafe");
+    assert.equal(invalid.unknownAnomalies.at(-1).kind, "history_base_prefix_invalid");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("fork local suffix gaps still fail closed and known duplicate repair retains base metadata", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-repair-"));
+  try {
+    const { parent, child } = await writeFork(home);
+    const parentBefore = await readFile(parent);
+    const original = await readFile(child, "utf8");
+    await writeFile(child, original.replace('"ordinal":3', '"ordinal":5'));
+    assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "unsafe");
+    await writeFile(child, `${original}${record(3, "event_msg", { type: "thread_settings_applied" })}\n`);
+    createProjection(home);
+    const result = await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment() });
+    assert.equal(result.status, "repaired");
+    assert.equal(result.finalOrdinal, 3);
+    assert.equal(await readFile(child, "utf8"), original);
+    assert.deepEqual(await readFile(parent), parentBefore);
+    assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "healthy");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("fork repair rechecks inherited prefixes before child replacement", async () => {
+  for (const changePrefix of [true, false]) {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-cas-"));
+    try {
+      const { parent, child } = await writeFork(home);
+      await appendFile(child, `${record(3, "event_msg", { type: "thread_settings_applied" })}\n`);
+      const before = await readFile(child);
+      const projection = createProjection(home);
+      const repair = guardCodexResumeHistory({
+        home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment(),
+        repairOperations: { beforeCompareAndSwap: async () => {
+          if (changePrefix) await writeFile(parent, (await readFile(parent, "utf8")).replace(PARENT_ID, SESSION_ID));
+          else await appendFile(parent, `${record(2, "event_msg", { type: "task_complete" })}\n`);
+        } },
+      });
+      if (changePrefix) {
+        await assert.rejects(repair, /Inherited Codex history changed/);
+        assert.deepEqual(await readFile(child), before);
+        const database = new DatabaseSync(projection);
+        try { assert.equal(database.prepare("SELECT count(*) AS count FROM thread_history_projection_state WHERE thread_id = ?").get(SESSION_ID).count, 1); }
+        finally { database.close(); }
+      } else assert.equal((await repair).status, "repaired");
+    } finally { await rm(home, { recursive: true, force: true }); }
+  }
+});
+
+test("malformed fork records never enter standalone partial-write repair", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-partial-"));
+  try {
+    const { child } = await writeFork(home, { history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 0, end_byte_offset: 100 }, forked_from_ordinal_exclusive: 0 });
+    await writeFile(child, `${record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated", history_base: { thread_id: PARENT_ID, end_ordinal_exclusive: 0, end_byte_offset: 100 } })}\n${record(1, "event_msg", { type: "task_complete" }).replace('"event_msg"', '"event_\nmsg"')}\n`);
+    const before = await readFile(child);
+    await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment() }), /not safe for automatic repair/);
+    assert.deepEqual(await readFile(child), before);
+    await assert.rejects(access(join(home, ".codex", "backups")));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
 
 test("inspection classifies only repeated restart settings as safely repairable", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-history-inspect-"));

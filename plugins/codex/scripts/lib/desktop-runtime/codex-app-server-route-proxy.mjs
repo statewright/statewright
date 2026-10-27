@@ -13,6 +13,7 @@ import { ApprovalOutcome, ApprovalPipeline, approvalDeny, approvalError,
   approvalNotHandled } from "./approval-pipeline.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
+import { nativeWorkflowEntryPrompt } from "./native-statewright-guidance.mjs";
 import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
 
 const WORKFLOW_APPROVAL_PRIORITY = 100;
@@ -1309,7 +1310,7 @@ export async function startCodexAppServerRouteProxy({
         }), checkState);
         if (!["captured", "existing"].includes(capture.status)) throw new Error(`Workflow origin capture failed: ${capture.status}`);
         const applied = applyRouteToTurnStart({method: "turn/start", params: {threadId,
-          input: [{type: "text", text: `Statewright entered '${state.state}'. Call the local statewright_get_state tool first, then follow the current phase's tools and transitions.`}],
+          input: [{type: "text", text: nativeWorkflowEntryPrompt(state.state)}],
           ...(settings.collaborationMode ? {collaborationMode: settings.collaborationMode} : {}),
         }}, route, process.env, nativeSelectionFor(threadId));
         applied.receipt.origin_binding = binding;

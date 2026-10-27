@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { WorkflowRouteOriginStore } from "../lib/workflow-route-origin.mjs";
+import { NATIVE_STATEWRIGHT_GUIDANCE } from "../lib/native-statewright-guidance.mjs";
 
 const threadId = "handoff-thread";
 const stateFor = (state, epoch, model, effort) => ({state, state_epoch: epoch,
@@ -246,10 +247,12 @@ test("Desktop load and transition cut over native turns and restore the original
   await until(() => f.calls.filter(c => c.method === "turn/start").length === 2 || f.errors.length);
   assert.deepEqual(f.errors, []);
   assert.equal(f.calls.filter(c => c.method === "turn/start")[1].params.model, "gpt-5.6-terra");
+  assert.ok(f.calls.filter(c => c.method === "turn/start")[1].params.input[0].text.includes(NATIVE_STATEWRIGHT_GUIDANCE));
   const review = stateFor("frontier_review", 2, "openai-codex/gpt-6-astra", "high");
   f.setState(review); f.completeTool("statewright_transition", {transitioned: true, from: "intake", to: "frontier_review"});
   await until(() => f.calls.filter(c => c.method === "turn/start").length === 3);
   assert.equal(f.calls.filter(c => c.method === "turn/start")[2].params.model, "gpt-6-astra");
+  assert.ok(f.calls.filter(c => c.method === "turn/start")[2].params.input[0].text.includes(NATIVE_STATEWRIGHT_GUIDANCE));
   assert.equal(f.confirmed.filter(r => r.confirmed).length, 2);
   f.setState({...review, state: "complete", state_epoch: 3, is_final: true});
   f.completeTool("statewright_transition", {transitioned: true, from: "frontier_review", to: "complete"});

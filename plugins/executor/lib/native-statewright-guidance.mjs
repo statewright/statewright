@@ -1,0 +1,6 @@
+// Agent guidance only: no tool remapping, workflow activation or permission change.
+export const NATIVE_STATEWRIGHT_GUIDANCE = "Statewright connector selection for terminal and Desktop: use only the advertised local/native MCP server named statewright for this conversation (mcp__statewright__statewright_* or mcp__plugin_statewright_statewright__statewright_*; the UI may display statewright.statewright_*). Do not use codex_apps.statewright_ai.*, mcp__codex_apps__statewright_*, or the web/marketplace Statewright connector here, even for workflow listing or status. The web connector is a separate session, not a fallback for native workflow state, model routing, permissions or approvals. If the local tool is absent, fails, or requires login, report that exact local failure and park dependent workflow actions; use only supported local discovery/recovery. Never substitute the web connector, infer live state from saved files, or run MCP tool names as shell commands. This guidance does not activate a workflow or authorize login, retry, approval or policy bypass.";
+
+export function nativeWorkflowEntryPrompt(state) {
+  return `Statewright entered '${state}'. ${NATIVE_STATEWRIGHT_GUIDANCE} Call the advertised local statewright_get_state tool first, then follow the current phase's tools and transitions.`;
+}

@@ -1,15 +1,17 @@
 #!/usr/bin/env node
+import { NATIVE_STATEWRIGHT_GUIDANCE } from "./lib/desktop-runtime/native-statewright-guidance.mjs";
 
 const TIMEOUT_MS = 5_000;
 
 function stateContext(state) {
   const executionPreference = "Execution preference: use one bounded native operation at a time; avoid heredocs, inline interpreters, and compound blobs unless structurally necessary and authorized.";
   if (state.isFinal) {
-    return `[statewright] Workflow complete. Final state: ${state.state}.`;
+    return `[statewright] Workflow complete. Final state: ${state.state}. ${NATIVE_STATEWRIGHT_GUIDANCE}`;
   }
-  if (state.additionalContext) return `${state.additionalContext} ${executionPreference}`;
+  if (state.additionalContext) return `${state.additionalContext} ${executionPreference} ${NATIVE_STATEWRIGHT_GUIDANCE}`;
   const parts = [`[statewright] Workflow active. Phase: ${state.state}.`];
   parts.push(executionPreference);
+  parts.push(NATIVE_STATEWRIGHT_GUIDANCE);
   if (state.instructions) parts.push(`Instructions: ${state.instructions}`);
   if (state.transitions?.length) {
     parts.push(`Transitions: ${state.transitions.map((item) => item.event).join(", ")}.`);

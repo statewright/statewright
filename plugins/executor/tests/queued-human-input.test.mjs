@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { once } from "node:events";
 import { WebSocket, WebSocketServer } from "ws";
 import { prepareQueuedHumanInput, humanInputHook } from "../lib/queued-human-input.mjs";
+import { NATIVE_STATEWRIGHT_GUIDANCE } from "../lib/native-statewright-guidance.mjs";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { startCodexAppServerRouteProxy as startPackagedProxy } from "../../codex/scripts/lib/desktop-runtime/codex-app-server-route-proxy.mjs";
 
@@ -48,7 +49,10 @@ test("shared policy is a separate additive hook, not a workflow or auth prerequi
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.deepEqual(JSON.parse(result.stdout), hook);
+  assert.deepEqual(JSON.parse(result.stdout), {hookSpecificOutput: {
+    ...hook.hookSpecificOutput,
+    additionalContext: `${text}\n\n${NATIVE_STATEWRIGHT_GUIDANCE}`,
+  }});
 });
 
 const until = async predicate => {

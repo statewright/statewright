@@ -8,6 +8,7 @@ use crate::config::{
 };
 use crate::custom_tools;
 use crate::enforcement::{self, EnforcementDecision};
+use crate::events::{WorkflowLifecycleEvent, WorkflowLifecycleKind, WorkflowLifecycleStatus};
 use crate::interceptors::{self, PreCallDecision};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse, ToolCallParams, ToolInfo};
 use crate::risk_assessment;
@@ -142,12 +143,19 @@ pub struct Gateway {
     /// True when the remote MCP host owns the conversation model and has not
     /// advertised a Statewright-managed routing channel.
     host_controls_model: bool,
+    /// Remote presentation may need lifecycle guidance because it does not
+    /// have the managed native hook channel.
+    web_workflow_guidance: bool,
+    #[cfg(feature = "metering")]
+    pub(crate) event_service: Option<std::sync::Arc<crate::event_delivery::EventService>>,
     /// MCP client name captured from initialize.clientInfo for diagnostics and
     /// a user-facing routing disclosure.
     host_client_name: Option<String>,
 }
 
 const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Statewright checks calls made through this MCP connection and workflow transitions; it cannot gate tools the host offers outside this connector. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
+
+const WEB_WORKFLOW_INSTRUCTIONS: &str = "After explicitly loading a workflow, execute its current state's instructions within the user's scope. Record observed evidence, emit an available statewright_transition event when its criteria are met, then follow the returned state_snapshot (or call statewright_get_state). Continue while useful authorized work remains; loading or describing a workflow alone is not execution. Stop for required user input, pending approval, denial, unavailable capabilities, pause, cancellation, or a final state. Ask a specific question when missing information prevents progress; retain the current run and re-read its state when the user answers. Never invent evidence, tools, approvals, events or completion; do not reload to escape a boundary or retry a denied action through another route. A transition result is not approval. Respect pending_approval and host permissions. Statewright can validate only calls through this connector and its transitions, not other host tools. The host retains its model and reasoning settings; workflow routes are recommendations. statewright_run_agent is separate execution and requires the user's requested scope; do not start it as an automatic fallback.";
 
 #[derive(Debug)]
 pub struct NativeUsageError {
@@ -265,6 +273,9 @@ impl Gateway {
             usage: UsageLedger::default(),
             usage_control_token: std::env::var("STATEWRIGHT_USAGE_CONTROL_TOKEN").ok(),
             host_controls_model: false,
+            web_workflow_guidance: false,
+            #[cfg(feature = "metering")]
+            event_service: None,
             host_client_name: None,
         }
     }
@@ -272,6 +283,14 @@ impl Gateway {
     /// Get the session ID for this gateway instance.
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub(crate) fn owned_by(&self, owner: &str) -> bool {
+        !owner.is_empty() && self.owner_id == owner
+    }
+
+    pub(crate) fn web_instructions() -> &'static str {
+        WEB_WORKFLOW_INSTRUCTIONS
     }
 
     pub(crate) fn approval_projection(
@@ -532,6 +551,82 @@ impl Gateway {
     /// pinned to an active run. New loads must use currently authorized entries.
     pub(crate) fn refresh_native_catalog(&mut self, workflows: HashMap<String, MachineDefinition>) {
         self.workflows = workflows;
+    }
+
+    /// Native hooks own their own continuation UX. Remote hosts without that
+    /// channel receive MCP guidance; this is presentation only, never policy.
+    pub fn set_web_workflow_guidance(&mut self, enabled: bool) {
+        self.web_workflow_guidance = enabled;
+    }
+
+    fn uses_web_workflow_guidance(&self) -> bool {
+        self.web_workflow_guidance && self.host_controls_model
+    }
+
+    /// Create a host-neutral observation after the caller has committed an
+    /// authoritative lifecycle mutation. Delivery is deliberately separate:
+    /// observing an event cannot advance or authorize the workflow.
+    pub(crate) fn lifecycle_event(
+        &self,
+        kind: WorkflowLifecycleKind,
+        status: WorkflowLifecycleStatus,
+    ) -> WorkflowLifecycleEvent {
+        let state = self
+            .session_manager
+            .get(&self.session_id)
+            .map(|session| session.current_state.clone());
+        WorkflowLifecycleEvent {
+            event_id: format!("evt_{}", uuid::Uuid::new_v4()),
+            occurred_at: chrono::Utc::now().to_rfc3339(),
+            owner_id: self.owner_id.clone(),
+            run_id: self.current_run_id.clone(),
+            run_session_id: self.transport_session_id.clone(),
+            workflow: self.active_workflow.clone(),
+            state,
+            state_epoch: self.usage.state_epoch(),
+            kind,
+            status,
+        }
+    }
+
+    pub(crate) fn lifecycle_observation(&self) -> WorkflowLifecycleEvent {
+        let session = self.session_manager.get(&self.session_id);
+        let status = if self.active_workflow.is_none() {
+            if self.current_run_id.is_some() {
+                WorkflowLifecycleStatus::Paused
+            } else {
+                WorkflowLifecycleStatus::Inactive
+            }
+        } else if session
+            .as_ref()
+            .is_some_and(|s| s.pending_approval.is_some())
+        {
+            WorkflowLifecycleStatus::AwaitingApproval
+        } else if session.as_ref().is_some_and(|s| s.is_final()) {
+            WorkflowLifecycleStatus::Final
+        } else {
+            WorkflowLifecycleStatus::Active
+        };
+        self.lifecycle_event(WorkflowLifecycleKind::Transitioned, status)
+    }
+
+    /// Observe real mutations, including externally resolved approvals. The
+    /// transport adapter is optional; native policy and hooks are unchanged.
+    pub(crate) async fn publish_lifecycle_change(&self, before: &WorkflowLifecycleEvent) {
+        let after = self.lifecycle_observation();
+        let Some(event) = crate::events::lifecycle_change(before, after) else {
+            return;
+        };
+        #[cfg(feature = "metering")]
+        if let Some(service) = &self.event_service {
+            if service.publish(&event).await.is_err() {
+                // The mutation already committed. Do not misreport failure of
+                // the user's operation and invite a duplicate transition.
+                tracing::error!(event_id=%event.event_id, "MCP lifecycle event could not be persisted");
+            }
+        }
+        #[cfg(not(feature = "metering"))]
+        let _ = event;
     }
 
     /// Set the API key fingerprint for session ownership verification.
@@ -821,7 +916,50 @@ impl Gateway {
             "initialize" => Some(self.handle_initialize(request.id, request.params.as_ref())),
             "notifications/initialized" => None, // notification, no response
             "tools/list" => Some(self.handle_tools_list(request.id)),
-            "tools/call" => Some(self.handle_tools_call(request.id, request.params).await),
+            "tools/call" => {
+                let before = self.lifecycle_observation();
+                let lifecycle = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| {
+                        matches!(
+                            name,
+                            "statewright_load_workflow"
+                                | "statewright_transition"
+                                | "statewright_get_state"
+                                | "statewright_pause"
+                                | "statewright_deactivate"
+                        )
+                    });
+                let mut response = self.handle_tools_call(request.id, request.params).await;
+                if Self::successful_tool_payload(&response).is_some() {
+                    self.publish_lifecycle_change(&before).await;
+                }
+                // Never append a follow-up state hint to a failed lifecycle
+                // call: a failure is already a stop boundary.
+                if lifecycle
+                    && self.uses_web_workflow_guidance()
+                    && Self::successful_tool_payload(&response).is_some()
+                {
+                    let state = if self.active_workflow.is_some() {
+                        let current = self
+                            .handle_tools_call(
+                                None,
+                                Some(json!({
+                                    "name": "statewright_get_state", "arguments": {}
+                                })),
+                            )
+                            .await;
+                        Self::successful_tool_payload(&current)
+                    } else {
+                        None
+                    };
+                    self.append_web_workflow_guidance(&mut response, state);
+                }
+                Some(response)
+            }
             "ping" => Some(JsonRpcResponse::success(request.id, json!({}))),
             _ => Some(JsonRpcResponse::error(
                 request.id,
@@ -843,7 +981,11 @@ impl Gateway {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| value.chars().take(128).collect());
-        JsonRpcResponse::success(id, Self::initialization_result(self.host_controls_model))
+        let mut result = Self::initialization_result(self.host_controls_model);
+        if self.uses_web_workflow_guidance() {
+            result["instructions"] = json!(WEB_WORKFLOW_INSTRUCTIONS);
+        }
+        JsonRpcResponse::success(id, result)
     }
 
     pub(crate) fn initialization_result(host_controls_model: bool) -> serde_json::Value {
@@ -861,6 +1003,80 @@ impl Gateway {
             result["instructions"] = json!(HOST_MODEL_ROUTING_WARNING);
         }
         result
+    }
+
+    fn successful_tool_payload(response: &JsonRpcResponse) -> Option<serde_json::Value> {
+        if response.error.is_some() {
+            return None;
+        }
+        let result = response.result.as_ref()?;
+        if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+            return None;
+        }
+        serde_json::from_str(result.get("content")?.get(0)?.get("text")?.as_str()?).ok()
+    }
+
+    fn append_web_workflow_guidance(
+        &self,
+        response: &mut JsonRpcResponse,
+        state: Option<serde_json::Value>,
+    ) {
+        let Some(payload) = Self::successful_tool_payload(response) else {
+            return;
+        };
+        let (status, instruction) = if payload["requires_approval"] == true
+            || payload["status"] == "pending_approval"
+            || state
+                .as_ref()
+                .is_some_and(|snapshot| snapshot["pending_approval"].is_object())
+        {
+            (
+                "awaiting_approval",
+                "Present the approval request and wait for its supported resolution. Do not advance, infer consent or replay the transition.",
+            )
+        } else if payload["paused"] == true {
+            (
+                "paused",
+                "The workflow is paused. Do not continue it unless the user requests resume.",
+            )
+        } else if self.active_workflow.is_none() {
+            (
+                "inactive",
+                "No workflow is active. Do not continue or automatically load another workflow.",
+            )
+        } else if state
+            .as_ref()
+            .is_some_and(|snapshot| snapshot["is_final"] == true)
+        {
+            (
+                "final",
+                "Report the actual final outcome and limitations. A blocked or failed final state is not success. Do not continue or automatically start another run.",
+            )
+        } else if state.is_none() {
+            (
+                "state_unavailable",
+                "Current state could not be established. Report the unavailable state; do not guess the next action.",
+            )
+        } else {
+            (
+                "active",
+                "Follow state_snapshot.instructions using available, permitted capabilities. Complete the phase before emitting an available transition with observed evidence. Continue authorized work, but ask for missing required input and stop for approvals, denial or unavailable capabilities.",
+            )
+        };
+        let guidance = json!({
+            "schema": "statewright/web-workflow/v1",
+            "status": status,
+            "instruction": instruction,
+            "state_snapshot": state,
+        });
+        if let Some(content) = response
+            .result
+            .as_mut()
+            .and_then(|result| result.get_mut("content"))
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            content.push(json!({"type":"text", "text": serde_json::to_string(&json!({"web_workflow": guidance})).expect("web guidance is JSON")}));
+        }
     }
 
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
@@ -3913,6 +4129,182 @@ mod tests {
             String::new(),
             None,
         )
+    }
+
+    #[test]
+    fn lifecycle_event_binds_authoritative_gateway_identity() {
+        let mut gateway = test_gateway();
+        gateway.owner_id = "owner-a".into();
+        gateway.current_run_id = Some("run-a".into());
+        gateway
+            .usage
+            .transition("planning", "planning", "START", None, None);
+        let event = gateway.lifecycle_event(
+            WorkflowLifecycleKind::Transitioned,
+            WorkflowLifecycleStatus::Active,
+        );
+        assert!(event.event_id.starts_with("evt_"));
+        assert_eq!(event.owner_id, "owner-a");
+        assert_eq!(event.run_id.as_deref(), Some("run-a"));
+        assert_eq!(event.run_session_id, "test-session");
+        assert_eq!(event.workflow.as_deref(), Some("test"));
+        assert_eq!(event.state.as_deref(), Some("planning"));
+        assert!(event.state_epoch >= 1);
+    }
+
+    #[tokio::test]
+    async fn remote_guidance_returns_authoritative_snapshot_but_never_for_native() {
+        let mut remote = test_gateway();
+        remote.set_remote_host_model_control(true);
+        remote.set_web_workflow_guidance(true);
+        let initialized = remote
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(1)),
+                method: "initialize".into(),
+                params: Some(json!({})),
+            })
+            .await
+            .unwrap();
+        assert!(
+            initialized.result.unwrap()["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Record observed evidence")
+        );
+        let state = remote
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(2)),
+                method: "tools/call".into(),
+                params: Some(json!({"name":"statewright_get_state","arguments":{}})),
+            })
+            .await
+            .unwrap();
+        let content = state.result.unwrap()["content"].as_array().unwrap().clone();
+        assert_eq!(content.len(), 2);
+        let guidance: serde_json::Value =
+            serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(guidance["web_workflow"]["status"], "active");
+        assert_eq!(
+            guidance["web_workflow"]["state_snapshot"]["state"],
+            "planning"
+        );
+
+        let mut native = test_gateway();
+        native.set_remote_host_model_control(false);
+        native.set_web_workflow_guidance(false);
+        let state = native
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(3)),
+                method: "tools/call".into(),
+                params: Some(json!({"name":"statewright_get_state","arguments":{}})),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            state.result.unwrap()["content"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn web_guidance_preserves_approval_pause_final_and_error_boundaries() {
+        let call = |name: &str, args: serde_json::Value| JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: "tools/call".into(),
+            params: Some(json!({"name":name,"arguments":args})),
+        };
+        let guidance = |response: &JsonRpcResponse| -> serde_json::Value {
+            assert!(
+                response.error.is_none(),
+                "unexpected fixture error: {:?}",
+                response.error
+            );
+            let content = response.result.as_ref().unwrap()["content"]
+                .as_array()
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(
+                content.last().unwrap()["text"].as_str().unwrap(),
+            )
+            .unwrap()["web_workflow"]
+                .clone()
+        };
+        let mut gw = approval_gateway();
+        gw.set_remote_host_model_control(true);
+        gw.set_web_workflow_guidance(true);
+        gw.current_run_id = Some("run1".into());
+        gw.session_manager.set_pending_approval(
+            "approval-session",
+            crate::session::PendingApproval {
+                approval_id: "apr_one".into(),
+                event: "DEPLOY".into(),
+                from_state: "working".into(),
+                to_state: "deployed".into(),
+                new_context: json!({}),
+                message: None,
+            },
+        );
+        let before = gw.lifecycle_observation();
+        assert_eq!(before.status, WorkflowLifecycleStatus::AwaitingApproval);
+        let response = gw
+            .handle_message(call("statewright_get_state", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(guidance(&response)["status"], "awaiting_approval");
+        assert!(crate::events::lifecycle_change(&before, gw.lifecycle_observation()).is_none());
+        let receipt = json!({"approval_id":"apr_one","run_id":"run1","from_state":"working",
+            "to_state":"deployed","status":"approved","context_snapshot":{}});
+        gw.apply_approval_receipt("run1", "apr_one", &receipt)
+            .unwrap();
+        let observation =
+            crate::events::lifecycle_change(&before, gw.lifecycle_observation()).unwrap();
+        assert_eq!(observation.status, WorkflowLifecycleStatus::Active);
+        assert_eq!(observation.state.as_deref(), Some("deployed"));
+        let response = gw
+            .handle_message(call("statewright_transition", json!({"event":"DONE"})))
+            .await
+            .unwrap();
+        assert_eq!(guidance(&response)["status"], "final");
+        let response = gw
+            .handle_message(call("statewright_deactivate", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(guidance(&response)["status"], "inactive");
+
+        let mut gw = test_gateway();
+        gw.set_remote_host_model_control(true);
+        gw.set_web_workflow_guidance(true);
+        let response = gw
+            .handle_message(call("statewright_transition", json!({"event":"INVALID"})))
+            .await
+            .unwrap();
+        assert!(Gateway::successful_tool_payload(&response).is_none());
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("web_workflow")
+        );
+        let response = gw
+            .handle_message(call("statewright_pause", json!({})))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.error.unwrap().message,
+            "Pause requires durable run storage"
+        );
+        // Presentation of a successful checkpoint is tested here; the actual
+        // durable pause operation is exercised by postgres_outbox_lifecycle.
+        let mut response = JsonRpcResponse::success(
+            Some(json!(1)),
+            json!({"content":[
+                {"type":"text","text":"{\"paused\":true}"}
+            ]}),
+        );
+        gw.append_web_workflow_guidance(&mut response, None);
+        assert_eq!(guidance(&response)["status"], "paused");
     }
 
     fn exploratory_gateway() -> Gateway {

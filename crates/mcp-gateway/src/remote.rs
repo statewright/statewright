@@ -51,6 +51,8 @@ pub struct RemoteState {
     /// Temporary, explicit field-calibration channel for classifier-denied
     /// shell commands. Raw command text never enters ordinary telemetry.
     classifier_denial_capture: bool,
+    #[cfg(feature = "metering")]
+    events: Option<Arc<crate::event_delivery::EventService>>,
 }
 
 impl RemoteState {
@@ -102,7 +104,7 @@ fn decode_telemetry_consent(value: Option<serde_json::Value>) -> Option<Telemetr
     (consent.version == 2
         && consent.updated_at.len() < 40
         && chrono::DateTime::parse_from_rfc3339(&consent.updated_at).is_ok())
-        .then_some(consent)
+    .then_some(consent)
 }
 
 fn observe_telemetry_consent(
@@ -113,9 +115,10 @@ fn observe_telemetry_consent(
     // Missing, malformed or old-purpose grants turn reporting off. A late valid
     // response cannot restore a grant withdrawn by a newer account decision.
     if next.as_ref().is_none_or(|new| {
-        !new.enabled || watermark.as_ref().is_none_or(|old| {
-            new.updated_at > old.updated_at || (new.updated_at == old.updated_at && old.enabled)
-        })
+        !new.enabled
+            || watermark.as_ref().is_none_or(|old| {
+                new.updated_at > old.updated_at || (new.updated_at == old.updated_at && old.enabled)
+            })
     }) {
         if let Some(new) = &next {
             let mut observed = new.clone();
@@ -411,6 +414,24 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
     let classifier_denial_capture = std::env::var("STATEWRIGHT_CLASSIFIER_DENIAL_CAPTURE")
         .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"));
 
+    #[cfg(feature = "metering")]
+    let events = if let Some(pool) = &db_pool {
+        match crate::event_delivery::EventService::initialize(pool.clone()).await {
+            Ok(events) => {
+                events.spawn_worker();
+                Some(events)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "MCP Events unavailable: durable event storage initialization failed"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let state = Arc::new(RemoteState {
         native_approvals: Mutex::new(native_approval::Broker::default()),
         sessions: RwLock::new(HashMap::new()),
@@ -421,6 +442,8 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
         db_pool,
         approval_secret,
         classifier_denial_capture,
+        #[cfg(feature = "metering")]
+        events,
     });
 
     let app = build_router(state);
@@ -553,7 +576,17 @@ async fn handle_sse(
 
     // Set API key fingerprint for /message auth verification
     gateway.set_api_key_fingerprint(&api_key);
+    #[cfg(feature = "metering")]
+    {
+        gateway.event_service = state.events.clone();
+    }
     gateway.set_remote_host_model_control(
+        headers
+            .get(CLIENT_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .is_none_or(str::is_empty),
+    );
+    gateway.set_web_workflow_guidance(
         headers
             .get(CLIENT_ID_HEADER)
             .and_then(|value| value.to_str().ok())
@@ -632,6 +665,12 @@ async fn handle_streamable_http(
         Ok(request) => request,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
+    if crate::web_protocol::is_modern(&request, &headers) {
+        return handle_modern_http(&state, &headers, request, validated, &api_key, &resource).await;
+    }
+    if validated.workflows.is_empty() {
+        return (StatusCode::NOT_FOUND, "No workflows found").into_response();
+    }
     // Deterministic base key from API key
     let api_key_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, api_key.as_bytes());
     let api_key_fingerprint = api_key_hash.to_string();
@@ -708,6 +747,10 @@ async fn handle_streamable_http(
             state.db_pool.clone(),
         );
         gateway.set_api_key_fingerprint(&api_key);
+        #[cfg(feature = "metering")]
+        {
+            gateway.event_service = state.events.clone();
+        }
 
         let (tx, _rx) = mpsc::channel::<String>(1);
         Some(Arc::new(Mutex::new(RemoteSession {
@@ -739,6 +782,9 @@ async fn handle_streamable_http(
     session
         .gateway
         .set_remote_host_model_control(client_id.is_none());
+    session
+        .gateway
+        .set_web_workflow_guidance(client_id.is_none());
 
     // Process request
     let capture_request = request.clone();
@@ -760,6 +806,239 @@ fn streamable_json_response(response: JsonRpcResponse, session_key: &str) -> Res
         headers.insert("mcp-session-id", value);
     }
     (StatusCode::OK, headers, Json(response)).into_response()
+}
+
+async fn handle_modern_http(
+    state: &Arc<RemoteState>,
+    headers: &HeaderMap,
+    request: JsonRpcRequest,
+    catalog: FetchResult,
+    api_key: &str,
+    resource: &str,
+) -> Response {
+    use crate::web_protocol::{VERSION, complete, validate};
+    use serde_json::json;
+    if let Some(origin) = headers.get("origin") {
+        if origin.to_str().ok() != Some(state.public_url.as_str()) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    if let Err(error) = validate(&request, headers) {
+        return (StatusCode::BAD_REQUEST, Json(error)).into_response();
+    }
+    let failure = |code, message: &str| {
+        Json(JsonRpcResponse::error(request.id.clone(), code, message)).into_response()
+    };
+    if request.method == "server/discover" {
+        #[allow(unused_mut)]
+        let mut capabilities = json!({"tools":{}});
+        #[cfg(feature = "metering")]
+        if state.events.is_some() {
+            capabilities["events"] = json!({});
+        }
+        return Json(complete(JsonRpcResponse::success(request.id.clone(),json!({
+            "supportedVersions":[VERSION],"capabilities":capabilities,
+            "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"statewright-gateway","version":env!("CARGO_PKG_VERSION")}},
+            "instructions":Gateway::web_instructions()
+        })))).into_response();
+    }
+    if request.method.starts_with("events/") {
+        if !["events/list", "events/subscribe", "events/unsubscribe"]
+            .contains(&request.method.as_str())
+        {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(JsonRpcResponse::error(
+                    request.id.clone(),
+                    -32601,
+                    "Method not found",
+                )),
+            )
+                .into_response();
+        }
+        #[cfg(feature = "metering")]
+        if let Some(events) = &state.events {
+            let principal = crate::event_delivery::EventPrincipal {
+                owner: &catalog.owner_id,
+                bearer: api_key,
+                resource,
+            };
+            return Json(complete(events.handle(principal, &request).await)).into_response();
+        }
+        return failure(
+            -32026,
+            "Events unavailable: durable gateway event storage is not configured",
+        );
+    }
+    if !["tools/list", "tools/call", "ping"].contains(&request.method.as_str()) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(JsonRpcResponse::error(
+                request.id.clone(),
+                -32601,
+                "Method not found",
+            )),
+        )
+            .into_response();
+    }
+    if request.method == "ping" {
+        return Json(complete(JsonRpcResponse::success(
+            request.id.clone(),
+            json!({}),
+        )))
+        .into_response();
+    }
+    let params = request.params.as_ref().cloned().unwrap_or(json!({}));
+    let name = params["name"].as_str().unwrap_or("");
+    let handle = params["arguments"]["run_session_id"].as_str();
+    if params["arguments"].get("run_session_id").is_some()
+        && !handle.is_some_and(|h| !h.is_empty() && h.len() <= 512)
+    {
+        return failure(-32602, "Invalid run_session_id");
+    }
+    if params["arguments"]["resume"] == true && handle.is_none() {
+        return failure(
+            -32602,
+            "Resuming requires the original run_session_id; never infer an account-wide current run",
+        );
+    }
+    // No account-level implicit 'current workflow' in MCP 2.0. Only the load
+    // call creates a retained application session; catalog calls are transient.
+    let creates_run =
+        request.method == "tools/call" && name == "statewright_load_workflow" && handle.is_none();
+    let needs_handle = request.method == "tools/call"
+        && ![
+            "statewright_load_workflow",
+            "statewright_list_workflows",
+            "statewright_get_workflow",
+            "statewright_get_status",
+            "statewright_docs",
+            "statewright_connect",
+        ]
+        .contains(&name);
+    if needs_handle && handle.is_none() {
+        return failure(
+            -32602,
+            "Pass the run_session_id returned by statewright_load_workflow",
+        );
+    }
+    let session = if let Some(handle) = handle {
+        let Some(session) = state.sessions.read().await.get(handle).cloned() else {
+            return failure(
+                -32000,
+                "Workflow handle is unavailable; do not replay the operation or automatically start another run",
+            );
+        };
+        session.lock_owned().await
+    } else {
+        let Some(default) = catalog.workflows.get(&catalog.default).cloned() else {
+            return failure(-32000, "No workflows available");
+        };
+        let owner_prefix = format!(
+            "web_{}_",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, catalog.owner_id.as_bytes())
+        );
+        let key = format!("{owner_prefix}{}", uuid::Uuid::new_v4());
+        let manager = SessionManager::new();
+        manager.create(key.clone(), default);
+        if let Some(limit) = catalog.plan_limit {
+            manager.set_plan_limit(&key, limit);
+        }
+        let mut gateway = Gateway::new(
+            manager,
+            UpstreamManager::empty(),
+            key.clone(),
+            catalog.workflows,
+            None,
+            catalog.owner_id.clone(),
+            state.db_pool.clone(),
+        );
+        gateway.set_api_key_fingerprint(api_key);
+        gateway.set_remote_host_model_control(true);
+        gateway.set_web_workflow_guidance(true);
+        #[cfg(feature = "metering")]
+        {
+            gateway.event_service = state.events.clone();
+        }
+        let (tx, _rx) = mpsc::channel(1);
+        let session = Arc::new(Mutex::new(RemoteSession {
+            native_revision: uuid::Uuid::new_v4().to_string(),
+            telemetry_consent: None,
+            telemetry_watermark: None,
+            gateway,
+            tx,
+            resource: resource.to_string(),
+        }));
+        // Hold the new session through admission and initial execution. A
+        // concurrent capacity sweep must not reclaim an unstarted allocation.
+        let guard = session.clone().lock_owned().await;
+        if creates_run {
+            let mut sessions = state.sessions.write().await;
+            if sessions
+                .keys()
+                .filter(|key| key.starts_with(&owner_prefix))
+                .count()
+                >= 64
+            {
+                // Only reclaim this owner's idle terminal/inactive handles,
+                // and only under pressure. Active, paused and in-flight runs
+                // remain pinned. Final readback normally remains available.
+                sessions.retain(|key, existing| {
+                    if !key.starts_with(&owner_prefix) {
+                        return true;
+                    }
+                    let Ok(existing) = existing.try_lock() else {
+                        return true;
+                    };
+                    !matches!(
+                        existing.gateway.lifecycle_observation().status,
+                        crate::events::WorkflowLifecycleStatus::Final
+                            | crate::events::WorkflowLifecycleStatus::Inactive
+                    )
+                });
+                if sessions
+                    .keys()
+                    .filter(|key| key.starts_with(&owner_prefix))
+                    .count()
+                    >= 64
+                {
+                    return failure(
+                        -32000,
+                        "Owner workflow capacity reached; finish or deactivate an existing run before starting another",
+                    );
+                }
+            }
+            if sessions.len() >= 4096 {
+                return failure(-32000, "Gateway application-session capacity reached");
+            }
+            sessions.insert(key, session.clone());
+        }
+        guard
+    };
+    let mut session = session;
+    if !session.gateway.owned_by(&catalog.owner_id) || session.resource != resource {
+        return failure(
+            -32024,
+            "Workflow handle does not belong to this authenticated owner/resource",
+        );
+    }
+    let method = request.method.clone();
+    let response = session.gateway.handle_message(request).await;
+    let observation = session.gateway.lifecycle_observation();
+    if creates_run && observation.workflow.is_none() && observation.run_id.is_none() {
+        let key = observation.run_session_id;
+        drop(session);
+        state.sessions.write().await.remove(&key);
+    }
+    match response {
+        Some(mut response) => {
+            if method == "tools/list" {
+                crate::web_protocol::add_handle_schema(&mut response);
+            }
+            Json(complete(response)).into_response()
+        }
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 /// POST /message?session_id=... — Receive JSON-RPC request, route to gateway, respond via SSE.
@@ -1001,6 +1280,10 @@ async fn handle_runtime_approval(
             state.db_pool.clone(),
         );
         gateway.set_api_key_fingerprint(key);
+        #[cfg(feature = "metering")]
+        {
+            gateway.event_service = state.events.clone();
+        }
         let (tx, _rx) = mpsc::channel::<String>(1);
         let candidate = Arc::new(Mutex::new(RemoteSession {
             gateway,
@@ -1045,6 +1328,7 @@ async fn handle_runtime_approval(
     let Some(receipt) = approval_service_receipt(&state, &projection).await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
+    let before = session.gateway.lifecycle_observation();
     if session
         .gateway
         .apply_approval_receipt(&body.run_id, &body.approval_id, &receipt)
@@ -1057,6 +1341,7 @@ async fn handle_runtime_approval(
     {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    session.gateway.publish_lifecycle_change(&before).await;
     Json(receipt).into_response()
 }
 
@@ -1242,7 +1527,8 @@ async fn handle_approval_callback(
     }
 
     remote_session.native_revision = uuid::Uuid::new_v4().to_string();
-    match body.status.as_str() {
+    let before = remote_session.gateway.lifecycle_observation();
+    let response = match body.status.as_str() {
         "approved" => {
             // Get the parked transition details
             if let Some(pending) = remote_session
@@ -1290,7 +1576,12 @@ async fn handle_approval_callback(
             (StatusCode::OK, "rejected").into_response()
         }
         _ => unreachable!("approval status validated before session lookup"),
-    }
+    };
+    remote_session
+        .gateway
+        .publish_lifecycle_change(&before)
+        .await;
+    response
 }
 
 #[cfg(test)]
@@ -1302,9 +1593,217 @@ mod tests {
     use serde_json::json;
     use tower::ServiceExt; // for oneshot()
 
+    #[tokio::test]
+    async fn modern_web_handles_isolate_chats_and_preserve_legacy_contract() {
+        let pb=Router::new().route("/api/gateway/workflows",get(|headers:HeaderMap|async move {
+            Json(json!({"default":"test","owner_id":if headers["authorization"]=="Bearer foreign" {"other"} else {"owner1"},
+                "workflows":{"test":{"id":"test","initial":"work","context":{},"states":{
+                    "work":{"on":{"DONE":"done"}},"done":{"type":"final"}
+                }}}}))
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pb_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, pb).await.unwrap() });
+        let state = Arc::new(RemoteState {
+            pb_url,
+            ..Arc::try_unwrap(test_state()).ok().unwrap()
+        });
+        let app = build_router(state.clone());
+        let request = |method: &str, mut params: serde_json::Value, key: &str| {
+            params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientInfo":{"name":"web-test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}});
+            let mut builder = Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {key}"))
+                .header("mcp-method", method)
+                .header("mcp-protocol-version", "2026-07-28");
+            if method == "tools/call" {
+                builder = builder.header("mcp-name", params["name"].as_str().unwrap());
+            }
+            builder
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string(),
+                ))
+                .unwrap()
+        };
+        async fn decode(app: Router, request: Request<Body>) -> serde_json::Value {
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap()
+        }
+        let discover = decode(app.clone(), request("server/discover", json!({}), "key")).await;
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert!(discover["result"]["capabilities"].get("events").is_none());
+        let list = decode(app.clone(), request("tools/list", json!({}), "key")).await;
+        assert!(
+            list["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["inputSchema"]["properties"]["run_session_id"].is_object())
+        );
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let loaded = decode(
+                app.clone(),
+                request(
+                    "tools/call",
+                    json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}),
+                    "key",
+                ),
+            )
+            .await;
+            let payload: serde_json::Value =
+                serde_json::from_str(loaded["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            handles.push(
+                payload["state_snapshot"]["run_session_id"]
+                    .as_str()
+                    .expect("load must return handle")
+                    .to_string(),
+            );
+        }
+        assert_ne!(handles[0], handles[1]);
+        let denied = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_transition","arguments":{"event":"DONE"}}),
+                "key",
+            ),
+        )
+        .await;
+        assert_eq!(denied["error"]["code"], -32602);
+        let foreign = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_get_state","arguments":{"run_session_id":handles[0]}}),
+                "foreign",
+            ),
+        )
+        .await;
+        assert_eq!(foreign["error"]["code"], -32024);
+        let done=decode(app.clone(),request("tools/call",json!({"name":"statewright_transition","arguments":{"event":"DONE","run_session_id":handles[0]}}),"key")).await;
+        assert!(done.get("error").is_none());
+        for (i, expected) in ["done", "work"].iter().enumerate() {
+            let response=decode(app.clone(),request("tools/call",json!({"name":"statewright_get_state","arguments":{"run_session_id":handles[i]}}),"key")).await;
+            let snapshot: serde_json::Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(snapshot["state"], *expected);
+        }
+        let before = state.sessions.read().await.len();
+        let unknown = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_get_state","arguments":{"run_session_id":"unknown"}}),
+                "key",
+            ),
+        )
+        .await;
+        assert_eq!(unknown["error"]["code"], -32000);
+        assert_eq!(state.sessions.read().await.len(), before);
+        let legacy=Request::post("/mcp").header("content-type","application/json").header("authorization","Bearer key")
+            .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"legacy"}}}).to_string())).unwrap();
+        let legacy = decode(app.clone(), legacy).await;
+        assert_eq!(legacy["result"]["protocolVersion"], "2024-11-05");
+        assert!(legacy["result"].get("resultType").is_none());
+        let before = state.sessions.read().await.len();
+        for _ in 0..70 {
+            let failed = decode(
+                app.clone(),
+                request(
+                    "tools/call",
+                    json!({"name":"statewright_load_workflow","arguments":{"name":"missing"}}),
+                    "key",
+                ),
+            )
+            .await;
+            assert_eq!(failed["result"]["isError"], true);
+        }
+        assert_eq!(
+            state.sessions.read().await.len(),
+            before,
+            "failed loads must not consume admission slots"
+        );
+        // Repeated completed runs reclaim only idle terminal handles under
+        // per-owner pressure; the other active chat remains usable.
+        for _ in 0..70 {
+            let loaded = decode(
+                app.clone(),
+                request(
+                    "tools/call",
+                    json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}),
+                    "key",
+                ),
+            )
+            .await;
+            let payload: serde_json::Value =
+                serde_json::from_str(loaded["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            let handle = &payload["state_snapshot"]["run_session_id"];
+            assert!(handle.is_string());
+            let done = decode(app.clone(), request("tools/call",
+                json!({"name":"statewright_transition","arguments":{"event":"DONE","run_session_id":handle}}), "key")).await;
+            assert!(done.get("error").is_none());
+        }
+        assert!(state.sessions.read().await.len() <= 65);
+        let still_active = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_get_state","arguments":{"run_session_id":handles[1]}}),
+                "key",
+            ),
+        )
+        .await;
+        assert!(still_active.get("error").is_none());
+        for _ in 0..63 {
+            let loaded = decode(
+                app.clone(),
+                request(
+                    "tools/call",
+                    json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}),
+                    "key",
+                ),
+            )
+            .await;
+            assert!(loaded.get("error").is_none());
+        }
+        let full = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}),
+                "key",
+            ),
+        )
+        .await;
+        assert_eq!(full["error"]["code"], -32000);
+        let other_owner = decode(
+            app.clone(),
+            request(
+                "tools/call",
+                json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}),
+                "foreign",
+            ),
+        )
+        .await;
+        assert!(
+            other_owner.get("error").is_none(),
+            "one owner must not consume another owner's admission slots"
+        );
+        server.abort();
+    }
+
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
             native_approvals: Mutex::new(native_approval::Broker::default()),
+            #[cfg(feature = "metering")]
+            events: None,
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
@@ -1319,6 +1818,8 @@ mod tests {
     fn test_state_with_secret(secret: &str) -> Arc<RemoteState> {
         Arc::new(RemoteState {
             native_approvals: Mutex::new(native_approval::Broker::default()),
+            #[cfg(feature = "metering")]
+            events: None,
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: "http://localhost:8090".into(),
@@ -1381,6 +1882,8 @@ mod tests {
         });
         let state = Arc::new(RemoteState {
             native_approvals: Mutex::new(native_approval::Broker::default()),
+            #[cfg(feature = "metering")]
+            events: None,
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: format!("http://{addr}"),
@@ -1533,6 +2036,8 @@ mod tests {
         }));
         let disabled = RemoteState {
             native_approvals: Mutex::new(native_approval::Broker::default()),
+            #[cfg(feature = "metering")]
+            events: None,
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),
             pb_url: pb_url.clone(),
@@ -1912,7 +2417,7 @@ mod tests {
             first_payload["result"]["instructions"]
                 .as_str()
                 .unwrap()
-                .contains("cannot apply")
+                .contains("Record observed evidence")
         );
 
         let revoked = app
@@ -2383,6 +2888,7 @@ mod tests {
             public_url: "https://mcp.statewright.example".into(),
             authorization_server_url: "https://statewright.example".into(),
             db_pool: Some(pool.clone()),
+            events: None,
             approval_secret: String::new(),
             classifier_denial_capture: false,
         });

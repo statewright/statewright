@@ -4097,17 +4097,22 @@ dependencies = [
 name = "statewright-mcp-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "base64",
  "chrono",
  "clap",
+ "hmac",
  "http-body-util",
  "openssl",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "statewright-agent",
  "statewright-engine",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tower",

@@ -111,3 +111,16 @@ bounded static follow-up review: no findings. No unrelated Claude edits included
 Coordinated follow-up package: `0.3.5+codex.20261028002755`; same supported scoped
 staging install and `scodex` resume path. No policy/permission override, manual
 history cleanup, shell config edit or protected UI action is part of the repair.
+
+Follow-up source commit: `03dabf8`. Supported scoped install completed once for
+the follow-up package. Fresh hashes of both installed modules match the values
+above. Installed integrity AND installed permission recovery pass against the
+unchanged original history (same SHA256 and 4,907 records).
+
+Verified pane3 idle at zsh, then ran its normal exact `scodex resume` again.
+Launcher PID40656 selects `0.3.5+codex.20261028002755`. Dismissed only the optional
+Codex-update offer, without an update. Native hook review appeared again (one new
+or changed hook); no input was sent to that menu. Full native resume remains
+pending human hook review. No original-session inference or permission changes.
+All six pre-existing unrelated Claude dirty/untracked paths remain outside these
+commits and outside the installed Codex package.

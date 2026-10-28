@@ -1470,16 +1470,22 @@ test("Codex resume location ignores copied parent turn contexts", async () => {
 });
 
 test("App Server proxy restores saved permissions before forwarding resume", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-unicode-resume-"));
+  const threadId = "01a062c6-560d-70d1-8d39-40db71875a69";
+  const directory = join(home, ".codex", "sessions", "2026", "09", "02");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, `rollout-2026-09-02T11-39-20-${threadId}.jsonl`), [
+    { type: "session_meta", payload: { id: threadId } },
+    { type: "event_msg", payload: { text: "real rollout content\u2028not a record boundary\u2029" } },
+    { type: "turn_context", payload: { approval_policy: "on-request", approvals_reviewer: "user", sandbox_policy: { type: "read-only" } } },
+  ].map(JSON.stringify).join("\n") + "\n");
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
   let socket;
   const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
-    resolveResumePermissions: async threadId => {
-      assert.equal(threadId, "historical-thread");
-      return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "danger-full-access" };
-    },
+    resolveResumePermissions: id => readCodexResumePermissions({ home, threadId: id }),
   });
   const client = new WebSocket(proxy.url);
   try {
@@ -1487,15 +1493,15 @@ test("App Server proxy restores saved permissions before forwarding resume", asy
     await connected;
     const forwarded = once(socket, "message");
     client.send(JSON.stringify({ id: 1, method: "thread/resume", params: {
-      threadId: "historical-thread", approvalPolicy: null, approvalsReviewer: null,
+      threadId, approvalPolicy: null, approvalsReviewer: null,
       permissions: null, sandbox: null, cwd: null, runtimeWorkspaceRoots: null,
     } }));
     assert.deepEqual(JSON.parse(String(await forwarded)).params, {
-      threadId: "historical-thread",
-      approvalPolicy: "never",
+      threadId,
+      approvalPolicy: "on-request",
       approvalsReviewer: "user",
       permissions: null,
-      sandbox: "danger-full-access",
+      sandbox: "read-only",
       cwd: null,
       runtimeWorkspaceRoots: null,
       excludeTurns: true,
@@ -1505,6 +1511,7 @@ test("App Server proxy restores saved permissions before forwarding resume", asy
     client.close();
     await proxy.close();
     await new Promise(resolve => upstream.close(resolve));
+    await rm(home, { recursive: true, force: true });
   }
 });
 

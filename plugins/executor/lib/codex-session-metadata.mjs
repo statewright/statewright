@@ -1,10 +1,8 @@
-import { createReadStream } from "node:fs";
 import { open, opendir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { createInterface } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
-import { findCodexRollout } from "./codex-history-integrity.mjs";
+import { findCodexRollout, readCodexRolloutLines } from "./codex-history-integrity.mjs";
 
 const MAX_SESSION_META_BYTES = 1024 * 1024;
 
@@ -149,7 +147,7 @@ export async function readCodexResumePermissions({ threadId, home = homedir(), c
   if (!validThreadId(threadId)) throw new Error("Statewright cannot restore permissions without a valid Codex thread id.");
   const path = await findCodexRollout({ home, codexHome, sessionId: threadId });
   if (!path) return null;
-  const lines = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+  const lines = readCodexRolloutLines(path);
   let lineNumber = 0;
   let permissionSettings = null;
   let locationSettings = null;

@@ -226,7 +226,7 @@ function sameSourceIdentity(left, right) {
 
 // JSONL records end at LF, not Unicode line/paragraph separators inside strings.
 // Use the stream's UTF-8 decoder so a multibyte character may cross chunks.
-async function* rolloutLines(path, options = {}) {
+export async function* readCodexRolloutLines(path, options = {}) {
   let fragments = [];
   for await (const chunk of createReadStream(path, { ...options, encoding: "utf8" })) {
     let start = 0;
@@ -271,7 +271,7 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
 
   if (requireCanonicalFilename && !recognizedFilename(path, expectedSessionId)) anomalies.push({ kind: "unrecognized_rollout_filename", line: 0 });
   const prefixOptions = endByteExclusive === null ? {} : { end: endByteExclusive - 1 };
-  const lines = rolloutLines(path, prefixOptions);
+  const lines = readCodexRolloutLines(path, prefixOptions);
   for await (const line of lines) {
     lineNumber += 1;
     normalizedSourceHash.update(line).update("\n");
@@ -436,7 +436,7 @@ async function writeRepairedRollout(source, destination) {
   let priorOrdinal = null;
   let droppedRecords = 0;
   try {
-    const lines = rolloutLines(source);
+    const lines = readCodexRolloutLines(source);
     for await (const line of lines) {
       const row = JSON.parse(line);
       if (priorOrdinal !== null && recognizedDuplicate(row, priorOrdinal)) { droppedRecords += 1; continue; }

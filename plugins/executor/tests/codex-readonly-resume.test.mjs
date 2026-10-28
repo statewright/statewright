@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -57,3 +57,22 @@ for (const [name, mutate] of Object.entries(variants)) {
     await assert.rejects(read(), { code: "STATEWRIGHT_SAVED_PERMISSIONS_UNREPRESENTABLE" });
   });
 }
+
+test("malformed JSON or foreign identity never yields saved permissions after Unicode content", async t => {
+  const home = await mkdtemp(join(tmpdir(), "sw-invalid-resume-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const id = "01a14fe5-6b3b-7a70-9dad-b670408eca20";
+  const directory = join(home, ".codex/sessions/2026/10/18");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `rollout-2026-10-18T12-43-17-${id}.jsonl`);
+  const rows = [
+    JSON.stringify({ type: "session_meta", payload: { id } }),
+    JSON.stringify({ type: "event_msg", payload: { text: "content\u2028and\u2029text" } }),
+    JSON.stringify({ type: "turn_context", payload: { permission_profile: readonly() } }),
+  ];
+  for (const content of [rows.join("\n") + "\n{broken}\n", rows.join("\u2028") + "\n", rows.join("\n").replace(id, "foreign-id") + "\n"]) {
+    await writeFile(path, content);
+    await assert.rejects(readCodexResumePermissions({ home, threadId: id }), { code: "STATEWRIGHT_SAVED_PERMISSIONS_INVALID" });
+    assert.equal(await readFile(path, "utf8"), content);
+  }
+});

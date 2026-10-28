@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { readCodexResumePermissions } from "../lib/codex-session-metadata.mjs";
 import {
   guardCodexResumeHistory,
   inspectCodexHistory,
@@ -93,20 +94,28 @@ const PARENT_ID = "01a0531f-2295-7852-b575-f9d4c2c1201c";
 test("JSONL Unicode separators are content, including across UTF-8 stream boundaries", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-history-unicode-"));
   try {
-    const root = record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" });
+    const root = record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated", cwd: "/fixture/project" });
     const empty = record(1, "event_msg", { text: "" });
     const textOffset = Buffer.byteLength(`${root}\n${empty.slice(0, empty.indexOf('"text":"') + 8)}`);
     for (const separator of ["\u2028", "\u2029"]) {
       for (const boundaryOffset of [-1, -2, 0]) {
         const text = "x".repeat(65536 + boundaryOffset - textOffset) + separator + "é😀".repeat(20000) + separator;
-        const path = await writeRollout(home, [root, record(1, "event_msg", { text })]);
+        const path = await writeRollout(home, [root, record(1, "event_msg", { text }),
+          record(2, "turn_context", { approval_policy: "never", sandbox_policy: { type: "danger-full-access" } }),
+          record(3, "event_msg", { type: "thread_settings_applied", thread_id: SESSION_ID, thread_settings: {
+            approval_policy: "on-request", approvals_reviewer: "user", sandbox_policy: { type: "read-only" }, cwd: "/fixture/project",
+          } }),
+        ]);
         const before = await readFile(path);
         assert.equal(before.indexOf(Buffer.from(separator)), 65536 + boundaryOffset);
         const inspection = await inspectCodexHistory({ home, sessionId: SESSION_ID });
         assert.equal(inspection.status, "healthy");
-        assert.equal(inspection.lineCount, 2);
+        assert.equal(inspection.lineCount, 4);
         assert.equal(inspection.sourceSha256, inspection.repairedSha256);
-        assert.deepEqual(await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }), { status: "healthy", finalOrdinal: 1 });
+        assert.deepEqual(await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }), { status: "healthy", finalOrdinal: 3 });
+        assert.deepEqual(await readCodexResumePermissions({ home, threadId: SESSION_ID }), {
+          sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "user", cwd: "/fixture/project",
+        });
         assert.deepEqual(await readFile(path), before);
         await assert.rejects(access(join(home, ".codex", "backups")));
       }

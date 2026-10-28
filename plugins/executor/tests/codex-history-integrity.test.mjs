@@ -90,10 +90,59 @@ const duplicateSettingsRollout = () => [
 
 const PARENT_ID = "01a0531f-2295-7852-b575-f9d4c2c1201c";
 
+test("JSONL Unicode separators are content, including across UTF-8 stream boundaries", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-unicode-"));
+  try {
+    const root = record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" });
+    const empty = record(1, "event_msg", { text: "" });
+    const textOffset = Buffer.byteLength(`${root}\n${empty.slice(0, empty.indexOf('"text":"') + 8)}`);
+    for (const separator of ["\u2028", "\u2029"]) {
+      for (const boundaryOffset of [-1, -2, 0]) {
+        const text = "x".repeat(65536 + boundaryOffset - textOffset) + separator + "é😀".repeat(20000) + separator;
+        const path = await writeRollout(home, [root, record(1, "event_msg", { text })]);
+        const before = await readFile(path);
+        assert.equal(before.indexOf(Buffer.from(separator)), 65536 + boundaryOffset);
+        const inspection = await inspectCodexHistory({ home, sessionId: SESSION_ID });
+        assert.equal(inspection.status, "healthy");
+        assert.equal(inspection.lineCount, 2);
+        assert.equal(inspection.sourceSha256, inspection.repairedSha256);
+        assert.deepEqual(await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }), { status: "healthy", finalOrdinal: 1 });
+        assert.deepEqual(await readFile(path), before);
+        await assert.rejects(access(join(home, ".codex", "backups")));
+      }
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("JSONL rejects noncanonical separators and malformed records without loosening framing", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-framing-"));
+  try {
+    const rows = [record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" }), record(1, "event_msg", { text: "safe" })];
+    const path = await writeRollout(home, rows);
+    for (const content of [rows.join("\r\n") + "\r\n", rows.join("\r") + "\r", rows.join("\u2028") + "\n", rows.join("\u2029") + "\n", rows.join("\n"), rows.join("\n\n") + "\n", rows.join("\n") + "\n{broken}\n"]) {
+      await writeFile(path, content);
+      assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "unsafe");
+      assert.equal(await readFile(path, "utf8"), content);
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("duplicate-settings repair preserves Unicode content byte-for-byte", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-unicode-repair-"));
+  try {
+    const rows = duplicateSettingsRollout();
+    rows[1] = record(1, "event_msg", { text: "before\u2028between\u2029after" });
+    const path = await writeRollout(home, rows);
+    createProjection(home);
+    assert.equal((await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment() })).status, "repaired");
+    assert.equal(await readFile(path, "utf8"), `${[rows[0], rows[1], rows[3]].join("\n")}\n`);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 async function writeFork(home, overrides = {}, parentLines = null) {
   const lines = parentLines ?? [
     record(0, "session_meta", { id: PARENT_ID, history_mode: "paginated" }),
-    record(1, "event_msg", { type: "task_complete" }),
+    record(1, "event_msg", { type: "task_complete", text: "inherited\u2028content\u2029" }),
   ];
   const parent = await writeRollout(home, lines, PARENT_ID);
   const base = { thread_id: PARENT_ID, end_ordinal_exclusive: 2, end_byte_offset: Buffer.byteLength(`${lines.join("\n")}\n`) };

@@ -4,7 +4,6 @@ import { createReadStream } from "node:fs";
 import { access, chmod, copyFile, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REPAIR_MODES = new Set(["guard", "repair", "auto", "prompt", "off"]);
@@ -225,6 +224,25 @@ function sameSourceIdentity(left, right) {
   return left.device === right.device && left.inode === right.inode && left.size === right.size && left.modified_ms === right.modified_ms;
 }
 
+// JSONL records end at LF, not Unicode line/paragraph separators inside strings.
+// Use the stream's UTF-8 decoder so a multibyte character may cross chunks.
+async function* rolloutLines(path, options = {}) {
+  let fragments = [];
+  for await (const chunk of createReadStream(path, { ...options, encoding: "utf8" })) {
+    let start = 0;
+    for (let end = chunk.indexOf("\n", start); end !== -1; end = chunk.indexOf("\n", start)) {
+      fragments.push(chunk.slice(start, end));
+      // Preserve the existing normalized-hash rejection of CRLF input.
+      yield fragments.join("").replace(/\r$/, "");
+      fragments = [];
+      start = end + 1;
+    }
+    if (start < chunk.length) fragments.push(chunk.slice(start));
+  }
+  // The inspector's hash comparison rejects a missing final LF.
+  if (fragments.length) yield fragments.join("").replace(/\r$/, "");
+}
+
 function historyStartOrdinal(metadata, expectedSessionId) {
   const base = metadata?.history_base;
   if (base == null) return 0;
@@ -253,7 +271,7 @@ async function inspectRolloutPath(path, expectedSessionId, { requireCanonicalFil
 
   if (requireCanonicalFilename && !recognizedFilename(path, expectedSessionId)) anomalies.push({ kind: "unrecognized_rollout_filename", line: 0 });
   const prefixOptions = endByteExclusive === null ? {} : { end: endByteExclusive - 1 };
-  const lines = createInterface({ input: createReadStream(path, prefixOptions), crlfDelay: Infinity });
+  const lines = rolloutLines(path, prefixOptions);
   for await (const line of lines) {
     lineNumber += 1;
     normalizedSourceHash.update(line).update("\n");
@@ -418,7 +436,7 @@ async function writeRepairedRollout(source, destination) {
   let priorOrdinal = null;
   let droppedRecords = 0;
   try {
-    const lines = createInterface({ input: createReadStream(source), crlfDelay: Infinity });
+    const lines = rolloutLines(source);
     for await (const line of lines) {
       const row = JSON.parse(line);
       if (priorOrdinal !== null && recognizedDuplicate(row, priorOrdinal)) { droppedRecords += 1; continue; }

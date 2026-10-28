@@ -929,7 +929,22 @@ async fn handle_modern_http(
                 "Workflow handle is unavailable; do not replay the operation or automatically start another run",
             );
         };
-        session.lock_owned().await
+        let guard = session.clone().lock_owned().await;
+        // Admission may reclaim an idle final handle between lookup and lock.
+        // Never execute on a detached session or return an unreachable new run.
+        if !state
+            .sessions
+            .read()
+            .await
+            .get(handle)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return failure(
+                -32000,
+                "Workflow handle was retired; do not replay the operation or automatically start another run",
+            );
+        }
+        guard
     } else {
         let Some(default) = catalog.workflows.get(&catalog.default).cloned() else {
             return failure(-32000, "No workflows available");
@@ -1795,6 +1810,42 @@ mod tests {
         assert!(
             other_owner.get("error").is_none(),
             "one owner must not consume another owner's admission slots"
+        );
+        // Hold a request at the lookup/lock boundary, then detach its map
+        // entry to model reclamation winning that race. The detached Arc must
+        // not execute a reload and return a now-unreachable new workflow.
+        let old = state
+            .sessions
+            .read()
+            .await
+            .get(&handles[1])
+            .cloned()
+            .unwrap();
+        let hold = old.clone().lock_owned().await;
+        let baseline_refs = Arc::strong_count(&old);
+        let reload = request(
+            "tools/call",
+            json!({"name":"statewright_load_workflow",
+            "arguments":{"name":"test","run_session_id":handles[1]}}),
+            "key",
+        );
+        let waiting = tokio::spawn(decode(app.clone(), reload));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while Arc::strong_count(&old) <= baseline_refs {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.sessions.write().await.remove(&handles[1]);
+        drop(hold);
+        let retired = waiting.await.unwrap();
+        assert_eq!(retired["error"]["code"], -32000);
+        assert!(
+            retired["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("retired")
         );
         server.abort();
     }

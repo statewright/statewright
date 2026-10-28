@@ -57,6 +57,20 @@ connector guidance from adc42b7. Unrelated dirty Claude hook/test changes are no
 part of this Codex package or commit. Normal user entrypoint remains `scodex`.
 No shell alias/config/trust changes or live shared-session termination.
 
-Installed-byte and native resume results will be appended after delivery;
-source inspection is not native resume acceptance. Rollback uses the same scoped
-installer with the retained previous version; it restores the false alarm too.
+Repair commit: `e28d133`. One scoped install completed successfully. Installed
+history module SHA256 equals the source/generated hash above; the staging shim
+selects the new version. An independent installed-module inspection returns the
+same healthy 4,907-record result and unchanged original history SHA256.
+
+From the verified idle pane `%4` / shell PID6437 in `/Users/ben/dev/polyhedron`,
+retried only `scodex resume 01a0a281-f183-7ce1-ab50-dcaf77684f6e`. Launcher PID57856
+uses the new durable package. Native Codex started without the history error.
+Dismissed its optional CLI-update offer without installing/updating Codex.
+It then displayed **Hooks need review; 1 hook is new or changed**. No hook trust,
+skip, disable or approval input was sent. Original-session resume acceptance is
+pending that real human gate, not claimed complete. Native guard did not prompt
+for history repair. No inference/task instruction was submitted.
+
+Unrelated Claude modifications remain unstaged and unchanged by this task.
+Rollback uses the same scoped installer with the retained previous version;
+it restores the false alarm too. No production or gateway deployment occurred.

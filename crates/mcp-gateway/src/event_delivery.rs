@@ -23,9 +23,20 @@ pub struct EventPrincipal<'a> {
 
 impl EventService {
     pub async fn initialize(pool: PgPool) -> Result<Arc<Self>, sqlx::Error> {
-        sqlx::raw_sql(include_str!("event_delivery.sql"))
-            .execute(&pool)
+        // IF NOT EXISTS alone cannot serialize concurrent catalog creation.
+        // Internal and public gateways share this schema. Keep the lock and
+        // DDL in one transaction, bounded and released on failure/disconnect.
+        let mut transaction = pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '5s'")
+            .execute(&mut *transaction)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(1937204581, 1)")
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::raw_sql(include_str!("event_delivery.sql"))
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
         Ok(Arc::new(Self {
             pool,
             transport: Arc::new(HttpsCallbacks),
@@ -414,6 +425,36 @@ mod tests {
             .connect(&url)
             .await
             .unwrap();
+        // Two gateway deployments initialize the same database concurrently.
+        // Prove initialization participates in the transaction-scoped lock,
+        // rather than relying on IF NOT EXISTS (which races in pg_namespace).
+        let mut blocker = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(1937204581, 1)")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let initializing = EventService::initialize(pool.clone());
+        tokio::pin!(initializing);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut initializing)
+                .await
+                .is_err(),
+            "schema initialization must wait for the other gateway's transaction"
+        );
+        let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND classid=1937204581 AND objid=1 AND NOT granted")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            waiting, 1,
+            "pending initialization must actually wait on the database lock"
+        );
+        blocker.rollback().await.unwrap();
+        initializing.await.unwrap();
+        let (left, right) = tokio::join!(
+            EventService::initialize(pool.clone()),
+            EventService::initialize(pool.clone())
+        );
+        left.unwrap();
+        right.unwrap();
         // This database name and loopback check deliberately exclude live data.
         sqlx::raw_sql("CREATE TABLE IF NOT EXISTS api_keys(key_hash text PRIMARY KEY,owner text,scope text,expires_at text,oauth_resource text); CREATE TABLE IF NOT EXISTS workflow_runs(id text PRIMARY KEY,owner text,session_id text);")
             .execute(&pool).await.unwrap();

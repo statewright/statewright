@@ -84,7 +84,7 @@ test.describe('Workflow Runs', () => {
 
   test('run status badges render correctly', async ({ request, page }) => {
     // Create runs with different statuses
-    for (const status of ['running', 'completed', 'failed', 'stopped']) {
+    for (const status of ['running', 'completed', 'blocked', 'failed', 'stopped']) {
       await request.post(`${PB_URL}/api/collections/workflow_runs/records`, {
         data: {
           workflow_name: `e2e-status-${status}`,
@@ -98,7 +98,7 @@ test.describe('Workflow Runs', () => {
 
     await page.goto('/runs')
     // Check status badge within each run row — use exact text match on the badge span
-    for (const status of ['running', 'completed', 'failed', 'stopped']) {
+    for (const status of ['running', 'completed', 'blocked', 'failed', 'stopped']) {
       const row = page.locator('div.rounded-lg', { hasText: `e2e-status-${status}` })
       await expect(row.locator('span.font-semibold.text-xs', { hasText: status })).toBeVisible()
     }

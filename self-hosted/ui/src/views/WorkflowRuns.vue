@@ -33,7 +33,7 @@
                 :class="{
                   'bg-green-100 text-green-700': run.status === 'completed',
                   'bg-blue-100 text-blue-700': run.status === 'running',
-                  'bg-red-100 text-red-700': run.status === 'failed',
+                  'bg-red-100 text-red-700': run.status === 'failed' || run.status === 'blocked',
                   'bg-gray-200 text-gray-600': run.status === 'stopped',
                 }">{{ run.status }}</span>
               <span class="font-semibold text-gray-900">{{ run.workflow_name }}</span>

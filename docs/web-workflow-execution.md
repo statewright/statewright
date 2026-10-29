@@ -19,6 +19,34 @@ returned authoritative state. Missing input, approval, denial, pause and final
 states remain explicit stop boundaries. The host still owns its model and its
 other tools; Statewright cannot enforce calls outside this connector.
 
+On a successful web workflow load, the gateway also returns a short notice for
+the host to show once in the visible chat: this connection has no Statewright
+pre-tool hooks for ChatGPT's other tools, cannot switch the host model, and
+agent-reported validation/review is not independent acceptance. A blocked or
+budget-exhausted run still needs follow-up. The notice is not repeated on state
+polls or emitted on failed loads, and is absent from native managed sessions.
+The host owns the chat rendering, so source tests cannot prove the notice was
+shown; verify it in a staging web chat before claiming visible acceptance.
+
+### Web P0 follow-up from the independent field evaluation
+
+- **Terminal outcome:** the gateway now maps the starter's `blocked` final
+  state to a `blocked` run-history status, rather than `completed`, and
+  deactivation no longer queues a `stopped` overwrite for a final run. The
+  run-history badge reflects the distinction. The end-of-run database write is
+  still asynchronous, and
+  `statewright_get_status` after deactivation does not return the last run ID,
+  outcome or reason. Durable same-run lookup and a required blocked reason remain
+  open; test them across a gateway restart before closing this P0.
+- **Enforcement coverage:** the load notice discloses the missing web hooks.
+  Exact host/tool-path coverage still needs an inspectable inventory and live
+  connector-path denial tests. A web connector cannot demonstrate denial of
+  ChatGPT tools that never pass through Statewright.
+- **Evidence integrity:** the engineering starter still accepts agent-authored
+  evidence fields. Binding a validation result to the actual command, source
+  revision and result artifact remains separate work; the typed run-registry
+  design is proposed, not implemented.
+
 ### Visible transition updates
 
 Web initialization instructions and transition replies ask the host to show a

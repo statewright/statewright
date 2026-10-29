@@ -1702,6 +1702,12 @@ mod tests {
         assert_eq!(foreign["error"]["code"], -32024);
         let done=decode(app.clone(),request("tools/call",json!({"name":"statewright_transition","arguments":{"event":"DONE","run_session_id":handles[0]}}),"key")).await;
         assert!(done.get("error").is_none());
+        let guidance: serde_json::Value =
+            serde_json::from_str(done["result"]["content"][1]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(guidance["web_workflow"]["progress"]["from"], "work");
+        assert_eq!(guidance["web_workflow"]["progress"]["to"], "done");
+        assert_eq!(guidance["web_workflow"]["status"], "final");
         for (i, expected) in ["done", "work"].iter().enumerate() {
             let response=decode(app.clone(),request("tools/call",json!({"name":"statewright_get_state","arguments":{"run_session_id":handles[i]}}),"key")).await;
             let snapshot: serde_json::Value =

@@ -19,6 +19,53 @@ returned authoritative state. Missing input, approval, denial, pause and final
 states remain explicit stop boundaries. The host still owns its model and its
 other tools; Statewright cannot enforce calls outside this connector.
 
+### Visible transition updates
+
+Web initialization instructions and transition replies ask the host to show a
+short progress line before the next tool call, for example
+`Statewright: baseline → validate`. The additive `web_workflow.progress` object
+contains only confirmed `from`/`to` labels and presentation guidance. It is
+emitted only when the transition succeeded and the authoritative snapshot
+confirms the destination. A final transition belongs in the outcome report;
+final does not imply success. Labels are data, not instructions. No additional
+user acknowledgement is requested merely to show progress.
+
+State polling does not repeat a transition notice. Pending approvals, errors,
+missing/mismatched state, and fork/invoke delegation do not claim a completed
+parent move. Existing approval/pause/final boundary guidance still applies.
+This is ordinary tool-result presentation, not an Events subscription, a new
+permission, or a hook replacement. The web host controls rendering; local
+tests cannot prove that ChatGPT displays a separate message for every update.
+
+The short login-checklist request was already observed completing five valid
+staging transitions on 2026-10-28 (run
+`6d9bf216-07ea-4a72-baf8-6bde0a96bf61`); the screenshot hid that progress in tool
+details. After deploying this presentation change, repeat the same natural
+request in Statewright Staging and check visible lines against the run's actual
+transition history. Also check an approval wait and a failed/blocked final
+state. Do not count this earlier execution as acceptance of the new display.
+
+Presentation-change validation on 2026-10-28, base `1a9b888`:
+
+- Red baseline: `cargo test -p statewright-mcp-gateway --lib web_progress -- --nocapture`
+  failed the new positive assertion (missing progress); one negative test passed.
+- Focused web checks: 8 passed.
+- `cargo test -p statewright-mcp-gateway --lib -- --quiet`: 424 passed,
+  0 failed, 3 ignored.
+- `cargo test -p statewright-mcp-gateway --features metering --lib -- --quiet`:
+  429 passed, 0 failed, 16 ignored. Ignored database fixtures were not executed.
+- Modern HTTP test confirms the notice survives the actual response envelope.
+- Owned Rust additions formatted with rustfmt; unrelated pre-existing formatting
+  preserved. `git diff --check` passed. Existing compiler warnings remain.
+- Independent read-only review: no actionable findings. No host-rendered
+  acceptance claimed; the staging retest above remains necessary.
+
+The working session's orchestration remains disabled by user instruction. This
+slice changes presentation only; it does not alter routes, hooks, workflow
+definitions, approvals, permissions, storage, or Events delivery. Revert this
+presentation commit and redeploy through the normal full-tree staging lane to
+roll back. No database migration or plugin install is needed.
+
 Existing hook-managed clients keep their native path. Legacy remote clients
 without a managed-client identity get web guidance without requiring a
 `?profile=web` URL. Claude web gets that guidance on a best-effort basis; this

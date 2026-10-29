@@ -10,7 +10,7 @@ async fn snapshot(pool: &sqlx::PgPool, id: &str) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "requires owned disposable PocketBase schema via Auldwyrm runtime harness"]
+#[ignore = "requires owned disposable PocketBase schema via private runtime harness"]
 async fn durable_hold_against_actual_migration() {
     use DurableAdmission::*;
     assert_eq!(

@@ -3895,7 +3895,7 @@ mod tests {
         }
     }
 
-    // Transport/error handling contract only. The Auldwyrm runtime harness
+    // Transport/error handling contract only. The private runtime harness
     // separately tests the production quota migration against real owner data.
     #[cfg(feature = "metering")]
     #[tokio::test]
@@ -6547,7 +6547,7 @@ mod tests {
 
     #[cfg(feature = "metering")]
     #[tokio::test]
-    #[ignore = "requires owned disposable PocketBase schema via Auldwyrm runtime harness"]
+    #[ignore = "requires owned disposable PocketBase schema via private runtime harness"]
     async fn workflow_start_matches_migrated_checkpoint_schema() {
         assert_eq!(std::env::var("STATEWRIGHT_QUOTA_FIXTURE").unwrap(), "disposable");
         let url = std::env::var("STATEWRIGHT_TEST_DATABASE_URL").unwrap();

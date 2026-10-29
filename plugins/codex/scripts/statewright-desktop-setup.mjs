@@ -85,11 +85,15 @@ function nativeDesktopConfigContents({ statePath, originalCodex, nodeExecutable,
   return `version=1\noriginal_codex=${originalCodex}\nnode_executable=${nodeExecutable}\nbroker_script=${runtime}\nstate_path=${statePath}\n`;
 }
 const DESKTOP_PACKAGE_ROOTS = new Set([".codex-plugin", "scripts", "vendor", "bin", "native"]);
-async function desktopPackageDigest(root, sourcePackage = false) {
+const MCP_PACKAGE_ROOTS = new Set([...DESKTOP_PACKAGE_ROOTS, "mcp-proxy.sh", "mcp-tool-catalog.json",
+  "client-id.sh", "gateway-profile.sh", "reference-search.mjs", "docs", ".mcp.json",
+  "hook.sh", "capture.sh", "tool-policy.sh", "hooks", "config", "workflows", "skills",
+  "package.json", "package-lock.json", "README.md"]);
+async function desktopPackageDigest(root, sourcePackage = false, roots = DESKTOP_PACKAGE_ROOTS) {
   const hash = createHash("sha256");
   async function visit(directory, prefix = "") {
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)) {
-      if (!prefix && sourcePackage && !DESKTOP_PACKAGE_ROOTS.has(entry.name)) continue;
+      if (!prefix && sourcePackage && !roots.has(entry.name)) continue;
       const name = prefix + entry.name, path = join(directory, entry.name);
       if (entry.isSymbolicLink()) throw new Error("Desktop runtime package contains a symbolic link: " + name);
       if (entry.isDirectory()) await visit(path, name + "/");
@@ -107,8 +111,18 @@ async function desktopPackageDigest(root, sourcePackage = false) {
 // Desktop must survive cache eviction without first launching the TUI. Keep
 // complete, content-addressed packages; never replace a live runtime in place.
 export async function persistDesktopRuntime({ pluginRoot = resolve(SCRIPT_ROOT, ".."), statePath }) {
+  return persistRuntime({ pluginRoot, statePath, namespace: "codex-desktop",
+    entry: join("scripts", "statewright-desktop-codex.mjs"), roots: DESKTOP_PACKAGE_ROOTS });
+}
+
+export async function persistMcpRuntime({ pluginRoot, statePath }) {
+  return persistRuntime({ pluginRoot, statePath, namespace: "codex-mcp",
+    entry: "mcp-proxy.sh", roots: MCP_PACKAGE_ROOTS });
+}
+
+async function persistRuntime({ pluginRoot, statePath, namespace, entry, roots }) {
   const source = await realpath(pluginRoot);
-  let storage = resolve(await realpath(dirname(statePath)), "runtime", "codex-desktop");
+  let storage = resolve(await realpath(dirname(statePath)), "runtime", namespace);
   const requireOutsidePackage = path => {
     const fromSource = relative(source, path);
     if (!fromSource || (fromSource !== ".." && !fromSource.startsWith(".." + sep) && !isAbsolute(fromSource))) {
@@ -120,13 +134,15 @@ export async function persistDesktopRuntime({ pluginRoot = resolve(SCRIPT_ROOT, 
   if (manifest?.name !== "statewright" || typeof manifest.version !== "string" || !/^[A-Za-z0-9._+-]+$/.test(manifest.version)) {
     throw new Error("Desktop runtime requires a versioned Statewright Codex package.");
   }
-  const entry = join("scripts", "statewright-desktop-codex.mjs");
   if (!await readable(join(source, entry))) throw new Error("Desktop runtime package is missing its broker.");
   await mkdir(storage, { recursive: true, mode: 0o700 });
   storage = await realpath(storage);
   requireOutsidePackage(storage);
-  const digest = await desktopPackageDigest(source, true);
+  const digest = await desktopPackageDigest(source, true, roots);
   const target = join(storage, manifest.version + "-" + digest);
+  if (dirname(source) === storage && source !== target) {
+    throw new Error("The retained runtime identity differs from its contents; refusing to republish it.");
+  }
   const verify = async () => {
     if (await desktopPackageDigest(target) !== digest) throw new Error("The durable Desktop runtime differs from its package; refusing to overwrite it.");
   };
@@ -140,7 +156,7 @@ export async function persistDesktopRuntime({ pluginRoot = resolve(SCRIPT_ROOT, 
   try {
     await mkdir(staged, { mode: 0o700 });
     for (const name of await readdir(source)) {
-      if (DESKTOP_PACKAGE_ROOTS.has(name)) {
+      if (roots.has(name)) {
         await cp(join(source, name), join(staged, name), { recursive: true, force: false, errorOnExist: true });
       }
     }

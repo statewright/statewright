@@ -30,13 +30,64 @@ if [ -z "$PROXY_NODE_BIN" ]; then
   fi
 fi
 
+# Retain the selected package before reading any request. exec preserves this
+# host's stdio and owner-bound bridge environment; it is not a tool retry or a
+# search for another session. Cache GC cannot remove the retained runtime.
+MCP_RUNTIME_FAILURE=""
+MCP_RUNTIME_PATH="${SCRIPT_DIR}/scripts/persist-mcp-runtime.mjs"
+if [ ! -x "$PROXY_NODE_BIN" ]; then
+  MCP_RUNTIME_FAILURE="node_executable_unavailable"
+  MCP_RUNTIME_PATH="$PROXY_NODE_BIN"
+elif [ ! -f "$MCP_RUNTIME_PATH" ]; then
+  MCP_RUNTIME_FAILURE="snapshot_helper_missing"
+elif MCP_DURABLE_ENTRY=$("$PROXY_NODE_BIN" "$MCP_RUNTIME_PATH") && [ -f "$MCP_DURABLE_ENTRY" ]; then
+  if [ "$MCP_DURABLE_ENTRY" != "$SCRIPT_DIR/mcp-proxy.sh" ]; then
+    # The plugin manifest launches with cwd=".". Do not retain a directory
+    # handle into an evictable cache; preserve an explicitly supplied project cwd.
+    if [ "$(pwd -P)" = "$SCRIPT_DIR" ]; then
+      cd "${MCP_DURABLE_ENTRY%/*}" || exit 1
+    fi
+    exec /bin/bash "$MCP_DURABLE_ENTRY" "$@"
+  fi
+else
+  MCP_RUNTIME_FAILURE="snapshot_verification_failed"
+fi
+
+runtime_failure_response() {
+  printf '%s' "$1" | jq -c --arg reason "$2" --arg path "$3" --arg outcome "$4" '
+    {jsonrpc:"2.0",id:.id,error:{code:-32603,
+      message:("Statewright local runtime failure: " + $reason + " (" + $path + "). Refresh the owning MCP connection through its host; do not replay an operation with unknown outcome."),
+      data:{kind:"local_runtime_unavailable",reason:$reason,path:$path,upstreamOutcome:$outcome,retryAllowed:false}}}'
+}
+
+if [ -n "$MCP_RUNTIME_FAILURE" ]; then
+  # Keep discovery actionable, but never dispatch a call with a broken runtime.
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    method=$(printf '%s' "$line" | jq -r '.method // empty')
+    case "$method" in notifications/*) continue ;; esac
+    response=$(runtime_failure_response "$line" "$MCP_RUNTIME_FAILURE" "$MCP_RUNTIME_PATH" "not_forwarded")
+    if [ "$method" = "initialize" ]; then
+      printf '%s' "$line" | jq -c '{jsonrpc:"2.0",id:.id,result:{protocolVersion:"2024-11-05",capabilities:{tools:{listChanged:false}},serverInfo:{name:"statewright",version:"0.1.0"}}}'
+    elif [ "$method" = "tools/list" ] && [ -f "$MCP_TOOL_CATALOG" ]; then
+      stable_tool_catalog_response "$(printf '%s' "$line" | jq -c '.id')" "$response"
+    else
+      printf '%s\n' "$response"
+    fi
+  done
+  exit 0
+fi
+
 normalize_transport_response() {
   local normalized
   if [ -x "$PROXY_NODE_BIN" ] && normalized=$(printf '%s\n%s' "$1" "$2" | "$PROXY_NODE_BIN" "$MCP_RECOVERY" "${3:-}") && [ -n "$normalized" ]; then
     printf '%s\n' "$normalized"
   else
-    # A missing helper must produce a response, not a two-minute MCP timeout.
-    printf '%s' "$1" | jq -c '{jsonrpc:"2.0",id:.id,error:{code:-32603,message:"Statewright Node response helper is unavailable. Repair the selected runtime and restart this client."}}'
+    # The upstream call may already have succeeded. Never automatically replay.
+    local reason="response_helper_failed"
+    [ -f "$MCP_RECOVERY" ] || reason="response_helper_missing"
+    [ -x "$PROXY_NODE_BIN" ] || reason="node_executable_unavailable"
+    runtime_failure_response "$1" "$reason" "$MCP_RECOVERY" "unknown"
   fi
 }
 

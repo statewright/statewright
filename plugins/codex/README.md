@@ -495,6 +495,23 @@ any standalone bootstrap. The executor remains the sole owner of the remote
 workflow session, credentials, delivery lifecycle, and telemetry. OMX uses
 this same Codex-native path when launched with `--host omx`.
 
+## MCP runtime lifetime
+
+The stdio proxy preserves its selected package in a verified, content-addressed
+runtime under `~/.statewright/runtime/codex-mcp` before accepting requests. It
+then executes that same package with the existing stdio and managed-client
+binding. Cache eviction or another installed version does not replace the
+running proxy's helpers. Snapshots are retained; this path does not garbage
+collect runtimes used by other sessions.
+
+This is not attachment to an arbitrary healthy server or automatic replay.
+A failed response helper can leave the upstream outcome unknown; inspect the
+operation before explicitly retrying. Startup failures report `not_forwarded`
+and keep local discovery available. If the host tries to launch a cache path
+already removed before startup, use its normal MCP refresh/restart lifecycle;
+the missing executable cannot repair itself. Native hooks remain host-owned and
+are not redirected by this MCP-only retention mechanism.
+
 ## License
 
 FSL-1.1-ALv2 (see plugins/LICENSE.md)

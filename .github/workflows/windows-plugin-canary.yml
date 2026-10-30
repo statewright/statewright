@@ -87,7 +87,13 @@ jobs:
           $cmd = Get-Command codex.cmd -ErrorAction SilentlyContinue
           if (-not $cmd) { $cmd = Get-Command codex }
           $env:CODEX_BIN = $cmd.Source
-          node plugins/executor/tests/windows-managed-app-server-canary.mjs
+          # Exercise intermittent process-tree shutdown, retaining the first
+          # failure rather than allowing a later successful iteration to mask it.
+          foreach ($attempt in 1..5) {
+            Write-Host "Owned App Server lifecycle $attempt/5"
+            node plugins/executor/tests/windows-managed-app-server-canary.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Run managed ownership race canary
         timeout-minutes: 2
         run: node --test plugins/executor/tests/managed-ownership-races.test.mjs

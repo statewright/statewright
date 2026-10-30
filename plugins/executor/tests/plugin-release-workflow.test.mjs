@@ -93,6 +93,17 @@ test("plugin release and canary gates retain the full matrix on supported macOS 
   assert.match(release, /runs-on: macos-15/);
 });
 
+test("Windows native lifecycle repetitions fail on the first unsuccessful cleanup", async () => {
+  const workflow = await readFile(resolve(root, ".github/workflows/windows-plugin-canary.yml"), "utf8");
+  const canary = workflow.split("name: Run managed Codex App Server approval protocol canary")[1].split("name: Run managed ownership race canary")[0];
+  assert.match(canary, /timeout-minutes: 3/);
+  assert.match(canary, /foreach \(\$attempt in 1\.\.5\)/);
+  assert.match(canary, /node plugins\/executor\/tests\/windows-managed-app-server-canary\.mjs\n\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
+  const source = await readFile(resolve(root, "plugins/executor/tests/windows-managed-app-server-canary.mjs"), "utf8");
+  assert.ok(source.lastIndexOf('outcome: "pass"') > source.indexOf("await runtime?.close()"));
+  assert.ok(source.lastIndexOf('outcome: "pass"') > source.indexOf("await rm(home"));
+});
+
 test("Claude's skipped Desktop build cannot skip downstream smoke or weaken publish gates", async () => {
   const workflow = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
   const packageJob = workflow.split("\n  package:\n")[1].split("\n  artifact-smoke:\n")[0];

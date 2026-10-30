@@ -77,6 +77,21 @@ test("release tests install shared executor dependencies before exercising Deskt
   assert.ok(install < packageJob.indexOf("name: Run plugin contract tests"));
 });
 
+test("local release gate checks every generated runtime before executing canaries", async () => {
+  const taskfile = await readFile(resolve(root, "Taskfile.yml"), "utf8");
+  const gate = taskfile.split("\n  test:plugin-release:")[1].split("\n  test:tool-policy:")[0];
+  const firstCanary = gate.indexOf("node --check plugins/executor/tests/unix-plugin-live-gateway-canary.mjs");
+  for (const script of [
+    "plugins/executor/scripts/sync-error-reporting.mjs",
+    "plugins/codex/scripts/sync-executor-core.mjs",
+    "plugins/claude-code/scripts/sync-managed-client.mjs",
+    "plugins/codex/scripts/sync-desktop-runtime.mjs",
+  ]) {
+    const check = gate.indexOf(`node ${script} --check`);
+    assert.ok(check >= 0 && check < firstCanary, `${script} must be checked before canaries`);
+  }
+});
+
 test("plugin release and canary gates retain the full matrix on supported macOS runners", async () => {
   const expectedJobs = ["codex", "claude", "cursor", "pi", "opencode", "omx"].flatMap(
     plugin => ["ubuntu-24.04", "macos-15"].map(os => `${plugin} on ${os}`),

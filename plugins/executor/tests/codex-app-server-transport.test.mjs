@@ -13,6 +13,7 @@ import {
   routeConfigEdits,
   runCodexAppServerTransport,
   startCodexAppServerRuntime,
+  stopOwnedAppServer,
 } from "../lib/codex-app-server-transport.mjs";
 import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyExplicitYoloResumePermissions, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
@@ -50,6 +51,44 @@ test("App Server runtime uses cmd.exe only for Windows batch launchers", () => {
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.bat", "win32"), { shell: true });
   assert.deepEqual(appServerCommandOptions("C:\\tools\\codex.exe", "win32"), { shell: false });
   assert.deepEqual(appServerCommandOptions("/usr/local/bin/codex", "darwin"), { shell: false });
+});
+
+for (const result of [
+  { status: "nonzero", code: 128, signal: null },
+  { status: "spawn_error", errorCode: "ENOENT" },
+  { status: "timeout", closedAfterKill: false },
+]) {
+  test(`Windows App Server cleanup retains ${result.status} evidence and fails closed`, async () => {
+    const child = { pid: 4242, exitCode: null, signalCode: null };
+    await assert.rejects(stopOwnedAppServer(child, new Promise(() => {}), 10, {
+      platform: "win32",
+      cleanupProcessTree: async owned => {
+        assert.equal(owned, child);
+        return { ...result, stderr: "untrusted subprocess output", environment: { SECRET: "private" } };
+      },
+    }), error => {
+      assert.match(error.message, /Owned App Server process-tree cleanup failed/);
+      assert.ok(error.message.includes(JSON.stringify(result.status)));
+      if (result.code) assert.ok(error.message.includes(`"code":${result.code}`));
+      if (result.errorCode) assert.ok(error.message.includes(JSON.stringify(result.errorCode)));
+      if (result.closedAfterKill === false) assert.ok(error.message.includes('"closedAfterKill":false'));
+      assert.doesNotMatch(error.message, /untrusted|SECRET|private/);
+      return true;
+    });
+  });
+}
+
+test("Windows App Server cleanup still requires child closure after successful taskkill", async () => {
+  let calls = 0;
+  await assert.rejects(stopOwnedAppServer({ pid: 4242, exitCode: null, signalCode: null }, new Promise(() => {}), 1, {
+    platform: "win32",
+    cleanupProcessTree: async () => { calls += 1; return { status: "success", code: 0 }; },
+  }), /could not confirm.*stopped/);
+  assert.equal(calls, 2);
+  await stopOwnedAppServer({ pid: 4242, exitCode: null, signalCode: null }, Promise.resolve(), 1, {
+    platform: "win32",
+    cleanupProcessTree: async () => ({ status: "success", code: 0 }),
+  });
 });
 
 test("resident reuse requires the same canonical gateway and auth profile, never merely the same thread", async () => {

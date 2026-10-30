@@ -73,6 +73,31 @@ test("Windows process-tree cleanup excludes managed-client and CI credentials", 
   assert.equal("GITHUB_TOKEN" in invocation.options.env, false);
 });
 
+for (const [message, reason] of [
+  ['ERROR: The process "4242" not found.', "process_not_found"],
+  ['Reason: There is no running instance of the task.', "no_running_instance"],
+  ['Reason: Access is denied.', "access_denied"],
+  ['unknown diagnostic with private text', "unrecognized"],
+  ['x'.repeat(2048) + 'Access is denied.', "unrecognized"],
+]) {
+  test(`Windows cleanup reports bounded reason ${reason} without raw output`, async () => {
+    const taskkill = new EventEmitter();
+    taskkill.stderr = new EventEmitter();
+    const result = await terminateWindowsProcessTree({ pid: 4242 }, {
+      spawnImpl(_command, _args, options) {
+        assert.deepEqual(options.stdio, ["ignore", "ignore", "pipe"]);
+        queueMicrotask(() => {
+          taskkill.stderr.emit("data", Buffer.from(message));
+          taskkill.emit("close", 128, null);
+        });
+        return taskkill;
+      },
+    });
+    assert.deepEqual(result, { status: "nonzero", code: 128, signal: null, reason });
+    assert.doesNotMatch(JSON.stringify(result), /private text|ERROR:/);
+  });
+}
+
 test("Windows process-tree cleanup settles after a bounded taskkill timeout", async () => {
   const taskkill = new EventEmitter();
   let killed = false;

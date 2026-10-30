@@ -126,7 +126,12 @@ jobs:
         run: |
           case "$TAG" in
             codex-v*)
-              raw=${TAG#codex-v}; version=${raw%%-r*}
+              raw=${TAG#codex-v}
+              [[ "$raw" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+                echo "Codex release tags must use an exact patch version (codex-vX.Y.Z)." >&2
+                exit 1
+              }
+              version=$raw
               echo 'plugin=codex' >> "$GITHUB_OUTPUT"
               echo 'directory=plugins/codex' >> "$GITHUB_OUTPUT"
               echo "archive=statewright-codex-$version.zip" >> "$GITHUB_OUTPUT"

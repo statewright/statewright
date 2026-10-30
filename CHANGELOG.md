@@ -3,6 +3,24 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Codex Plugin 0.3.6] — 2026-10-30
+
+### Fixed
+- **[codex]** Preserve foreground conversation ownership across background
+  summaries and make workflow discovery available after connection or a cold
+  resume.
+- **[codex]** Keep the MCP runtime available when a plugin cache entry is
+  removed, so an existing proxy does not depend on a deleted package path.
+- **[codex]** Explain classifier denials and approval availability without
+  promising an approval dialog before one has been submitted.
+
+### Changed
+- **[codex]** Give the withdrawn 0.3.5-r1 changes their own patch version in
+  the plugin manifest, runtime and release archive.
+- **[gateway source]** Add web-specific workflow guidance and visible receipts
+  for confirmed transitions. This source change does not deploy a gateway as
+  part of the Codex plugin update.
+
 ## [Codex Plugin 0.3.5] — 2026-10-14
 
 ### Fixed

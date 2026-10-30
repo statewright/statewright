@@ -1,28 +1,11 @@
 # Statewright for Codex 0.3.5
 
-## Revision 1
+## Withdrawn revision
 
-`codex-v0.3.5-r1` updates the 0.3.5 release line. It retains the plugin's
-0.3.5 version and uses a new release tag; the original tag is unchanged.
-
-- Preserve foreground conversation ownership across background summaries and
-  keep workflow discovery available through connection and cold-resume paths.
-- Retain the MCP runtime when a plugin cache entry is removed, so an existing
-  proxy does not depend on a deleted package directory.
-- Explain classifier denial causes and approval availability without promising
-  a dialog that has not been submitted. Repository validation commands still
-  require their applicable execution authority.
-- Refresh documentation examples, release labels and source references.
-
-The accompanying gateway source adds web-specific workflow guidance and visible
-confirmed-transition receipts. Web connectors retain the chat's selected model;
-they do not acquire terminal hooks or native model routing. See the
-[web workflow guide](../web-workflow-execution.md) for continuation and event
-delivery limits. Installing the plugin does not deploy a self-hosted gateway.
-
-This revision does not change credentials, native permissions or workflow
-definitions during installation. Existing clients keep their loaded code until
-an ordinary idle restart. The upgrade instructions below still apply.
+The `codex-v0.3.5-r1` publication was withdrawn because its package still
+reported version 0.3.5. The original 0.3.5 release and the withdrawn revision's
+tag remain intact. The revision's changes are documented under the distinct
+[0.3.6 patch release](codex-0.3.6.md).
 
 ## Original 0.3.5 release
 

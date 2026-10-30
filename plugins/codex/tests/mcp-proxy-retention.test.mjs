@@ -116,7 +116,7 @@ test("a new cache version never replaces a live snapshot; retained entry can col
   const oldBytes = await readFile(oldEntry, "utf8");
   const manifestPath = join(f.plugin, ".codex-plugin", "plugin.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  await writeFile(manifestPath, JSON.stringify({ ...manifest, version: "0.3.5+retention-next" }));
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, version: `${manifest.version.split("+")[0]}+retention-next` }));
   const second = await f.start("swc_two");
   assert.equal((await f.snapshots()).length, 2);
   assert.equal(await readFile(oldEntry, "utf8"), oldBytes);

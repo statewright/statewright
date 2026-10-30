@@ -116,6 +116,30 @@ test("local release gate checks every generated runtime before executing canarie
   }
 });
 
+test("Codex release tags require exact patch versions while Claude revision tags remain supported", async () => {
+  const workflow = parseYaml(await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8"));
+  const script = workflow.jobs.package.steps.find(step => step.name === "Resolve plugin").run;
+  const directory = mkdtempSync(join(tmpdir(), "statewright-release-tag-"));
+  const output = join(directory, "github-output");
+  const resolveTag = (tag) => {
+    writeFileSync(output, "");
+    execFileSync("bash", ["-c", script], {
+      cwd: root,
+      env: { ...process.env, TAG: tag, GITHUB_OUTPUT: output },
+      stdio: "pipe",
+    });
+    return readFileSync(output, "utf8");
+  };
+  try {
+    assert.match(resolveTag("codex-v0.3.6"), /(?:^|\n)version=0\.3\.6(?:\n|$)/);
+    assert.throws(() => resolveTag("codex-v0.3.6-r1"));
+    assert.throws(() => resolveTag("codex-v0.3.6.1"));
+    assert.match(resolveTag("claude-v0.3.4-r1"), /(?:^|\n)version=0\.3\.4(?:\n|$)/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("plugin release and canary gates retain the full matrix on supported macOS runners", async () => {
   const expectedJobs = ["codex", "claude", "cursor", "pi", "opencode", "omx"].flatMap(
     plugin => ["ubuntu-24.04", "macos-15"].map(os => `${plugin} on ${os}`),

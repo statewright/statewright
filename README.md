@@ -4,7 +4,7 @@
 
 Your workflows, in the harness you choose. Statewright defines tools, checks, and transitions for each phase of agent work. Use it with Claude Code, Codex, Cursor, OpenCode, Pi, or OMX, or connect a custom MCP host. Tool enforcement and model routing depend on the integration. [Full docs →](https://docs.statewright.ai)
 
-> **Published plugin releases:** [Claude 0.3.4-r1](https://github.com/statewright/statewright/releases/tag/claude-v0.3.4-r1) and [Codex 0.3.5](https://github.com/statewright/statewright/releases/tag/codex-v0.3.5). See the [Claude notes](docs/releases/claude-0.3.4.md) and [Codex notes](docs/releases/codex-0.3.5.md). Changes on a development branch are not necessarily included in those packages.
+> **Plugin releases:** [Claude 0.3.4-r1](https://github.com/statewright/statewright/releases/tag/claude-v0.3.4-r1) and [Codex 0.3.6](https://github.com/statewright/statewright/releases/tag/codex-v0.3.6). See the [Claude notes](docs/releases/claude-0.3.4.md) and [Codex notes](docs/releases/codex-0.3.6.md). Changes on a development branch are not necessarily included in those packages.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
@@ -278,7 +278,7 @@ delivery and other hosts; it is not Claude's consumer Desktop integration.
 | Agent | Release line | Executor integration | Tool enforcement | Route boundary |
 |-------|--------------|----------------------|------------------|----------------|
 | [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.4-r1 | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
-| [Codex](plugins/codex/) | 0.3.5 | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
+| [Codex](plugins/codex/) | 0.3.6 | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
 | [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
 | [Pi](plugins/pi/) | 0.3.0 | Native extension + executor MCP bridge | Hard* | Live |
 | [OpenCode](plugins/opencode/) | 0.3.0 | Native plugin + executor MCP bridge | Hard | Live |

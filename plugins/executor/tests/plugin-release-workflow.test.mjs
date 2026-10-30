@@ -3,6 +3,12 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import test from "node:test";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 const root = resolve(import.meta.dirname, "../../..");
 const require = createRequire(import.meta.url);
@@ -10,6 +16,8 @@ const { REQUIRED_WORKFLOWS, requirePluginCanaries } = require(
   resolve(root, ".github/scripts/require-plugin-canaries.cjs"),
 );
 const SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567";
+const { makeReceipt, receiptContract, artifactName } = require(resolve(root, ".github/scripts/canary-step-receipt.cjs"));
+const { readCanaryReceipt, decodeReceiptArchive } = require(resolve(root, ".github/scripts/read-canary-receipt.cjs"));
 
 function githubClient({ branchSha = SOURCE_SHA, jobs = successfulJobs(), runs = {} } = {}) {
   return {
@@ -39,7 +47,7 @@ function githubClient({ branchSha = SOURCE_SHA, jobs = successfulJobs(), runs = 
 }
 
 function successfulJobs() {
-  return {
+  const jobs = {
     11: REQUIRED_WORKFLOWS[0].requiredJobs.map((name) => ({
       name,
       conclusion: "success",
@@ -59,14 +67,30 @@ function successfulJobs() {
     }],
     13: [{ name: "Plugin contract matrix", conclusion: "success", steps: [] }],
   };
+  for (const [runId, entries] of Object.entries(jobs)) {
+    for (const job of entries) {
+      Object.assign(job, { run_id: Number(runId), run_attempt: 1, head_sha: SOURCE_SHA, status: "completed" });
+      for (const step of job.steps) step.status = "completed";
+    }
+  }
+  return jobs;
 }
 
 function successfulRuns(event = "push") {
-  return {
+  const runs = {
     "plugin-production-canary.yml": [{ id: 11, event, conclusion: "success", html_url: "https://example.test/unix" }],
     "windows-plugin-canary.yml": [{ id: 12, event, conclusion: "success", html_url: "https://example.test/windows" }],
     "ci.yml": [{ id: 13, event, conclusion: "success", html_url: "https://example.test/ci" }],
   };
+  for (const [workflow, entries] of Object.entries(runs)) {
+    for (const run of entries) Object.assign(run, {
+      head_sha: SOURCE_SHA, head_branch: "main", status: "completed", run_attempt: 1,
+      path: `.github/workflows/${workflow}`,
+      repository: { full_name: "statewright/statewright" },
+      head_repository: { full_name: "statewright/statewright" },
+    });
+  }
+  return runs;
 }
 
 test("release tests install shared executor dependencies before exercising Desktop fixtures", async () => {
@@ -198,15 +222,15 @@ test("plugin release workflow resolves distinct names and curated notes", async 
     /push:\n\s+branches: \[main\]\n\s+pull_request:/,
     "every main commit must produce trusted exact-SHA Windows evidence for the release gate",
   );
-  assert.match(windowsCanary, /name: Run managed-client bootstrap canary\n\s+timeout-minutes: 3/);
-  assert.match(windowsCanary, /name: Run managed-client route canary\n\s+timeout-minutes: 3/);
+  assert.match(windowsCanary, /name: Run managed-client bootstrap canary\n\s+id: bootstrap\n\s+timeout-minutes: 3/);
+  assert.match(windowsCanary, /name: Run managed-client route canary\n\s+id: route\n\s+timeout-minutes: 3/);
   assert.match(
     windowsCanary,
     /name: Prove secretless browser onboarding[\s\S]*STATEWRIGHT_API_KEY: ""[\s\S]*windows-plugin-browser-onboarding-canary\.mjs/,
   );
   assert.match(
     windowsCanary,
-    /name: Run authenticated production gateway canary\n\s+if: github\.event_name != 'pull_request'/,
+    /name: Run authenticated production gateway canary\n\s+id: production\n\s+if: github\.event_name != 'pull_request'/,
   );
   assert.ok(
     windowsCanary.indexOf("Prove secretless browser onboarding") <
@@ -291,6 +315,219 @@ test("release gate accepts successful exact-commit hosted canaries", async () =>
   });
   assert.deepEqual(evidence.map((item) => item.runId), [11, 12, 13]);
   assert.equal(messages.length, 3);
+});
+
+function receiptEnv(workflow = REQUIRED_WORKFLOWS[1].workflowId, jobName = REQUIRED_WORKFLOWS[1].requiredJobs[0]) {
+  const contract = receiptContract(workflow, jobName);
+  return {
+    GITHUB_REPOSITORY: "statewright/statewright", GITHUB_SHA: SOURCE_SHA,
+    GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", GITHUB_JOB: contract.jobKey,
+    GITHUB_WORKFLOW_REF: `statewright/statewright/.github/workflows/${workflow}@refs/heads/main`,
+    GITHUB_RUN_ID: workflow === "windows-plugin-canary.yml" ? "12" : "11", GITHUB_RUN_ATTEMPT: "1",
+    CANARY_WORKFLOW: workflow, CANARY_JOB_NAME: jobName, CANARY_SOURCE_SHA: SOURCE_SHA,
+    CANARY_STEPS: JSON.stringify(Object.fromEntries(Object.keys(contract.steps).map(id => [id, {
+      outcome: "success", conclusion: "success", outputs: { private: "never serialize step outputs" },
+    }]))),
+  };
+}
+
+function zipReceipt(receipt, member = "canary-steps.json") {
+  const directory = mkdtempSync(join(tmpdir(), "canary-receipt-test-"));
+  try {
+    writeFileSync(join(directory, member), JSON.stringify(receipt));
+    execFileSync("zip", ["-q", "receipt.zip", member], { cwd: directory });
+    return readFileSync(join(directory, "receipt.zip"));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+function receiptFixture({ receipt = makeReceipt(receiptEnv()), artifactOverride = {}, bytes = zipReceipt(receipt) } = {}) {
+  const artifact = {
+    id: 123, name: artifactName(receipt.workflow, receipt.jobName, receipt.attempt), expired: false,
+    size_in_bytes: bytes.length, digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    workflow_run: { id: receipt.runId, head_sha: SOURCE_SHA, head_branch: "main" }, ...artifactOverride,
+  };
+  return { bytes, artifact };
+}
+
+function attachArtifacts(github, fixtures) {
+  github.rest.actions.listWorkflowRunArtifacts = async request => {
+    assert.equal(request.owner, "statewright"); assert.equal(request.repo, "statewright");
+    return { data: { artifacts: fixtures.filter(f => f.artifact.name === request.name).map(f => f.artifact) } };
+  };
+  github.rest.actions.downloadArtifact = async request => {
+    assert.equal(request.archive_format, "zip");
+    return { data: fixtures.find(f => f.artifact.id === request.artifact_id).bytes };
+  };
+  return github;
+}
+
+test("runner receipt records required outcomes only and rejects skipped/failed/continued steps", () => {
+  const receipt = makeReceipt(receiptEnv());
+  assert.equal(receipt.steps.length, 6);
+  assert.doesNotMatch(JSON.stringify(receipt), /never serialize|outputs|private/);
+  for (const outcome of ["failure", "cancelled", "skipped", undefined]) {
+    const env = receiptEnv(); const steps = JSON.parse(env.CANARY_STEPS);
+    steps.bootstrap.outcome = outcome;
+    assert.throws(() => makeReceipt({ ...env, CANARY_STEPS: JSON.stringify(steps) }), /did not succeed/);
+  }
+  for (const [key, value] of Object.entries({
+    GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/heads/feature", GITHUB_SHA: "bad",
+    CANARY_SOURCE_SHA: "f".repeat(40), GITHUB_WORKFLOW_REF: "untrusted", GITHUB_JOB: "other",
+    GITHUB_RUN_ATTEMPT: "0", GITHUB_RUN_ID: "NaN",
+  })) assert.throws(() => makeReceipt({ ...receiptEnv(), [key]: value }), undefined, key);
+});
+
+test("receipt writer CLI emits native-shaped context without including outputs", () => {
+  const directory = mkdtempSync(join(tmpdir(), "canary-writer-test-"));
+  try {
+    execFileSync(process.execPath, [resolve(root, ".github/scripts/canary-step-receipt.cjs")], {
+      cwd: directory, env: receiptEnv(),
+    });
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, "canary-steps.json"))), makeReceipt(receiptEnv()));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("release gate recovers empty API steps from exact-source digest-checked runner receipts", async () => {
+  const jobs = successfulJobs(); const fixtures = [];
+  for (const [index, requirement] of REQUIRED_WORKFLOWS.slice(0, 2).entries()) {
+    for (const job of jobs[index + 11]) {
+      job.steps = [];
+      const receipt = makeReceipt(receiptEnv(requirement.workflowId, job.name));
+      fixtures.push(receiptFixture({ receipt, artifactOverride: { id: fixtures.length + 1 } }));
+    }
+  }
+  const evidence = await requirePluginCanaries({
+    github: attachArtifacts(githubClient({ jobs, runs: successfulRuns() }), fixtures),
+    context: { repo: { owner: "statewright", repo: "statewright" } }, core: { info() {} }, sourceSha: SOURCE_SHA,
+  });
+  assert.equal(evidence[0].receipts.length, 12);
+  assert.equal(evidence[1].receipts.length, 1);
+  assert.match(evidence[1].receipts[0].digest, /^sha256:/);
+});
+
+test("receipt reader rejects wrong identity, replay, missing, duplicate and failed step evidence", async () => {
+  const base = makeReceipt(receiptEnv());
+  const changes = [
+    ...Object.entries({ schema: "v0", repository: "other/repo", sourceSha: "f".repeat(40), event: "pull_request",
+      ref: "refs/heads/other", workflowRef: "other", runId: 999, attempt: 2, jobKey: "other" })
+      .map(([key, value]) => r => { r[key] = value; }),
+    r => { r.steps = []; }, r => { r.steps[0].outcome = "failure"; },
+    r => { r.steps[0].conclusion = "skipped"; }, r => { r.steps[0].id = "other"; },
+    r => { r.steps[0].name = "other"; }, r => { r.steps[1] = r.steps[0]; },
+  ];
+  for (const change of changes) {
+    const receipt = structuredClone(base); change(receipt);
+    const fixture = receiptFixture({ bytes: zipReceipt(receipt) });
+    const github = attachArtifacts(githubClient(), [fixture]);
+    await assert.rejects(readCanaryReceipt({ github, context: { repo: { owner: "statewright", repo: "statewright" } },
+      requirement: REQUIRED_WORKFLOWS[1], run: successfulRuns()["windows-plugin-canary.yml"][0],
+      job: successfulJobs()[12][0], sourceSha: SOURCE_SHA }), /mismatch|lacks successful/);
+  }
+});
+
+test("receipt reader fails closed on missing, ambiguous, expired or mismatched artifacts", async () => {
+  const fixture = receiptFixture();
+  const sets = [[], [fixture, fixture], ...[
+    { expired: true }, { size_in_bytes: 1000000 }, { digest: "sha256:" + "0".repeat(64) },
+    { workflow_run: { id: 999, head_sha: SOURCE_SHA, head_branch: "main" } },
+    { workflow_run: { id: 12, head_sha: "f".repeat(40), head_branch: "main" } },
+  ].map(override => [{ ...fixture, artifact: { ...fixture.artifact, ...override } }])];
+  for (const fixtures of sets) await assert.rejects(readCanaryReceipt({
+    github: attachArtifacts(githubClient(), fixtures), context: { repo: { owner: "statewright", repo: "statewright" } },
+    requirement: REQUIRED_WORKFLOWS[1], run: successfulRuns()["windows-plugin-canary.yml"][0],
+    job: successfulJobs()[12][0], sourceSha: SOURCE_SHA,
+  }));
+});
+
+test("receipt recovery respects retained successful job attempts on a partial rerun", async () => {
+  const fixture = receiptFixture();
+  const run = { ...successfulRuns()["windows-plugin-canary.yml"][0], run_attempt: 2 };
+  const args = { github: attachArtifacts(githubClient(), [fixture]),
+    context: { repo: { owner: "statewright", repo: "statewright" } }, requirement: REQUIRED_WORKFLOWS[1],
+    run, job: successfulJobs()[12][0], sourceSha: SOURCE_SHA };
+  assert.equal((await readCanaryReceipt(args)).attempt, 1);
+  await assert.rejects(readCanaryReceipt({ ...args, job: { ...args.job, run_attempt: 2 } }), /missing/);
+  for (const override of [{ run_id: 999 }, { head_sha: "f".repeat(40) }, { run_attempt: 3 }, { run_attempt: 0 }]) {
+    await assert.rejects(readCanaryReceipt({ ...args, job: { ...args.job, ...override } }), /mismatch/);
+  }
+});
+
+test("artifact service errors cannot turn missing step evidence into acceptance", async () => {
+  const github = attachArtifacts(githubClient(), [receiptFixture()]);
+  github.rest.actions.downloadArtifact = async () => { throw new Error("artifact service unavailable"); };
+  await assert.rejects(readCanaryReceipt({ github,
+    context: { repo: { owner: "statewright", repo: "statewright" } }, requirement: REQUIRED_WORKFLOWS[1],
+    run: successfulRuns()["windows-plugin-canary.yml"][0], job: successfulJobs()[12][0], sourceSha: SOURCE_SHA,
+  }), /artifact service unavailable/);
+});
+
+test("release gate rejects ambiguous jobs and missing rather than empty step fields", async () => {
+  for (const mutate of [jobs => jobs[11].push(jobs[11][0]), jobs => { delete jobs[11][0].steps; }]) {
+    const jobs = successfulJobs(); mutate(jobs);
+    const github = githubClient({ jobs, runs: successfulRuns() });
+    github.rest.actions.listWorkflowRunArtifacts = () => assert.fail("ambiguous evidence is not an omission");
+    await assert.rejects(requirePluginCanaries({ github,
+      context: { repo: { owner: "statewright", repo: "statewright" } }, core: { info() {} }, sourceSha: SOURCE_SHA,
+    }), /lacks successful/);
+  }
+});
+
+test("archive decoder refuses malformed, unexpected and oversized payloads", () => {
+  for (const bytes of [Buffer.from("not a zip"), zipReceipt({}, "other.json"), zipReceipt({ text: "x".repeat(100000) })]) {
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    assert.throws(() => decodeReceiptArchive(bytes, digest));
+  }
+});
+
+test("nonempty API failure or partial evidence never falls back to artifacts", async () => {
+  for (const steps of [[{ name: "unrelated", status: "completed", conclusion: "success" }],
+    [{ name: "Submit plugin adoption telemetry event", status: "completed", conclusion: "failure" }]]) {
+    const jobs = successfulJobs(); jobs[11][0].steps = steps;
+    const github = githubClient({ jobs, runs: successfulRuns() });
+    github.rest.actions.listWorkflowRunArtifacts = () => assert.fail("must not override API evidence");
+    await assert.rejects(requirePluginCanaries({ github,
+      context: { repo: { owner: "statewright", repo: "statewright" } }, core: { info() {} }, sourceSha: SOURCE_SHA,
+    }), /lacks successful step/);
+  }
+});
+
+test("release gate revalidates returned run identity instead of trusting API query filters", async () => {
+  for (const [key, value] of Object.entries({ head_sha: "f".repeat(40), head_branch: "other", status: "in_progress",
+    path: ".github/workflows/untrusted.yml", head_repository: { full_name: "fork/repo" }, run_attempt: 0 })) {
+    const runs = successfulRuns(); runs["windows-plugin-canary.yml"][0][key] = value;
+    await assert.rejects(requirePluginCanaries({ github: githubClient({ runs }),
+      context: { repo: { owner: "statewright", repo: "statewright" } }, core: { info() {} }, sourceSha: SOURCE_SHA,
+    }), /no successful trusted push run/);
+  }
+});
+
+test("both canary workflows bind runner step IDs and immutable receipts to each matrix attempt", async () => {
+  for (const requirement of REQUIRED_WORKFLOWS.slice(0, 2)) {
+    const workflow = await readFile(resolve(root, ".github/workflows", requirement.workflowId), "utf8");
+    const contract = receiptContract(requirement.workflowId, requirement.requiredJobs[0]);
+    const parsed = parseYaml(workflow);
+    const steps = parsed.jobs[contract.jobKey].steps;
+    const producer = steps.findIndex(step => step.name === "Record required step outcomes");
+    assert.equal(steps[producer].run, "node .github/scripts/canary-step-receipt.cjs");
+    assert.equal(steps[producer].env.CANARY_WORKFLOW, requirement.workflowId);
+    for (const [id, name] of Object.entries(contract.steps)) {
+      assert.ok(workflow.includes(`name: ${name}\n        id: ${id}\n`));
+      const matches = steps.filter(step => step.id === id);
+      assert.equal(matches.length, 1);
+      assert.equal(matches[0].name, name);
+      assert.ok(steps.indexOf(matches[0]) < producer);
+      assert.notEqual(matches[0]["continue-on-error"], true);
+    }
+    assert.equal(steps[producer + 1].uses, "actions/upload-artifact@v4");
+    assert.equal(steps[producer + 1].with.path, "canary-steps.json");
+    assert.equal(steps[producer + 1].with["if-no-files-found"], "error");
+    assert.match(workflow, /CANARY_STEPS: \$\{\{ toJSON\(steps\) \}\}/);
+    assert.match(workflow, /CANARY_SOURCE_SHA: \$\{\{ steps\.source\.outputs\.sha \}\}/);
+    assert.match(workflow, /name: Record required step outcomes\n\s+if: github.event_name == 'push'/);
+    assert.match(workflow, /uses: actions\/upload-artifact@v4/);
+    assert.match(workflow, /-attempt-\$\{\{ github.run_attempt \}\}/);
+    assert.doesNotMatch(workflow, /overwrite: true|continue-on-error: true/);
+  }
 });
 
 test("release gate rejects a tag that is not current main", async () => {
@@ -403,11 +640,11 @@ test("release gate rejects an earlier failed Windows native command even when a 
 test("release gate ignores a newer incomplete push when complete evidence exists", async () => {
   const runs = successfulRuns();
   runs["plugin-production-canary.yml"] = [
-    { id: 14, event: "push", conclusion: "success", html_url: "https://example.test/partial" },
+    { ...runs["plugin-production-canary.yml"][0], id: 14, html_url: "https://example.test/partial" },
     ...runs["plugin-production-canary.yml"],
   ];
   const jobs = successfulJobs();
-  jobs[14] = jobs[11].slice(0, 1);
+  jobs[14] = jobs[11].slice(0, 1).map(job => ({ ...job, run_id: 14 }));
   const evidence = await requirePluginCanaries({
     github: githubClient({ jobs, runs }),
     context: { repo: { owner: "statewright", repo: "statewright" } },

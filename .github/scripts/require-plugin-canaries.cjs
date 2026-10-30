@@ -1,5 +1,7 @@
 "use strict";
 
+const { readCanaryReceipt } = require("./read-canary-receipt.cjs");
+
 const UNIX_PLUGINS = Object.freeze(["codex", "claude", "cursor", "pi", "opencode", "omx"]);
 const UNIX_OPERATING_SYSTEMS = Object.freeze(["ubuntu-24.04", "macos-15"]);
 const WINDOWS_JOB = "Codex and Claude managed-client bootstrap";
@@ -43,29 +45,39 @@ const REQUIRED_WORKFLOWS = Object.freeze([
   },
 ]);
 
-async function requireWorkflowJobs({ github, context, requirement, run }) {
+async function requireWorkflowJobs({ github, context, requirement, run, sourceSha }) {
   const { data } = await github.rest.actions.listJobsForWorkflowRun({
     owner: context.repo.owner,
     repo: context.repo.repo,
     run_id: run.id,
+    filter: "latest",
     per_page: 100,
   });
   const jobs = data.jobs ?? [];
+  if (data.total_count > jobs.length) throw new Error("Incomplete canary job listing.");
+  const receipts = [];
   for (const jobName of requirement.requiredJobs) {
-    const job = jobs.find((candidate) => candidate.name === jobName);
-    if (!job || job.conclusion !== "success") {
+    const matches = jobs.filter((candidate) => candidate.name === jobName);
+    const job = matches[0];
+    if (matches.length !== 1 || job.status !== "completed" || job.conclusion !== "success" ||
+        job.run_id !== run.id || job.head_sha !== sourceSha) {
       throw new Error(`${requirement.label} run ${run.id} lacks successful job ${jobName}.`);
     }
-  }
-  for (const required of requirement.requiredSteps ?? []) {
-    const job = jobs.find((candidate) => candidate.name === required.job);
-    const step = job?.steps?.find((candidate) => candidate.name === required.step);
-    if (!step || step.conclusion !== "success") {
-      throw new Error(
-        `${requirement.label} run ${run.id} lacks successful step ${required.step} in ${required.job}.`,
-      );
+    const required = (requirement.requiredSteps ?? []).filter(step => step.job === jobName);
+    if (required.length && Array.isArray(job.steps) && job.steps.length === 0) {
+      // GitHub occasionally omits the entire steps array. Use a separately
+      // authenticated, digest-checked runner receipt; never synthesize API steps.
+      receipts.push(await readCanaryReceipt({ github, context, requirement, run, job, sourceSha }));
+      continue;
+    }
+    for (const { step: stepName } of required) {
+      const steps = job.steps?.filter(candidate => candidate.name === stepName);
+      if (steps?.length !== 1 || steps[0].status !== "completed" || steps[0].conclusion !== "success") {
+        throw new Error(`${requirement.label} run ${run.id} lacks successful step ${stepName} in ${jobName}.`);
+      }
     }
   }
+  return receipts;
 }
 
 async function requirePluginCanaries({ github, context, core, sourceSha }) {
@@ -90,15 +102,21 @@ async function requirePluginCanaries({ github, context, core, sourceSha }) {
       per_page: 100,
     });
     const candidates = data.workflow_runs.filter((run) =>
-      run.conclusion === "success" && run.event === "push");
+      run.conclusion === "success" && run.status === "completed" && run.event === "push" &&
+      run.head_sha === sourceSha && run.head_branch === "main" &&
+      run.path === `.github/workflows/${requirement.workflowId}` &&
+      run.repository?.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+      run.head_repository?.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+      Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0);
     if (candidates.length === 0) {
       throw new Error(`${requirement.label} has no successful trusted push run for ${sourceSha}.`);
     }
     let passed;
+    let receipts;
     let lastError;
     for (const candidate of candidates) {
       try {
-        await requireWorkflowJobs({ github, context, requirement, run: candidate });
+        receipts = await requireWorkflowJobs({ github, context, requirement, run: candidate, sourceSha });
         passed = candidate;
         break;
       } catch (error) {
@@ -111,7 +129,7 @@ async function requirePluginCanaries({ github, context, core, sourceSha }) {
       );
     }
     core.info(`${requirement.label}: ${passed.html_url}`);
-    evidence.push({ workflowId: requirement.workflowId, runId: passed.id, url: passed.html_url });
+    evidence.push({ workflowId: requirement.workflowId, runId: passed.id, url: passed.html_url, receipts });
   }
   return evidence;
 }

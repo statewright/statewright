@@ -25,6 +25,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/plugin-production-canary.yml"
+      - ".github/scripts/**"
       - "plugins/capabilities.json"
       - "plugins/executor/**"
       - "plugins/codex/**"
@@ -103,6 +104,7 @@ jobs:
               ;;
           esac
       - name: Submit plugin adoption telemetry event
+        id: telemetry
         env:
           PLUGIN: ${{ matrix.plugin }}
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
@@ -111,6 +113,22 @@ jobs:
         run: |
           version=$(node -p "require('./plugins/capabilities.json').plugins[process.env.PLUGIN].version")
           node plugins/executor/tests/plugin-adoption-telemetry-canary.mjs "$PLUGIN" "$version"
+      - name: Record required step outcomes
+        if: github.event_name == 'push'
+        env:
+          CANARY_WORKFLOW: plugin-production-canary.yml
+          CANARY_JOB_NAME: ${{ matrix.plugin }} on ${{ matrix.os }}
+          CANARY_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          CANARY_STEPS: ${{ toJSON(steps) }}
+        run: node .github/scripts/canary-step-receipt.cjs
+      - name: Upload required step receipt
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-steps-${{ matrix.plugin }}-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: canary-steps.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Record verification boundary
         if: always()
         env:

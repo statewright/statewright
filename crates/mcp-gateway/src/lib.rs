@@ -1,6 +1,7 @@
 pub mod bash_classifier;
 pub mod config;
 pub mod custom_tools;
+pub mod docs_search;
 pub mod enforcement;
 #[cfg(feature = "metering")]
 pub mod event_delivery;

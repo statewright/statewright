@@ -2039,6 +2039,18 @@ impl Gateway {
         arguments: serde_json::Value,
     ) -> JsonRpcResponse {
         match name {
+            "statewright_search_docs" => {
+                let query = arguments
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let result = crate::docs_search::search(query).await;
+                let payload = match result {
+                    Ok(hits) => crate::protocol::ToolCallResult::text(hits.to_string()),
+                    Err(error) => crate::protocol::ToolCallResult::error(error),
+                };
+                JsonRpcResponse::success(id, serde_json::to_value(payload).unwrap())
+            }
             "statewright_adapter_pre_tool" => {
                 let tool_name = arguments
                     .get("tool_name")
@@ -4701,9 +4713,32 @@ mod tests {
             .collect();
         assert!(names.contains(&"statewright_transition".to_string()));
         assert!(names.contains(&"statewright_get_state".to_string()));
+        assert!(names.contains(&"statewright_search_docs".to_string()));
         assert!(!names.contains(&"statewright_adapter_pre_tool".to_string()));
         assert!(!names.contains(&"statewright_adapter_post_tool".to_string()));
         assert!(!names.contains(&"statewright_adapter_stop".to_string()));
+    }
+
+    #[tokio::test]
+    async fn docs_search_rejects_missing_query_without_network_access() {
+        let mut gw = test_gateway();
+        let response = gw
+            .handle_message(JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                method: "tools/call".into(),
+                params: Some(json!({"name": "statewright_search_docs", "arguments": {}})),
+                id: Some(json!(1)),
+            })
+            .await
+            .unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["isError"], true);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("query must contain")
+        );
     }
 
     #[tokio::test]
@@ -5405,7 +5440,7 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         let names: Vec<String> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap().into())

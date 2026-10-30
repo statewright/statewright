@@ -15,7 +15,9 @@ try {
     statePath: join(stateRoot, "mcp-runtime.json"),
   });
   if (/[\r\n]/.test(entry)) throw new Error("Runtime path is not single-line");
-  process.stdout.write(entry + "\n");
+  // Git Bash accepts drive paths with forward slashes. Keep directory extraction
+  // in the shell valid too; native backslashes are not shell path separators.
+  process.stdout.write((process.platform === "win32" ? entry.replaceAll("\\", "/") : entry) + "\n");
 } catch (error) {
   // Do not echo arbitrary source content or inherited environment values.
   process.stderr.write("[statewright] MCP runtime snapshot could not be verified/published; no request forwarded.\n");

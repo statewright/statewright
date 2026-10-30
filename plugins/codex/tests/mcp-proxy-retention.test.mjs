@@ -8,12 +8,23 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { installManagedClientShim } from "../../executor/lib/managed-client-supervisor.mjs";
 
-async function fixture(t) {
+async function fixture(t, { aliasedEntry = false } = {}) {
   const home = await mkdtemp(join(tmpdir(), "statewright-proxy-retention-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const plugin = join(home, "cache", "plugin");
+  const plugin = join(home, "cache", "plugin with spaces");
   await cp(resolve("plugins/codex"), plugin, { recursive: true,
     filter: path => !path.split("/").includes("node_modules") });
+  if (aliasedEntry) {
+    // Model a different spelling at the Node-to-Bash boundary without changing
+    // snapshot verification or using a flag to skip retention on the next exec.
+    const helper = join(plugin, "scripts/persist-mcp-runtime.mjs");
+    const source = await readFile(helper, "utf8");
+    const marker = '  if (/[\\r\\n]/.test(entry))';
+    assert.ok(source.includes(marker));
+    assert.ok(source.includes('  const entry = await'));
+    await writeFile(helper, source.replace('  const entry = await', '  let entry = await')
+      .replace(marker, '  entry = entry.replace("mcp-proxy.sh", "./mcp-proxy.sh");\n' + marker));
+  }
   const calls = [];
   const server = createServer(async (req, res) => {
     let raw = ""; for await (const part of req) raw += part;
@@ -55,6 +66,21 @@ async function fixture(t) {
   }
   return { home, plugin, calls, start, snapshots };
 }
+
+test("equivalent retained entry spelling initializes once and can cold-start", async t => {
+  const f = await fixture(t, { aliasedEntry: true });
+  const first = await f.start();
+  const [entry] = await f.snapshots();
+  const cold = await f.start("swc_cold", entry);
+  for (const proxy of [first, cold]) {
+    assert.equal((await proxy.request("tools/call", { name: "statewright_get_state" })).error, undefined);
+  }
+  assert.deepEqual(f.calls.map(c => [c.client, c.rpc.method]), [
+    ["swc_one", "initialize"], ["swc_cold", "initialize"],
+    ["swc_one", "tools/call"], ["swc_cold", "tools/call"],
+  ]);
+  assert.equal((await f.snapshots()).length, 1);
+});
 
 test("live MCP proxy survives cache eviction without reconnecting or replaying", async t => {
   const f = await fixture(t);

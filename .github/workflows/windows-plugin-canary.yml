@@ -72,10 +72,14 @@ jobs:
       - name: Run managed-client route canary
         timeout-minutes: 3
         run: node plugins/executor/tests/windows-managed-client-route-canary.mjs
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build onboarding credential helper
+        run: cargo build --locked -p statewright-credentials
       - name: Prove secretless browser onboarding
         timeout-minutes: 2
         env:
           STATEWRIGHT_API_KEY: ""
+          STATEWRIGHT_CREDENTIAL_HELPER: ${{ github.workspace }}/target/debug/statewright-credentials.exe
         run: node plugins/executor/tests/windows-plugin-browser-onboarding-canary.mjs
       - name: Run managed Codex App Server approval protocol canary
         timeout-minutes: 3

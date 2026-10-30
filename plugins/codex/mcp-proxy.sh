@@ -4,7 +4,7 @@
 # Browser device authorization provisions the local key; authenticated calls
 # continue to resolve it at call time from the credential store.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 MCP_RESPONSE_SUMMARIZER="${SCRIPT_DIR}/scripts/summarize-mcp-response.mjs"
 MCP_TOOL_CATALOG="${SCRIPT_DIR}/mcp-tool-catalog.json"
 
@@ -41,7 +41,9 @@ if [ ! -x "$PROXY_NODE_BIN" ]; then
 elif [ ! -f "$MCP_RUNTIME_PATH" ]; then
   MCP_RUNTIME_FAILURE="snapshot_helper_missing"
 elif MCP_DURABLE_ENTRY=$("$PROXY_NODE_BIN" "$MCP_RUNTIME_PATH") && [ -f "$MCP_DURABLE_ENTRY" ]; then
-  if [ "$MCP_DURABLE_ENTRY" != "$SCRIPT_DIR/mcp-proxy.sh" ]; then
+  # Node and Git Bash can spell the same Windows file differently (C:/ vs /c/).
+  # Compare file identity, not text, or a retained entry execs itself forever.
+  if ! [ "$MCP_DURABLE_ENTRY" -ef "$SCRIPT_DIR/mcp-proxy.sh" ]; then
     # The plugin manifest launches with cwd=".". Do not retain a directory
     # handle into an evictable cache; preserve an explicitly supplied project cwd.
     if [ "$(pwd -P)" = "$SCRIPT_DIR" ]; then

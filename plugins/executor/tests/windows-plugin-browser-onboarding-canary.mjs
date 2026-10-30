@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,7 +30,7 @@ function secretlessEnvironment(home, probePath, resultPath) {
   };
 }
 
-function runProxy(proxyPath, environment, connect = false) {
+function runProxy(stage, proxyPath, environment, connect = false) {
   const input = [
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
@@ -38,6 +38,7 @@ function runProxy(proxyPath, environment, connect = false) {
     ...(connect ? [{ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_connect", arguments: {} } }] : []),
   ].map((value) => JSON.stringify(value)).join("\n") + "\n";
   return new Promise((resolve, reject) => {
+    console.log(`[windows-browser-onboarding] starting ${stage}`);
     const child = spawn("bash", [proxyPath], {
       env: environment,
       stdio: ["pipe", "pipe", "pipe"],
@@ -45,10 +46,36 @@ function runProxy(proxyPath, environment, connect = false) {
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    let exited = false;
+    child.once("exit", () => { exited = true; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (exited) {
+        // Descendants may still hold a pipe, but an exited parent's PID can be
+        // reused. Do not taskkill by that stale identity.
+        child.stdout.destroy();
+        child.stderr.destroy();
+        reject(new Error(`${stage} timed out waiting for pipe closure after proxy exit; no stale PID was killed`));
+        return;
+      }
+      // Only this fixture's child tree. Never leave a spinning proxy after the
+      // outer CI step kills the harness, or dump arbitrary child/environment data.
+      execFile("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"],
+        { windowsHide: true, timeout: 5_000 }, (error) => {
+          reject(new Error(`${stage} timed out after 25s (stdout=${stdout.length} bytes, stderr=${stderr.length} bytes; child-tree cleanup ${error ? "failed" : "completed"})`));
+        });
+    }, 25_000);
     child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
-    child.once("error", reject);
-    child.once("close", (code) => resolve({ code, stdout, stderr }));
+    child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (!timedOut) resolve({ code, stdout, stderr });
+    });
+    child.stdin.on("error", (error) => {
+      if (error.code !== "EPIPE") reject(error);
+    });
     child.stdin.end(input);
   });
 }
@@ -124,7 +151,7 @@ const plugins = [
 
 for (const [name, proxyUrl] of plugins) {
   const root = await mkdtemp(join(tmpdir(), `statewright-${name}-browser-onboarding-`));
-  const home = join(root, "home");
+  const home = join(root, "home with spaces");
   const probePath = join(root, "browser-probe.cmd");
   const resultPath = join(root, "browser-probe-result.txt");
   let issuer;
@@ -141,18 +168,34 @@ for (const [name, proxyUrl] of plugins) {
     );
     const proxy = msysPath(fileURLToPath(proxyUrl));
     if (name === "codex") {
+      // Source checkout CI must build the helper shipped in release archives.
+      // An absent helper is unavailable, not an empty credential store.
+      assert.ok(process.env.STATEWRIGHT_CREDENTIAL_HELPER, "native credential helper must be supplied");
+      await access(process.env.STATEWRIGHT_CREDENTIAL_HELPER);
+      environment.STATEWRIGHT_CREDENTIAL_HELPER = process.env.STATEWRIGHT_CREDENTIAL_HELPER;
       issuer = await deviceIssuerFixture();
       environment.STATEWRIGHT_GATEWAY_URL = `${issuer.origin}/mcp`;
       environment.STATEWRIGHT_PB_URL = issuer.origin;
-      const disconnected = await runProxy(proxy, environment);
+      const disconnected = await runProxy("codex disconnected", proxy, environment);
       assert.equal(disconnected.code, 0, disconnected.stderr);
       const messages = disconnected.stdout.trim().split(/\r?\n/).map(JSON.parse);
-      assert.deepEqual(messages.find(({ id }) => id === 2).result.tools.map(({ name }) => name),
-        ["statewright_search_docs", "statewright_list_workflows", "statewright_connect"]);
+      const catalog = JSON.parse(await readFile(new URL("../../codex/mcp-tool-catalog.json", import.meta.url), "utf8"));
+      assert.deepEqual(messages.find(({ id }) => id === 2).result.tools.map(({ name }) => name).sort(),
+        catalog.map(({ name }) => name).sort());
       assert.equal(messages.find(({ id }) => id === 3).error.code, -32001);
       await assert.rejects(readFile(resultPath), { code: "ENOENT" }, "ordinary calls must not open a browser");
 
-      const connected = await runProxy(proxy, environment, true);
+      const snapshotsRoot = join(home, ".statewright", "runtime", "codex-mcp");
+      const snapshots = (await readdir(snapshotsRoot)).filter(name => !name.startsWith("."));
+      assert.equal(snapshots.length, 1, "initial launch must retain exactly one runtime");
+      const retainedProxy = msysPath(join(snapshotsRoot, snapshots[0], "mcp-proxy.sh"));
+      const cold = await runProxy("codex retained cold-start", retainedProxy, environment);
+      assert.equal(cold.code, 0, cold.stderr);
+      assert.deepEqual(cold.stdout.trim().split(/\r?\n/).map(JSON.parse), messages);
+      assert.deepEqual((await readdir(snapshotsRoot)).filter(name => !name.startsWith(".")), snapshots);
+      await assert.rejects(readFile(resultPath), { code: "ENOENT" }, "cold-start must not open a browser");
+
+      const connected = await runProxy("codex explicit connect", proxy, environment, true);
       assert.equal(connected.code, 0, connected.stderr);
       const connect = connected.stdout.trim().split(/\r?\n/).map(JSON.parse).find(({ id }) => id === 4);
       const text = connect.result.content[0].text;
@@ -166,7 +209,7 @@ for (const [name, proxyUrl] of plugins) {
       continue;
     }
 
-    const result = await runProxy(proxy, environment);
+    const result = await runProxy(`${name} legacy onboarding`, proxy, environment);
     assert.equal(result.code, 0, `${name} proxy failed: ${result.stderr}`);
     assert.match(result.stdout, /Statewright API key not configured/);
 

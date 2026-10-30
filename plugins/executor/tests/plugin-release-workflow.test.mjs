@@ -218,6 +218,15 @@ test("hosted plugin contracts expose installed Task to nested adapter tests", as
   assert.match(workflow, /task test:plugin-release/);
 });
 
+test("Windows secretless onboarding uses a built native credential helper", async () => {
+  const workflow = await readFile(resolve(root, ".github/workflows/windows-plugin-canary.yml"), "utf8");
+  const build = workflow.indexOf("cargo build --locked -p statewright-credentials");
+  const onboarding = workflow.indexOf("name: Prove secretless browser onboarding");
+  assert.ok(build >= 0 && build < onboarding, "missing helper must not masquerade as missing credentials");
+  assert.match(workflow.slice(onboarding), /STATEWRIGHT_CREDENTIAL_HELPER: \$\{\{ github\.workspace \}\}\/target\/debug\/statewright-credentials\.exe/);
+  assert.match(workflow.slice(onboarding), /timeout-minutes: 2/);
+});
+
 test("workspace CI and release builds install the Linux credential helper prerequisites", async () => {
   for (const [file, buildStep] of [
     ["ci.yml", "cargo check --workspace"],

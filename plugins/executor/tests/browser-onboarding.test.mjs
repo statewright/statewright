@@ -405,8 +405,9 @@ esac
   }
 });
 
-test("codex searches public docs without a local credential or gateway request", async () => {
-  const root = await mkdtemp(join(tmpdir(), "statewright-codex-public-docs-"));
+for (const [client, proxy] of [["codex", "plugins/codex/mcp-proxy.sh"], ["claude", "plugins/claude-code/mcp-proxy.sh"]]) {
+test(`${client} searches public docs with canonical URLs and no gateway request`, async () => {
+  const root = await mkdtemp(join(tmpdir(), `statewright-${client}-public-docs-`));
   const home = join(root, "home");
   const bin = join(root, "bin");
   const curlCapture = join(root, "curl-command.txt");
@@ -418,7 +419,7 @@ test("codex searches public docs without a local credential or gateway request",
     const fakeCurl = join(bin, "curl");
     await writeFile(
       fakeCurl,
-      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s' '[{\"url\":\"/docs/workflows\",\"title\":\"Workflow Guide\",\"section\":\"Intro\",\"content\":\"Build workflows safely.\"}]'\n",
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s' '[{\"url\":\"/docs/workflows\",\"title\":\"Workflow Guide\",\"section\":\"Intro\",\"content\":\"Build workflows safely.\"},{\"url\":\"/workflow-schema.json\",\"title\":\"Workflow JSON Schema\",\"section\":\"Schema\",\"content\":\"Workflow fields.\"},{\"url\":\"/docs/../bad\",\"title\":\"Unsafe Workflow Link\",\"section\":\"Intro\",\"content\":\"Workflow fields.\"}]'\n",
     );
     await chmod(fakeCurl, 0o755);
     Object.assign(environment, {
@@ -429,14 +430,20 @@ test("codex searches public docs without a local credential or gateway request",
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
-    const result = await runProxyRequests(resolve("plugins/codex/mcp-proxy.sh"), environment, [
-      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    // Claude's standalone proxy checks its local key before dispatching tools.
+    if (client === "claude") environment.STATEWRIGHT_API_KEY = "fixture-key";
+    const result = await runProxyRequests(resolve(proxy), environment, [
+      ...(client === "codex" ? [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }] : []),
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: "workflow" } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: 'not "found' } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: "schema" } } },
     ]);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(responseById(result.stdout, 2).result.content[0].text, /Workflow Guide/);
-    assert.equal(responseById(result.stdout, 3).result.content[0].text, 'No results found for: not "found');
+    const guide = responseById(result.stdout, 2).result.content[0].text;
+    assert.match(guide, /URL: https:\/\/docs\.statewright\.ai\/workflows\//);
+    assert.doesNotMatch(guide, /statewright\.ai\/docs\/|\/docs\/\.\.\/bad/);
+    if (client === "codex") assert.equal(responseById(result.stdout, 3).result.content[0].text, 'No results found for: not "found');
+    assert.match(responseById(result.stdout, 4).result.content[0].text, /URL: https:\/\/statewright\.ai\/workflow-schema\.json/);
     const curlArguments = await readFile(curlCapture, "utf8");
     assert.match(curlArguments, /https:\/\/docs\.statewright\.ai\/search-index\.json/);
     assert.doesNotMatch(curlArguments, /Authorization:|mcp\.statewright\.ai/);
@@ -444,6 +451,7 @@ test("codex searches public docs without a local credential or gateway request",
     await rm(root, { recursive: true, force: true });
   }
 });
+}
 
 test("codex rejects a malformed selected gateway without opening a browser or leaking its URL", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-codex-invalid-key-"));

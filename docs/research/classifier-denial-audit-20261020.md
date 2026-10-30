@@ -9,13 +9,16 @@ sessions. The selected cohort is the newest 100 command-hook denials before
 `2026-10-20T14:00:00Z`; the cutoff excludes audit activity itself. The
 accompanying [sanitized record set](classifier-denial-audit-20261020.json)
 contains exactly 100 unique timestamp/call-ID pairs in descending order. It
-retains only safe metadata: timestamp, opaque call ID, source-log basename,
+retains timestamp, publication-local event and session pseudonyms,
 project label, denial category, command-family label, and individual
 adjudication status. Every retained status is `unreviewed`: it records an
 evidence limit, not a correct/incorrect classification. Three non-command
 patch events were excluded and replaced with older command-hook records; the
 three replacements whose command operands were unavailable are explicitly
-labelled `uninspected_record` rather than guessed.
+labelled `uninspected_record` rather than guessed. Original call IDs and log
+basenames are retained privately. Pseudonyms preserve record uniqueness and
+session grouping; they cannot be used to locate original sessions. The time,
+ordering, categories, families and adjudication status are unchanged.
 
 All 100 retained records have `project` set to `unknown`; project attribution
 and per-project coverage cannot be established from this artifact. This is
@@ -64,7 +67,10 @@ pre-edit JSON receipt and compared every 20-record slice after removing only
 matched exactly. The fresh record checks found 100 exact seven-key records,
 100 unique timestamp/call-ID pairs, descending timestamps before the cutoff,
 and the reported category and family totals. The Rust results above predate
-this metadata-only correction and are inherited evidence, not a new suite run.
+that metadata-only correction and are inherited evidence, not a new suite run.
+The later publication cleanup replaces identifiers only; the original receipt
+comparison above describes the pre-publication artifact, not byte equality of
+the pseudonymized copy.
 
 S1 remains disabled and no bundle is installed by this audit. The exact
 single-test Cargo form using `-- --exact` was denied by the current guard

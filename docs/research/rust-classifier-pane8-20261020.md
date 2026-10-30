@@ -1,10 +1,10 @@
-# Rust classifier repair: death-rebirth:8.1
+# Rust classifier repair
 
 ## Evidence and ownership
 
-Read-only pane inspection identified `%9`, cwd `/Users/ben/dev/harbringer`.
-Its durable thread is `01a02bb3-832b-7443-acb5-69ef156bc18a`, at
-`/Users/ben/.codex/sessions/2026/08/22/rollout-2026-08-22T18-59-39-01a02bb3-832b-7443-acb5-69ef156bc18a.jsonl`.
+Read-only inspection identified a Rust project session. Personal paths, project
+names and session identifiers in this public note are generalized; original
+evidence remains private.
 These October 20 incidents postdate the original 100-command audit cutoff.
 No historical command was executed by this investigation.
 
@@ -12,8 +12,8 @@ Relevant original JSONL records (UTC):
 
 | Line | Time | Recorded result |
 | --- | --- | --- |
-| 60863 | 14:29:14.819 | `/Users/ben/.cargo/bin/cargo test -p harbringer-core -p harbringer-cli` denied before execution |
-| 60972 | 14:36:14.745 | `cargo test --manifest-path crates/harbringer-core/Cargo.toml --lib` denied; human-approval request could not complete |
+| 60863 | 14:29:14.819 | `/Users/example/.cargo/bin/cargo test -p example-rust-project-core -p example-rust-project-cli` denied before execution |
+| 60972 | 14:36:14.745 | `cargo test --manifest-path crates/example-rust-project-core/Cargo.toml --lib` denied; human-approval request could not complete |
 | 61103 | 14:44:56.463 | `cargo fmt --all` denied before execution |
 | 61116 | 14:45:18.889 | absolute `.cargo/bin/rustfmt --edition 2024 ...` denied |
 | 61127 | 14:45:39.639 | manifest-selected focused Cargo test denied |
@@ -29,10 +29,10 @@ At line 60972 the exact additional message is:
 the plugin; the invocation remains denied.”
 This is evidence of an approval failure, not proof of its internal cause.
 
-Harbringer's owner independently moved its nested worktree to
-`/Users/ben/dev/harbringer-hackmaster-adaptation` and continued validation.
+The Rust project's owner independently moved its nested worktree to
+`/Users/example/dev/example-rust-worktree` and continued validation.
 Those are inherited results, not checks performed by this repair.
-No Harbringer files, processes, or sessions were mutated here.
+No files, processes, or sessions belonging to that project were mutated here.
 
 ## Root causes and repair
 
@@ -79,7 +79,7 @@ and [ADR 018](../adr/018-classifier-intent-and-risk-policy.md).
 ## Validation and limits
 
 Regression tests treat recorded commands as inert strings; they do not run
-Harbringer, historical denied commands, or attacker payloads.
+the other project, historical denied commands, or attacker payloads.
 
 Red evidence:
 
@@ -115,5 +115,5 @@ Remaining issues are explicit:
 - Other corpus families, including the denied `ps` pipeline, are separate work.
 - This is a source/test candidate only, not an installed or deployed fix.
 
-Canonical Statewright plugin edits and the active Harbringer owner remain
+Canonical Statewright plugin edits and the other project's active owner remain
 untouched. No workflow was activated for this repair.

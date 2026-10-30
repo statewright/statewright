@@ -2820,7 +2820,7 @@ mod tests {
             "/tmp/attacker/.cargo/bin/rustfmt --check src/lib.rs",
             "/tmp/attacker/.cargo/bin/cargo fmt --check",
             "/tmp/attacker/.cargo/bin/cargo fmt --all",
-            "/Users/ben/.cargo/bin/rustfmt --edition 2024 src/lib.rs",
+            "/Users/example/.cargo/bin/rustfmt --edition 2024 src/lib.rs",
             "cargo test --offline --manifest-path ../Cargo.toml",
             "cargo test --offline --target-dir /tmp/outside",
             "cargo test --offline --config net.offline=false",

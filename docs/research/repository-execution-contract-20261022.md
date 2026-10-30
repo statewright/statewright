@@ -16,8 +16,9 @@ Source inspection is not proof of which gateway binary a remote session loads.
 The latest denied invocation is retained, not replayed:
 `cargo check -p statewright-engine -p statewright-mcp-gateway`, in
 `.agent-worktrees/workflow-adaptation-revisions`, invocation
-`invocation_v1_ea513fd6a3b55f82a952b132fd0abfe8`. Its only use in the new suite
-is as an inert string passed to classification. No repository task represented
+`example-denied-invocation` (a public label; the original identifier is private).
+The command is used in the new suite only as an inert string passed to
+classification. No repository task represented
 by a fixture is executed.
 
 ## Decision and security boundary

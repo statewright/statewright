@@ -748,9 +748,20 @@ while IFS= read -r line; do
           fi
         fi
         if [ -n "$RESULTS" ] && [ "$RESULTS" != "[]" ]; then
-          RESULT_TEXT=$(echo "$RESULTS" | jq -r '.[] | "## \(.title) > \(.section)\nURL: https://statewright.ai\(.url)\n\(.snippet)\n"' 2>/dev/null)
-          RESULT_JSON=$(jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}')
-          echo "$RESULT_JSON"
+          RESULT_TEXT=$(echo "$RESULTS" | jq -r '
+            def canonical_doc_url:
+              if . == "/workflow-schema.json" then "https://statewright.ai/workflow-schema.json"
+              elif type == "string" and test("^/docs/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$")
+                then "https://docs.statewright.ai/" + ltrimstr("/docs/") + "/"
+              else empty end;
+            .[] | (.url | canonical_doc_url) as $url |
+            "## \(.title) > \(.section)\nURL: \($url)\n\(.snippet)\n"
+          ' 2>/dev/null)
+          if [ -n "$RESULT_TEXT" ]; then
+            jq -cn --arg text "$RESULT_TEXT" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}'
+          else
+            jq -cn --arg text "No results found for: $QUERY" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}'
+          fi
         else
           jq -cn --arg text "No results found for: $QUERY" '{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":$text}]},"id":'"$ID"'}'
         fi

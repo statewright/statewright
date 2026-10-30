@@ -22,7 +22,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset: statewright-credentials-linux-x64
             source: target/x86_64-unknown-linux-gnu/release/statewright-credentials
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             asset: statewright-credentials-darwin-arm64
             source: target/aarch64-apple-darwin/release/statewright-credentials
@@ -62,7 +62,7 @@ jobs:
             platform: darwin-x64
           - target: aarch64-apple-darwin
             platform: darwin-arm64
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -228,7 +228,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -1,7 +1,7 @@
 "use strict";
 
 const UNIX_PLUGINS = Object.freeze(["codex", "claude", "cursor", "pi", "opencode", "omx"]);
-const UNIX_OPERATING_SYSTEMS = Object.freeze(["ubuntu-24.04", "macos-14"]);
+const UNIX_OPERATING_SYSTEMS = Object.freeze(["ubuntu-24.04", "macos-15"]);
 const WINDOWS_JOB = "Codex and Claude managed-client bootstrap";
 const ADOPTION_TELEMETRY_STEP = "Submit plugin adoption telemetry event";
 const WINDOWS_ONBOARDING_STEP = "Prove secretless browser onboarding";

@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
         plugin: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.plugin != 'all' && format('["{0}"]', inputs.plugin) || '["codex","claude","cursor","pi","opencode","omx"]') }}
     steps:
       - uses: actions/checkout@v4

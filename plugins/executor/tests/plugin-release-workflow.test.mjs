@@ -77,6 +77,22 @@ test("release tests install shared executor dependencies before exercising Deskt
   assert.ok(install < packageJob.indexOf("name: Run plugin contract tests"));
 });
 
+test("plugin release and canary gates retain the full matrix on supported macOS runners", async () => {
+  const expectedJobs = ["codex", "claude", "cursor", "pi", "opencode", "omx"].flatMap(
+    plugin => ["ubuntu-24.04", "macos-15"].map(os => `${plugin} on ${os}`),
+  );
+  assert.deepEqual(REQUIRED_WORKFLOWS[0].requiredJobs, expectedJobs);
+  assert.equal(REQUIRED_WORKFLOWS[0].requiredSteps.length, 12);
+  for (const file of ["plugin-release.yml", "plugin-production-canary.yml", "plugin-version-canary.yml"]) {
+    const workflow = await readFile(resolve(root, ".github/workflows", file), "utf8");
+    assert.doesNotMatch(workflow, /macos-14/);
+    assert.match(workflow, /os: \[ubuntu-24\.04, macos-15\]/);
+  }
+  const release = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
+  assert.match(release, /os: macos-15\n\s+target: aarch64-apple-darwin/);
+  assert.match(release, /runs-on: macos-15/);
+});
+
 test("Claude's skipped Desktop build cannot skip downstream smoke or weaken publish gates", async () => {
   const workflow = await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8");
   const packageJob = workflow.split("\n  package:\n")[1].split("\n  artifact-smoke:\n")[0];

@@ -277,19 +277,25 @@ while IFS= read -r line; do
   API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$KEY_FILE" 2>/dev/null || true)}"
   API_KEY="${API_KEY%"${API_KEY##*[![:space:]]}"}"  # trim trailing whitespace/newlines
   METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
+  TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
+  # Public documentation search uses only the published index, not the gateway.
+  PUBLIC_DOCS_CALL=false
+  if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
+    PUBLIC_DOCS_CALL=true
+  fi
 
   if [ -n "$API_KEY" ] && ! invalid_key_matches "$API_KEY"; then
     rm -f "$INVALID_KEY_SENTINEL" "$MISSING_KEY_SENTINEL"
   fi
 
-  if [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
+  if [ "$PUBLIC_DOCS_CALL" != true ] && [ -n "$API_KEY" ] && invalid_key_matches "$API_KEY"; then
     if [ "$METHOD" != "notifications/initialized" ]; then
       echo '{"jsonrpc":"2.0","error":{"code":-1,"message":"Statewright API key is invalid or revoked. Visit https://statewright.ai/keys to generate a new key, then restart this client."},"id":'"$(echo "$line" | jq -r '.id // null' 2>/dev/null)"'}'
     fi
     continue
   fi
 
-  if [ -z "$API_KEY" ]; then
+  if [ "$PUBLIC_DOCS_CALL" != true ] && [ -z "$API_KEY" ]; then
     METHOD=$(echo "$line" | jq -r '.method // empty' 2>/dev/null)
     ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
     [ "$METHOD" = "notifications/initialized" ] || prompt_missing_key
@@ -315,7 +321,6 @@ while IFS= read -r line; do
   fi
 
   # Handle statewright_search_docs locally (no gateway round-trip)
-  TOOL_NAME=$(echo "$line" | jq -r '.params.name // empty' 2>/dev/null)
   if [ "$METHOD" = "tools/call" ] && [ "$TOOL_NAME" = "statewright_search_docs" ]; then
     ID=$(echo "$line" | jq -r '.id // null' 2>/dev/null)
     QUERY=$(echo "$line" | jq -r '.params.arguments.query // empty' 2>/dev/null)

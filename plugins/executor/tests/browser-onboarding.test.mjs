@@ -406,7 +406,7 @@ esac
 });
 
 for (const [client, proxy] of [["codex", "plugins/codex/mcp-proxy.sh"], ["claude", "plugins/claude-code/mcp-proxy.sh"]]) {
-test(`${client} searches public docs with canonical URLs and no gateway request`, async () => {
+test(`${client} searches public docs without credentials or a gateway request`, async () => {
   const root = await mkdtemp(join(tmpdir(), `statewright-${client}-public-docs-`));
   const home = join(root, "home");
   const bin = join(root, "bin");
@@ -430,13 +430,12 @@ test(`${client} searches public docs with canonical URLs and no gateway request`
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
-    // Claude's standalone proxy checks its local key before dispatching tools.
-    if (client === "claude") environment.STATEWRIGHT_API_KEY = "fixture-key";
     const result = await runProxyRequests(resolve(proxy), environment, [
       ...(client === "codex" ? [{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }] : []),
       { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: "workflow" } } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: 'not "found' } } },
       { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "statewright_search_docs", arguments: { query: "schema" } } },
+      ...(client === "claude" ? [{ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "statewright_get_state", arguments: {} } }] : []),
     ]);
     assert.equal(result.code, 0, result.stderr);
     const guide = responseById(result.stdout, 2).result.content[0].text;
@@ -444,6 +443,7 @@ test(`${client} searches public docs with canonical URLs and no gateway request`
     assert.doesNotMatch(guide, /statewright\.ai\/docs\/|\/docs\/\.\.\/bad/);
     if (client === "codex") assert.equal(responseById(result.stdout, 3).result.content[0].text, 'No results found for: not "found');
     assert.match(responseById(result.stdout, 4).result.content[0].text, /URL: https:\/\/statewright\.ai\/workflow-schema\.json/);
+    if (client === "claude") assert.match(responseById(result.stdout, 5).error.message, /API key not configured/);
     const curlArguments = await readFile(curlCapture, "utf8");
     assert.match(curlArguments, /https:\/\/docs\.statewright\.ai\/search-index\.json/);
     assert.doesNotMatch(curlArguments, /Authorization:|mcp\.statewright\.ai/);

@@ -91,6 +91,23 @@ test("Windows App Server cleanup still requires child closure after successful t
   });
 });
 
+test("Windows App Server cleanup accepts an already exited launcher only after its close event", async () => {
+  for (const reason of ["no_running_instance", "process_not_found"]) {
+    let confirmClose;
+    const closed = new Promise(resolve => { confirmClose = resolve; });
+    const stopping = stopOwnedAppServer({ pid: 4242, exitCode: null, signalCode: null }, closed, 25, {
+      platform: "win32",
+      cleanupProcessTree: async () => ({ status: "nonzero", code: 255, reason }),
+    });
+    setTimeout(confirmClose, 1);
+    await stopping;
+    await assert.rejects(stopOwnedAppServer({ pid: 4242, exitCode: null, signalCode: null }, new Promise(() => {}), 1, {
+      platform: "win32",
+      cleanupProcessTree: async () => ({ status: "nonzero", code: 255, reason }),
+    }), /process-tree cleanup failed/);
+  }
+});
+
 test("resident reuse requires the same canonical gateway and auth profile, never merely the same thread", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-resident-profile-"));
   try {

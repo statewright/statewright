@@ -37,6 +37,11 @@ export async function stopOwnedAppServer(child, closed, graceMs, {
     if (platform === "win32") {
       const result = await cleanupProcessTree(child);
       if (result.status !== "success" && !childStopped(child)) {
+        if (["no_running_instance", "process_not_found"].includes(result.reason)) {
+          // taskkill can observe the launcher exit before Node emits "close".
+          // Accept that race only once the owned child is confirmed closed.
+          if (await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
+        }
         // Preserve the helper's bounded result, not command output, environment,
         // or native protocol payloads. A generic error hid distinct failures.
         throw new Error(`Owned App Server process-tree cleanup failed (${JSON.stringify({

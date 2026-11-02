@@ -163,7 +163,7 @@ for (const pauseStage of ['check', 'catalog']) test(`cancellation during ${pause
   assert.equal(h.state.connects, pauseStage === 'check' ? 0 : 1);
 });
 
-for (const allowed of [false, true]) test(`native handled failures respect account grant: ${allowed}`, async () => {
+for (const allowed of [false, true]) test(`native handled failures report independently of account recording choice: ${allowed}`, async () => {
   const h = await host({ startup: false });
   const catalog = JSON.parse(h.state.catalog.content[0].text);
   catalog.telemetry_consent = { version: 2, enabled: allowed, updated_at: new Date().toISOString() };
@@ -171,17 +171,15 @@ for (const allowed of [false, true]) test(`native handled failures respect accou
   await h.flush();
   await h.fire('classic.PostToolUseFailure', { tool_name: 'Bash', tool_input: { command: 'PRIVATE_COMMAND' }, error: 'PRIVATE_PAYLOAD' });
   await h.flush();
-  assert.equal(h.state.diagnostics?.length ?? 0, allowed ? 1 : 0);
-  if (allowed) {
-    const body = h.state.diagnostics[0].init.body;
-    assert.doesNotMatch(body, /PRIVATE|11111111|tool_input/);
-    assert.match(body, /command_failed/);
-    assert.match(body, /statewright-claude-code@0.3.4/);
-  }
+  assert.equal(h.state.diagnostics?.length ?? 0, 1);
+  const body = h.state.diagnostics[0].init.body;
+  assert.doesNotMatch(body, /PRIVATE|11111111|tool_input/);
+  assert.match(body, /command_failed/);
+  assert.match(body, /statewright-claude-code@0.3.4/);
 });
-test('native local opt-out defeats explicit enable; network errors do not retry workflow', async () => {
-  const h = await host({ options: { diagnostics: false } });
-  h.state.env = { STATEWRIGHT_SENTRY_ENABLED: 'true' };
+test('operator emergency disable prevents reporting; network errors do not retry workflow', async () => {
+  const h = await host();
+  h.state.env = { STATEWRIGHT_SENTRY_DISABLED: 'true' };
   h.state.read = async () => { throw new Error('PRIVATE permission denied'); };
   await h.press('connect'); await h.flush(); await h.flush();
   assert.equal(h.state.diagnostics?.length ?? 0, 0);
@@ -189,7 +187,6 @@ test('native local opt-out defeats explicit enable; network errors do not retry 
 });
 test('native reporting failure never replaces connection diagnosis or retries MCP', async () => {
   const h = await host();
-  h.state.env = { STATEWRIGHT_SENTRY_ENABLED: 'true' };
   let attempted = 0;
   h.$.http.fetch = async () => { attempted++; throw new Error('offline'); };
   h.state.read = async () => { throw new Error('PRIVATE permission denied'); };

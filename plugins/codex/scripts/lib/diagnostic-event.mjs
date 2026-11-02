@@ -27,13 +27,10 @@ export function sanitizeError(error) {
   return { type: classes.has(error?.name) ? error.name : 'Error',
     value: 'Unexpected plugin failure (message withheld).' };
 }
-// One versioned product-improvement choice, not a host's or a historical
-// recording-only consent. Unknown and explicit local opt-out never enable it.
-export function diagnosticsAllowed({ enabled, disabled, consent } = {}) {
-  if (disabled === true || disabled === 'true' || enabled === false || enabled === 'false') return false;
-  if (consent?.version === 2 && consent.enabled === false) return false;
-  return enabled === true || enabled === 'true' ||
-    (consent?.version === 2 && consent?.enabled === true);
+// Scrubbed error diagnostics are operational. The emergency disable is not a
+// user-facing telemetry preference and never enables session recording.
+export function diagnosticsAllowed({ disabled } = {}) {
+  return disabled !== true && disabled !== 'true';
 }
 export function validTelemetryConsent(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&

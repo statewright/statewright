@@ -262,7 +262,7 @@ function setup(on) {
   });
   return { state, clock };
 }
-for (const permitted of [false, true]) test(`native engine emits only granted scrubbed diagnostic envelopes: ${permitted}`, async ($, on) => {
+for (const permitted of [false, true]) test(`native engine emits scrubbed diagnostics independent of account choice: ${permitted}`, async ($, on) => {
   const { state, clock } = setup(on); state.connected = true; state.native = true;
   state.telemetry = { version: 2, enabled: permitted, updated_at: '2026-10-14T12:00:00.000Z' };
   mock.env(on, {});
@@ -270,19 +270,11 @@ for (const permitted of [false, true]) test(`native engine emits only granted sc
   await $.classic.PostToolUseFailure({ session_id: state.session, transcript_path: '/PRIVATE', cwd: '/PRIVATE',
     hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'fixture', tool_input: { command: 'PRIVATE_COMMAND' }, error: 'PRIVATE_ERROR' } as any);
   await clock.settle();
-  expect(state.diagnostics.length).toBe(permitted ? 1 : 0);
-  if (permitted) {
-    const serialized = JSON.stringify(state.diagnostics[0]);
-    expect(serialized).toContain('command_failed');
-    expect(serialized).not.toContain('PRIVATE');
-    expect(serialized).not.toContain(state.session);
-    state.telemetry = { version: 2, enabled: false, updated_at: '2026-10-13T12:00:00.000Z' };
-    await $.tool.call({ tool: 'mcp__statewright__statewright_get_state' });
-    await $.classic.PostToolUseFailure({ session_id: state.session, transcript_path: '/PRIVATE', cwd: '/PRIVATE',
-      hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'second', tool_input: {}, error: 'PRIVATE' } as any);
-    await clock.settle();
-    expect(state.diagnostics.length).toBe(1);
-  }
+  expect(state.diagnostics.length).toBe(1);
+  const serialized = JSON.stringify(state.diagnostics[0]);
+  expect(serialized).toContain('command_failed');
+  expect(serialized).not.toContain('PRIVATE');
+  expect(serialized).not.toContain(state.session);
 });
 test('native request hook applies all equivalents, follows state changes, records evidence and restores baseline', async ($, on) => {
   const { state, clock } = setup(on); state.connected = true; state.native = true;

@@ -44,13 +44,8 @@ function sanitizeError(error) {
     value: "Unexpected plugin failure (message withheld)."
   };
 }
-function diagnosticsAllowed({ enabled, disabled, consent } = {}) {
-  if (disabled === true || disabled === "true" || enabled === false || enabled === "false") return false;
-  if (consent?.version === 2 && consent.enabled === false) return false;
-  return enabled === true || enabled === "true" || consent?.version === 2 && consent?.enabled === true;
-}
-function validTelemetryConsent(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => ["version", "enabled", "updated_at"].includes(key)) && value.version === 2 && typeof value.enabled === "boolean" && typeof value.updated_at === "string" && value.updated_at.length < 40 && Number.isFinite(Date.parse(value.updated_at));
+function diagnosticsAllowed({ disabled } = {}) {
+  return disabled !== true && disabled !== "true";
 }
 function sentryEndpoint(dsn) {
   try {
@@ -96,29 +91,23 @@ function createErrorReporter({
   plugin,
   version = process.env.npm_package_version ?? "unknown",
   environment = process.env,
-  send = defaultSend,
-  consent
+  send = defaultSend
 } = {}) {
   const seen = /* @__PURE__ */ new Set(), pending = /* @__PURE__ */ new Set();
   let last = { outcome: "idle" }, attempts = 0, installed = false;
   const tags = { plugin, release: `statewright-${plugin}@${version}` };
   async function prepare(error, context, handled) {
-    if (environment.STATEWRIGHT_SENTRY_DISABLED === "true" || environment.STATEWRIGHT_SENTRY_ENABLED === "false") {
+    if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) {
       last = { outcome: "disabled" };
       return null;
     }
     const source = environment, identity = [source.STATEWRIGHT_API_KEY, source.STATEWRIGHT_PB_URL, source.STATEWRIGHT_GATEWAY_URL];
-    const grant = await (consent ? consent() : readAccountConsent(environment));
+    await Promise.resolve();
     if (source !== environment || identity.some((value, i) => value !== [environment.STATEWRIGHT_API_KEY, environment.STATEWRIGHT_PB_URL, environment.STATEWRIGHT_GATEWAY_URL][i])) {
       last = { outcome: "disabled" };
       return null;
     }
-    const enabled = diagnosticsAllowed({
-      enabled: environment.STATEWRIGHT_SENTRY_ENABLED,
-      disabled: environment.STATEWRIGHT_SENTRY_DISABLED,
-      consent: grant
-    });
-    if (!enabled) {
+    if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) {
       last = { outcome: "disabled" };
       return null;
     }
@@ -172,7 +161,7 @@ function createErrorReporter({
     installed = true;
     process.on("uncaughtExceptionMonitor", (error, origin) => {
       try {
-        if (!diagnosticsAllowed({ enabled: environment.STATEWRIGHT_SENTRY_ENABLED, disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) return;
+        if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) return;
         const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN, endpoint = sentryEndpoint(dsn);
         if (!endpoint) return;
         const payload = packet(error, { mechanism: origin === "unhandledRejection" ? "unhandled_rejection" : "uncaught_exception" }, false, dsn, endpoint);
@@ -191,27 +180,6 @@ function createErrorReporter({
       environment = value;
     }
   };
-}
-async function readAccountConsent(environment, fetchImpl = fetch) {
-  const key = environment.STATEWRIGHT_API_KEY, base = environment.STATEWRIGHT_PB_URL;
-  if (!key || !base || !environment.STATEWRIGHT_GATEWAY_URL) return null;
-  try {
-    const url = new URL(base);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
-    const response = await fetchImpl(`${base.replace(/\/$/, "")}/api/gateway/telemetry`, {
-      headers: { Authorization: `Bearer ${key}`, "X-Statewright-OAuth-Resource": environment.STATEWRIGHT_GATEWAY_URL },
-      redirect: "error",
-      signal: AbortSignal.timeout(1e3)
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      return null;
-    }
-    const value = await response.json();
-    return validTelemetryConsent(value) ? value : null;
-  } catch {
-    return null;
-  }
 }
 async function defaultSend({ endpoint, dsn, event, environment }) {
   const response = await fetch(endpoint, {

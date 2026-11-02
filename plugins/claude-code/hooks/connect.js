@@ -18,7 +18,6 @@ const fresh = conversation => ({ conversation, desktopNavigationRevision: ++navi
   native: null, control: null, controlError: '', generation: 0, requiresEnforcement: false, controlConsent: false, consentEpoch: 0,
   runningTool: null, actionBusy: false, journey: null, showGraph: true, routes: [], routeError: '', modelActivity: null, baseRequest: null, fallback: null });
 let view = fresh('');
-let diagnosticOptions = {};
 const diagnosticSeen = new Set();
 let diagnosticAttempts = 0;
 function reportDiagnostic($, v, reason, operation, phase) {
@@ -32,11 +31,9 @@ function reportDiagnostic($, v, reason, operation, phase) {
   $.clock.after(0, async () => {
     let delivered = false;
     try {
-      if (view !== v || diagnosticOptions.diagnostics === false) return;
+      if (view !== v) return;
       const disabled = await $.env.get('STATEWRIGHT_SENTRY_DISABLED');
-      const enabled = await $.env.get('STATEWRIGHT_SENTRY_ENABLED');
-      if (view !== v || !diagnosticsAllowed({ disabled, enabled,
-        consent: Date.now() - (v.telemetryCheckedAt ?? 0) <= 60000 ? v.telemetryConsent : null })) return;
+      if (view !== v || !diagnosticsAllowed({ disabled })) return;
       diagnosticAttempts++;
       const response = await $.http.fetch('https://glitch.enhasa.cloud/api/12/envelope/?sentry_version=7&sentry_key=3c30b803a5b44d74bf9657db7a89f033', {
         method: 'POST', headers: { 'Content-Type': 'application/x-sentry-envelope' },
@@ -500,7 +497,6 @@ async function restore($) {
 }
 
 export function register(on, options = {}) {
-  diagnosticOptions = options;
   registerResultUI(on, ARBITER_PURPLE);
   on('ui.message', async ($, e, next) => {
     if (e.surface === 'desktop' && e.component === 'AbovePrompt' &&

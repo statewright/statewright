@@ -123,12 +123,12 @@ Statewright key. Each destination supplies its own Statewright integration and
 credential. This does not rebind an already-running shared daemon or enable
 Statewright on an unconfigured remote server.
 
-### Optional diagnostic reports
+### Error diagnostics
 
-Plugin failure reports follow your current Statewright account telemetry choice.
-Set `STATEWRIGHT_SENTRY_DISABLED=true` to opt out locally. Reports exclude prompts,
-commands, code and credentials. Pre-login and fatal-exit coverage has additional
-consent limits; see [telemetry and privacy](../../docs/guides/optional-telemetry.md).
+Limited plugin failure reports run automatically through Statewright's self-hosted
+GlitchTip service. Reports exclude prompts, commands, code and credentials,
+including for pre-login and fatal-exit failures. Website session recording is a
+separate opt-in; see [telemetry and privacy](../../docs/guides/optional-telemetry.md).
 
 ### Exact native token telemetry
 

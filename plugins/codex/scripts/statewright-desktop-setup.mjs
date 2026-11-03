@@ -312,7 +312,7 @@ try {
   // Optional diagnostics must never become a launcher dependency.
   try {
     const { createErrorReporter } = await import(new URL("./error-reporting.mjs", runtimeUrl));
-    diagnosticReporter = createErrorReporter({ plugin: "codex", version: "0.3.6", environment: profileEnvironment });
+    diagnosticReporter = createErrorReporter({ plugin: "codex", version: "0.3.7", environment: profileEnvironment });
   } catch {}
   const profile = state.profile ?? "production";
   if (!["production", "staging", "development"].includes(profile)) throw new Error("Unknown Desktop profile in launcher state.");

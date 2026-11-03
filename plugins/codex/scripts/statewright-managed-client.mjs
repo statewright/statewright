@@ -16,7 +16,7 @@ export function managedClientVersion(argv = process.argv.slice(2)) {
   const separator = argv.indexOf("--");
   const options = separator < 0 ? argv : argv.slice(0, separator);
   const host = options.indexOf("--host");
-  return host >= 0 && options[host + 1] === "claude" ? "0.3.4" : "0.3.6";
+  return host >= 0 && options[host + 1] === "claude" ? "0.3.5" : "0.3.7";
 }
 
 function parseArgs(argv) {

@@ -175,7 +175,7 @@ for (const allowed of [false, true]) test(`native handled failures report indepe
   const body = h.state.diagnostics[0].init.body;
   assert.doesNotMatch(body, /PRIVATE|11111111|tool_input/);
   assert.match(body, /command_failed/);
-  assert.match(body, /statewright-claude-code@0.3.4/);
+  assert.match(body, /statewright-claude-code@0.3.5/);
 });
 test('operator emergency disable prevents reporting; network errors do not retry workflow', async () => {
   const h = await host();
@@ -490,7 +490,7 @@ test('shipping manifest is configurable native HTTP OAuth with production defaul
   const manifest = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url)));
   const config = JSON.parse(readFileSync(new URL('../.mcp.json', import.meta.url)));
   assert.equal(manifest.name, 'statewright');
-  assert.equal(manifest.version, '0.3.4');
+  assert.equal(manifest.version, '0.3.5');
   assert.equal(manifest.userConfig.gateway_url.default, GATEWAY);
   assert.deepEqual(config.mcpServers, { [SERVER]: { type: 'http', url: '${user_config.gateway_url}',
     oauth: { clientId: 'statewright-claude', callbackPort: 54545, scopes: 'mcp' } } });

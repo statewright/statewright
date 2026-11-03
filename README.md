@@ -4,7 +4,7 @@
 
 Your workflows, in the harness you choose. Statewright defines tools, checks, and transitions for each phase of agent work. Use it with Claude Code, Codex, Cursor, OpenCode, Pi, or OMX, or connect a custom MCP host. Tool enforcement and model routing depend on the integration. [Full docs →](https://docs.statewright.ai)
 
-> **Plugin releases:** [Claude 0.3.4-r1](https://github.com/statewright/statewright/releases/tag/claude-v0.3.4-r1) and [Codex 0.3.6](https://github.com/statewright/statewright/releases/tag/codex-v0.3.6). See the [Claude notes](docs/releases/claude-0.3.4.md) and [Codex notes](docs/releases/codex-0.3.6.md). Changes on a development branch are not necessarily included in those packages.
+> **Plugin releases:** [Claude 0.3.5](https://github.com/statewright/statewright/releases/tag/claude-v0.3.5) and [Codex 0.3.7](https://github.com/statewright/statewright/releases/tag/codex-v0.3.7). See the [Claude notes](docs/releases/claude-0.3.5.md) and [Codex notes](docs/releases/codex-0.3.7.md). Changes on a development branch are not necessarily included in those packages.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
@@ -145,7 +145,7 @@ The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface th
 
 States can specify a `model`; `meta.default_model` applies where no state
 override is present. This is optional: the default engineering starter retains
-your selected model. The native Claude 0.3.4 plugin routes subsequent
+your selected model. The native Claude 0.3.5 plugin routes subsequent
 main-conversation requests without restarting the app. Codex's managed App
 Server adapter routes turns. Pi and OpenCode switch live, Cursor's executor
 resumes the same chat, and OMX applies its route at startup. Requested settings
@@ -269,7 +269,7 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 ## Supported agents
 
-Enforcement and model routing depend on the host. Claude 0.3.4 is a native
+Enforcement and model routing depend on the host. Claude 0.3.5 is a native
 plugin; it needs no shim. Codex uses a managed App Server adapter. Neither
 changes a model midway through a response. The separate
 [`statewright-exec`](plugins/executor/) transport supports executor-owned
@@ -277,8 +277,8 @@ delivery and other hosts; it is not Claude's consumer Desktop integration.
 
 | Agent | Release line | Executor integration | Tool enforcement | Route boundary |
 |-------|--------------|----------------------|------------------|----------------|
-| [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.4-r1 | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
-| [Codex](plugins/codex/) | 0.3.6 | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
+| [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.5 | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
+| [Codex](plugins/codex/) | 0.3.7 | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
 | [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
 | [Pi](plugins/pi/) | 0.3.0 | Native extension + executor MCP bridge | Hard* | Live |
 | [OpenCode](plugins/opencode/) | 0.3.0 | Native plugin + executor MCP bridge | Hard | Live |
@@ -350,8 +350,8 @@ The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, em
 
 [docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows), and [isolated delivery](https://docs.statewright.ai/features/isolated-delivery/).
 
-Optional plugin diagnostics follow your Statewright account telemetry choice,
-with local opt-outs. Reports exclude prompts, code, commands and credentials.
+Limited plugin error diagnostics run automatically and do not depend on the
+website session-recording choice. Reports exclude prompts, code, commands and credentials.
 See [telemetry and privacy](docs/guides/optional-telemetry.md).
 
 ## Contributing

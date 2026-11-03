@@ -3,6 +3,14 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Claude and Codex Plugins 0.3.7] — 2026-11-03
+
+### Changed
+- **[claude, codex]** Limited, scrubbed native error diagnostics run
+  automatically, independently of the website session-recording switch.
+- **[claude]** Align the published capability and plugin version with Codex at
+  0.3.7. Claude 0.3.6 was skipped; 0.3.5 remains a historical release.
+
 ## [Codex Plugin 0.3.6] — 2026-10-30
 
 ### Fixed

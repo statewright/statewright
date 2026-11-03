@@ -679,7 +679,7 @@ async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.5" : "0.3.7", environment }) }) {
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.7" : "0.3.7", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const launch = await resolveWindowsLaunch(command);
   const launchCommand = launch.command;

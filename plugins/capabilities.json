@@ -2,7 +2,7 @@
   "schema": "statewright/plugin-capabilities/v1",
   "plugins": {
     "claude": {
-      "version": "0.3.5",
+      "version": "0.3.7",
       "runtime": { "vehicle": "native_mod", "hosts": ["claude-code-tui", "claude-desktop-code-local"], "minimum_code_engine": "2.1.295" },
       "production_transport": { "operating_systems": [], "native_windows": false, "evidence_kind": "native_acceptance_pending" },
       "auth": { "mode": "oauth", "onboarding": "native_claude", "test": "plugins/claude-code/tests/native-connection.test.mjs" },

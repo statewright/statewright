@@ -12,7 +12,7 @@ import {
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 
 test("adoption telemetry canary resolves the exercised plugin version", async () => {
-  assert.equal(await resolvePluginVersion(repositoryRoot, "codex"), "0.3.7");
+  assert.equal(await resolvePluginVersion(repositoryRoot, "codex"), "0.3.8");
   assert.equal(await resolvePluginVersion(repositoryRoot, "pi"), "0.3.0");
 });
 

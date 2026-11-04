@@ -1,6 +1,6 @@
 {
   "name": "statewright",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Statewright workflows with the Arbiter, native approvals, and model routing in Claude Code and Desktop Code.",
   "author": {
     "name": "statewright.ai",

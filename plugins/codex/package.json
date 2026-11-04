@@ -1,6 +1,6 @@
 {
   "name": "statewright-codex",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "private": true,
   "license": "FSL-1.1-ALv2",
   "type": "module",

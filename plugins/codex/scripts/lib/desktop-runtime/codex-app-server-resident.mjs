@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startCodexAppServerRuntime } from "./codex-app-server-transport.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session-metadata.mjs";
+import { resolveCodexHistoryStorage } from "./codex-history-integrity.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./error-reporting.mjs";
 import { bindManagedSessionLabel, codexRouteOwnsRoot, readCodexRootSession, readManagedSessionLabels, writeManagedControlIdentity } from "./managed-client-identity.mjs";
 import { residentThreadAuthorizer } from "./codex-resident-thread-owner.mjs";
@@ -84,14 +85,16 @@ export async function residentProfileIdentity(environment = process.env, home = 
   return createHash("sha256").update(JSON.stringify([profile.gatewayUrl, profile.authUrl])).digest("hex");
 }
 
-export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined, profileIdentity = undefined) {
+export function residentMatchesRuntime(manifest, runtimeRevision, threadListCwd = undefined, profileIdentity = undefined, historyArgs = undefined, historyMode = undefined) {
   if (manifest?.runtimeRevision !== runtimeRevision) return false;
   if (profileIdentity !== undefined && manifest.profileIdentity !== profileIdentity) return false;
-  return threadListCwd === undefined || (manifest.threadListCwd ?? null) === threadListCwd;
+  if (threadListCwd !== undefined && (manifest.threadListCwd ?? null) !== threadListCwd) return false;
+  if (historyArgs !== undefined && JSON.stringify(manifest.historyArgs ?? []) !== JSON.stringify(historyArgs)) return false;
+  return historyMode === undefined || (manifest.historyMode ?? null) === (historyMode ?? null);
 }
 
-async function ready(manifest, runtimeRevision, threadListCwd, profileIdentity) {
-  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd, profileIdentity) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
+async function ready(manifest, runtimeRevision, threadListCwd, profileIdentity, historyArgs, historyMode) {
+  if (!residentMatchesRuntime(manifest, runtimeRevision, threadListCwd, profileIdentity, historyArgs, historyMode) || !manifest?.pid || !processAlive(manifest.pid) || !manifest.proxyUrl) return false;
   try {
     return (await fetch(`${manifest.proxyUrl.replace(/^ws/, "http")}/readyz`, { signal: AbortSignal.timeout(400) })).ok;
   } catch { return false; }
@@ -195,13 +198,21 @@ async function createManagedMcpBridge({ environment, clientId }) {
   return bridge;
 }
 
-export async function ensureCodexAppServerResident({ command, cwd, environment = process.env, home = homedir(), clientId, threadListCwd = null, terminalLabel = null }) {
+export async function codexResidentHistoryArgs({ home, cwd, environment, args = [] }) {
+  const storage = await resolveCodexHistoryStorage({ home, cwd, environment, args });
+  // Preserve storage semantics without persisting prompts, credentials or a
+  // selected thread ID in the detached resident's argv and manifest.
+  return ["-c", `sqlite_home=${JSON.stringify(storage.sqliteHome)}`];
+}
+
+export async function ensureCodexAppServerResident({ command, cwd, environment = process.env, home = homedir(), clientId, threadListCwd = null, terminalLabel = null, historyArgs = [], historyMode = null }) {
+  historyArgs = await codexResidentHistoryArgs({ home, cwd, environment, args: historyArgs });
   const root = residentRoot(home, clientId);
   const manifestPath = join(root, "manifest.json");
   const runtimeRevision = await residentRuntimeRevision();
   const profileIdentity = await residentProfileIdentity(environment, home);
   const existing = await readManifest(manifestPath);
-  if (await ready(existing, runtimeRevision, threadListCwd, profileIdentity)) return existing;
+  if (await ready(existing, runtimeRevision, threadListCwd, profileIdentity, historyArgs, historyMode)) return existing;
   if (existing?.pid && processAlive(existing.pid)) {
     throw new Error(
       `Statewright Codex App Server resident ${existing.pid} is still running with a different runtime, gateway profile, or resume scope. `
@@ -219,6 +230,8 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
     "--home", home,
     "--thread-list-cwd", threadListCwd ?? "",
     "--terminal-label", terminalLabel ?? "",
+    "--history-args", JSON.stringify(historyArgs),
+    "--history-mode", historyMode ?? "",
   ], {
     cwd,
     env: { ...environment, STATEWRIGHT_CODEX_RESIDENT_ROOT: root },
@@ -229,7 +242,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
-    if (await ready(manifest, runtimeRevision, threadListCwd, profileIdentity)) return manifest;
+    if (await ready(manifest, runtimeRevision, threadListCwd, profileIdentity, historyArgs, historyMode)) return manifest;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   const log = await readFile(join(root, "resident.log"), "utf8").catch(() => "");
@@ -245,6 +258,15 @@ async function main() {
   const codexHome = process.env.CODEX_HOME ?? join(home, ".codex");
   const threadListCwd = values["thread-list-cwd"] || null;
   const terminalLabel = values["terminal-label"] || null;
+  let historyArgs = [];
+  try {
+    const parsed = JSON.parse(values["history-args"] ?? "[]");
+    if (!Array.isArray(parsed) || parsed.some(value => typeof value !== "string")) throw new Error("invalid history args");
+    historyArgs = parsed;
+  } catch {
+    throw new Error("resident requires a valid history argument list");
+  }
+  const historyMode = values["history-mode"] || null;
   const reporter = createErrorReporter({ plugin: "codex", version: "0.3.5" });
   reporter.installProcessHandlers();
   if (!clientId || !command || !cwd) throw new Error("resident requires client-id, command, and cwd");
@@ -284,6 +306,8 @@ async function main() {
     cwd,
     home,
     clientId,
+    historyArgs,
+    historyMode,
     environment: {
       ...process.env,
       STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
@@ -316,6 +340,8 @@ async function main() {
     runtimeRevision: await residentRuntimeRevision(),
     profileIdentity: await residentProfileIdentity(process.env, home),
     threadListCwd,
+    historyArgs,
+    historyMode,
     startedAt: new Date().toISOString(),
   });
   process.once("SIGTERM", stop);

@@ -14,7 +14,7 @@ import {
   runCodexAppServerTransport,
   startCodexAppServerRuntime,
 } from "../lib/codex-app-server-transport.mjs";
-import { ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
+import { codexResidentHistoryArgs, ensureCodexAppServerResident, nextCodexResidentRouteRequest, residentControlDir, residentMatchesRuntime, residentProfileIdentity, residentRoot, residentRuntimeRevision } from "../lib/codex-app-server-resident.mjs";
 import { applyCompactResumeRequest, applyExplicitYoloResumePermissions, applyRestoredResumePermissions, applyRouteToTurnStart, applyThreadListCwd, captureWorkflowOrigin, clarifyActiveWriterResumeError, expandPluginRootHookCommands, hydrateBoundedResumeTurns, labelThreadListResponse, nativeThreadRouteSettings, restoreWorkflowOrigin, settingsConfirmRoute, startCodexAppServerRouteProxy, terminalStatewrightCompletion } from "../lib/codex-app-server-route-proxy.mjs";
 import {WorkflowRouteOriginStore} from "../lib/workflow-route-origin.mjs";
 import { readCodexResumePermissions, readCodexThreadCwds } from "../lib/codex-session-metadata.mjs";
@@ -217,6 +217,50 @@ if (args[0] === "app-server") {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("runtime and picker history guard share the same normalized SQLite override", { timeout: 5_000 }, async t => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-picker-storage-"));
+  const codexHome = join(home, ".codex");
+  const sqliteHome = join(home, "db");
+  const fake = join(home, "fake-codex.mjs");
+  const argsPath = join(home, "args.json");
+  await mkdir(codexHome);
+  await mkdir(sqliteHome);
+  await writeFile(fake, `#!/usr/bin/env node
+import { WebSocketServer } from ${JSON.stringify(import.meta.resolve("ws"))};
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+const url = new URL(process.argv.at(-1));
+const http = createServer((_request, response) => { response.writeHead(200); response.end("ok"); });
+const server = new WebSocketServer({server:http});
+http.listen(Number(url.port), url.hostname);
+server.on("connection", socket => socket.on("message", raw => {
+  const request = JSON.parse(String(raw));
+  socket.send(JSON.stringify({id:request.id,result:{thread:{id:request.params.threadId}}}));
+}));
+`);
+  await chmod(fake, 0o755);
+  let guarded;
+  const runtime = await startCodexAppServerRuntime({
+    command: fake, home, cwd: home, clientId: "swc_picker_storage_fixture",
+    environment: { ...process.env, CODEX_HOME: codexHome, STATEWRIGHT_QWEN_ENABLED: "false", STATEWRIGHT_SENTRY_DISABLED: "true" },
+    historyArgs: ["-c", 'sqlite_home="db"', "resume", "selected", "private prompt"], historyMode: "repair",
+    historyGuard: async options => { options.checkCurrentRequest(); guarded = options; },
+  });
+  const client = new WebSocket(runtime.proxyUrl);
+  t.after(async () => { client.terminate(); await runtime.close(); await rm(home, { recursive: true, force: true }); });
+  await once(client, "open");
+  const reply = once(client, "message");
+  client.send(JSON.stringify({ id: 100, method: "thread/resume", params: { threadId: "selected" } }));
+  assert.equal(JSON.parse(String(await reply)).result.thread.id, "selected");
+  const args = JSON.parse(await readFile(argsPath, "utf8"));
+  assert.deepEqual(args.slice(0, 2), guarded.args);
+  assert.match(args[1], /sqlite_home=.*\/db/);
+  assert.doesNotMatch(JSON.stringify(args), /private prompt|selected/);
+  assert.equal(guarded.mode, "repair");
+  assert.equal(guarded.environment.CODEX_HOME, codexHome);
 });
 
 test("App Server transport creates bounded, filesystem-safe temporary home names", () => {
@@ -450,8 +494,29 @@ test("resident runtime revision changes reuse only when the loaded transport bun
   assert.equal(residentMatchesRuntime({ runtimeRevision: revision, threadListCwd: "/repo" }, revision, "/repo"), true);
   assert.equal(residentMatchesRuntime({ runtimeRevision: revision, threadListCwd: "/repo" }, revision, null), false);
   assert.equal(residentMatchesRuntime({ runtimeRevision: revision, threadListCwd: null }, revision, "/repo"), false);
+  assert.equal(residentMatchesRuntime({ runtimeRevision: revision, historyArgs: ["resume", "thread-a"], historyMode: "prompt" }, revision, undefined, undefined, ["resume", "thread-a"], "prompt"), true);
+  assert.equal(residentMatchesRuntime({ runtimeRevision: revision, historyArgs: ["resume", "thread-a"], historyMode: "prompt" }, revision, undefined, undefined, ["resume", "thread-b"], "prompt"), false);
+  assert.equal(residentMatchesRuntime({ runtimeRevision: revision, historyArgs: [], historyMode: "prompt" }, revision, undefined, undefined, [], "repair"), false);
   assert.equal(residentMatchesRuntime({ runtimeRevision: "stale" }, revision), false);
   assert.equal(residentMatchesRuntime({}, revision), false);
+});
+
+test("resident history scope keeps storage overrides but drops prompts, credentials and selected thread IDs", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-scope-"));
+  try {
+    const sqliteHome = join(home, "db");
+    await mkdir(sqliteHome);
+    const options = { home, cwd: home, environment: {} };
+    const first = await codexResidentHistoryArgs({ ...options, args: ["-c", 'sqlite_home="db"', "resume", "thread-a", "private prompt"] });
+    const second = await codexResidentHistoryArgs({ ...options, args: ["--config", 'sqlite_home="db"', "--remote-auth-token-env", "PRIVATE_TOKEN_NAME", "resume", "thread-b"] });
+    assert.deepEqual(first, second);
+    assert.equal(first.length, 2);
+    assert.match(first[1], /sqlite_home=.*\/db/);
+    assert.doesNotMatch(JSON.stringify(first), /private prompt|PRIVATE_TOKEN_NAME|thread-a|thread-b/);
+    const manifest = { runtimeRevision: "revision", historyArgs: first, historyMode: "prompt" };
+    assert.equal(residentMatchesRuntime(manifest, "revision", undefined, undefined, second, "prompt"), true);
+    assert.equal(residentMatchesRuntime(manifest, "revision", undefined, undefined, [], "prompt"), false);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 
 test("a mismatched launch never retires a live resident that may own detached work", async () => {
@@ -1469,22 +1534,28 @@ test("Codex resume location ignores copied parent turn contexts", async () => {
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test("App Server proxy restores saved permissions before forwarding resume", async () => {
+for (const compressed of [false, true]) {
+test(`App Server proxy restores saved permissions after history recovery: compressed=${compressed}`, { timeout: 5_000 }, async () => {
+  const { guardCodexResumeHistory } = await import("../lib/codex-history-integrity.mjs");
+  const { zstdCompressSync } = await import("node:zlib");
   const home = await mkdtemp(join(tmpdir(), "statewright-unicode-resume-"));
   const threadId = "01a062c6-560d-70d1-8d39-40db71875a69";
   const directory = join(home, ".codex", "sessions", "2026", "09", "02");
   await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, `rollout-2026-09-02T11-39-20-${threadId}.jsonl`), [
-    { type: "session_meta", payload: { id: threadId } },
+  const canonical = join(directory, `rollout-2026-09-02T11-39-20-${threadId}.jsonl`);
+  const content = [
+    { type: "session_meta", payload: { id: threadId, history_mode: "paginated" } },
     { type: "event_msg", payload: { text: "real rollout content\u2028not a record boundary\u2029" } },
     { type: "turn_context", payload: { approval_policy: "on-request", approvals_reviewer: "user", sandbox_policy: { type: "read-only" } } },
-  ].map(JSON.stringify).join("\n") + "\n");
+  ].map((row, ordinal) => JSON.stringify({ ...row, ordinal })).join("\n") + "\n";
+  await writeFile(compressed ? `${canonical}.zst` : canonical, compressed ? zstdCompressSync(content) : content);
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
   let socket;
   const connected = new Promise(resolve => upstream.once("connection", value => { socket = value; resolve(); }));
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    guardResumeHistory: ({ sessionId, checkCurrentRequest }) => guardCodexResumeHistory({ home, sessionId, mode: "repair", environment: { PATH: process.env.PATH }, checkCurrentRequest }),
     resolveResumePermissions: id => readCodexResumePermissions({ home, threadId: id }),
   });
   const client = new WebSocket(proxy.url);
@@ -1507,6 +1578,8 @@ test("App Server proxy restores saved permissions before forwarding resume", asy
       excludeTurns: true,
       initialTurnsPage: { limit: 4, sortDirection: "desc", itemsView: "summary" },
     });
+    assert.equal(await readFile(canonical, "utf8"), content);
+    if (compressed) await access(`${canonical}.zst`);
   } finally {
     client.close();
     await proxy.close();
@@ -1514,6 +1587,7 @@ test("App Server proxy restores saved permissions before forwarding resume", asy
     await rm(home, { recursive: true, force: true });
   }
 });
+}
 
 test("resident proxy retires after its last idle TUI disconnects", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -2100,6 +2174,109 @@ test("App Server route proxy binds a bare-picker selection and refreshes labels 
   await proxy.close();
   await new Promise((resolveClose) => upstream.close(resolveClose));
 });
+
+test("App Server route proxy guards a picker-selected resume before compacting or forwarding it", async () => {
+  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(upstream, "listening");
+  const guarded = [];
+  const proxy = await startCodexAppServerRouteProxy({
+    upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+    authorizeThread: async ({ method, threadId }) => method === "thread/resume" ? {
+      version: 1, kind: "statewright_thread_adoption", method, threadId,
+      commit: async () => {}, cancel: async () => {},
+    } : null,
+    guardResumeHistory: async ({ sessionId, checkCurrentRequest }) => {
+      guarded.push(sessionId);
+      checkCurrentRequest();
+      const error = new Error("compressed history needs interactive repair");
+      error.code = "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED";
+      throw error;
+    },
+  });
+  const upstreamConnection = new Promise((resolveConnection) => upstream.once("connection", resolveConnection));
+  const client = new WebSocket(proxy.url);
+  await once(client, "open");
+  await upstreamConnection;
+  const reply = new Promise((resolveMessage) => client.once("message", raw => resolveMessage(JSON.parse(String(raw)))));
+  client.send(JSON.stringify({ id: 44, method: "thread/resume", params: { threadId: "picker-history" } }));
+  const response = await reply;
+  assert.deepEqual(guarded, ["picker-history"]);
+  assert.equal(response.id, 44);
+  assert.match(response.error.message, /compressed history needs interactive repair/i);
+  client.close();
+  await proxy.close();
+  await new Promise((resolveClose) => upstream.close(resolveClose));
+});
+
+for (const scenario of ["disconnect", "duplicate-id", "parallel-resume", "unauthorized"]) {
+  test(`resume admission preserves ownership and request lifetime: ${scenario}`, { timeout: 5_000 }, async t => {
+    const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await once(upstream, "listening");
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    let entered;
+    const admissionStarted = new Promise(resolve => { entered = resolve; });
+    let finished;
+    const admissionFinished = new Promise(resolve => { finished = resolve; });
+    let calls = 0;
+    let mutated = false;
+    const forwarded = [];
+    const proxy = await startCodexAppServerRouteProxy({
+      upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
+      authorizeThread: async () => {
+        if (scenario === "unauthorized") throw Object.assign(new Error("foreign owner"), { code: "STATEWRIGHT_THREAD_OWNERSHIP" });
+      },
+      guardResumeHistory: async ({ checkCurrentRequest }) => {
+        calls++;
+        entered();
+        try { await pending; checkCurrentRequest(); mutated = true; }
+        finally { finished(); }
+      },
+    });
+    const connected = once(upstream, "connection");
+    const client = new WebSocket(proxy.url);
+    t.after(async () => {
+      release();
+      client.terminate();
+      await proxy.close();
+      await new Promise(resolve => upstream.close(resolve));
+    });
+    await once(client, "open");
+    const socket = await connected;
+    socket.on("message", raw => forwarded.push(JSON.parse(String(raw))));
+    const first = { id: 41, method: "thread/resume", params: { threadId: "same-thread" } };
+    if (scenario === "unauthorized") {
+      const reply = once(client, "message");
+      client.send(JSON.stringify(first));
+      assert.match(JSON.parse(String(await reply)).error.message, /foreign owner/);
+      assert.equal(calls, 0);
+    } else {
+      client.send(JSON.stringify(first));
+      await admissionStarted;
+      if (scenario === "parallel-resume") {
+        const reply = once(client, "message");
+        client.send(JSON.stringify({ ...first, id: 42 }));
+        assert.match(JSON.parse(String(await reply)).error.message, /already pending/);
+        const accepted = once(socket, "message");
+        release();
+        await accepted;
+        assert.equal(calls, 1);
+        assert.equal(mutated, true);
+        assert.equal(forwarded.length, 1);
+        return;
+      }
+      const closed = once(client, "close");
+      if (scenario === "duplicate-id") client.send(JSON.stringify(first));
+      else client.close();
+      await closed;
+      release();
+      await admissionFinished;
+      assert.equal(calls, 1);
+    }
+    assert.equal(mutated, false);
+    assert.deepEqual(forwarded, []);
+  });
+}
 
 test("App Server thread/start binds ownership before reporting native success and fails closed on conflict", async () => {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });

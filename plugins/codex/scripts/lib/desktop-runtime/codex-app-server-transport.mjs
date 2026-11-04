@@ -5,6 +5,7 @@ import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { routeIdentity, startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
+import { codexHistoryRepairMode, guardCodexResumeHistory, resolveCodexHistoryStorage } from "./codex-history-integrity.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 
@@ -197,6 +198,7 @@ export async function runCodexAppServerTransport({
   let pendingRoute = null;
   const runtime = await startCodexAppServerRuntime({
     command,
+    historyArgs: args,
     launch,
     environment,
     cwd,
@@ -273,6 +275,9 @@ export async function startCodexAppServerRuntime({
   onThreadStarted = async () => {},
   onThreadResumed = async () => {},
   authorizeThread = async () => {},
+  historyGuard = guardCodexResumeHistory,
+  historyArgs = [],
+  historyMode = null,
   workflowOriginStore,
   onNativeUsage,
   routeOwner = async () => ({}),
@@ -289,12 +294,16 @@ export async function startCodexAppServerRuntime({
   const classifierApprovalToken = classifierApprovalService ? randomUUID() : null;
   const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
   const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
+  if (historyArgs.length) {
+    const storage = await resolveCodexHistoryStorage({ home, cwd, environment, args: historyArgs });
+    historyArgs = ["-c", `sqlite_home=${JSON.stringify(storage.sqliteHome)}`];
+  }
 
   // Some callers already resolved an npm .cmd shim for their companion TUI.
   // Keep that complete launch descriptor intact: passing only node.exe loses
   // the Codex JavaScript entrypoint before this App Server child is spawned.
   const launch = providedLaunch ?? await resolveWindowsLaunch(command);
-  const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, "app-server", "--listen", url], {
+  const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, ...historyArgs, "app-server", "--listen", url], {
     cwd,
     env: { ...environment, CODEX_HOME: appServerHome },
     stdio: ["ignore", "pipe", "pipe"],
@@ -331,6 +340,15 @@ export async function startCodexAppServerRuntime({
       onThreadStarted,
       onThreadResumed,
       authorizeThread,
+      guardResumeHistory: async ({ sessionId, checkCurrentRequest }) => {
+        checkCurrentRequest?.();
+        const result = await historyGuard({
+          home, cwd, args: historyArgs, environment, sessionId, checkCurrentRequest,
+          mode: historyMode ?? codexHistoryRepairMode({ environment }),
+        });
+        checkCurrentRequest?.();
+        return result;
+      },
       workflowOriginStore,
       onNativeUsage,
       routeOwner,

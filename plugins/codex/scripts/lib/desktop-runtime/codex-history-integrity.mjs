@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { access, chmod, copyFile, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { access, chmod, copyFile, link, mkdir, open, opendir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { Transform } from "node:stream";
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_COMPRESSED_ROLLOUT_BYTES = 128 * 1024 * 1024;
+const MAX_MATERIALIZED_ROLLOUT_BYTES = 512 * 1024 * 1024;
 const REPAIR_MODES = new Set(["guard", "repair", "auto", "prompt", "off"]);
 const CODEX_OPTIONS_WITH_VALUE = new Set([
   "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config", "--local-provider",
@@ -196,6 +199,109 @@ async function findRollouts(root, sessionId, matches = []) {
   return matches;
 }
 
+async function findCompressedRollouts(root, sessionId, matches = []) {
+  if (!await pathExists(root)) return matches;
+  const directory = await opendir(root);
+  for await (const entry of directory) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) await findCompressedRollouts(path, sessionId, matches);
+    else if (entry.isFile() && entry.name.endsWith(`${sessionId}.jsonl.zst`)) matches.push(path);
+  }
+  return matches;
+}
+
+let nativeZstdVerified;
+async function decompressRollout(archivePath, boundedOutput, destination, environment) {
+  const zlib = await import("node:zlib");
+  const { pipeline } = await import("node:stream/promises");
+  if (nativeZstdVerified === undefined) {
+    nativeZstdVerified = false;
+    if (typeof zlib.createZstdDecompress === "function" && typeof zlib.zstdCompressSync === "function") {
+      // Some Node releases silently accept incomplete frames. JSON validation
+      // alone cannot detect an archive truncated at a valid record boundary.
+      const frame = zlib.zstdCompressSync(Buffer.from("statewright archive integrity probe"));
+      try { zlib.zstdDecompressSync(frame.subarray(0, frame.length - 1)); }
+      catch (error) { nativeZstdVerified = error.code === "Z_BUF_ERROR"; }
+    }
+  }
+  if (nativeZstdVerified) {
+    return pipeline(createReadStream(archivePath), zlib.createZstdDecompress(), boundedOutput, destination);
+  }
+  const child = spawn("zstd", ["--decompress", "--stdout", "--quiet", "--", archivePath], {
+    env: environment, stdio: ["ignore", "pipe", "ignore"], shell: false,
+  });
+  const exited = new Promise((resolveExit, rejectExit) => {
+    child.once("error", cause => rejectExit(new CodexHistoryIntegrityError(
+      "This Node runtime cannot verify incomplete Zstd frames and the zstd executable is unavailable. Install zstd or use a Node runtime with verified Zstd EOF checks before resuming this archive.",
+      { code: "CODEX_HISTORY_ZSTD_UNAVAILABLE", cause },
+    )));
+    child.once("close", code => code === 0 ? resolveExit() : rejectExit(new CodexHistoryIntegrityError(
+      "Zstd rejected the compressed history stream. The archive was retained and no canonical rollout was installed.",
+      { code: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_FAILED" },
+    )));
+  });
+  try { await Promise.all([pipeline(child.stdout, boundedOutput, destination), exited]); }
+  finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await exited.catch(() => {});
+  }
+}
+
+async function materializeCompressedRollout({ archivePath, sessionId, operations = {}, checkCurrentRequest, environment }) {
+  const canonicalPath = archivePath.slice(0, -4);
+  if (!recognizedFilename(canonicalPath, sessionId)) {
+    throw new CodexHistoryIntegrityError("Statewright found a compressed Codex history with an unrecognized canonical filename and will not materialize it.", { code: "CODEX_HISTORY_UNSAFE" });
+  }
+  if (await pathExists(canonicalPath)) return canonicalPath;
+  const archiveIdentity = sourceIdentity(await stat(archivePath));
+  const maxCompressedBytes = Math.min(operations.maxCompressedBytes ?? MAX_COMPRESSED_ROLLOUT_BYTES, MAX_COMPRESSED_ROLLOUT_BYTES);
+  const maxMaterializedBytes = Math.min(operations.maxMaterializedBytes ?? MAX_MATERIALIZED_ROLLOUT_BYTES, MAX_MATERIALIZED_ROLLOUT_BYTES);
+  if (archiveIdentity.size > maxCompressedBytes) {
+    throw new CodexHistoryIntegrityError("Statewright will not materialize a compressed Codex rollout larger than the bounded recovery limit. The archive was retained and no resume was started.", { code: "CODEX_HISTORY_ARCHIVE_TOO_LARGE" });
+  }
+  const archiveSha256 = await sha256(archivePath);
+  const temporary = `${canonicalPath}.statewright-hydrate-${process.pid}-${randomUUID()}.tmp`;
+  try {
+    let materializedBytes = 0;
+    const boundedOutput = new Transform({
+      transform(chunk, encoding, callback) {
+        materializedBytes += chunk.length;
+        if (materializedBytes > maxMaterializedBytes) {
+          callback(new CodexHistoryIntegrityError("Statewright will not materialize compressed Codex history beyond the bounded recovery limit. The archive was retained and no canonical rollout was installed.", { code: "CODEX_HISTORY_ARCHIVE_EXPANSION_LIMIT" }));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    await decompressRollout(archivePath, boundedOutput, createWriteStream(temporary, { flags: "wx", mode: 0o600 }), environment);
+    await syncFile(temporary);
+    const inspection = await inspectRolloutPath(temporary, sessionId, { requireCanonicalFilename: false });
+    if (inspection.status !== "healthy") {
+      throw new CodexHistoryIntegrityError("The compressed Codex history did not satisfy the canonical identity and ordinal contract, so Statewright did not materialize it.", { code: "CODEX_HISTORY_UNSAFE", inspection });
+    }
+    await operations.beforeArchiveInstall?.({ archivePath, canonicalPath });
+    const currentArchiveIdentity = sourceIdentity(await stat(archivePath));
+    if (!sameSourceIdentity(currentArchiveIdentity, archiveIdentity) || await sha256(archivePath) !== archiveSha256) {
+      throw new CodexHistoryIntegrityError("Compressed Codex history changed while Statewright prepared recovery. The archive was retained and no canonical rollout was installed.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+    }
+    // link() is atomic and refuses an existing destination; rename() could overwrite
+    // a concurrently-created canonical rollout.
+    checkCurrentRequest();
+    await link(temporary, canonicalPath);
+    await syncFile(canonicalPath);
+    await syncDirectory(dirname(canonicalPath));
+    return canonicalPath;
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new CodexHistoryIntegrityError("A canonical Codex rollout appeared while Statewright prepared compressed history. Nothing was replaced; retry once the writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED", cause: error });
+    }
+    if (error instanceof CodexHistoryIntegrityError || error?.code === "STATEWRIGHT_SUPERSEDED") throw error;
+    throw new CodexHistoryIntegrityError("Statewright could not safely materialize compressed Codex history. The archive was retained and no resume was started.", { code: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_FAILED", cause: error });
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
+}
+
 export async function findCodexRollout({ home = homedir(), codexHome = join(home, ".codex"), sessionId }) {
   if (!SESSION_ID_PATTERN.test(String(sessionId ?? ""))) {
     throw new CodexHistoryIntegrityError("Statewright cannot inspect Codex history without an explicit durable session ID.", { code: "CODEX_HISTORY_INVALID_SESSION" });
@@ -205,6 +311,24 @@ export async function findCodexRollout({ home = homedir(), codexHome = join(home
     throw new CodexHistoryIntegrityError("Statewright found more than one rollout for the requested Codex session and will not guess which one is canonical.", { code: "CODEX_HISTORY_AMBIGUOUS" });
   }
   return matches[0] ?? null;
+}
+
+async function materializeArchivedRollout({ storage, sessionId, mode, confirmRepair, inspection }) {
+  const archives = await findCompressedRollouts(storage.sessionsRoot, sessionId);
+  if (archives.length > 1) {
+    throw new CodexHistoryIntegrityError("Statewright found more than one compressed rollout for the requested Codex session and will not guess which one is canonical.", { code: "CODEX_HISTORY_AMBIGUOUS" });
+  }
+  if (archives.length === 0) return null;
+  if (mode === "guard") {
+    throw new CodexHistoryIntegrityError("Statewright found valid-looking compressed Codex history but guard mode will not materialize it. Re-run interactively with history repair set to prompt or auto after every writer for this thread is idle.", { code: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED", inspection });
+  }
+  await requireRepairConsent({
+    mode,
+    confirmRepair,
+    message: "[statewright] Codex retained this session only as compressed history. Materialize and validate the canonical .jsonl without deleting the archive? [y/N] ",
+    inspection,
+  });
+  return archives[0];
 }
 
 function recognizedFilename(path, sessionId) {
@@ -580,6 +704,7 @@ async function repairCodexHistory({ sessionId, inspection, backupRoot, projectio
         throw new CodexHistoryIntegrityError("Inherited Codex history changed while Statewright prepared the repair. Nothing was replaced; retry after the writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
       }
     }
+    operations.checkCurrentRequest?.();
     await rename(temporary, inspection.path);
     rolloutReplaced = true;
     await syncDirectory(dirname(inspection.path));
@@ -702,6 +827,7 @@ async function repairPartialWrite({ inspection, sessionId, backupRoot, operation
     if (!sameSourceIdentity(currentIdentity, inspection.sourceIdentity) || currentHash !== inspection.sourceSha256) {
       throw new CodexHistoryIntegrityError("Codex history changed while Statewright prepared the partial-write repair. Nothing was replaced; retry after the writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED", inspection });
     }
+    operations.checkCurrentRequest?.();
     await rename(temporary, path);
     await syncDirectory(dirname(path));
     await writeJsonAtomic(manifestPath, {
@@ -726,12 +852,19 @@ async function staleThreadPointer({ storage, sessionId }) {
   const directory = await opendir(storage.sqliteHome).catch(() => null);
   if (!directory) return null;
   for await (const entry of directory) {
-    const match = entry.isFile() && entry.name.match(/^state_(\d+)\.sqlite$/);
-    if (match) candidates.push({ path: join(storage.sqliteHome, entry.name), version: Number(match[1]) });
+    const match = entry.name.match(/^state_(\d+)\.sqlite$/);
+    if (!match) continue;
+    const candidatePath = join(storage.sqliteHome, entry.name);
+    // The staging lane exposes the durable state database through a symlink.
+    // Dirent#isFile is false for that entry, so validate its followed target.
+    candidates.push({ path: candidatePath, version: Number(match[1]) });
   }
   candidates.sort((left, right) => right.version - left.version);
   const candidate = candidates[0];
   if (!candidate) return null;
+  if (!(await stat(candidate.path).catch(() => null))?.isFile()) {
+    throw new CodexHistoryIntegrityError("The newest Codex state database is unavailable. Statewright will not modify an obsolete database.", { code: "CODEX_HISTORY_STATE_UNAVAILABLE" });
+  }
   const canonicalPath = await findCodexRollout({ codexHome: storage.codexHome, sessionId });
   if (!canonicalPath) return null;
   const sqlite = await openProjection();
@@ -741,14 +874,14 @@ async function staleThreadPointer({ storage, sessionId }) {
     const recordedPath = row?.rollout_path;
     if (!recordedPath || await pathExists(recordedPath)) return null;
     if (!statewrightAppServerRolloutPath(recordedPath) || basename(recordedPath) !== basename(canonicalPath)) return null;
-    return { databasePath: candidate.path, recordedPath, canonicalPath };
+    return { databasePath: await realpath(candidate.path), recordedPath, canonicalPath: await realpath(canonicalPath) };
   } catch (error) {
     if (/no such table: threads/.test(String(error?.message))) return null;
     throw error;
   } finally { database.close(); }
 }
 
-async function repairStaleThreadPointer({ pointer, sessionId, backupRoot }) {
+async function repairStaleThreadPointer({ pointer, sessionId, backupRoot, checkCurrentRequest, operations = {} }) {
   const stamp = new Date().toISOString().replaceAll(":", "-").replaceAll(".", "-");
   const backupRootExisted = await pathExists(backupRoot);
   await mkdir(backupRoot, { recursive: true, mode: 0o700 });
@@ -769,6 +902,8 @@ async function repairStaleThreadPointer({ pointer, sessionId, backupRoot }) {
   await syncDirectory(backupDir);
   const database = new sqlite.DatabaseSync(pointer.databasePath);
   try {
+    await operations.beforePointerCompareAndSwap?.({ pointer });
+    checkCurrentRequest();
     database.exec("BEGIN IMMEDIATE");
     const result = database.prepare("UPDATE threads SET rollout_path = ? WHERE id = ? AND rollout_path = ?")
       .run(pointer.canonicalPath, sessionId, pointer.recordedPath);
@@ -793,14 +928,34 @@ async function repairStaleThreadPointer({ pointer, sessionId, backupRoot }) {
 export async function guardCodexResumeHistory({
   home = homedir(), cwd = process.cwd(), args = [], sessionId, mode = "guard", backupRoot = null,
   environment = process.env, withWriterLock = withCodexWriterLock, repairOperations = {}, confirmRepair = requestRepairConsent,
+  checkCurrentRequest = () => {},
 } = {}) {
   try {
+    checkCurrentRequest();
+    repairOperations = { ...repairOperations, checkCurrentRequest };
     if (!sessionId || mode === "off") return { status: "skipped" };
     if (!SESSION_ID_PATTERN.test(String(sessionId))) return { status: "not_applicable", historyMode: null };
     if (!REPAIR_MODES.has(mode)) mode = "guard";
     const storage = await resolveCodexHistoryStorage({ home, cwd, environment, args });
     const effectiveBackupRoot = backupRoot ?? join(storage.codexHome, "backups");
     let inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
+    if (inspection.status === "not_found") {
+      const archivePath = await materializeArchivedRollout({ storage, sessionId, mode, confirmRepair, inspection });
+      if (archivePath) {
+        await withWriterLock({ home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, sessionId, environment }, async () => {
+          checkCurrentRequest();
+          const current = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
+          if (current.status === "not_found") {
+            const currentArchives = await findCompressedRollouts(storage.sessionsRoot, sessionId);
+            if (currentArchives.length !== 1 || currentArchives[0] !== archivePath) {
+              throw new CodexHistoryIntegrityError("Compressed rollout candidates changed while awaiting recovery. No archive was selected.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+            }
+            await materializeCompressedRollout({ archivePath, sessionId, operations: repairOperations, checkCurrentRequest, environment });
+          }
+        });
+        inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
+      }
+    }
     let partialRepairResult = null;
     const partialWriteCandidate = inspection.status === "unsafe"
       && inspection.historyBase === null
@@ -814,6 +969,7 @@ export async function guardCodexResumeHistory({
         inspection,
       });
       partialRepairResult = await withWriterLock({ home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, sessionId, environment }, async () => {
+        checkCurrentRequest();
         const lockedInspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
         if (!lockedInspection.path || !recognizedFilename(lockedInspection.path, sessionId)) return classifyInspection(lockedInspection);
         if (lockedInspection.historyBase !== null || lockedInspection.status !== "unsafe" || !lockedInspection.unknownAnomalies.some((item) => item.kind === "malformed_json")) return classifyInspection(lockedInspection);
@@ -831,6 +987,7 @@ export async function guardCodexResumeHistory({
         inspection,
       });
       historyResult = await withWriterLock({ home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, sessionId, environment }, async () => {
+        checkCurrentRequest();
         const lockedInspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
         const lockedClassification = classifyInspection(lockedInspection);
         if (lockedClassification) return lockedClassification;
@@ -847,9 +1004,16 @@ export async function guardCodexResumeHistory({
         inspection,
       });
     }
-    return await repairStaleThreadPointer({ pointer, sessionId, backupRoot: effectiveBackupRoot });
+    return await withWriterLock({ home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, sessionId, environment }, async () => {
+      checkCurrentRequest();
+      // Re-read under the same lock used for history mutation; a resume or
+      // another repair may have fixed this exact row while consent was open.
+      const lockedPointer = await staleThreadPointer({ storage, sessionId });
+      if (!lockedPointer) return historyResult;
+      return repairStaleThreadPointer({ pointer: lockedPointer, sessionId, backupRoot: effectiveBackupRoot, checkCurrentRequest, operations: repairOperations });
+    });
   } catch (error) {
-    if (error instanceof CodexHistoryIntegrityError) throw error;
+    if (error instanceof CodexHistoryIntegrityError || error?.code === "STATEWRIGHT_SUPERSEDED") throw error;
     throw new CodexHistoryIntegrityError("Statewright could not inspect or repair Codex history safely. No unverified resume was started.", { code: "CODEX_HISTORY_OPERATION_FAILED", cause: error });
   }
 }

@@ -537,6 +537,10 @@ export async function startCodexAppServerRouteProxy({
   // Optional host-specific ownership guard. It may return a typed lifecycle
   // whose commit runs only after the matching original upstream RPC succeeds.
   authorizeThread = async () => {},
+  // Durable-history admission runs after ownership authorization but before a
+  // downstream resume is compacted or forwarded upstream. Internal provider
+  // switching uses internalRpc and never enters this downstream boundary.
+  guardResumeHistory = async () => {},
   requiredMcpToolSuffix = null,
   requiredMcpServerName = "statewright",
   requiredMcpReadyTimeoutMs = 0,
@@ -750,6 +754,7 @@ export async function startCodexAppServerRouteProxy({
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Could not allocate a Statewright App Server route proxy port.");
 
+  const pendingHistoryResumes = new Set();
   server.on("connection", (downstream, request) => {
     const yoloThreads = new URL(request?.url ?? "/", "ws://127.0.0.1").searchParams.getAll("statewright_resume_yolo_thread");
     if (yoloThreads.length > 1 || (yoloThreads.length === 1 && (!yoloThreads[0] || yoloThreads[0].length > 128))) {
@@ -1427,8 +1432,8 @@ export async function startCodexAppServerRouteProxy({
       let threadAuthorization = null;
       let ownsRequestSlot = false;
       const checkCurrentRequest = () => {
-        if (requestEpoch !== undefined && (operatorActivity.get(message.params.threadId) !== requestEpoch
-            || downstream.readyState !== WebSocket.OPEN)) {
+        if (protocolFailed || downstream.readyState !== WebSocket.OPEN
+            || requestEpoch !== undefined && operatorActivity.get(message.params.threadId) !== requestEpoch) {
           const error = new Error("Statewright request superseded by newer user input");
           error.code = "STATEWRIGHT_SUPERSEDED";
           throw error;
@@ -1475,19 +1480,13 @@ export async function startCodexAppServerRouteProxy({
           await forwardPayload(upstream, payload);
           return;
         }
-        if (message.method === "thread/resume" && message.params?.threadId) {
-          // An explicit CLI override must win even when the historical profile
-          // is unreadable or cannot be represented by the remote protocol.
-          if (!yoloThreadId) message = applyRestoredResumePermissions(
-            message, await resolveResumePermissions(String(message.params.threadId)));
-        }
-        message = applyExplicitYoloResumePermissions(message, yoloThreadId);
         if (message.method === "thread/start" || message.params?.threadId) {
           threadAuthorization = await authorizeThread({
             method: message.method,
             threadId: message.params?.threadId ?? null,
             ephemeral: message.params?.ephemeral === true,
           });
+          checkCurrentRequest();
           if (threadAuthorization) {
             if (message.id === undefined || threadAuthorization?.version !== 1
                 || threadAuthorization?.kind !== "statewright_thread_adoption"
@@ -1507,6 +1506,26 @@ export async function startCodexAppServerRouteProxy({
             backgroundAttachments.set(rpcIdKey(message.id), {method: message.method, threadId: message.params?.threadId ?? null});
           }
         }
+        if (message.method === "thread/resume" && message.params?.threadId) {
+          checkCurrentRequest();
+          const sessionId = String(message.params.threadId);
+          if (pendingHistoryResumes.has(sessionId)) {
+            const error = new Error("History admission for this thread is already pending. Wait for that resume to finish.");
+            error.code = "CODEX_HISTORY_RESUME_PENDING";
+            throw error;
+          }
+          pendingHistoryResumes.add(sessionId);
+          try {
+            await guardResumeHistory({ sessionId, requestId: message.id ?? null, checkCurrentRequest });
+            checkCurrentRequest();
+            // Recover the canonical archive before reading its saved permissions.
+            // An existing explicit CLI override retains its normal precedence.
+            if (!yoloThreadId) message = applyRestoredResumePermissions(
+              message, await resolveResumePermissions(sessionId));
+            checkCurrentRequest();
+          } finally { pendingHistoryResumes.delete(sessionId); }
+        }
+        message = applyExplicitYoloResumePermissions(message, yoloThreadId);
         if (isActiveGoalSet(message)) {
           // Goal creation carries an objective only when no native goal exists.
           // An objective-bearing activation of a paused goal must retain the
@@ -1551,7 +1570,6 @@ export async function startCodexAppServerRouteProxy({
           });
         }
         void onConnection({ direction: "native_to_upstream", method: message.method ?? null });
-        if (message.id !== undefined && message.method) requestMethods.set(rpcIdKey(message.id), message.method);
         message = applyThreadListCwd(message, threadListCwd);
         const compacted = compactResume && message.method === "thread/resume";
         message = applyCompactResumeRequest(message, compactResume, resumeHistoryLimit);
@@ -1777,12 +1795,13 @@ export async function startCodexAppServerRouteProxy({
             || error.code === "STATEWRIGHT_ROUTE_ORIGIN_OWNER"
             || error.code === "STATEWRIGHT_ROUTE_SELECTION"
             || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_INVALID"
-            || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_UNREPRESENTABLE")
+            || error.code === "STATEWRIGHT_SAVED_PERMISSIONS_UNREPRESENTABLE"
+            || String(error.code ?? "").startsWith("CODEX_HISTORY_"))
             && message.id !== undefined && downstream.readyState === WebSocket.OPEN) {
           void forwardWhenOpen(downstream, JSON.stringify({
             jsonrpc: "2.0",
             id: message.id,
-            error: { code: -32603, message: `Statewright route was not applied: ${error.message}` },
+            error: { code: -32603, message: `${String(error.code ?? "").startsWith("CODEX_HISTORY_") ? "Statewright could not resume this session" : "Statewright route was not applied"}: ${error.message}` },
           })).catch((sendError) => onTransportError({
             side: "native_to_upstream",
             message: sendError instanceof Error ? sendError.message : String(sendError),

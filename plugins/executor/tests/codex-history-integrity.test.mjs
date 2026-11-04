@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
@@ -35,6 +35,14 @@ async function writeRollout(home, lines, sessionId = SESSION_ID) {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${lines.join("\n")}\n`, { mode: 0o600 });
   return path;
+}
+
+async function writeCompressedRollout(home, lines) {
+  const canonical = await writeRollout(home, lines);
+  const { zstdCompressSync } = await import("node:zlib");
+  await writeFile(`${canonical}.zst`, zstdCompressSync(await readFile(canonical)), { mode: 0o600 });
+  await rm(canonical);
+  return { archive: `${canonical}.zst`, canonical };
 }
 
 function createProjectionAt(path) {
@@ -290,6 +298,107 @@ test("inspection classifies only repeated restart settings as safely repairable"
     assert.equal(inspection.duplicateSettingsCount, 1);
     assert.equal(inspection.unknownAnomalies.length, 0);
     assert.equal(inspection.finalOrdinal, 2);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("repair mode validates and materializes one compressed canonical rollout without deleting its archive", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-zstd-"));
+  try {
+    const { archive, canonical } = await writeCompressedRollout(home, [
+      record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" }),
+      record(1, "event_msg", { type: "task_complete" }),
+    ]);
+    const result = await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment() });
+    assert.equal(result.status, "healthy");
+    assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "healthy");
+    assert.equal(await readFile(canonical, "utf8"), `${record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" })}\n${record(1, "event_msg", { type: "task_complete" })}\n`);
+    assert.ok(await stat(archive));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("guard mode refuses compressed history without materializing it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-zstd-guard-"));
+  try {
+    const { canonical } = await writeCompressedRollout(home, [
+      record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" }),
+    ]);
+    await assert.rejects(
+      guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }),
+      error => error?.code === "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED",
+    );
+    await assert.rejects(stat(canonical));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+for (const scenario of ["corrupt", "truncated", "wrong-thread", "bad-ordinal", "oversize", "expansion", "source-changed", "no-clobber", "cancelled"]) {
+  test(`compressed history refuses ${scenario} and retains the archive`, async () => {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-archive-refusal-"));
+    try {
+      const lines = [
+        record(0, "session_meta", { id: scenario === "wrong-thread" ? "foreign" : SESSION_ID, history_mode: "paginated" }),
+        record(scenario === "bad-ordinal" ? 4 : 1, "event_msg", { type: "task_complete" }),
+      ];
+      const { archive, canonical } = await writeCompressedRollout(home, lines);
+      if (scenario === "corrupt") await writeFile(archive, "not zstd");
+      if (scenario === "truncated") {
+        const bytes = await readFile(archive);
+        await writeFile(archive, bytes.subarray(0, bytes.length - 4));
+      }
+      const original = await readFile(archive);
+      let cancelled = false;
+      const repairOperations = {
+        ...(scenario === "oversize" ? { maxCompressedBytes: 1 } : {}),
+        ...(scenario === "expansion" ? { maxMaterializedBytes: 1 } : {}),
+        beforeArchiveInstall: async () => {
+          if (scenario === "source-changed") await appendFile(archive, "changed");
+          if (scenario === "no-clobber") await writeFile(canonical, "other writer");
+          if (scenario === "cancelled") cancelled = true;
+        },
+      };
+      const codes = {
+        corrupt: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_FAILED", truncated: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_FAILED",
+        "wrong-thread": "CODEX_HISTORY_UNSAFE", "bad-ordinal": "CODEX_HISTORY_UNSAFE",
+        oversize: "CODEX_HISTORY_ARCHIVE_TOO_LARGE", expansion: "CODEX_HISTORY_ARCHIVE_EXPANSION_LIMIT",
+        "source-changed": "CODEX_HISTORY_SOURCE_CHANGED", "no-clobber": "CODEX_HISTORY_SOURCE_CHANGED", cancelled: "STATEWRIGHT_SUPERSEDED",
+      };
+      await assert.rejects(guardCodexResumeHistory({
+        home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment(), repairOperations,
+        checkCurrentRequest: () => { if (cancelled) throw Object.assign(new Error("request disconnected"), { code: "STATEWRIGHT_SUPERSEDED" }); },
+      }), error => error.code === codes[scenario]);
+      if (scenario === "no-clobber") assert.equal(await readFile(canonical, "utf8"), "other writer");
+      else await assert.rejects(stat(canonical));
+      if (scenario !== "source-changed") assert.deepEqual(await readFile(archive), original);
+      assert.ok(!(await readdir(dirname(canonical))).some(name => name.includes(".statewright-hydrate-")));
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+}
+
+test("archive selection is rechecked under the writer lock and ambiguous candidates are refused", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archive-race-"));
+  try {
+    const { archive, canonical } = await writeCompressedRollout(home, [record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" })]);
+    const options = { home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment() };
+    const second = join(dirname(archive), `rollout-2026-08-30T01-00-00-${SESSION_ID}.jsonl.zst`);
+    await assert.rejects(guardCodexResumeHistory({ ...options,
+      withWriterLock: async (_options, action) => { await writeFile(second, await readFile(archive)); return action(); },
+    }), error => error.code === "CODEX_HISTORY_SOURCE_CHANGED");
+    await assert.rejects(guardCodexResumeHistory(options), error => error.code === "CODEX_HISTORY_AMBIGUOUS");
+    await assert.rejects(stat(canonical));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("archive recovery honors declined consent and a disconnected requester before acquiring the writer", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archive-consent-"));
+  try {
+    const { canonical } = await writeCompressedRollout(home, [record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" })]);
+    await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "prompt", environment: codexTestEnvironment(), confirmRepair: async () => false }), error => error.code === "CODEX_HISTORY_REPAIR_DECLINED");
+    let cancelled = false;
+    await assert.rejects(guardCodexResumeHistory({
+      home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment(),
+      checkCurrentRequest: () => { if (cancelled) throw Object.assign(new Error("disconnected"), { code: "STATEWRIGHT_SUPERSEDED" }); },
+      withWriterLock: async (_options, action) => { cancelled = true; return action(); },
+    }), error => error.code === "STATEWRIGHT_SUPERSEDED");
+    await assert.rejects(stat(canonical));
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -924,7 +1033,7 @@ test("repair relinks an exact stale managed App Server pointer after backing up 
     });
     assert.equal(result.repairKind, "stale_rollout_pointer");
     const repaired = new DatabaseSync(databasePath, { readOnly: true });
-    assert.equal(repaired.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(SESSION_ID).rollout_path, canonical);
+    assert.equal(repaired.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(SESSION_ID).rollout_path, await realpath(canonical));
     repaired.close();
     const backups = await readdir(join(home, ".codex", "backups"));
     assert.equal(backups.length, 1);
@@ -932,6 +1041,31 @@ test("repair relinks an exact stale managed App Server pointer after backing up 
     const manifest = JSON.parse(await readFile(join(home, ".codex", "backups", backups[0], "manifest.json"), "utf8"));
     assert.match(manifest.target_scoped_rollback_sql, /UPDATE threads SET rollout_path/);
     assert.match(manifest.rollback, /whole database is disaster recovery only/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("stale pointer repair recognizes the current state database when staging exposes it by symlink", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-pointer-symlink-"));
+  try {
+    const { canonical, archive } = await writeCompressedRollout(home, [
+      legacyRecord("session_meta", { id: SESSION_ID, history_mode: "legacy" }),
+      legacyRecord("event_msg", { type: "task_complete" }),
+    ]);
+    const durable = join(home, "durable-state_5.sqlite");
+    const stale = join(tmpdir(), `statewright-swc_${"c".repeat(32)}-app-server-dead`, "sessions", "2026", "08", "30", `rollout-2026-08-30T00-00-00-${SESSION_ID}.jsonl`);
+    const database = new DatabaseSync(durable);
+    database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+    database.prepare("INSERT INTO threads VALUES (?, ?)").run(SESSION_ID, stale);
+    database.prepare("INSERT INTO threads VALUES (?, ?)").run("other-thread", "unrelated history");
+    database.close();
+    await symlink(durable, join(home, ".codex", "state_5.sqlite"));
+    const result = await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment() });
+    assert.equal(result.repairKind, "stale_rollout_pointer");
+    const repaired = new DatabaseSync(durable, { readOnly: true });
+    assert.equal(repaired.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(SESSION_ID).rollout_path, await realpath(canonical));
+    assert.equal(repaired.prepare("SELECT rollout_path FROM threads WHERE id = ?").get("other-thread").rollout_path, "unrelated history");
+    assert.ok(await stat(archive));
+    repaired.close();
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
@@ -957,3 +1091,35 @@ test("stale pointer repair never falls through to an obsolete Codex state databa
     unchanged.close();
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+
+for (const scenario of ["broken-newest-link", "cancelled", "changed-row"]) {
+  test(`stale pointer recovery refuses ${scenario} without rewinding another writer`, async () => {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-pointer-safety-"));
+    try {
+      const canonical = await writeRollout(home, [legacyRecord("session_meta", { id: SESSION_ID, history_mode: "legacy" })]);
+      const databasePath = join(home, ".codex", "state_5.sqlite");
+      const stale = join(tmpdir(), `statewright-swc_${"d".repeat(32)}-app-server-dead`, "sessions", basename(canonical));
+      const database = new DatabaseSync(databasePath);
+      database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)");
+      database.prepare("INSERT INTO threads VALUES (?, ?)").run(SESSION_ID, stale);
+      database.close();
+      if (scenario === "broken-newest-link") await symlink(join(home, "missing.sqlite"), join(home, ".codex", "state_6.sqlite"));
+      let cancelled = false;
+      await assert.rejects(guardCodexResumeHistory({
+        home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment(),
+        checkCurrentRequest: () => { if (cancelled) throw Object.assign(new Error("disconnected"), { code: "STATEWRIGHT_SUPERSEDED" }); },
+        repairOperations: { beforePointerCompareAndSwap: async () => {
+          if (scenario === "cancelled") cancelled = true;
+          if (scenario === "changed-row") {
+            const writer = new DatabaseSync(databasePath);
+            writer.prepare("UPDATE threads SET rollout_path = ? WHERE id = ?").run("new writer path", SESSION_ID);
+            writer.close();
+          }
+        } },
+      }), error => error.code === ({ "broken-newest-link": "CODEX_HISTORY_STATE_UNAVAILABLE", cancelled: "STATEWRIGHT_SUPERSEDED", "changed-row": "CODEX_HISTORY_OPERATION_FAILED" })[scenario]);
+      const result = new DatabaseSync(databasePath, { readOnly: true });
+      assert.equal(result.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(SESSION_ID).rollout_path, scenario === "changed-row" ? "new writer path" : stale);
+      result.close();
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+}

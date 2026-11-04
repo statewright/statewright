@@ -91,6 +91,32 @@ test("Windows App Server cleanup still requires child closure after successful t
   });
 });
 
+for (const reason of ["no_running_instance", "process_not_found"]) {
+  test(`Windows App Server cleanup accepts ${reason} only after owned child closes`, async () => {
+    const child = { pid: 4242, exitCode: null, signalCode: null };
+    let resolveClosed;
+    const closed = new Promise(resolve => { resolveClosed = resolve; });
+    let calls = 0;
+    await stopOwnedAppServer(child, closed, 50, {
+      platform: "win32",
+      cleanupProcessTree: async owned => {
+        assert.equal(owned, child);
+        calls += 1;
+        setTimeout(() => { child.exitCode = 0; resolveClosed(); }, 5);
+        return { status: "nonzero", code: 128, reason };
+      },
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+test("Windows App Server cleanup still fails when taskkill reports no instance without child closure", async () => {
+  await assert.rejects(stopOwnedAppServer(
+    { pid: 4242, exitCode: null, signalCode: null }, new Promise(() => {}), 10,
+    { platform: "win32", cleanupProcessTree: async () => ({ status: "nonzero", code: 128, reason: "no_running_instance" }) },
+  ), /process-tree cleanup failed.*no_running_instance/);
+});
+
 test("resident reuse requires the same canonical gateway and auth profile, never merely the same thread", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-resident-profile-"));
   try {

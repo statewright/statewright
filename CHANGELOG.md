@@ -3,6 +3,17 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Claude and Codex Plugins 0.3.8] — 2026-11-04
+
+### Fixed
+- **[codex]** Confirm owned App Server closure when Windows reports that its
+  process tree is already gone. A missing close event still fails within the
+  existing shutdown grace period.
+
+### Changed
+- **[claude, codex]** Align the published plugin and capability versions at
+  0.3.8. Claude behavior is unchanged apart from its diagnostic version.
+
 ## [Claude and Codex Plugins 0.3.7] — 2026-11-03
 
 ### Changed

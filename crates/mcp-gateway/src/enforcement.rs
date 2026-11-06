@@ -161,6 +161,23 @@ pub fn resolve_adapter_tool_name_with_pipeline_and_origin(
     if origin == AdapterToolOrigin::RegisteredUpstream {
         return requested.to_string();
     }
+    // Native shell adapters are alternate names for the same execution
+    // surface. Preserve an explicit shell denial before effect-based Read
+    // normalization or an allowed alias can obscure it. Do not generalize
+    // this to Read/Grep or Write/Edit: those families contain distinct tools.
+    if native_tool_family(requested) == Some(NativeToolFamily::Command) {
+        if let Some(denied) = session
+            .definition
+            .states
+            .get(&session.current_state)
+            .and_then(|state| state.disallowed_tools.as_ref())
+            .and_then(|names| names.iter().find(|name| {
+                native_tool_family(name) == Some(NativeToolFamily::Command)
+            }))
+        {
+            return denied.clone();
+        }
+    }
     let exploratory = session
         .definition
         .states
@@ -1316,6 +1333,28 @@ mod tests {
         assert!(semantic_effect_capability_denial(&session, &closeout).is_none());
         assert_eq!(ordinary_write.resolve_effect(), ResolvedEffect::LocalWrite);
         assert!(semantic_effect_capability_denial(&session, &ordinary_write).is_some());
+    }
+
+    #[test]
+    fn native_shell_denials_survive_alias_and_read_normalization() {
+        let aliases = ["Bash", "exec_command", "run_command", "shell", "terminal", "functions.exec_command", "functions::exec_command"];
+        for denied in aliases {
+            let mut session = denylist_session(&[denied]);
+            session.definition.states.get_mut("inspect").unwrap().allowed_tools = Some(vec!["Read".into(), "Bash".into()]);
+            for requested in aliases {
+                let policy = resolve_adapter_tool_name(&session, requested, &json!({"cmd":"cat fixture"}));
+                assert_eq!(policy, denied, "{requested}/{denied}");
+                assert!(matches!(enforce_tool_call(&session, &policy), EnforcementDecision::Block { .. }));
+                // Registered MCP identity must not be normalized as native.
+                assert_eq!(resolve_adapter_tool_name_with_pipeline_and_origin(
+                    &session, requested, &json!({"cmd":"cat fixture"}), None, AdapterToolOrigin::RegisteredUpstream,
+                ), requested);
+            }
+        }
+        let session = denylist_session(&["Grep"]);
+        assert_eq!(resolve_adapter_tool_name(&session, "Read", &json!({})), "Read");
+        let session = denylist_session(&["Edit"]);
+        assert_eq!(resolve_adapter_tool_name(&session, "Write", &json!({})), "Write");
     }
 
     #[test]

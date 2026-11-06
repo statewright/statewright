@@ -6916,6 +6916,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ledger_families_have_explicit_decision_and_approval_boundaries() {
+        // Sanitized regression inputs, never executed. This exercises the
+        // native gateway decision, not a model, real workflow or native UI.
+        // No filesystem proof is supplied: unresolved runners stay unresolved.
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        let cases = [
+            ("opaque_version", "./vendor/tool --version", false, true),
+            ("python_discovery", "python3 -m unittest discover -s weekly -p test_build.py", false, true),
+            ("python_entrypoint", "python3 weekly/test_build.py", false, true),
+            ("bash_syntax", "bash -n scripts/check.sh", false, true),
+            ("process_pipeline", "ps -Ao pid=,command= | rg 'fixture|other' || true", true, false),
+            ("node_entrypoint", "node scripts/check.mjs", false, true),
+            ("absolute_node_test", "node --test /workspace/tests/check.test.mjs", false, true),
+            ("byte_compare", "cmp scripts/check.mjs /workspace/other/check.mjs", true, false),
+            ("task_runner", "task test", false, true),
+            ("check_and_runner", "git diff --check && npx vitest run --exclude '**/generated/**' tests/a.spec.js", false, true),
+            ("selected_runner", "npx vitest run --exclude '**/generated/**' tests/a.spec.js", false, true),
+            ("inline_interpreter", "node -e \"require('fs').readFileSync('fixture.js','utf8')\"", false, true),
+            ("syntax_and_execution", "git diff --check && node --check scripts/a.js && node scripts/check.mjs", false, false),
+            ("multiple_selected_tests", "npx vitest run --exclude '**/generated/**' tests/a.spec.js tests/b.spec.js", false, true),
+            ("symlink_mutation", "ln -s /workspace/deps node_modules", false, true),
+            ("disk_observation", "df -h /Volumes/fixture", true, false),
+            ("dependency_mutation", "npm ci --ignore-scripts --no-audit --no-fund", false, true),
+            ("process_lookup", "pgrep -fl fixture-worker", true, false),
+        ];
+        for (label, command, is_read, uncertain_eligible) in cases {
+            for restriction in ["none", "read_only", "explicit_deny"] {
+                let mut state = json!({"on":{"DONE":"done"}});
+                if restriction == "read_only" {
+                    state["allowed_tools"] = json!(["Read", "Grep", "Bash"]);
+                } else if restriction == "explicit_deny" {
+                    state["disallowed_tools"] = json!(["Bash"]);
+                }
+                let definition: MachineDefinition = serde_json::from_value(json!({
+                    "id":"ledger-boundary", "initial":"inspect",
+                    "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                    "states":{"inspect":state,"done":{"type":"final"}}
+                })).unwrap();
+                let manager = SessionManager::new();
+                manager.create("ledger-session".into(), definition.clone());
+                let mut workflows = HashMap::new();
+                workflows.insert("ledger-boundary".into(), definition);
+                let mut gateway = Gateway::new(manager, UpstreamManager::mock(vec![]),
+                    "ledger-session".into(), workflows, Some("ledger-boundary".into()), String::new(), None);
+                gateway.current_run_id = Some("ledger-run".into());
+                let epoch = gateway.usage.state_epoch();
+                let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
+                let expected_allow = is_read && restriction != "explicit_deny";
+                assert_eq!(result["decision"], if expected_allow { "allow" } else { "deny" }, "{label}/{restriction}: {result}");
+                let expected_approval = !is_read && uncertain_eligible && restriction == "none";
+                assert_eq!(result["classifier_context"].is_object(), expected_approval, "{label}/{restriction}: {result}");
+                if expected_approval {
+                    assert_eq!(result["risk_assessment"]["separate_approval_allowed"], true, "{label}");
+                    assert_eq!(result["classifier_context"]["run_id"], "ledger-run");
+                    assert_eq!(result["classifier_context"]["run_session_id"], gateway.transport_session_id);
+                    assert_eq!(result["classifier_context"]["state_epoch"], epoch);
+                }
+                assert_eq!(gateway.session_manager.get("ledger-session").unwrap().current_state, "inspect");
+                assert_eq!(gateway.usage.state_epoch(), epoch);
+            }
+        }
+        risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
     async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",

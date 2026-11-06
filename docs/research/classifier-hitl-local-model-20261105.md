@@ -291,3 +291,29 @@ AST classes. No ledger entries were removed. Source tests do not establish
 native approval dialogs, waiting notifications, installation or staging health.
 System One scores remain uncalibrated judgments; ADR wording no longer implies
 an established calibration result. No thresholds or enforcement modes changed.
+
+### Gateway decision matrix and native alias denial
+
+Added a static gateway decision matrix for all 18 sanitized ledger families in
+three policy contexts (54 cases): unrestricted, Read/Grep/Bash capability-limited,
+and explicit shell denial. The fixture creates only in-memory test sessions;
+it executes no command and does not touch a resident workflow. It supplies no
+filesystem proof, so task/package/script resolution remains intentionally
+unresolved here. Four observation families can pass the read policy. Eligible
+uncertainty receives owner/run/session/state/epoch-bound approval context only
+under the unrestricted policy. Restrictive capability policy and mixed execution
+with missing authority remain explicit denials, not approvable by relabeling.
+
+The matrix initially failed: a native `exec_command` read could bypass an
+explicit `Bash` denial. Native shell aliases now retain the actual denied
+spelling before read-effect or allowed-alias normalization. Registered upstream
+MCP tools retain exact identity; Read/Grep and Write/Edit are not collapsed into
+equivalent denials. A separate 7-by-7 alias test checks each native spelling,
+registered-origin separation, and unchanged non-shell distinctions.
+
+After repair the full gateway library passed **420 tests, 3 ignored, 0 failed**.
+Independent read-only review found no must-fix issue in this bounded delta;
+the reviewer did not execute tests or certify installation. The failed gateway
+matrix is retained as the regression receipt. No live policy was modified.
+This source candidate still needs model measurements, full-tree staging
+reconciliation and real installed approval/notification acceptance.

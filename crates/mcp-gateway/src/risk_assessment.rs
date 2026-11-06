@@ -2565,6 +2565,70 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    #[ignore = "operator-supplied public model receipts; offline effect-resolution diagnostic"]
+    fn recorded_public_scores_through_rust_effect_resolution() {
+        use sha2::{Digest, Sha256};
+        assert!(!SemanticShadowConfig::from_env().enabled,
+            "diagnostic refuses enabled providers before reading inputs");
+        let path = std::env::var("STATEWRIGHT_RECORDED_POLICY_INPUT").expect("input required");
+        assert!(std::fs::metadata(&path).unwrap().len() <= 4 * 1024 * 1024);
+        let bytes = std::fs::read(path).unwrap();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(digest, std::env::var("STATEWRIGHT_RECORDED_POLICY_SHA256").expect("digest required"));
+        let input: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(input["schema"], "statewright/recorded-policy-diagnostic/v1");
+        assert_eq!(input["classification"], "public_synthetic");
+        let rows = input["rows"].as_array().unwrap();
+        assert!(!rows.is_empty() && rows.len() <= 1000);
+        let mut seen = std::collections::HashSet::new();
+        set_test_shell_ast_authority_enabled(Some(true));
+        for row in rows {
+            assert!(seen.insert(format!("{}/{}/{}", row["model"], row["arm"], row["id"])));
+            let command = row["command"].as_str().unwrap();
+            assert!(!command.is_empty() && command.len() <= 8192);
+            let vector = if row["vector"].is_null() {
+                assert_eq!(row["recorded_status"], "abstain_model");
+                None
+            } else {
+                assert_eq!(row["recorded_status"], "assessed");
+                assert_eq!(row["vector"].as_object().unwrap().len(), 6);
+                let score = |field| Probability::new(row["vector"][field].as_f64().unwrap() as f32).unwrap();
+                Some(SemanticRiskVector {
+                    read_only: score("read_only"), may_write: score("may_write"),
+                    reversible: score("reversible"), destructive: score("destructive"),
+                    irreversible: score("irreversible"), external_or_account_effect: score("external_or_account_effect"),
+                })
+            };
+            let deterministic = assess_invocation(None, "exec_command", &json!({"cmd":command}), None);
+            for mode in ["rust_only", "advisory_recorded", "hypothetical_authoritative"] {
+                let authorization = mode == "hypothetical_authoritative";
+                let receipt = SemanticAssessmentReceipt {
+                    tool: "exec_command".into(), state_intent: None,
+                    status: if mode == "rust_only" { SemanticAssessorStatus::Disabled }
+                        else if vector.is_none() { SemanticAssessorStatus::Unavailable }
+                        else if authorization { SemanticAssessorStatus::Assessed }
+                        else { SemanticAssessorStatus::ShadowOnly },
+                    vector: if mode == "rust_only" { None } else { vector.clone() },
+                };
+                // Pure shared production resolver. No provider submit function,
+                // live config/permission changes, gateway or command execution.
+                let resolved = pipeline_from_parts(deterministic.clone(), receipt, authorization);
+                let (effect, basis) = resolved.resolve_effect_with_basis();
+                println!("RECORDED_POLICY {}", json!({
+                    "input_sha256":digest, "model":row["model"], "id":row["id"], "arm":row["arm"],
+                    "mode":mode, "recorded_status":row["recorded_status"], "draft_labels":row["expected"],
+                    "effect":effect.label(), "basis":basis,
+                    "deterministic_risk":format!("{:?}",deterministic.risk),
+                    "deterministic_exposure":format!("{:?}",deterministic.exposure),
+                    "effective_risk":format!("{:?}",resolved.effective_risk),
+                    "authorization":"not_evaluated", "execution":"none"
+                }));
+            }
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
     fn shell_bands_cover_read_local_write_and_external_write() {
         assert_eq!(assess_shell("rg pattern src").risk, RiskBand::Low);
         assert_eq!(

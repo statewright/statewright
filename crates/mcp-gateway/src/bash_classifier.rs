@@ -1800,6 +1800,7 @@ fn bounded_version_probe(invocation: &LiteralInvocation, executable: &str) -> bo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalExecutionIntent {
     Validation,
+    SyntaxValidation,
 }
 
 /// Normalize runner-specific argv into a policy-level intent. Adding a new
@@ -1809,6 +1810,9 @@ fn local_execution_intent(
     invocation: &LiteralInvocation,
     executable: &str,
 ) -> Option<LocalExecutionIntent> {
+    if bounded_syntax_validation(invocation, executable) {
+        return Some(LocalExecutionIntent::SyntaxValidation);
+    }
     let validation = match executable {
         "node" => bounded_node_local_execution(invocation),
         "python" | "python3" => bounded_python_unittest_execution(invocation),
@@ -1819,6 +1823,23 @@ fn local_execution_intent(
         _ => false,
     };
     validation.then_some(LocalExecutionIntent::Validation)
+}
+
+// Syntax validation is an execution intent, not a Read proof. In particular,
+// interpreter startup can consume inherited configuration. Keep the same
+// explicit execution authority as other validators, reject injected startup
+// options, and leave every surrounding shell effect to the ordinary AST path.
+fn bounded_syntax_validation(invocation: &LiteralInvocation, executable: &str) -> bool {
+    match (executable, invocation.args.as_slice()) {
+        ("node", [flag, path]) if flag == "--check" => bounded_node_script_path(path),
+        ("bash", [flag, path]) if flag == "-n" => {
+            !path.starts_with('-') && bounded_relative_path(path, "")
+        }
+        ("bash", [flag, separator, path]) if flag == "-n" && separator == "--" => {
+            !path.starts_with('-') && bounded_relative_path(path, "")
+        }
+        _ => false,
+    }
 }
 
 // The standard module runner declares repository-test execution, not Read.
@@ -1890,7 +1911,6 @@ fn bounded_node_local_execution(invocation: &LiteralInvocation) -> bool {
         [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => {
             paths.iter().all(|path| bounded_node_test_path(path))
         }
-        [flag, path] if flag == "--check" => bounded_node_script_path(path),
         _ => false,
     }
 }
@@ -3112,6 +3132,35 @@ mod tests {
             "env PYTHONSTARTUP=fixture.py python3 -m unittest",
             "env -S python3 -m unittest discover", "/tmp/python3 -m unittest discover",
             "python3 -m unittest discover -p test_*.py",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::BoundedLocalExecution], "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn syntax_validation_intent_requires_literal_noninteractive_file() {
+        for command in [
+            "bash -n plugins/codex/mcp-proxy.sh",
+            "bash -n scripts/check",
+            "bash -n -- scripts/check.sh",
+            "command -- bash -n scripts/check.sh",
+            "env CI=true bash -n scripts/check.sh",
+            "node --check src/check.mjs",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::BoundedLocalExecution], "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+        for command in [
+            "bash scripts/check.sh", "bash -n", "bash -n -", "bash -n -i",
+            "bash -n -- -i", "bash -n scripts/check.sh extra", "bash -n ../outside.sh",
+            "bash -n /tmp/outside.sh", "bash -in scripts/check.sh", "bash -n -c 'echo ok'",
+            "bash --login -n scripts/check.sh", "bash --rcfile startup.sh -n scripts/check.sh",
+            "bash -n scripts/*.sh", "bash -n $(which_file)", "bash -n <(generate_file)",
+            "BASH_ENV=startup.sh bash -n scripts/check.sh", "ENV=startup.sh bash -n scripts/check.sh",
+            "SHELLOPTS=verbose bash -n scripts/check.sh", "BASHOPTS=extdebug bash -n scripts/check.sh",
+            "env -S 'bash -n scripts/check.sh'", "command -p bash -n scripts/check.sh",
+            "/tmp/bash -n scripts/check.sh", "node --check --require startup src/check.mjs",
         ] {
             assert_ne!(classify(command), vec![OpClass::BoundedLocalExecution], "{command}");
             assert_eq!(readonly_capabilities(command), None, "{command}");

@@ -7883,7 +7883,10 @@ mod tests {
             // Python's recognized module runner has the separate capability
             // matrix below; direct-script execution remains unresolved here.
             ("python_entrypoint", "python3 weekly/test_build.py", false, true),
-            ("bash_syntax", "bash -n scripts/check.sh", false, true),
+            // Recognized validation requires explicit execution authority;
+            // it must not fall back to uncertainty approval when absent.
+            ("bash_syntax", "bash -n scripts/check.sh", false, false),
+            ("bash_entrypoint", "bash scripts/check.sh", false, true),
             ("process_pipeline", "ps -Ao pid=,command= | rg 'fixture|other' || true", true, false),
             ("node_entrypoint", "node scripts/check.mjs", false, true),
             ("absolute_node_test", "node --test /workspace/tests/check.test.mjs", false, true),
@@ -7925,6 +7928,11 @@ mod tests {
                 assert_eq!(result["decision"], if expected_allow { "allow" } else { "deny" }, "{label}/{restriction}: {result}");
                 let expected_approval = !is_read && uncertain_eligible && restriction == "none";
                 assert_eq!(result["classifier_context"].is_object(), expected_approval, "{label}/{restriction}: {result}");
+                if label == "bash_syntax" && restriction != "explicit_deny" {
+                    assert_eq!(result["risk_assessment"]["resolved_effect"], "bounded_local_execution");
+                    assert_eq!(result["risk_assessment"]["required_authority"], "BoundedLocalExecution");
+                    assert_eq!(result["risk_assessment"]["separate_approval_allowed"], false);
+                }
                 if expected_approval {
                     assert_eq!(result["risk_assessment"]["separate_approval_allowed"], true, "{label}");
                     assert_eq!(result["classifier_context"]["run_id"], "ledger-run");
@@ -7939,11 +7947,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn python_runner_intent_preserves_execution_and_independent_denials() {
+    async fn validation_runner_intent_preserves_execution_and_independent_denials() {
         risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
         for (command, bounded) in [
             ("python3 -m unittest discover -s weekly -p test_build.py", true),
             ("python -m unittest -v tests.test_parser", true),
+            ("bash -n plugins/codex/mcp-proxy.sh", true),
+            ("bash -n -- scripts/check", true),
+            ("node --check src/check.mjs", true),
+            ("bash -n ../outside.sh", false),
+            ("bash --login -n scripts/check.sh", false),
+            ("BASH_ENV=startup.sh bash -n scripts/check.sh", false),
+            ("bash -n scripts/check.sh && rm fixture.txt", false),
+            ("bash -n scripts/check.sh && curl https://example.invalid", false),
+            ("bash -n scripts/check.sh > receipt.txt", false),
             ("python3 -m unittest discover -s ../outside", false),
             ("python3 -m unrelated", false),
             ("python3 tests/test_parser.py", false),

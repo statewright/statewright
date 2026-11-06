@@ -70,13 +70,29 @@ but rejects failed/error results and malformed content. Hints still require
 authoritative identity/state checks; assistant prose and foreign servers are not
 approval evidence.
 
-Separate unresolved integration gap: `plugins/codex/scripts/executor-hook.mjs`
-formats `approval_required` and returns denial but does not dispatch the request.
-The legacy hook does dispatch through the authenticated native endpoint. Wiring
-the executor path needs the same verified thread/run/session/state-epoch and
-invocation identity, not a second retry counter or an unauthenticated prompt.
-The adapter bridge presently has only run/state/host scope for its rework gate;
-do not fabricate the missing native binding or trust model-supplied identifiers.
+The executor hook previously formatted `approval_required` without dispatching
+the request. It now submits each eligible denial, including both reworks, to the
+existing authenticated native approval controller. The Codex adapter bridge no
+longer owns a second retry counter. The gateway supplies run/session/state/epoch
+from the decision snapshot; the native hook supplies its thread identity, which
+the controller checks against the connected owner and authoritative state.
+Only a response matching the entire request can release that held invocation.
+The hook never emits `permissionDecision=allow`: platform permissions remain.
+
+This exposed an ordering defect: the gateway's uncertainty return preceded its
+independent workflow checks. An approval eligibility preflight now enforces
+current tool policy and independent interceptors without performing implicit
+transitions. Unresolved effects cannot establish compatibility with a capability
+allowlist, explicit restrictions, exploratory-read-only intent or a missing
+explicit execution capability. Those remain non-approvable. State and inherited
+`low_local`/`moderate_local` policies also require deterministic evidence, not
+classifier approval. This intentionally conservative eligibility contract does
+not change thresholds, ordinary allowed execution or workflow definitions.
+
+Missing context, unsupported native ownership and transport failures produce
+specific unavailable outcomes rather than promising a dialog. Asynchronous
+native send failures now settle safely; a late transport acknowledgment after
+abort dismisses only the old request. No other owner's proxy is substituted.
 
 Protocol tests are not proof of a visible native TUI/Desktop dialog or OS notice.
 Those remain separate acceptance gates, as does any web reviewer notification.
@@ -131,7 +147,8 @@ to a model. Help-text enrichment remains deferred.
 
 ## Validation receipt
 
-Executed in the Sidecar preparation checkout, not the installed runtime:
+Previous checkpoint `6d1b46e`, executed in the Sidecar preparation checkout,
+not the installed runtime:
 
 - `cargo test --target-dir /Volumes/sidecar/statewright-target -p statewright-mcp-gateway --lib`:
   **414 passed, 3 ignored, 0 failed** on final source. Ignored native interop
@@ -155,6 +172,37 @@ manual scoped reconciliation, the test passed. Those failures are retained, not
 reclassified as successful runs. A mechanical cherry-pick continuation also
 failed because uncommitted application was preserved; quitting its sequencer and
 applying only the remaining commits preserved all preparation bytes.
+
+### Executor handoff checkpoint
+
+Fresh checks after the handoff and policy-ordering repair:
+
+- `cargo test --target-dir /Volumes/sidecar/statewright-target -p statewright-mcp-gateway --lib -- --quiet`:
+  **415 passed, 3 ignored, 0 failed**. Existing warnings remain.
+- `node --test plugins/executor/tests/classifier-approval-controller.test.mjs plugins/executor/tests/codex-classifier-approval-proxy.test.mjs plugins/executor/tests/human-approval.test.mjs plugins/executor/tests/codex-approval-gate.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs plugins/executor/tests/adapter-bridge.test.mjs plugins/codex/tests/executor-bridge.test.mjs`:
+  **145 passed, 0 failed/cancelled/skipped**.
+- Generated runtime synchronization and `git diff --check`: passed.
+
+New loopback coverage runs the real hook, adapter bridge, approval HTTP helper
+and proxy/controller against a mock native WebSocket peer: two reworks, then
+accept/decline/cancel. Negative cases include missing thread/context/runtime,
+mismatched response, explicit policy, foreign/stale owner, changed state,
+duplicate owner, disconnect, asynchronous send failure and late acknowledgment.
+No visible TUI/Desktop dialog was exercised. Native execution without a matching
+resident remains unsupported and denied, not silently redirected.
+
+Intermediate failed checks are retained: an async-send test incorrectly used
+the forbidden zero-rework configuration (22 passed, 1 failed); a gateway test's
+next-state tool name did not match its requested native alias (414 passed,
+1 failed, 3 ignored); a later Rust compile rejected an ambiguous `.into()` in
+the new denial message. Correcting these fixture/source errors preceded the
+fresh green runs. Independent review additionally identified and verified the
+effective risk-tolerance guard; final narrow source review had no must-fix item.
+
+Outstanding package/version gates above were not rerun or declared fixed.
+All private denial-ledger entries remain unresolved. Local-model measurement,
+complete package preparation and installed native acceptance remain separate
+work; this checkpoint does not establish release readiness.
 
 Independent read-only review found and drove fixes for local-client timeout/proxy
 loss, stalled notification blocking authority polling, and shadow-score isolation

@@ -190,7 +190,7 @@ test("bridge authenticates adapters and preserves one executor identity", async 
   }
 });
 
-test("bridge counts repeated classifier intent without retaining tool payloads", async () => {
+test("non-Codex bridge counts repeated classifier intent without retaining tool payloads", async () => {
   const telemetry = [];
   let invocation = 0;
   const client = {
@@ -215,7 +215,7 @@ test("bridge counts repeated classifier intent without retaining tool payloads",
   const bridge = await new AdapterBridge(client, {
     executorId: "executor",
     token: "test-token",
-    host: "codex",
+    host: "opencode",
     telemetry: async (event, fields) => telemetry.push({ event, fields }),
   }).start();
 

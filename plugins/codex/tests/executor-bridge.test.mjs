@@ -6,7 +6,34 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { formatGuardDenial } from "../scripts/executor-hook.mjs";
+import { formatGuardDenial, handleExecutorHook } from "../scripts/executor-hook.mjs";
+
+test("executor approval rejects missing binding, independent denial and mismatched response", async () => {
+  const context = {run_id: "run", run_session_id: "session", state: "implement", state_epoch: 1};
+  const risk = {intent_fingerprint: "intent_v1_test", invocation_fingerprint: "invocation_v1_test",
+    final_denial_basis: "semantic_authorization_disabled",
+    required_authority: "complete_structural_evidence_or_separate_approval",
+    reformulation_allowed: true, exact_invocation_retry_allowed: false, separate_approval_allowed: true};
+  for (const variant of ["missing-context", "missing-thread", "independent", "mismatch", "missing-runtime"]) {
+    let approvals = 0;
+    const result = await handleExecutorHook("pre-tool", {
+      session_id: variant === "missing-thread" ? undefined : "thread",
+      tool_name: "opaque_fixture", tool_input: {},
+    }, {adapterUrl: "http://fixture", fetch: async () => new Response(JSON.stringify({decision: "deny",
+      classifier_context: variant === "missing-context" ? undefined : context,
+      risk_assessment: variant === "independent" ? {...risk, separate_approval_allowed: false,
+        final_denial_basis: "workflow_approval_policy"} : risk,
+    })), approvalOptions: {
+      environment: variant === "missing-runtime" ? {} : {STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/synthetic"},
+      readFile: async () => JSON.stringify({proxyUrl: "ws://127.0.0.1:1", proxyToken: "fixture"}),
+      fetch: async () => { approvals++; return new Response(JSON.stringify({action: "allow_once", ...context, state_epoch: 2})); },
+    }});
+    assert.equal(result.hookSpecificOutput.permissionDecision, "deny", variant);
+    assert.equal(approvals, variant === "mismatch" ? 1 : 0, variant);
+    if (variant === "mismatch") assert.match(result.hookSpecificOutput.permissionDecisionReason, /classifier_approval_identity_mismatch/);
+    if (variant === "missing-runtime") assert.match(result.hookSpecificOutput.permissionDecisionReason, /classifier_approval_runtime_unavailable/);
+  }
+});
 
 const codexRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

@@ -279,7 +279,9 @@ export class AdapterBridge {
           };
           const riskAssessment = result?.risk_assessment ?? result?.riskAssessment;
           const denied = result?.decision === "deny" || result?.decision === "block";
-          const classifierRework = denied
+          // Codex hooks submit every eligible invocation to the bound native
+          // approval controller, which alone owns its retry budget.
+          const classifierRework = this.host === "codex" ? null : denied
             ? this.classifierReworkGate.observeDenial({ receipt: riskAssessment, scope: classifierScope })
             : (this.classifierReworkGate.observeSuccess({ receipt: riskAssessment, scope: classifierScope }), null);
           if (classifierRework) result = { ...result, classifier_rework: classifierRework };

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
+import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
+import { AdapterBridge } from "../lib/adapter-bridge.mjs";
 
 const threadId = "classifier-fixture-thread";
 const token = "classifier-fixture-token";
@@ -164,6 +166,44 @@ test("classifier uncertainty reaches one exact native approval after two rewrite
 
   const consumed = await (await fixture.post(approvalRequest("three"))).json();
   assert.equal(consumed.action, "rework", "one approval cannot persist beyond its held invocation");
+});
+
+test("executor hook and bridge share the native controller budget and exact approval", async t => {
+  for (const action of ["accept", "decline", "cancel"]) {
+    await t.test(action, {timeout: 10_000}, async t => {
+      const fixture = await setup(t);
+      const {client, messages} = await fixture.connectAndOwn();
+      let invocation = 0;
+      const bridge = await new AdapterBridge({async call(name) {
+        assert.equal(name, "statewright_adapter_pre_tool");
+        const request = approvalRequest(String(++invocation));
+        return {decision: "deny", state: request.state,
+          classifier_context: {run_id: request.run_id, run_session_id: request.run_session_id,
+            state: request.state, state_epoch: request.state_epoch},
+          risk_assessment: request.classifier_receipt};
+      }}, {host: "codex", token: "bridge-test"}).start();
+      t.after(() => bridge.close());
+      const options = {adapterUrl: bridge.url, adapterToken: "bridge-test", approvalOptions: {
+        environment: {STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/synthetic/owner.json"},
+        readFile: async () => JSON.stringify({proxyUrl: fixture.endpoint.replace(/^http/, "ws"), proxyToken: token}),
+      }};
+      const invoke = () => handleExecutorHook("pre-tool", {session_id: threadId,
+        tool_name: "opaque_fixture", tool_input: {private: "never-forward-this"}}, options);
+      for (const attempt of [1, 2]) {
+        const result = await invoke();
+        assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+        assert.match(result.hookSpecificOutput.permissionDecisionReason, new RegExp(`Rework attempt ${attempt}/2`));
+        assert.doesNotMatch(JSON.stringify(result), /never-forward-this/);
+      }
+      const pending = invoke();
+      const modal = await until(() => messages.find(item => item.method === "mcpServer/elicitation/request"), "executor native form");
+      client.send(JSON.stringify({id: modal.id, result: {action}}));
+      const result = await pending;
+      assert.equal(result.hookSpecificOutput.permissionDecision, action === "accept" ? undefined : "deny");
+      assert.match(JSON.stringify(result), action === "accept" ? /allow_once/ : action === "decline" ? /human_declined/ : /human_cancelled/);
+      assert.doesNotMatch(JSON.stringify(messages), /never-forward-this/);
+    });
+  }
 });
 
 test("packaged symlinked approval CLI reaches native elicitation with S1 disabled", async t => {

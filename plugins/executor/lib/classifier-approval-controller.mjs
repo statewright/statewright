@@ -162,16 +162,29 @@ export class ClassifierApprovalController {
       run_id: request.runId, state: request.state, basis: request.basis,
       attempts: entry.attempts, max_reworks: this.maxReworks});
     try {
-      this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
+      const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
         message: `Statewright could not prove this exact invocation after ${this.maxReworks} rewrites.\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
         requestedSchema: {type: "object", properties: {}},
       }});
-      pending.presented = true;
+      // A queued send is not proof of presentation. Observe asynchronous
+      // transport failures without stalling abort/timeout processing.
+      void Promise.resolve(sent).then(() => {
+        pending.presented = true;
+        if (pending.settled) this.dismiss(pending);
+      }, () => this.finish(container, "deny", "native_approval_unavailable"));
     } catch {
       this.finish(container, "deny", "native_approval_unavailable");
     }
     return approvalAsk(pending.promise);
+  }
+
+  dismiss(pending) {
+    try {
+      void Promise.resolve(this.send({method: "serverRequest/resolved", params: {
+        threadId: pending.request.threadId, requestId: pending.requestId,
+      }})).catch(() => {});
+    } catch {}
   }
 
   finish(container, action, reason) {
@@ -189,11 +202,7 @@ export class ClassifierApprovalController {
       entry.denialReason = reason;
     }
     if (pending.presented) {
-      try {
-        this.send({method: "serverRequest/resolved", params: {
-          threadId: pending.request.threadId, requestId: pending.requestId,
-        }});
-      } catch {}
+      this.dismiss(pending);
     }
     this.emit({type: action === "allow_once"
       ? "classifier_human_approval_granted" : "classifier_human_approval_denied",

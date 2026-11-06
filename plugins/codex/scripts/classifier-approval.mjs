@@ -149,7 +149,7 @@ function isEntrypoint() {
   }
 }
 
-function failureReason(error) {
+export function classifierApprovalFailureReason(error) {
   const message = String(error?.message ?? "");
   if (message.length <= 128 && /^classifier_approval_(?:[a-z_]+|http_[0-9]{3})$/.test(message)) return message;
   if (["ENOENT", "EACCES", "EPERM"].includes(error?.code)) {
@@ -162,6 +162,6 @@ function failureReason(error) {
 if (isEntrypoint()) {
   main().catch(error => process.stdout.write(`${JSON.stringify({
     schema: "statewright/classifier-approval/v2", action: "unavailable",
-    reason: failureReason(error),
+    reason: classifierApprovalFailureReason(error),
   })}\n`));
 }

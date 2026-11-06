@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { NATIVE_STATEWRIGHT_GUIDANCE } from "./lib/desktop-runtime/native-statewright-guidance.mjs";
+import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "./classifier-approval.mjs";
 
 const TIMEOUT_MS = 5_000;
 
@@ -64,14 +65,19 @@ export function formatGuardDenial(result) {
     "incomplete_structural_evidence",
     "semantic_vector_unavailable",
     "semantic_assessment_incomplete",
+    "semantic_authorization_disabled",
   ].includes(basis)) {
-    display = "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation instead of a heredoc or inline interpreter; use the approved execution path when code must run.";
+    display = basis === "semantic_authorization_disabled"
+      ? "Statewright guard: denied · structural analysis did not establish the complete effect, and semantic authorization is disabled."
+      : "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation instead of a heredoc or inline interpreter; use the approved execution path when code must run.";
   } else if (basis === "deterministic_nonlocal_risk") {
     display = "Statewright guard: denied · known non-local effect. Next: use the approved execution path.";
   } else if (basis.startsWith("workflow_capability_")) {
     display = `Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants ${required}.`;
   } else if (basis.startsWith("classifier_policy_")) {
     display = `Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with ${required}.`;
+  } else if (basis === "workflow_approval_policy") {
+    display = `Statewright guard: denied · ${result.reason} Classifier approval cannot override this workflow restriction.`;
   } else {
     display = `Statewright guard: denied · classifier policy requires ${required}.`;
   }
@@ -81,10 +87,16 @@ export function formatGuardDenial(result) {
     display += ` System One signals: read-only ${percent(vector.read_only)}, write ${percent(vector.may_write)}, destructive ${percent(vector.destructive)}, external ${percent(vector.external_or_account_effect)}.`;
   }
   const rework = result?.classifier_rework ?? result?.classifierRework;
+  const approval = result?.classifier_approval;
   if (!delegationDenied && rework?.action === "rework") {
     display += ` Rework attempt ${rework.attempts}/${rework.max_reworks}; after this budget, the same classified intent must be sent for human approval.`;
   } else if (!delegationDenied && rework?.action === "approval_required") {
     display += " Rework budget exhausted; this exact classified intent now requires native human approval.";
+  }
+  if (approval?.action === "unavailable") {
+    display += ` Native approval was not presented: ${approval.reason}. A matching connected native owner and a gateway-bound approval receipt are required; do not retry this denied invocation or switch clients.`;
+  } else if (approval?.action === "deny") {
+    display += ` Native approval outcome: ${approval.reason}. The invocation remains denied.`;
   }
   return {
     display,
@@ -92,6 +104,7 @@ export function formatGuardDenial(result) {
       classifier_receipt: redactClassifierReceipt(risk),
       ...(delegation ? { managed_delegation: redactClassifierReceipt(delegation) } : {}),
       ...(rework ? { classifier_rework: redactClassifierReceipt(rework) } : {}),
+      ...(approval ? { classifier_approval: redactClassifierReceipt(approval) } : {}),
     }),
   };
 }
@@ -165,11 +178,38 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
 
     if (endpoint === "pre-tool") {
       if (isStatewrightTool(input.tool_name ?? "")) return null;
-      const result = await adapterCall("pre-tool", {
+      let result = await adapterCall("pre-tool", {
         tool_name: input.tool_name ?? "",
         tool_input: input.tool_input ?? {},
       }, options);
       if (result.decision === "deny" || result.decision === "block") {
+        const risk = result.risk_assessment ?? result.riskAssessment;
+        if (risk?.separate_approval_allowed === true) {
+          // Every eligible invocation reaches the SAME resident controller,
+          // including its two reworks. No per-hook or bridge retry counter.
+          const request = redactedApprovalRequest({
+            ...result.classifier_context,
+            thread_id: input.session_id,
+            classifier_receipt: risk,
+          });
+          let approval = { action: "unavailable", reason: "classifier_approval_decision_binding_missing" };
+          if (request) {
+            try {
+              approval = await requestClassifierApproval(request, options.approvalOptions);
+            } catch (error) {
+              approval = { action: "unavailable", reason: classifierApprovalFailureReason(error) };
+            }
+          }
+          if (approval.action === "allow_once") {
+            // Do not emit permissionDecision=allow: native platform approval
+            // and other plugins' guards remain independent requirements.
+            return { hookSpecificOutput: { hookEventName: "PreToolUse",
+              additionalContext: `[statewright] Human approved this exact invocation once. Native platform permissions still apply. Classifier approval receipt: ${JSON.stringify(approval)}`,
+            } };
+          }
+          result = { ...result, classifier_approval: approval,
+            classifier_rework: approval.action === "rework" ? approval : undefined };
+        }
         const denial = formatGuardDenial(result);
         return {
           hookSpecificOutput: {

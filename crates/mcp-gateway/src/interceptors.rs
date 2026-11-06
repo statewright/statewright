@@ -77,14 +77,50 @@ pub fn pre_call_check_with_pipeline(
     arguments: &serde_json::Value,
     pipeline: Option<&RiskPipelineAssessment>,
 ) -> PreCallDecision {
+    pre_call_check_impl(session, tool_name, arguments, pipeline, false)
+}
+
+/// Eligibility only, never execution authority. An uncertain effect cannot
+/// prove compatibility with a restrictive capability policy. Keep all other
+/// interceptors identical to the ordinary execution path.
+pub fn classifier_approval_policy_check(
+    session: &GatewaySession,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    pipeline: &RiskPipelineAssessment,
+) -> PreCallDecision {
+    if pipeline.resolve_effect() != ResolvedEffect::DenyUncertain {
+        return PreCallDecision::Block("Only classifier uncertainty is eligible for this approval path.".into());
+    }
+    pre_call_check_impl(session, tool_name, arguments, Some(pipeline), true)
+}
+
+fn pre_call_check_impl(
+    session: &GatewaySession,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    pipeline: Option<&RiskPipelineAssessment>,
+    approval_candidate: bool,
+) -> PreCallDecision {
     if let Some(reason) = crate::enforcement::unsupported_shell_dialect_reason(tool_name, arguments)
     {
         return PreCallDecision::Block(reason.into());
     }
     let state_def = match session.definition.states.get(&session.current_state) {
         Some(s) => s,
+        None if approval_candidate => return PreCallDecision::Block("Current workflow state is unavailable.".into()),
         None => return PreCallDecision::Allow,
     };
+
+    if approval_candidate && (state_def.intent.as_deref() == Some("exploratory_read_only")
+        || state_def.allowed_tools.is_some()
+        || state_def.disallowed_tools.as_ref().is_some_and(|tools| !tools.is_empty())
+        || pipeline.is_some_and(RiskPipelineAssessment::requires_explicit_execution_capability))
+    {
+        return PreCallDecision::Block(
+            "Classifier uncertainty cannot establish compatibility with this state's capability restrictions. Human classifier approval cannot grant missing workflow capabilities.".into(),
+        );
+    }
 
     let mut warnings: Vec<String> = Vec::new();
 
@@ -93,6 +129,9 @@ pub fn pre_call_check_with_pipeline(
     // guard must not exist only in a client hook.
     let bash_tool = state_def.allowed_commands_tool.as_deref().unwrap_or("Bash");
     if is_shell_tool(tool_name, bash_tool) {
+        if extract_command(arguments).is_none() {
+            return PreCallDecision::Block(format!("Shell invocation is missing command/cmd in state '{}'.", session.current_state));
+        }
         if let Some(blocked_env) = state_def
             .blocked_env
             .as_ref()
@@ -160,7 +199,7 @@ pub fn pre_call_check_with_pipeline(
     // 2. Always apply the operation classifier. Exploratory states use
     // the read capabilities as their effective shell policy even though their
     // MCP tool surface is selected by semantic intent rather than an allowlist.
-    if is_shell_tool(tool_name, bash_tool) {
+    if !approval_candidate && is_shell_tool(tool_name, bash_tool) {
         let Some(command) = extract_command(arguments) else {
             return PreCallDecision::Block(format!(
                 "Shell invocation is missing command/cmd in state '{}'.",

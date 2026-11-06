@@ -359,9 +359,19 @@ pub fn semantic_effect_risk_denial_details(
             basis,
             effect.required_authority(),
         )),
+        ResolvedEffect::DenyUncertain
+            if classifier_risk_tolerance(session) != ClassifierRiskTolerance::AssessedModerateLocal =>
+        {
+            Some(SemanticEffectDenial::new(
+                "Operation denied: this workflow's classifier policy requires structural or deterministic effect proof. Separate classifier approval cannot override that requirement.",
+                "classifier_policy_uncertain_resolution",
+                "structural_or_deterministic_effect_proof",
+            ))
+        }
         ResolvedEffect::DenyUncertain => Some(SemanticEffectDenial::new(
             format!(
-                "Operation denied: classifier axis '{basis}' left the effect uncertain after System One assessment. Required authority: {}. Inspect risk_assessment for the redacted bands and probabilities; do not retry the equivalent operation through another executable.",
+                "Operation denied: classifier axis '{basis}' left the effect uncertain (semantic status: {:?}). Required authority: {}. Inspect risk_assessment for redacted evidence and independent scores; do not retry the equivalent operation through another executable.",
+                pipeline.semantic.status,
                 effect.required_authority(),
             ),
             basis,

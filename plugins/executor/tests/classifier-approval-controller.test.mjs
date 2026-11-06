@@ -134,6 +134,34 @@ test("native errors, sender failures, abort, and close all deny", async () => {
   assert.equal((await aborting.completion).reason, "approval_request_aborted");
 });
 
+test("asynchronous send failure settles denial and a late send is dismissed after abort", async () => {
+  const failed = new ClassifierApprovalController({send: async () => { throw new Error("closed"); },
+    getState: currentState, maxReworks: 1});
+  await failed.begin(request());
+  const second = request({}, {invocation_fingerprint: "invocation_v1_second"});
+  const failure = await failed.begin(second);
+  assert.equal((await response(failure)).reason, "native_approval_unavailable");
+  assert.equal(failed.requests.size, 0);
+
+  let confirmSend;
+  const sent = [];
+  const controller = new ClassifierApprovalController({send: value => {
+    sent.push(value);
+    return value.method === "mcpServer/elicitation/request"
+      ? new Promise(resolve => { confirmSend = resolve; }) : Promise.reject(new Error("closed on dismissal"));
+  }, getState: currentState, maxReworks: 1});
+  await controller.begin(request());
+  const abort = new AbortController();
+  const pending = await controller.begin(second, {signal: abort.signal});
+  abort.abort();
+  assert.equal((await response(pending)).reason, "approval_request_aborted");
+  confirmSend();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(sent.filter(item => item.method === "serverRequest/resolved").length, 1);
+  controller.handleReply({id: sent[0].id, result: {action: "accept"}});
+  assert.equal(controller.requests.size, 0);
+});
+
 test("abort remains terminal while lifecycle telemetry is still pending", async () => {
   let releaseRecord;
   let recordEntered;

@@ -814,7 +814,9 @@ export async function startCodexAppServerRouteProxy({
         if (downstream.readyState !== WebSocket.OPEN) {
           throw new Error("Native Desktop connection is unavailable");
         }
-        downstream.send(JSON.stringify(value));
+        return new Promise((resolve, reject) => {
+          downstream.send(JSON.stringify(value), error => error ? reject(error) : resolve());
+        });
       },
       getState: readClassifierState,
       approvalTimeoutMs: classifierApprovalTimeoutMs,

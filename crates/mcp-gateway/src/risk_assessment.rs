@@ -367,6 +367,14 @@ impl<'a> FinalDecisionContext<'a> {
 }
 
 impl RiskPipelineAssessment {
+    /// These known effects require an explicit capability even in a normally
+    /// unrestricted state. Separate classifier approval cannot supply it.
+    pub fn requires_explicit_execution_capability(&self) -> bool {
+        self.deterministic.required_capability.is_some_and(|capability| {
+            capability.split('+').any(|part| matches!(part, "BoundedLocalExecution" | "GitLocalWrite"))
+        })
+    }
+
     fn reformulation_allowed(basis: &str) -> bool {
         matches!(
             basis,

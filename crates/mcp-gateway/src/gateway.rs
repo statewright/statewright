@@ -1434,10 +1434,58 @@ impl Gateway {
         }
         if let Some(denial) = enforcement::semantic_effect_risk_denial_details(&session, &pipeline)
         {
+            let mut classifier_context = None;
+            if pipeline.resolve_effect() == risk_assessment::ResolvedEffect::DenyUncertain
+                && denial.required_authority == "complete_structural_evidence_or_separate_approval"
+            {
+                // Classifier approval resolves uncertainty only. It must not
+                // skip the independent policy checks below this early return,
+                // nor implicitly transition the workflow to acquire authority.
+                let policy_name = enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+                    &session, tool_name, tool_input, Some(&pipeline),
+                    if registered_tool.is_some() {
+                        enforcement::AdapterToolOrigin::RegisteredUpstream
+                    } else {
+                        enforcement::AdapterToolOrigin::NativeUnregistered
+                    },
+                );
+                let policy_denial = match enforcement::enforce_tool_call(&session, &policy_name) {
+                    EnforcementDecision::Block { reason, .. } => Some(reason),
+                    EnforcementDecision::ImplicitTransition { .. } => Some(
+                        "Classifier approval cannot perform an implicit workflow transition.".into(),
+                    ),
+                    EnforcementDecision::Allow | EnforcementDecision::CheckpointReached { .. } => {
+                        match interceptors::classifier_approval_policy_check(&session, tool_name, tool_input, &pipeline) {
+                            PreCallDecision::Block(reason) => Some(reason),
+                            _ => None,
+                        }
+                    }
+                };
+                if let Some(reason) = policy_denial {
+                    return json!({
+                        "decision": "deny", "reason": reason, "state": session.current_state,
+                        "risk_assessment": pipeline.visible_json_for_denial(
+                            "workflow_approval_policy", "independent_workflow_policy_clearance",
+                        ),
+                    });
+                }
+                // Bind to the decision snapshot, not a later status read.
+                // Native thread identity is supplied by the host hook and
+                // independently checked by the owning approval controller.
+                if let Some(run_id) = &self.current_run_id {
+                    classifier_context = Some(json!({
+                        "run_id": run_id,
+                        "run_session_id": self.transport_session_id,
+                        "state": session.current_state,
+                        "state_epoch": self.usage.state_epoch(),
+                    }));
+                }
+            }
             return json!({
                 "decision": "deny",
                 "reason": denial.reason,
                 "state": session.current_state,
+                "classifier_context": classifier_context,
                 "risk_assessment": pipeline.visible_json_for_denial(
                     denial.basis,
                     denial.required_authority,
@@ -6806,6 +6854,65 @@ mod tests {
             combined.contains("planning"),
             "Checkpoint should mention current state"
         );
+    }
+
+    #[tokio::test]
+    async fn classifier_approval_context_requires_independent_policy_clearance() {
+        for (label, extra, command, eligible) in [
+            ("unrestricted", json!({}), "unknown_fixture --inspect", true),
+            ("explicit_tool", json!({"disallowed_tools":["exec_command"]}), "unknown_fixture", false),
+            ("explicit_family", json!({"disallowed_tools":["Bash"]}), "unknown_fixture", false),
+            ("capability_denial", json!({"disallowed_tools":["Write"]}), "unknown_fixture", false),
+            ("read_only", json!({"intent":"exploratory_read_only"}), "unknown_fixture", false),
+            ("restrictive_capabilities", json!({"allowed_tools":["Bash","Read"]}), "unknown_fixture", false),
+            ("state_low_local", json!({"classifier_policy":{"risk_tolerance":"low_local"}}), "unknown_fixture", false),
+            ("state_moderate_local", json!({"classifier_policy":{"risk_tolerance":"moderate_local"}}), "unknown_fixture", false),
+            ("inherited_low_local", json!({}), "unknown_fixture", false),
+            ("inherited_moderate_local", json!({}), "unknown_fixture", false),
+            ("state_override", json!({"classifier_policy":{"risk_tolerance":"assessed_moderate_local"}}), "unknown_fixture", true),
+            ("missing_bounded_capability", json!({}), "cargo test && unknown_fixture", false),
+            ("missing_git_capability", json!({}), "git commit -m fixture && unknown_fixture", false),
+            ("blocked_environment", json!({"blocked_env":["PRIVATE_ENV"]}), "unknown_fixture $PRIVATE_ENV", false),
+            ("final", json!({"type":"final"}), "unknown_fixture", false),
+            ("implicit_transition", json!({"allowed_tools":["Read"]}), "unknown_fixture", false),
+        ] {
+            let mut state = json!({"on":{"NEXT":"next"}});
+            state.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let definition: MachineDefinition = serde_json::from_value(json!({
+                "id":"approval-policy", "initial":"inspect",
+                "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "meta":{"classifier_policy":{"risk_tolerance": match label {
+                    "inherited_low_local" | "state_override" => "low_local",
+                    "inherited_moderate_local" => "moderate_local",
+                    _ => "assessed_moderate_local",
+                }}},
+                "states":{"inspect":state,"next":{"allowed_tools":["Bash","exec_command"]},"done":{"type":"final"}}
+            })).unwrap();
+            let manager = SessionManager::new();
+            manager.create("approval-session".into(), definition.clone());
+            let mut workflows = HashMap::new();
+            workflows.insert("approval-policy".into(), definition);
+            let mut gateway = Gateway::new(manager, UpstreamManager::mock(vec![]),
+                "approval-session".into(), workflows, Some("approval-policy".into()), String::new(), None);
+            gateway.current_run_id = Some("approval-run".into());
+            let epoch = gateway.usage.state_epoch();
+            let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
+            assert_eq!(result["decision"], "deny", "{label}: {result}");
+            assert_eq!(result["risk_assessment"]["separate_approval_allowed"], eligible, "{label}: {result}");
+            if label == "implicit_transition" {
+                assert_eq!(result["reason"], "Classifier approval cannot perform an implicit workflow transition.");
+            }
+            if eligible {
+                assert_eq!(result["classifier_context"]["run_id"], "approval-run");
+                assert_eq!(result["classifier_context"]["run_session_id"], gateway.transport_session_id);
+                assert_eq!(result["classifier_context"]["state"], "inspect");
+                assert_eq!(result["classifier_context"]["state_epoch"], epoch);
+            } else {
+                assert!(result["classifier_context"].is_null(), "{label}");
+            }
+            assert_eq!(gateway.session_manager.get("approval-session").unwrap().current_state, "inspect", "{label}");
+            assert_eq!(gateway.usage.state_epoch(), epoch, "{label}");
+        }
     }
 
     #[tokio::test]

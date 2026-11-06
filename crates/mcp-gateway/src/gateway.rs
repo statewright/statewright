@@ -7938,6 +7938,60 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "operator-supplied private ledger, static decision audit only"]
+    async fn private_ledger_decisions_without_execution() {
+        // Commands are data passed only to the pre-tool decision function.
+        // No upstream, model, shell, saved workflow, or real session is used.
+        assert!(!risk_assessment::SemanticShadowConfig::from_env().enabled,
+            "static ledger audit refuses an enabled semantic provider before reading inputs");
+        let path = std::env::var("STATEWRIGHT_STATIC_LEDGER").expect("ledger path required");
+        let bytes = std::fs::read(path).expect("read ledger");
+        assert!(bytes.len() <= 1024 * 1024);
+        let ledger = std::str::from_utf8(&bytes).expect("UTF-8 ledger");
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        for (index, command) in ledger.lines().enumerate() {
+            assert!(!command.is_empty() && command.len() <= 8192);
+            for (policy, capabilities) in [
+                ("unrestricted", None),
+                ("read", Some(json!(["Read", "Grep", "Glob", "Bash"]))),
+                ("validate", Some(json!(["Read", "Grep", "Glob", "Bash", "BoundedLocalExecution"]))),
+                ("implement", Some(json!(["Read", "Grep", "Glob", "Bash", "Write", "BoundedLocalExecution", "GitLocalWrite"]))),
+                ("explicit_deny", None),
+            ] {
+                let mut state = json!({"on":{"DONE":"done"}});
+                if let Some(capabilities) = capabilities { state["allowed_tools"] = capabilities; }
+                if policy == "explicit_deny" { state["disallowed_tools"] = json!(["Bash"]); }
+                let definition: MachineDefinition = serde_json::from_value(json!({
+                    "id":"static-ledger", "initial":"inspect",
+                    "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                    "states":{"inspect":state,"done":{"type":"final"}}
+                })).unwrap();
+                let manager = SessionManager::new();
+                manager.create("static-ledger-session".into(), definition.clone());
+                let mut workflows = HashMap::new();
+                workflows.insert("static-ledger".into(), definition);
+                let mut gateway = Gateway::new(manager, UpstreamManager::empty(),
+                    "static-ledger-session".into(), workflows, Some("static-ledger".into()), String::new(), None);
+                gateway.current_run_id = Some("static-ledger-run".into());
+                let epoch = gateway.usage.state_epoch();
+                let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
+                assert_eq!(result["risk_assessment"]["semantic_status"], "Disabled", "audit must not invoke a model");
+                assert_eq!(gateway.session_manager.get("static-ledger-session").unwrap().current_state, "inspect");
+                assert_eq!(gateway.usage.state_epoch(), epoch);
+                if policy == "explicit_deny" { assert_eq!(result["decision"], "deny"); }
+                println!("STATIC_LEDGER {}", json!({
+                    "ledger_line":index+1, "policy":policy,
+                    "command_fingerprint":uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, command.as_bytes()).to_string(),
+                    "decision":result["decision"], "risk":result["risk_assessment"],
+                    "approval_context_present":result["classifier_context"].is_object(),
+                    "execution":"not_executed", "context":"synthetic_no_filesystem_evidence"
+                }));
+            }
+        }
+        risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
     async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",

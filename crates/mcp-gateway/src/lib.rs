@@ -8,6 +8,7 @@ pub mod interceptors;
 pub mod protocol;
 pub mod remote;
 pub mod risk_assessment;
+pub mod semantic_contract;
 pub mod session;
 pub mod shell_ast_shadow;
 pub mod tool_intent;

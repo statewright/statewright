@@ -94,6 +94,8 @@ pub enum SemanticAssessorStatus {
     Malformed,
     QueueFull,
     Assessed,
+    /// Successfully evaluated for comparison only, never an enforcement signal.
+    ShadowOnly,
 }
 
 /// Staging-only controls for the semantic branch.  Production is disabled
@@ -102,6 +104,8 @@ pub enum SemanticAssessorStatus {
 pub struct SemanticShadowConfig {
     pub enabled: bool,
     pub authoritative_enabled: bool,
+    /// Experimental scores may be recorded, but cannot loosen or tighten policy.
+    pub evaluation_only: bool,
     pub queue_capacity: usize,
 }
 
@@ -112,9 +116,29 @@ impl SemanticShadowConfig {
         fallthrough_enabled: Option<&str>,
         capacity: Option<&str>,
     ) -> Self {
+        Self::from_provider_values(
+            environment,
+            shadow_enabled,
+            fallthrough_enabled,
+            capacity,
+            None,
+        )
+    }
+
+    fn from_provider_values(
+        environment: Option<&str>,
+        shadow_enabled: Option<&str>,
+        fallthrough_enabled: Option<&str>,
+        capacity: Option<&str>,
+        provider_kind: Option<&str>,
+    ) -> Self {
         let telemetry_enabled =
             matches!(environment, Some("staging")) && shadow_enabled_for(shadow_enabled);
-        let authoritative_enabled = shadow_enabled_for(fallthrough_enabled);
+        // New checkpoint families need held-out validation and provenance before
+        // their scores may authorize commands. Existing hosted opt-ins do not
+        // silently confer that authority on an experimental local replacement.
+        let authoritative_enabled = provider_kind.map(str::trim) != Some("laya_local")
+            && shadow_enabled_for(fallthrough_enabled);
         let enabled = telemetry_enabled || authoritative_enabled;
         let queue_capacity = capacity
             .and_then(|value| value.parse::<usize>().ok())
@@ -123,12 +147,13 @@ impl SemanticShadowConfig {
         Self {
             enabled,
             authoritative_enabled,
+            evaluation_only: provider_kind.map(str::trim) == Some("laya_local"),
             queue_capacity,
         }
     }
 
     pub fn from_env() -> Self {
-        Self::from_values(
+        Self::from_provider_values(
             std::env::var("STATEWRIGHT_ENV").ok().as_deref(),
             std::env::var("STATEWRIGHT_SEMANTIC_RISK_ASSESSMENT")
                 .ok()
@@ -137,6 +162,9 @@ impl SemanticShadowConfig {
                 .ok()
                 .as_deref(),
             std::env::var("STATEWRIGHT_SEMANTIC_RISK_QUEUE_CAPACITY")
+                .ok()
+                .as_deref(),
+            std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND")
                 .ok()
                 .as_deref(),
         )
@@ -661,6 +689,7 @@ struct SemanticProviderConfig {
 enum SemanticProviderKind {
     OpenAiCompatible,
     TypeSafeSystemOne,
+    LayaLocal,
 }
 
 impl SemanticProviderConfig {
@@ -699,6 +728,7 @@ impl SemanticProviderConfig {
                 SemanticProviderKind::TypeSafeSystemOne
             }
             Some("openai_compatible" | "openai") => SemanticProviderKind::OpenAiCompatible,
+            Some("laya_local") => SemanticProviderKind::LayaLocal,
             Some(_) => return None,
             None if endpoint.is_some() => SemanticProviderKind::OpenAiCompatible,
             None if typesafe_api_key.is_some_and(|value| !value.trim().is_empty()) => {
@@ -716,6 +746,21 @@ impl SemanticProviderConfig {
             .or_else(|| {
                 (kind == SemanticProviderKind::TypeSafeSystemOne).then(|| "jev-latest".to_owned())
             })?;
+        // Explicit local endpoint/model; never inherit a hosted credential or
+        // silently route a local-model request to a hosted service.
+        if kind == SemanticProviderKind::LayaLocal {
+            let url = reqwest::Url::parse(&endpoint).ok()?;
+            if !matches!(url.scheme(), "http" | "https")
+                || !matches!(url.host_str(), Some("127.0.0.1" | "[::1]"))
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || url.path() != "/v1/systemone"
+            {
+                return None;
+            }
+        }
         let timeout_ms = timeout_ms
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| (50..=5_000).contains(value))
@@ -724,7 +769,9 @@ impl SemanticProviderConfig {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned);
         let bearer_token = match kind {
-            SemanticProviderKind::OpenAiCompatible => provider_token,
+            SemanticProviderKind::OpenAiCompatible | SemanticProviderKind::LayaLocal => {
+                provider_token
+            }
             SemanticProviderKind::TypeSafeSystemOne => provider_token.or_else(|| {
                 typesafe_api_key
                     .filter(|value| !value.trim().is_empty())
@@ -839,6 +886,9 @@ async fn assess_with_provider(
     request: &SemanticAssessmentRequest,
 ) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
     let mut request_shape = serde_json::json!({
+        "contract": crate::semantic_contract::VERSION,
+        "effect_instructions": crate::semantic_contract::CONTEXT,
+        "evidence_completeness": "redacted_shape_only_operands_and_option_values_unavailable",
         "tool_family": request.tool_family, "tool_name": request.tool_name,
         "state_intent": request.state_intent, "argument_keys": request.argument_keys,
         "shell_shape": request.shell_shape,
@@ -857,26 +907,32 @@ async fn assess_with_provider(
                 "temperature": 0.0,
                 "max_tokens": 160,
                 "messages": [
-                    {"role":"system","content":"Return JSON only with independent numbers 0..1: read_only, may_write, reversible, destructive, irreversible, external_or_account_effect. Assess only the supplied redacted operation shape."},
+                    {"role":"system","content":crate::semantic_contract::json_prompt()},
                     {"role":"user","content": request_shape.to_string()}
                 ]
             }),
         ),
-        SemanticProviderKind::TypeSafeSystemOne => (
+        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal => (
             provider.endpoint.clone(),
             serde_json::json!({
                 "state": request_shape,
                 "model": provider.model,
-                "questions": {
-                    "read_only": {"type":"noul", "instructions":"Does this operation only observe state without changing local, remote, or account state?"},
-                    "may_write": {"type":"noul", "instructions":"May this operation change local files, processes, sessions, or configuration?"},
-                    "reversible": {"type":"noul", "instructions":"If this operation changes state, is the change locally reversible without external coordination?"},
-                    "destructive": {"type":"noul", "instructions":"May this operation delete, overwrite, corrupt, or terminate resources?"},
-                    "irreversible": {"type":"noul", "instructions":"May this operation cause an effect that cannot be reliably undone?"},
-                    "external_or_account_effect": {"type":"noul", "instructions":"May this operation change remote, network, hosted-service, or user-account state?"}
-                }
+                "questions": crate::semantic_contract::typed_questions()
             }),
         ),
+    };
+    // A loopback-only provider must not redirect its state to a remote host.
+    let local_client;
+    let client = if provider.kind == SemanticProviderKind::LayaLocal {
+        local_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .timeout(provider.timeout)
+            .build()
+            .map_err(|_| SemanticAssessorStatus::Unavailable)?;
+        &local_client
+    } else {
+        client
     };
     let mut call = client.post(url).json(&body);
     if let Some(token) = &provider.bearer_token {
@@ -914,7 +970,7 @@ async fn assess_with_provider(
             serde_json::from_str(content.trim().trim_matches('`').trim_start_matches("json"))
                 .map_err(|_| SemanticAssessorStatus::Malformed)?
         }
-        SemanticProviderKind::TypeSafeSystemOne => {
+        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal => {
             let envelope: TypeSafeProviderResponse =
                 serde_json::from_slice(&body).map_err(|_| SemanticAssessorStatus::Malformed)?;
             let answers = envelope.answers;
@@ -1685,7 +1741,7 @@ pub fn assess_pipeline(
     if let Some(request) = deterministic.ast_semantic_request.as_ref() {
         let _ = submit_semantic_pipeline(request);
     }
-    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
+    pipeline_from_config(deterministic, semantic, &config)
 }
 
 /// Async visible form for hook and adapter responses. It waits only for the
@@ -1795,7 +1851,7 @@ async fn assess_pipeline_visible_with_runtime(
     if let Some(request) = deterministic.ast_semantic_request.as_ref() {
         let _ = submit_semantic_pipeline_with(config, runtime, request);
     }
-    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
+    pipeline_from_config(deterministic, semantic, config)
 }
 
 /// Provider-injected form used by a future calibrated worker and focused
@@ -1842,7 +1898,23 @@ fn assess_pipeline_with_config<A: SemanticAssessor>(
             None => semantic_receipt(request, SemanticAssessorStatus::Unavailable),
         },
     };
-    pipeline_from_parts(deterministic, semantic, config.authoritative_enabled)
+    pipeline_from_config(deterministic, semantic, config)
+}
+
+fn pipeline_from_config(
+    deterministic: ShadowAssessment,
+    mut semantic: SemanticAssessmentReceipt,
+    config: &SemanticShadowConfig,
+) -> RiskPipelineAssessment {
+    if config.evaluation_only && semantic.status == SemanticAssessorStatus::Assessed {
+        // Carry isolation with the receipt through native-evidence rebuilding.
+        semantic.status = SemanticAssessorStatus::ShadowOnly;
+    }
+    pipeline_from_parts(
+        deterministic,
+        semantic,
+        config.authoritative_enabled && !config.evaluation_only,
+    )
 }
 
 fn pipeline_from_parts(
@@ -2085,6 +2157,9 @@ fn semantic_failsafe_floor(
     deterministic: RiskBand,
     semantic: &SemanticAssessmentReceipt,
 ) -> RiskBand {
+    if semantic.status == SemanticAssessorStatus::ShadowOnly {
+        return deterministic;
+    }
     let Some(vector) = semantic.vector.as_ref() else {
         return deterministic;
     };
@@ -3588,6 +3663,187 @@ mod tests {
             typesafe.bearer_token.as_deref(),
             Some("private-typesafe-key")
         );
+    }
+
+    #[test]
+    fn laya_local_requires_explicit_loopback_configuration_without_hosted_credentials() {
+        let config = |endpoint, model| {
+            SemanticProviderConfig::from_values(
+                Some("laya_local"),
+                endpoint,
+                model,
+                None,
+                Some("hosted-secret"),
+                None,
+            )
+        };
+        for endpoint in [
+            "http://127.0.0.1:8000/v1/systemone",
+            "http://[::1]:8000/v1/systemone",
+        ] {
+            let local = config(Some(endpoint), Some("typed-decisions")).unwrap();
+            assert_eq!(local.kind, SemanticProviderKind::LayaLocal);
+            assert!(local.bearer_token.is_none());
+        }
+        for endpoint in [
+            None,
+            Some("https://api.typesafe.ai/v1/systemone"),
+            Some("http://localhost:8000/v1/systemone"),
+            Some("http://127.0.0.1:8000/predict"),
+            Some("http://user:secret@127.0.0.1:8000/v1/systemone"),
+            Some("http://127.0.0.1:8000/v1/systemone?token=secret"),
+        ] {
+            assert!(config(endpoint, Some("typed-decisions")).is_none());
+        }
+        assert!(config(Some("http://127.0.0.1:8000/v1/systemone"), None).is_none());
+    }
+
+    #[test]
+    fn laya_local_is_shadow_only_even_with_existing_hosted_authorization_opt_in() {
+        for environment in [None, Some("production"), Some("staging")] {
+            for shadow in [None, Some("true")] {
+                let config = SemanticShadowConfig::from_provider_values(
+                    environment,
+                    shadow,
+                    Some("true"),
+                    Some("1"),
+                    Some("laya_local"),
+                );
+                assert!(!config.authoritative_enabled);
+                assert_eq!(
+                    config.enabled,
+                    environment == Some("staging") && shadow == Some("true")
+                );
+            }
+        }
+        let hosted = SemanticShadowConfig::from_provider_values(
+            Some("staging"),
+            None,
+            Some("true"),
+            None,
+            Some("typesafe_system_one"),
+        );
+        assert!(hosted.authoritative_enabled);
+    }
+
+    #[test]
+    fn laya_local_scores_cannot_allow_or_escalate_the_enforced_effect() {
+        let config = SemanticShadowConfig::from_provider_values(
+            Some("staging"),
+            Some("true"),
+            Some("true"),
+            None,
+            Some("laya_local"),
+        );
+        for (score, command) in [
+            (0.0, "unknown_program"),
+            (1.0, "unknown_program"),
+            (0.0, "task test"),
+            (1.0, "task test"),
+        ] {
+            let deterministic = assess_invocation(None, "Bash", &json!({"command": command}), None);
+            let semantic = SemanticAssessmentReceipt {
+                tool: "Bash".into(),
+                status: SemanticAssessorStatus::Assessed,
+                state_intent: None,
+                vector: Some(SemanticRiskVector {
+                    read_only: Probability::new(1.0 - score).unwrap(),
+                    may_write: Probability::new(score).unwrap(),
+                    reversible: Probability::new(1.0 - score).unwrap(),
+                    destructive: Probability::new(score).unwrap(),
+                    irreversible: Probability::new(score).unwrap(),
+                    external_or_account_effect: Probability::new(score).unwrap(),
+                }),
+            };
+            let pipeline = pipeline_from_config(deterministic, semantic, &config);
+            assert_eq!(pipeline.effective_risk, RiskBand::Moderate);
+            assert!(!pipeline.semantic_failsafe_escalated);
+            assert!(!pipeline.semantic_authorization_enabled);
+            assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyUncertain);
+            let rebuilt = apply_native_command_evidence(
+                pipeline,
+                None,
+                "Bash",
+                &json!({"command": command}),
+                Some(&json!({"complete":false})),
+            );
+            assert_eq!(rebuilt.semantic.status, SemanticAssessorStatus::ShadowOnly);
+            assert_eq!(rebuilt.effective_risk, RiskBand::Moderate);
+            assert!(!rebuilt.semantic_failsafe_escalated);
+            assert_eq!(rebuilt.resolve_effect(), ResolvedEffect::DenyUncertain);
+        }
+    }
+
+    #[tokio::test]
+    async fn laya_local_keeps_timeout_and_refuses_redirects() {
+        use axum::{Router, response::Redirect, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let followed = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/slow",
+                post(|| async {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    "{}"
+                }),
+            )
+            .route(
+                "/redirect",
+                post(|| async { Redirect::temporary("/target") }),
+            )
+            .route(
+                "/target",
+                post({
+                    let followed = followed.clone();
+                    move || {
+                        let followed = followed.clone();
+                        async move {
+                            followed.fetch_add(1, Ordering::SeqCst);
+                            "{}"
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let request = semantic_request(
+            None,
+            "read_file",
+            &json!({"path":"private-value"}),
+            None,
+            false,
+        );
+        let mut provider = SemanticProviderConfig {
+            kind: SemanticProviderKind::LayaLocal,
+            endpoint: format!("{base}/slow"),
+            model: "test".into(),
+            bearer_token: None,
+            timeout: std::time::Duration::from_millis(30),
+        };
+        // The supplied client's timeout is deliberately absent: the replacement
+        // local-only client must retain the bound itself.
+        let client = reqwest::Client::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            assess_with_provider(&client, &provider, &request),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Err(SemanticAssessorStatus::Timeout));
+        provider.endpoint = format!("{base}/redirect");
+        assert!(
+            assess_with_provider(&client, &provider, &request)
+                .await
+                .is_err()
+        );
+        assert_eq!(followed.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 
     #[tokio::test]

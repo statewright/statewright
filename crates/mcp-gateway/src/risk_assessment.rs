@@ -2830,6 +2830,32 @@ mod tests {
                 .contains("tests/a.spec.js")
         );
 
+        let selection = proof(vec![evidence_unit(
+            "npx vitest run --exclude '**/.agent-worktrees/**' tests/a.spec.js",
+            "node_modules/.bin/vitest run --exclude '**/.agent-worktrees/**' tests/a.spec.js",
+        )]);
+        assert_eq!(
+            apply_native_command_evidence(base(), None, "exec_command", &input, Some(&selection))
+                .resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution
+        );
+        for rewritten in [
+            "node_modules/.bin/vitest run --exclude '**/different/**' tests/a.spec.js",
+            "node_modules/.bin/vitest run --exclude '**/.agent-worktrees/**' --config=outside.js",
+            "node_modules/.bin/vitest run --exclude **/.agent-worktrees/** tests/a.spec.js",
+        ] {
+            let bad = proof(vec![evidence_unit(
+                "npx vitest run --exclude '**/.agent-worktrees/**' tests/a.spec.js",
+                rewritten,
+            )]);
+            assert_eq!(
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&bad))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{rewritten}"
+            );
+        }
+
         for (nested, expected) in [
             (
                 "echo x > output.txt",
@@ -3190,6 +3216,57 @@ mod tests {
                     ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain
                 ),
                 "{suffix}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn observation_effects_resolve_without_model_authorization() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        for command in [
+            "df -h /Volumes/fixture",
+            "cmp scripts/a.mjs /workspace/b.mjs",
+            "pgrep -fl fixture-worker",
+            "ps -Ao pid=,command= | rg 'fixture|other' || true",
+        ] {
+            let input = json!({"cmd":command});
+            let deterministic = assess_invocation(None, "exec_command", &input, None);
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            let pipeline = pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                false,
+            );
+            assert_eq!(
+                pipeline.resolve_effect(),
+                ResolvedEffect::ReadOnly,
+                "{command}"
+            );
+            assert!(!pipeline.semantic_authorization_enabled);
+            assert_eq!(pipeline.deterministic.risk, RiskBand::Low);
+            assert_eq!(pipeline.deterministic.exposure, ExposureBand::Local);
+        }
+        for command in [
+            "ps -E",
+            "pgrep --signal 9 worker",
+            "df -h && unknown_helper",
+            "ps -A && rm marker",
+        ] {
+            let input = json!({"cmd":command});
+            let deterministic = assess_invocation(None, "exec_command", &input, None);
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            let pipeline = pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                false,
+            );
+            assert!(
+                matches!(
+                    pipeline.resolve_effect(),
+                    ResolvedEffect::DenyUncertain | ResolvedEffect::DenyKnownRisk
+                ),
+                "{command}"
             );
         }
         set_test_shell_ast_authority_enabled(None);

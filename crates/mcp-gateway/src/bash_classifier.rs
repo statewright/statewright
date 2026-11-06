@@ -1338,6 +1338,148 @@ fn split_segments(command: &str) -> Vec<String> {
     segments
 }
 
+/// Shared literal option binding for observation adapters. Flags with values
+/// consume the remainder of a short cluster or the next argv; a flag-looking
+/// value is not silently reinterpreted as another option. Unknown options and
+/// malformed/missing values remain unresolved. This is not command authority.
+fn observation_operands<'a>(
+    args: &'a [String],
+    switches: &str,
+    valued: &str,
+    long_switches: &[&str],
+    long_valued: &[&str],
+) -> Option<Vec<&'a str>> {
+    if args.len() > 64
+        || args
+            .iter()
+            .any(|arg| arg.is_empty() || arg.len() > 1024 || arg.chars().any(char::is_control))
+    {
+        return None;
+    }
+    let mut operands = Vec::new();
+    let mut index = 0;
+    let mut end_options = false;
+    while let Some(arg) = args.get(index) {
+        index += 1;
+        if end_options {
+            operands.push(arg.as_str());
+            continue;
+        }
+        if arg == "--" {
+            end_options = true;
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            if let Some((name, value)) = long.split_once('=') {
+                if !long_valued.contains(&name) || value.is_empty() || value.starts_with('-') {
+                    return None;
+                }
+            } else if long_valued.contains(&long) {
+                let value = args.get(index)?;
+                if value.starts_with('-') {
+                    return None;
+                }
+                index += 1;
+            } else if !long_switches.contains(&long) {
+                return None;
+            }
+        } else if let Some(short) = arg.strip_prefix('-').filter(|value| !value.is_empty()) {
+            for (offset, flag) in short.char_indices() {
+                if valued.contains(flag) {
+                    let attached = &short[offset + flag.len_utf8()..];
+                    let value = if attached.is_empty() {
+                        let next = args.get(index)?;
+                        index += 1;
+                        next.as_str()
+                    } else {
+                        attached
+                    };
+                    if value.starts_with('-') {
+                        return None;
+                    }
+                    break;
+                }
+                if !switches.contains(flag) {
+                    return None;
+                }
+            }
+        } else {
+            operands.push(arg.as_str());
+        }
+    }
+    Some(operands)
+}
+
+/// Effect adapters grounded in the platform utility contracts (df/cmp/ps/
+/// pgrep man pages). Location and output sensitivity are not filesystem mutation;
+/// explicit environment dumps and unsupported modes stay outside this proof.
+fn observation_effect(executable: &str, args: &[String]) -> Option<OpClass> {
+    let operands = match executable {
+        "df" => observation_operands(
+            args,
+            "ahHiklPbm",
+            "",
+            &["human-readable", "si", "local", "inodes"],
+            &[],
+        )?,
+        "cmp" => observation_operands(
+            args,
+            "blsxhz",
+            "in",
+            &["silent", "quiet", "verbose", "print-bytes"],
+            &["ignore-initial", "bytes"],
+        )?,
+        // g/u change arity in legacy/BSD modes: -gE can mean -g -E,
+        // not a selector named E. Do not swallow sensitive flags as values.
+        "ps" => observation_operands(args, "AaCcdfhjlmMrSTvwXxL", "OoGptU", &[], &[])?,
+        "pgrep" => observation_operands(
+            args,
+            "aflnovxiqc",
+            "FGPUdgtus",
+            &[
+                "full",
+                "list-name",
+                "list-full",
+                "exact",
+                "count",
+                "ignore-case",
+                "newest",
+                "oldest",
+                "inverse",
+            ],
+            &[
+                "parent",
+                "uid",
+                "euid",
+                "pgroup",
+                "terminal",
+                "pidfile",
+                "delimiter",
+            ],
+        )?,
+        _ => return None,
+    };
+    let valid = match executable {
+        "df" => true,
+        "cmp" => {
+            (2..=4).contains(&operands.len())
+                && operands
+                    .iter()
+                    .skip(2)
+                    .all(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        }
+        // BSD ps also accepts unprefixed display flags. Exclude e/E, which
+        // disclose environment contents on some hosts; do not infer parity.
+        "ps" => operands.iter().all(|value| {
+            value.bytes().all(|byte| byte.is_ascii_digit())
+                || value.chars().all(|flag| "aAcfhlmruvwx".contains(flag))
+        }),
+        "pgrep" => !operands.is_empty(),
+        _ => false,
+    };
+    valid.then_some(OpClass::FileRead)
+}
+
 /// Classify a single command segment (no pipes, no `&&`/`;`).
 fn classify_segment(segment: &str) -> OpClass {
     // `command -v NAME` queries shell resolution; it does not invoke NAME.
@@ -1374,6 +1516,10 @@ fn classify_segment(segment: &str) -> OpClass {
         "cat" | "head" | "tail" | "nl" => {
             // cat with redirect is FileWrite — handled by has_output_redirect
             OpClass::FileRead
+        }
+
+        "df" | "cmp" | "ps" | "pgrep" if git_command_tokens(segment).is_some() => {
+            observation_effect(base_cmd, &invocation.args).unwrap_or(OpClass::Passthrough)
         }
 
         // Content search
@@ -1484,7 +1630,9 @@ fn classify_segment(segment: &str) -> OpClass {
         // intentionally not generic interpreter/build-tool permission: every
         // accepted argv is literal and bounded, and the normalized intent
         // still requires explicit workflow capability.
-        _ if local_execution_intent(&invocation, base_cmd).is_some() => {
+        _ if local_execution_intent(&invocation, base_cmd).is_some()
+            && git_command_tokens(segment).is_some() =>
+        {
             OpClass::BoundedLocalExecution
         }
 
@@ -1921,9 +2069,39 @@ fn bounded_vitest_local_execution(invocation: &LiteralInvocation) -> bool {
     let [operation, paths @ ..] = invocation.args.as_slice() else {
         return false;
     };
-    invocation.executable == "node_modules/.bin/vitest"
-        && operation == "run"
-        && paths.iter().all(|path| {
+    if invocation.executable != "node_modules/.bin/vitest" || operation != "run" || paths.len() > 64
+    {
+        return false;
+    }
+    let pattern = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 256
+            && !value.starts_with(['-', '/'])
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || "_.*?[]!/-".contains(ch))
+            && !value.split('/').any(|part| part == "..")
+    };
+    let mut index = 0;
+    while let Some(path) = paths.get(index) {
+        index += 1;
+        if path == "--exclude" {
+            let Some(value) = paths.get(index) else {
+                return false;
+            };
+            index += 1;
+            if !pattern(value) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(value) = path.strip_prefix("--exclude=") {
+            if !pattern(value) {
+                return false;
+            }
+            continue;
+        }
+        if !({
             [
                 ".test.js",
                 ".test.ts",
@@ -1945,7 +2123,11 @@ fn bounded_vitest_local_execution(invocation: &LiteralInvocation) -> bool {
             .iter()
             .any(|suffix| bounded_relative_path(path, suffix))
                 && !path.starts_with('-')
-        })
+        }) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Admit the conventional argument-free Vite production build after a native
@@ -2338,6 +2520,63 @@ mod tests {
     #[test]
     fn mkdir_is_a_bounded_local_write() {
         assert_eq!(classify("mkdir -p docs/plans"), vec![OpClass::LocalWrite]);
+    }
+
+    #[test]
+    fn observation_families_share_literal_option_binding_without_execution_authority() {
+        for command in [
+            "df -h /Volumes/fixture",
+            "df -ki .",
+            "df -- /tmp",
+            "cmp scripts/a.mjs /workspace/b.mjs",
+            "cmp -s a b",
+            "cmp -n 64 a b",
+            "ps -Ao pid=,command=",
+            "ps -ax -o pid,comm",
+            "ps -p123 -o comm=",
+            "pgrep -fl fixture-worker",
+            "pgrep -P 123 -x node",
+            "command -- /usr/bin/pgrep -f 'fixture worker'",
+            "ps -Ao pid=,command= | rg 'fixture|other' || true",
+        ] {
+            assert!(readonly_capabilities(command).is_some(), "{command}");
+            assert!(
+                crate::shell_ast_shadow::assess(command)
+                    .classes
+                    .iter()
+                    .all(|class| matches!(
+                        class,
+                        OpClass::FileRead | OpClass::ContentSearch | OpClass::SafeOutput
+                    )),
+                "{command}"
+            );
+        }
+        for command in [
+            "./pgrep -fl worker",
+            "PATH=/tmp ps -A",
+            "pgrep $(payload)",
+            "pkill -fl worker",
+            "pgrep --signal 9 worker",
+            "pgrep -P",
+            "ps -o",
+            "ps e",
+            "ps -E",
+            "ps -gE",
+            "ps -uE",
+            "ps -ge",
+            "ps -ue",
+            "ps auxe",
+            "df --sync",
+            "df --unknown",
+            "cmp --output=result a b",
+            "cmp a",
+            "cmp -n",
+            "cmp a b > result",
+            "ps -A && rm -rf fixture",
+            "df -h; curl https://example.invalid",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
     }
 
     #[test]
@@ -2961,6 +3200,8 @@ mod tests {
     fn local_vitest_family_has_explicit_adversarial_neighbors() {
         for command in [
             "node_modules/.bin/vitest run",
+            "node_modules/.bin/vitest run --exclude '**/.agent-worktrees/**' tests/a.spec.js",
+            "node_modules/.bin/vitest run '--exclude=**/generated/**' tests/a.spec.js",
             "node_modules/.bin/vitest run pb/hooks/__tests__/example.spec.js tests/a.test.ts",
         ] {
             assert_eq!(
@@ -2975,6 +3216,12 @@ mod tests {
             "npx playwright test",
             "task test:unit",
             "node_modules/.bin/vitest --watch",
+            "node_modules/.bin/vitest run --exclude **/generated/** tests/a.spec.js",
+            "node_modules/.bin/vitest run --exclude --config=outside.js",
+            "node_modules/.bin/vitest run --exclude ''",
+            "node_modules/.bin/vitest run --exclude '../outside/**'",
+            "node_modules/.bin/vitest run --exclude '**/ok/**' --watch",
+            "node_modules/.bin/vitest run --exclude '**/ok/**' --reporter=custom.js",
             "node_modules/.bin/vitest run --config=outside.js",
             "node_modules/.bin/vitest run --reporter=json",
             "node_modules/.bin/vitest run ../outside.spec.js",

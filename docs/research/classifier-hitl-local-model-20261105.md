@@ -247,3 +247,47 @@ entry was removed and no denied command was executed. Pipeline rejection and
 explicit cwd requirements deliberately retain unsupported cases for an honest
 approval/diagnostic path. Current staging bindings still name an older source
 candidate; no deployment was performed using those stale bindings.
+
+### Literal observation and selection-option checkpoint
+
+The observation adapters now share bounded, literal option/value binding for
+disk statistics, file comparison and process observation. They recognize short
+flag clusters and attached values without granting authority by executable name
+alone. Unsupported options, substitutions, untrusted executable paths, output
+redirects and destructive companions retain their independent classification.
+The local utility manuals supply the option contracts; observation of location
+or process metadata is not itself workload mutation. Existing Read capability
+and policy checks still apply.
+
+Independent read-only review identified mode-dependent `ps` arity: `-gE` and
+`-uE` may expose environment values in legacy mode rather than select a value
+named E. Both ambiguous options were removed from the accepted subset, with
+negative regressions for upper/lowercase environment flags. This is a bounded
+adapter, not a claim to understand every CLI or platform mode.
+
+The installed-Vitest evidence path now retains repeated `--exclude` selection
+values (separate or equals form). Its contract follows the
+[Vitest CLI reference](https://vitest.dev/guide/cli.html#exclude). Literal quoted
+globs remain distinct from unquoted shell expansion; the latter cannot acquire
+trusted runner evidence. Configuration, reporter/plugin injection, watch mode,
+changed selection values and paths outside the evidence root remain excluded.
+Runner identity, cwd, ordered composition, freshness, capability and approval
+requirements are unchanged. Test execution is not read-only authorization.
+
+Fresh checks after the reviewer-driven `ps` correction:
+
+- Gateway library: **418 passed, 3 ignored, 0 failed**; existing warnings remain.
+- Collector and both generated-runtime bundle contracts: **19 passed, 0 failed**.
+- Earlier collector/package coverage on this delta: **23 passed, 0 failed**.
+- Static audit of all 18 denial-ledger strings: completed without executing
+  commands or evaluating live authorization. Four observations now have read
+  effects; installed-runner cases still need their actual local evidence.
+
+Retained red evidence: the first new observation regression failed on `df`;
+the first Vitest exclusion regression failed to collect evidence. A subsequent
+observation assertion incorrectly demanded all legacy classifications be reads
+even for the safe `true` companion; it was corrected to check the authoritative
+AST classes. No ledger entries were removed. Source tests do not establish
+native approval dialogs, waiting notifications, installation or staging health.
+System One scores remain uncalibrated judgments; ADR wording no longer implies
+an established calibration result. No thresholds or enforcement modes changed.

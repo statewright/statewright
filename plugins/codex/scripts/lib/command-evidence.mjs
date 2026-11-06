@@ -18,6 +18,12 @@ const fail = reason => { throw new Error(reason); };
 // effect classification; this parser never executes or rewrites shell syntax.
 export function literalArgv(command) {
   if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00\\$`;&|<>()]/.test(command)) return null;
+  let quote = null;
+  for (const char of command) {
+    if (quote) { if (char === quote) quote = null; }
+    else if (char === "'" || char === '"') quote = char;
+    else if ("*?[]{}~".includes(char)) return null;
+  }
   const words = command.match(/(?:[^\s'"]+|'[^']*'|"[^"]*")+/g);
   if (!words || words.join(" ").replace(/\s/g, "") !== command.replace(/\s/g, "")) return null;
   return words.map(word => word.replace(/'([^']*)'|"([^"]*)"/g, (_, a, b) => a ?? b));
@@ -72,6 +78,23 @@ function inside(root, path) {
   const rel = relative(root, path);
   return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../");
 }
+
+// Selection-only options do not add execution authority. Keep their values
+// bound and quote them again when rendering the resolved installed launcher.
+function vitestSelectionArgs(args) {
+  if (args[0] !== "run" || args.length > 65) return false;
+  const pattern = value => value && value.length <= 256 && !value.startsWith("-") && !isAbsolute(value)
+    && /^[a-zA-Z0-9_.*?\[\]!\/-]+$/.test(value) && !value.split("/").includes("..");
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--exclude") { if (!pattern(args[++i])) return false; }
+    else if (arg.startsWith("--exclude=")) { if (!pattern(arg.slice(10))) return false; }
+    else if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.\/-]*\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg)
+      || arg.split("/").some(part => ["", ".", ".."].includes(part))) return false;
+  }
+  return true;
+}
+const shellLiteral = value => /^[a-zA-Z0-9_./=-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 
 // Candidate boundaries only, not shell authority. Rust independently parses
 // the full original AST and requires exactly these leaves, in this order.
@@ -191,11 +214,9 @@ export async function collectCommandEvidence(toolName, input, { cwd = process.cw
         // A bare shell/Taskfile `vitest` may resolve to an unrelated global bin.
         if (tokens[0] === "vitest" && !stack.some(item => item.startsWith("script:"))) fail("runner_path_unresolved");
         const args = tokens[0] === "npx" ? tokens.slice(2) : tokens.slice(1);
-        if ((tokens[0] === "npx" && tokens[1] !== "vitest") || args[0] !== "run"
-            || args.slice(1).some(arg => !/^[a-zA-Z0-9_][a-zA-Z0-9_.\/-]*\.(?:test|spec)\.[cm]?[jt]sx?$/.test(arg)
-              || arg.split("/").some(part => ["", ".", ".."].includes(part)))) fail("network_runner_unresolved");
+        if ((tokens[0] === "npx" && tokens[1] !== "vitest") || !vitestSelectionArgs(args)) fail("network_runner_unresolved");
         await installedVitest(activeRoot);
-        evidence.commands.push({ original: text, resolved: ["node_modules/.bin/vitest", ...args].join(" "), cwd: unitCwd(activeRoot), invocation: parsed });
+        evidence.commands.push({ original: text, resolved: ["node_modules/.bin/vitest", ...args].map(shellLiteral).join(" "), cwd: unitCwd(activeRoot), invocation: parsed });
       } else if (tokens?.[0] === "node") {
         const [entrypoint, ...args] = tokens.slice(1);
         if (!entrypoint || entrypoint.startsWith("-") || args.length > 64

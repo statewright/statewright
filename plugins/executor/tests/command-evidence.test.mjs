@@ -106,6 +106,27 @@ test("bare npx needs an installed matching local Vitest binary", async t => {
   }
 });
 
+test("Vitest selection options retain literal glob values and installed-runner binding", async t => {
+  const root = await fixture(t);
+  await vitest(root);
+  for (const selection of ["--exclude '**/.agent-worktrees/**'", "'--exclude=**/generated/**'", "--exclude '**/one/**' --exclude '**/two/**'"]) {
+    const command = `npx vitest run ${selection} tests/a.spec.js`;
+    const proof = await inspect(root, command);
+    assert.equal(proof.complete, true, command);
+    const expected = literalInvocation(command);
+    const resolved = literalInvocation(proof.commands[0].resolved);
+    assert.deepEqual(resolved.args, expected.args.slice(1));
+    assert.equal(resolved.executable, "node_modules/.bin/vitest");
+    assert.ok(proof.files.length >= 2);
+  }
+  for (const selection of ["--exclude", "--exclude --config", "--exclude=", "--exclude ../outside", "--exclude /outside",
+    "--exclude '**/ok/**' --reporter=custom.js", "--exclude '**/ok/**' --config=other.js", "--exclude '**/ok/**' --watch"]) {
+    assert.equal((await inspect(root, `npx vitest run ${selection}`)).complete, false, selection);
+  }
+  assert.equal(await inspect(root, "npx vitest run --exclude **/generated/** tests/a.spec.js"), null);
+  assert.equal(await inspect(root, "npx vitest run --exclude '${SECRET}' tests/a.spec.js"), null);
+});
+
 test("collector entrypoint runs through a symlinked plugin cache", async t => {
   const root = await fixture(t);
   await vitest(root);

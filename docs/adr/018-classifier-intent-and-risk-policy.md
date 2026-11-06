@@ -34,7 +34,7 @@ effects.
    State scope overrides workflow scope. Supported values are:
    - `low_local`: structurally proven local reads only;
    - `moderate_local`: proven reads and deterministic local writes;
-   - `assessed_moderate_local`: the existing calibrated System One path may
+   - `assessed_moderate_local`: the existing System One assessment path may
      resolve uncertainty to a bounded local read or reversible local write.
 5. Keep `assessed_moderate_local` as the compatibility default. No tolerance
    admits a known high/critical, destructive, external, irreversible, or

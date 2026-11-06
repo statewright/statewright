@@ -381,25 +381,25 @@ pub async fn start_remote_server(config: RemoteConfig) -> Result<std::net::Socke
     let authorization_server_url =
         normalize_public_origin(&config.authorization_server_url, "authorization server URL")?;
 
-    // Connect to Postgres for step metering if DATABASE_URL provided
+    // Configured storage also owns approval recovery and run checkpoints.
+    // A transient startup outage must not silently select memory-only operation
+    // for this process lifetime and report a healthy but unrecoverable gateway.
     #[cfg(feature = "metering")]
     let db_pool: crate::DbPool = if let Some(ref db_url) = config.database_url {
-        match sqlx::postgres::PgPoolOptions::new()
+        const UNAVAILABLE: &str = "Configured durable storage unavailable; remote gateway startup refused. Check database availability and configuration.";
+        if db_url.trim().is_empty() {
+            return Err(UNAVAILABLE.into());
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(db_url)
             .await
-        {
-            Ok(pool) => {
-                tracing::info!("Step metering: connected to Postgres");
-                Some(pool)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Step metering: failed to connect to Postgres: {e}. Metering disabled."
-                );
-                None
-            }
-        }
+            // Neither the configured DSN nor driver error may escape this
+            // boundary. The normal process supervisor owns startup retries.
+            .map_err(|_| UNAVAILABLE.to_owned())?;
+        tracing::info!("Durable gateway storage connected to Postgres");
+        Some(pool)
     } else {
         tracing::info!("Step metering: no DATABASE_URL, metering disabled");
         None
@@ -2354,6 +2354,77 @@ mod tests {
         assert_eq!(manager.get(&client_a).unwrap().current_state, "complete");
         assert_eq!(manager.get(&client_b).unwrap().current_state, "planning");
         assert_eq!(manager.get(&client_b).unwrap().context, json!({}));
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    async fn configured_storage_failure_prevents_remote_startup_without_leaking_dsn() {
+        for database_url in [
+            "postgres://fixture:synthetic-secret@127.0.0.1:not-a-port/db",
+            "",
+        ] {
+            let result = start_remote_server(RemoteConfig {
+                pb_url: "http://127.0.0.1:1".into(),
+                // A different bind failure proves storage was silently ignored.
+                listen_addr: "not-a-listen-address".into(),
+                database_url: Some(database_url.into()),
+                public_url: "https://mcp.statewright.example".into(),
+                authorization_server_url: "https://statewright.example".into(),
+            })
+            .await;
+            assert_eq!(
+                result.unwrap_err(),
+                "Configured durable storage unavailable; remote gateway startup refused. Check database availability and configuration."
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfigured_storage_preserves_explicit_memory_only_remote_startup() {
+        let address = start_remote_server(RemoteConfig {
+            pb_url: "http://127.0.0.1:1".into(),
+            listen_addr: "127.0.0.1:0".into(),
+            database_url: None,
+            public_url: "https://mcp.statewright.example".into(),
+            authorization_server_url: "https://statewright.example".into(),
+        })
+        .await
+        .unwrap();
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/health"))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[cfg(feature = "metering")]
+    #[tokio::test]
+    async fn configured_storage_connection_refusal_is_bounded_and_never_serves() {
+        // Reserve then close an ephemeral loopback port. No external database,
+        // live credentials, server setup or persisted table is involved.
+        let database = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = database.local_addr().unwrap();
+        drop(database);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            start_remote_server(RemoteConfig {
+                pb_url: "http://127.0.0.1:1".into(),
+                listen_addr: "not-a-listen-address".into(),
+                database_url: Some(format!(
+                    "postgres://fixture:synthetic-secret@{address}/db?sslmode=disable"
+                )),
+                public_url: "https://mcp.statewright.example".into(),
+                authorization_server_url: "https://statewright.example".into(),
+            }),
+        )
+        .await
+        .expect("configured storage failure must be bounded");
+        assert_eq!(
+            result.unwrap_err(),
+            "Configured durable storage unavailable; remote gateway startup refused. Check database availability and configuration."
+        );
     }
 
     #[tokio::test]

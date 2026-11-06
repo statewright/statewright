@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { NATIVE_STATEWRIGHT_GUIDANCE, nativeWorkflowEntryPrompt } from "../lib/native-statewright-guidance.mjs";
+import { NATIVE_STATEWRIGHT_GUIDANCE, nativeWorkflowEntryPrompt, nativeApprovalResultPrompt } from "../lib/native-statewright-guidance.mjs";
 import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
 
 test("native connector guidance identifies exact native tools and forbids silent web/file fallback", () => {
@@ -12,6 +12,16 @@ test("native connector guidance identifies exact native tools and forbids silent
     "infer live state from saved files", "does not activate a workflow"]) assert.ok(text.includes(term), term);
   assert.ok(nativeWorkflowEntryPrompt("intake").includes(text));
   assert.match(nativeWorkflowEntryPrompt("intake"), /Call the advertised local statewright_get_state tool first/);
+});
+
+test("approval outcome guidance requires a complete applied release, never a still-pending hint", () => {
+  const release={approvalId:'apr',fromState:'review',state:{run_id:'run',run_session_id:'session',state:'review',pending_approval:null}};
+  assert.match(nativeApprovalResultPrompt(release),/approved and applied/);
+  for(const changed of [{...release,approvalId:null},{...release,state:{...release.state,run_id:null}},
+    {...release,state:{...release.state,run_session_id:null}},
+    {...release,state:{...release.state,pending_approval:{approval_id:'apr'}}}]) {
+    assert.throws(()=>nativeApprovalResultPrompt(changed),/no verified applied decision/);
+  }
 });
 
 for (const state of [{state: "implement"}, {state: "complete", isFinal: true},

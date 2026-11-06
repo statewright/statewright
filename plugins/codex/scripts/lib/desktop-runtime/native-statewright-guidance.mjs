@@ -4,3 +4,19 @@ export const NATIVE_STATEWRIGHT_GUIDANCE = "Statewright connector selection for 
 export function nativeWorkflowEntryPrompt(state) {
   return `Statewright entered '${state}'. ${NATIVE_STATEWRIGHT_GUIDANCE} Call the advertised local statewright_get_state tool first, then follow the current phase's tools and transitions.`;
 }
+
+// Only a release already verified by CodexApprovalGate may call this formatter.
+// This reports a decision; it does not authorize another invocation or workflow.
+export function nativeApprovalResultPrompt({approvalId, state, fromState}) {
+  if (![approvalId, state?.run_id, state?.run_session_id, fromState, state?.state]
+      .every(value => typeof value === "string" && value.length > 0) || state.pending_approval) {
+    throw new Error("Approval continuation has no verified applied decision identity");
+  }
+  const outcome = {type:"statewright_approval_result", approval_id:approvalId,
+    run_id:state.run_id, run_session_id:state.run_session_id, status:"approved",
+    applied:true, pending:false, from_state:fromState, to_state:state.state};
+  return `Verified Statewright human-review result: ${JSON.stringify(outcome)}\n` +
+    "This exact human review was approved and applied; it is no longer pending, including when the transition returns to the same state. " +
+    "Do not infer an unresolved approval from earlier conversation. Approval does not complete the task or expand its authorized scope. " +
+    nativeWorkflowEntryPrompt(state.state);
+}

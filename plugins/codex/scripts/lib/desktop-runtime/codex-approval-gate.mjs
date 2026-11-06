@@ -133,7 +133,7 @@ export class CodexApprovalGate {
       if (autoContinue && !state.is_final) {
         await this.assertOwner(threadId);
         await this.continueApproved({ threadId, state, fromState: snapshot.pending_approval.from_state,
-          goal: entry.goal, check });
+          approvalId:ticket.approval_id, goal: entry.goal, check });
         check();
       }
       if (!retainCheckpoint) await this.service.clear(threadId, ticket.approval_id);

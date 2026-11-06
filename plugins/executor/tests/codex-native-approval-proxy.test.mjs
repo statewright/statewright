@@ -26,7 +26,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai", rejectObjectiveGoal = false, approvedState = destination } = {}) {
+async function fixture(t, { withService = true, delayedIdle = false, nativeGoal = null, startProvider = "openai", rejectObjectiveGoal = false, rejectInjection = false, pendingState = pending, approvedState = destination } = {}) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await once(server, "listening");
   const calls = [], timeline = [], errors = [], statuses = [], serviceCalls = [], injected = [], readStatuses = [], idleEvents = [];
@@ -80,6 +80,9 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
       if (request.method === "thread/settings/update") {
         settings = structuredClone(request.params);
         return reply({});
+      }
+      if (request.method === "thread/inject_items") {
+        return rejectInjection ? reject({code:-32601,message:"History injection unavailable"}) : reply({});
       }
       if (request.method === "thread/read") {
         readStatuses.push({ status: active ? "active" : "idle", decision });
@@ -200,10 +203,10 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     await rpc("thread/start");
     const { turn } = await rpc("turn/start", { threadId, input: [{ type: "text", text: "Fixture request" }] });
     await until(() => visible.some(message => message.method === "turn/started" && message.params.turn.id === turn.id), "origin turn");
-    state = structuredClone(pending);
+    state = structuredClone(pendingState);
     const completion = { method: "item/completed", params: { threadId, turnId: turn.id,
       item: { id: "fixture-transition", type: "mcpToolCall", server: "statewright",
-        tool: "statewright_transition", result: { structuredContent: structuredClone(pending) } } } };
+        tool: "statewright_transition", result: { structuredContent: structuredClone(pendingState) } } } };
     send(completion);
     await until(() => visible.some(message => message.method === formMethod), "native approval form");
     return completion;
@@ -219,7 +222,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     get decision() { return decision; },
     get goal() { return goal; },
     get settings() { return settings; },
-    armPending() { state = structuredClone(pending); },
+    armPending() { state = structuredClone(pendingState); },
     setState(value) { state = structuredClone(value); },
     changeRoot() { owned = false; },
     setRoute(value) { routes = [value]; },
@@ -394,7 +397,9 @@ test("beforeTurn releases native turn/start with the authoritative destination w
   assert.equal(released.id, id);
   assert.equal(released.params.model, "fixture-destination-model");
   assert.equal(released.params.effort, destination.thinking_level);
-  assert.equal(released.params.input[0].text, "Preserve this gated user request");
+  assert.equal(released.params.input.length, 2);
+  assert.match(released.params.input[0].text, /fixture-approval/);
+  assert.deepEqual(released.params.input[1], {type:"text",text:"Preserve this gated user request"});
   assert.equal(f.saved.size, 0);
 });
 
@@ -588,6 +593,11 @@ test("observed approval pauses a real active goal and resumes it only after dest
   const settingsIndex = f.calls.findIndex(message => message.method === "thread/settings/update");
   const activeIndex = f.calls.findIndex(message => message.method === "thread/goal/set" && message.params.status === "active");
   assert.ok(pauseIndex >= 0 && settingsIndex > pauseIndex && activeIndex > settingsIndex);
+  const outcomeIndex = f.calls.findIndex(message => message.method === "thread/inject_items");
+  assert.ok(outcomeIndex > settingsIndex && outcomeIndex < activeIndex,
+    "verified approval outcome must reach model history before the goal resumes");
+  assert.match(JSON.stringify(f.calls[outcomeIndex].params.items), /fixture-approval/);
+  assert.match(JSON.stringify(f.calls[outcomeIndex].params.items), /approved/);
   assert.equal(f.settings.model, "fixture-destination-model");
   assert.equal(f.settings.effort, destination.thinking_level);
   assert.equal(f.goal.status, "active");
@@ -689,9 +699,51 @@ test("native approval forwards completed evidence before interrupt and consumes 
   assert.equal(continuation.params.model, "fixture-destination-model");
   assert.equal(continuation.params.effort, destination.thinking_level);
   assert.match(continuation.params.input[0].text, /entered 'implement'/);
+  assert.match(continuation.params.input[0].text, /fixture-approval/);
+  assert.match(continuation.params.input[0].text, /approved and applied/);
+  assert.match(continuation.params.input[0].text, /no longer pending/);
   assert.equal(f.injected[0].route.state, destination.state);
   assert.equal(f.saved.size, 0);
   assert.deepEqual(f.errors, []);
+});
+
+for (const withGoal of [false,true]) test(`same-state approved review reports its applied outcome before inference (goal=${withGoal})`, async t => {
+  const f = await fixture(t, {nativeGoal:withGoal ? {...pausedGoal,status:"active"} : null,
+    pendingState:{...pending,state_epoch:1,pending_approval:{...pending.pending_approval,to_state:"review"}},
+    approvedState:{...destination,state:"review",state_epoch:2,pending_approval:null}});
+  await f.observePending();
+  assert.equal(f.calls.some(m=>m.method==='thread/inject_items'),false);
+  assert.equal(starts(f).length,1);
+  f.respond(form(f),"accept");
+  await until(()=>f.saved.size===0,"same-state review continuation");
+  const text = withGoal
+    ? f.calls.find(m=>m.method==='thread/inject_items').params.items[0].content[0].text
+    : starts(f)[1].params.input[0].text;
+  const outcome=JSON.parse(text.split('\n')[0].split('result: ')[1]);
+  assert.deepEqual(outcome,{type:'statewright_approval_result',approval_id:'fixture-approval',run_id:'fixture-run',
+    run_session_id:'fixture-session',status:'approved',applied:true,pending:false,from_state:'review',to_state:'review'});
+  assert.match(text,/no longer pending/);
+  assert.match(text,/does not complete the task or expand/);
+  assert.equal(starts(f).length,withGoal ? 1 : 2);
+  assert.equal(f.serviceCalls.filter(c=>c.method==='resolve').length,1);
+});
+
+test("unavailable history injection retains approval provenance and does not resume a goal", async t => {
+  const f=await fixture(t,{nativeGoal:{...pausedGoal,status:'active'},rejectInjection:true});
+  await f.observePending();f.respond(form(f),'accept');
+  await until(()=>f.errors.length>0,'injection rejection');
+  assert.equal(f.goal.status,'paused');assert.equal(f.saved.size,1);
+  assert.equal(f.calls.some(m=>m.method==='thread/goal/set'&&m.params.status==='active'),false);
+  assert.equal(starts(f).length,1);
+});
+
+test("owner change during outcome injection cannot release or clear the approved checkpoint", async t => {
+  const f=await fixture(t,{nativeGoal:{...pausedGoal,status:'active'}});
+  await f.observePending();const hold=f.holdRpc('thread/inject_items');f.respond(form(f),'accept');
+  await hold.entered.promise;f.changeRoot();hold.release.resolve();
+  await until(()=>f.errors.length>0,'owner-change refusal');
+  assert.equal(f.goal.status,'paused');assert.equal(f.saved.size,1);
+  assert.equal(f.calls.some(m=>m.method==='thread/goal/set'&&m.params.status==='active'),false);
 });
 
 test("cold native thread resume reopens the saved pending gate without a new tool completion", { timeout: 8000 }, async t => {
@@ -714,6 +766,8 @@ test("cold native thread resume reopens the saved pending gate without a new too
   await until(() => f.saved.size === 0, "cold-resume approval release");
   assert.equal(starts(f).length, 2);
   assert.equal(starts(f)[1].params.model, "fixture-destination-model");
+  assert.match(starts(f)[1].params.input[0].text,/fixture-approval/);
+  assert.match(starts(f)[1].params.input[0].text,/no longer pending/);
   assert.equal(f.serviceCalls.filter(call => call.method === "resolve").length, 1);
 });
 

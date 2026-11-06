@@ -99,6 +99,7 @@ test("approval checkpoints and pauses before interruption, then releases only af
   assert.deepEqual(f.decisions, ["approved"]);
   assert.equal(f.continuations.length, 1);
   assert.deepEqual(f.continuations[0].state, approved);
+  assert.equal(f.continuations[0].approvalId, snapshot.pending_approval.approval_id);
   assert.equal(f.continuations[0].goal.status, "paused");
   assert.equal(f.goal().status, "active");
   assert.equal(await f.journal.load(threadId), null);

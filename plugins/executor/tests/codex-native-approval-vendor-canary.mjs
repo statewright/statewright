@@ -64,6 +64,13 @@ try {
   socket.send(JSON.stringify({ method: "initialized", params: {} }));
   const started = await rpc("thread/start", { approvalPolicy: "never", sandbox: "read-only" });
   const threadId = started.thread.id;
+  // Goal resumes do not consume turn/start input. Verify the actual native
+  // history API used to deliver the already-applied review outcome instead.
+  const injected = await rpc("thread/inject_items", {threadId, items:[{
+    type:"message", role:"user", content:[{type:"input_text",
+      text:"Protocol-only fixture: no real approval was decided; do not start inference."}],
+  }]});
+  assert.ok(injected && typeof injected === "object");
   state = { run_id: "fixture-run", run_session_id: "fixture-session", state: "awaiting",
     pending_approval: { approval_id: "fixture-approval", from_state: "awaiting", to_state: "verified" } };
   const id = ++requestId;
@@ -83,7 +90,7 @@ try {
   assert.equal(decisions, 0);
   assert.equal(nativeTurnStarts, 0);
   console.log(JSON.stringify({ schema: "statewright/vendor-approval-protocol-canary/v1", outcome: "pass",
-    binary: command, checked: ["real-native-goal-get", "native-form-frame", "creator-label", "cancel-keeps-journal", "turn-blocked-before-inference"],
+    binary: command, checked: ["real-native-goal-get", "real-native-thread-inject-items", "native-form-frame", "creator-label", "cancel-keeps-journal", "turn-blocked-before-inference"],
     native_inference_turns: nativeTurnStarts, approval_decisions: decisions }));
 } finally {
   socket?.terminate();

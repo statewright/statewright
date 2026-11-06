@@ -32,6 +32,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "human-approval.mjs"),
   join(EXECUTOR_ROOT, "approval-journal.mjs"),
   join(EXECUTOR_ROOT, "codex-approval-gate.mjs"),
+  join(EXECUTOR_ROOT, "native-statewright-guidance.mjs"),
   join(EXECUTOR_ROOT, "runtime-approval-service.mjs"),
   join(EXECUTOR_ROOT, "approval-evidence.mjs"),
   join(EXECUTOR_ROOT, "codex-session-metadata.mjs"),

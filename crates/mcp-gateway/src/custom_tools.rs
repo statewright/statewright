@@ -230,6 +230,7 @@ pub fn handle_get_state(session: &GatewaySession) -> serde_json::Value {
         "default_model": default_model,
         "thinking_level": thinking_level,
         "transition_count": session.transition_count,
+        "pending_approval": null,
         "blocked_env": blocked_env,
         "env_overrides": env_overrides,
         "context": context,
@@ -892,10 +893,10 @@ mod tests {
     }
 
     #[test]
-    fn get_state_no_pending_approval_field_when_none() {
+    fn get_state_explicitly_clears_pending_approval_when_none() {
         let session = GatewaySession::new("test".into(), approval_definition());
         let state = handle_get_state(&session);
-        assert!(state.get("pending_approval").is_none() || state["pending_approval"].is_null());
+        assert_eq!(state.get("pending_approval"), Some(&serde_json::Value::Null));
     }
 
     // --- Interrupt handler tests ---

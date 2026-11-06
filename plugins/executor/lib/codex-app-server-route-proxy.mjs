@@ -13,7 +13,7 @@ import { ApprovalOutcome, ApprovalPipeline, approvalDeny, approvalError,
   approvalNotHandled } from "./approval-pipeline.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
-import { nativeWorkflowEntryPrompt } from "./native-statewright-guidance.mjs";
+import { nativeWorkflowEntryPrompt, nativeApprovalResultPrompt } from "./native-statewright-guidance.mjs";
 import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
 
 const WORKFLOW_APPROVAL_PRIORITY = 100;
@@ -1393,7 +1393,7 @@ export async function startCodexAppServerRouteProxy({
       rpc: internalRpc,
       send: value => forwardWhenOpen(downstream, JSON.stringify(value)),
       record: event => onHandoffStatus({ schema: "statewright/approval-lifecycle/v1", ...event }),
-      continueApproved: async ({ threadId, state, fromState, goal, check }) => {
+      continueApproved: async ({ threadId, state, fromState, approvalId, goal, check }) => {
         const checkOwner = async () => { check(); await gate.assertOwner(threadId); check(); };
         const release = await acquireRouteLease();
         let reservation, forwarded = false;
@@ -1405,7 +1405,8 @@ export async function startCodexAppServerRouteProxy({
           if (route.session_id !== threadId || route.run_id !== state.run_id || route.state !== state.state
               || route.model !== state.model
               || route.effort !== state.thinking_level) throw new Error("Approval continuation lacks the authoritative destination route");
-          const params = { threadId, input: [{ type: "text", text: `Statewright entered '${state.state}'. Call statewright_get_state first and continue the current phase.` }] };
+          const outcome = nativeApprovalResultPrompt({approvalId, state, fromState});
+          const params = { threadId, input: [{ type: "text", text: outcome }] };
           const applied = applyRouteToTurnStart({ method: "turn/start", params }, route, process.env, nativeSelectionFor(threadId));
           await switchProvider(threadId, applied.receipt);
           await checkOwner();
@@ -1417,6 +1418,12 @@ export async function startCodexAppServerRouteProxy({
             if (current?.status !== "paused" || current.objective !== goal.objective || current.createdAt !== goal.createdAt) throw new Error("Native goal changed during approval");
             const {input, ...settingsUpdate} = applied.message.params;
             await internalRpc("thread/settings/update", settingsUpdate);
+            await checkOwner();
+            // Goal activation creates its own inference turn, so settings
+            // alone would silently discard the approved-result input above.
+            await internalRpc("thread/inject_items", {threadId, items:[{
+              type:"message", role:"user", content:[{type:"input_text", text:outcome}],
+            }]});
             await checkOwner();
             const resumed = (await internalRpc("thread/goal/set", { threadId, status: "active" })).goal;
             forwarded = true;
@@ -1645,6 +1652,17 @@ export async function startCodexAppServerRouteProxy({
             throw error;
           }
           if (state) await waitForApprovalIdle(threadId, checkReleaseOwner);
+          if (approvedRelease) {
+            const outcome = nativeApprovalResultPrompt(approvedRelease);
+            if (message.method === "turn/start") {
+              message.params = {...message.params, input:[{type:"text", text:outcome}, ...(message.params.input ?? [])]};
+            } else {
+              await internalRpc("thread/inject_items", {threadId, items:[{
+                type:"message", role:"user", content:[{type:"input_text", text:outcome}],
+              }]});
+              await checkReleaseOwner();
+            }
+          }
           let capturedOrigin = null;
           let originBinding = null;
           let restoration = null;

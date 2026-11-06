@@ -34,8 +34,8 @@ test("managed hooks refresh route state through their authenticated bridge, neve
     STATEWRIGHT_ROUTE_CONTROL_DIR: control, STATEWRIGHT_GATEWAY_URL: "http://127.0.0.1:1",
     STATEWRIGHT_API_KEY: "wrong-direct-key", STATEWRIGHT_MANAGED_MCP_URL: `http://127.0.0.1:${server.address().port}`,
     STATEWRIGHT_MANAGED_MCP_TOKEN: "bridge-only-token", STATEWRIGHT_NATIVE_TELEMETRY: "0"});
-  const invoke = async (tool, response) => {
-    const child = spawn("bash", [new URL("../hook.sh", import.meta.url).pathname, "post-tool"], {env});
+  const invoke = async (tool, response, action = "post-tool") => {
+    const child = spawn("bash", [new URL("../hook.sh", import.meta.url).pathname, action], {env});
     let output = ""; child.stdout.on("data", x => {output += x}); child.stderr.resume();
     child.stdin.end(JSON.stringify({thread_id: threadId, turn_id: "native-turn", tool_name: `mcp__statewright__${tool}`, tool_response: response}));
     const [code] = await once(child, "exit"); assert.equal(code, 0); return output;
@@ -47,6 +47,16 @@ test("managed hooks refresh route state through their authenticated bridge, neve
   assert.match(output, /review/, JSON.stringify({output, requests}));
   const route = JSON.parse(await readFile(join(control, "current.route.json"), "utf8"));
   assert.equal(route.state, "review"); assert.equal(route.model, state.model);
+  // An actual pending review permits Stop; an applied self-loop must instead
+  // continue. Old transcript statements about pending review are not authority.
+  state = {...state, pending_approval: {approval_id: "apr_waiting"}};
+  await invoke("statewright_get_state", state);
+  assert.equal(await invoke("statewright_get_state", state, "stop"), "");
+  state = {...state, pending_approval: null, state_epoch: 3, transition_count: 2};
+  await invoke("statewright_get_state", state);
+  const resumedStop = JSON.parse(await invoke("statewright_get_state", state, "stop"));
+  assert.equal(resumedStop.decision, "block");
+  assert.match(resumedStop.reason, /CONTINUATION REQUIRED/);
   assert.ok(requests.length);
   assert.ok(requests.every(r => r.url === "/mcp" && r.authorization === "Bearer bridge-only-token" && r.client === clientId));
 });

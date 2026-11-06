@@ -10,6 +10,8 @@ const evidence = await collectCommandEvidence("exec_command", { cmd: command, wo
 process.stdout.write(`${JSON.stringify({
   schema: "statewright/command-evidence-diagnostic/v1", executed: false,
   inspected: evidence !== null, complete: evidence?.complete ?? false,
-  reason: evidence?.reason ?? null, units: evidence?.commands.length ?? 0,
-  files: evidence?.files.length ?? 0, collected_at_ms: evidence?.collected_at_ms ?? null,
+  reason: evidence?.reason ?? null, units: evidence?.commands?.length ?? evidence?.leaves?.length ?? 0,
+  files: evidence?.files?.length ?? evidence?.leaves?.reduce((n, leaf) => n + (leaf.evidence?.files?.length ?? 0), 0) ?? 0,
+  evidence_schema: evidence?.schema ?? null,
+  collected_at_ms: evidence?.collected_at_ms ?? null,
 })}\n`);

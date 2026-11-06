@@ -195,6 +195,56 @@ pub fn assess(command: &str) -> AstShadowAssessment {
     assess_at_depth(command, 0)
 }
 
+/// Local-only evidence boundary. Never serialize these source slices into
+/// semantic requests or telemetry. Unsupported composition returns no proof.
+pub(crate) fn literal_command_units(command: &str) -> Option<Vec<&str>> {
+    if command.len() > 8192 {
+        return None;
+    }
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(command, None)?;
+    if tree.root_node().has_error() {
+        return None;
+    }
+    fn collect<'a>(
+        node: Node<'_>,
+        source: &'a str,
+        depth: usize,
+        units: &mut Vec<&'a str>,
+    ) -> Option<()> {
+        if depth > MAX_AST_DEPTH || units.len() >= 32 {
+            return None;
+        }
+        match node.kind() {
+            "command" => {
+                let text = source.get(node.byte_range())?;
+                bash_classifier::literal_invocation(text)?;
+                units.push(text);
+            }
+            // Pipeline siblings execute concurrently and can invalidate local
+            // evidence before another leaf consumes it. No snapshot guarantee.
+            "program" | "list" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.is_named() {
+                        collect(child, source, depth + 1, units)?;
+                    } else if !matches!(child.kind(), ";" | "&&" | "||" | "|") {
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+    let mut units = Vec::new();
+    collect(tree.root_node(), command, 0, &mut units)?;
+    (!units.is_empty()).then_some(units)
+}
+
 fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAssessment {
     if command.len() > MAX_SHELL_BYTES || recursive_shell_depth > MAX_RECURSIVE_SHELL_DEPTH {
         return AstShadowAssessment::unavailable(ParseStatus::LimitExceeded);
@@ -986,12 +1036,10 @@ mod tests {
     fn semantic_shapes_never_forward_custom_executable_names_from_code_bodies() {
         let result =
             assess("bash <<'EOF'\nprivate_client_runner --token private-client-token\nEOF");
-        assert!(
-            result
-                .semantic_shapes
-                .iter()
-                .any(|shape| { shape.executable == "unknown" && shape.delegates_unknown_effect })
-        );
+        assert!(result
+            .semantic_shapes
+            .iter()
+            .any(|shape| { shape.executable == "unknown" && shape.delegates_unknown_effect }));
         let serialized = serde_json::to_string(&result.semantic_shape()).unwrap();
         assert!(!serialized.contains("private_client_runner"));
         assert!(!serialized.contains("private-client-token"));

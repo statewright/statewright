@@ -209,3 +209,41 @@ loss, stalled notification blocking authority polling, and shadow-score isolatio
 being lost during native-evidence rebuilding. Final review reported no further
 finding in those bounded deltas. It did not certify a model, installation,
 native UI, complete classifier coverage or deployment.
+
+### Compositional evidence and package preparation checkpoint
+
+Fresh local evidence now covers simple literal command lists. The collector
+returns every original leaf; the gateway independently parses the original Bash
+AST and requires exact ordered coverage, invocation/cwd binding and freshness.
+It unions known effects and capabilities instead of treating a read prefix as
+permission for the remainder. Commands are inspected as data, never executed.
+
+Independent review found an in-list invalidation hazard: an earlier write or
+repository script can change a later manifest/binary after collection. The
+gateway therefore stops using subsequent file evidence after any leaf not
+proven Low/Local. Concurrent pipelines remain outside this evidence path;
+ordinary AST classification still applies. Unsupported control flow,
+substitutions, redirects, missing leaves and stale evidence cannot gain admission.
+Both producer and consumer bound the envelope to 128 KiB. Omitted execution cwd
+no longer borrows the bridge process cwd; explicit absolute cwd is required for
+local file evidence. Unknown provenance remains unresolved, not permission.
+
+Package manifests were already `0.3.9`; stale `0.3.5` diagnostic constants are
+now synchronized to that version, including generated runtime copies. Added
+candidate release notes. This is source preparation, not a new install.
+
+Fresh executed checks on this delta:
+
+- Gateway library: **416 passed, 3 ignored, 0 failed**; existing compiler warnings.
+- Collector plus package/runtime bundle contracts: **22 passed, 0 failed**.
+- Stronger total-byte-budget collector fixture subsequently rerun: **16 passed,
+  0 failed**. The fixture proves an individually valid repeated expansion exceeds
+  and is rejected by the total budget, rather than merely checking a small proof.
+- Focused Rust composition test passed before and after invalidation hardening.
+
+The earlier package failures remain in this record; the fresh six package checks
+now pass. Source tests are not installed/native acceptance. No denial-ledger
+entry was removed and no denied command was executed. Pipeline rejection and
+explicit cwd requirements deliberately retain unsupported cases for an honest
+approval/diagnostic path. Current staging bindings still name an older source
+candidate; no deployment was performed using those stale bindings.

@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { collectCommandEvidence, literalArgv, literalInvocation } from "../lib/command-evidence.mjs";
+import { collectCommandEvidence, literalArgv, literalInvocation, literalCommandList } from "../lib/command-evidence.mjs";
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "sw-command-evidence-"));
@@ -42,6 +42,33 @@ test("literal launcher parser rejects shell execution and malformed quoting", ()
   for (const text of ["task test && curl x", "task $(x)", "task `x`", "task test > x", "task 'test", "task test\nwhoami", "task te\\st"]) {
     assert.equal(literalArgv(text), null, text);
   }
+});
+
+test("command-list collection retains every branch and never executes a leaf", async t => {
+  const root = await fixture(t);
+  await mkdir(join(root, "scripts"));
+  await writeFile(join(root, "scripts/check.mjs"), "throw new Error('must never run');\n");
+  for (const operator of ["&&", "||", ";", "|"]) {
+    const command = `git diff --check ${operator} node scripts/check.mjs`;
+    assert.deepEqual(literalCommandList(command), ["git diff --check", "node scripts/check.mjs"]);
+    const proof = await inspect(root, command);
+    assert.equal(proof.schema, "statewright/command-list-evidence/v1");
+    assert.equal(proof.command, command);
+    assert.equal(proof.leaves.length, 2);
+    assert.equal(proof.leaves[0].evidence, null);
+    assert.equal(proof.leaves[1].evidence.complete, true);
+    assert.equal(proof.leaves[1].evidence.command, "node scripts/check.mjs");
+    assert.equal(proof.leaves[1].evidence.requested_cwd, root);
+  }
+  for (const command of ["node scripts/check.mjs & unknown", "node scripts/check.mjs > output",
+    "node scripts/check.mjs && $(unknown)", "node scripts/check.mjs &&", "node scripts/check.mjs;; unknown",
+    "node scripts/check.mjs\nunknown", "(node scripts/check.mjs)", "NODE_OPTIONS=x node scripts/check.mjs && true"]) {
+    assert.equal(literalCommandList(command), null, command);
+    assert.equal(await inspect(root, command), null, command);
+  }
+  const unknown = await inspect(root, "node scripts/check.mjs && unknown_fixture --mutate");
+  assert.equal(unknown.leaves[1].command, "unknown_fixture --mutate");
+  assert.equal(unknown.leaves[1].evidence, null);
 });
 
 test("literal invocation normalizes assignments and transparent wrappers", () => {
@@ -108,6 +135,9 @@ test("hash-binds a literal Node repository entrypoint without executing it", asy
   assert.deepEqual(result.invocation, literalInvocation(command));
   assert.deepEqual(result.commands.map(({ resolved, cwd }) => ({ resolved, cwd })), [{ resolved: command, cwd: "." }]);
   assert.ok(result.files.some(file => file.path === "scripts/preflight.mjs"));
+  const implicit = await collectCommandEvidence("exec_command", {cmd: command}, {cwd: root});
+  assert.equal(implicit.complete, false);
+  assert.equal(implicit.reason, "absolute_cwd_required");
   for (const denied of [
     "node ../preflight.mjs", "node /tmp/preflight.mjs", "node --import=evil scripts/preflight.mjs",
     "NODE_OPTIONS=--require=evil node scripts/preflight.mjs", "env -S node scripts/preflight.mjs",
@@ -115,6 +145,31 @@ test("hash-binds a literal Node repository entrypoint without executing it", asy
     const evidence = await inspect(root, denied);
     assert.ok(evidence == null || evidence.complete === false, denied);
   }
+});
+
+test("command-list envelope is byte bounded and diagnostic supports both schemas", async t => {
+  const root = await fixture(t);
+  await mkdir(join(root, "scripts"));
+  await writeFile(join(root, "scripts/check.mjs"), "throw new Error('never execute');\n");
+  // Each leaf is individually valid, but repeated manifests exceed the total
+  // envelope budget. A missing envelope must never mean permission granted.
+  await writeFile(join(root, "Taskfile.yml"), `version: '3'\ntasks:\n  test:\n    cmds:\n${Array(32).fill("      - node scripts/check.mjs\n").join("")}`);
+  assert.equal((await inspect(root, "task test")).complete, true);
+  const proof = await inspect(root, Array(25).fill("task test").join(" && "));
+  assert.equal(proof, null);
+  const path = fileURLToPath(new URL("../scripts/inspect-command-evidence.mjs", import.meta.url));
+  const child = spawn(process.execPath, [path, root, "git diff --check && node scripts/check.mjs"]);
+  let output = "", errors = "";
+  child.stdout.on("data", chunk => { output += chunk; });
+  child.stderr.on("data", chunk => { errors += chunk; });
+  const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  assert.equal(code, 0, errors);
+  const report = JSON.parse(output);
+  assert.equal(report.executed, false);
+  assert.equal(report.units, 2);
+  assert.equal(report.evidence_schema, "statewright/command-list-evidence/v1");
+  assert.equal(report.complete, false); // collection is not authoritative admission
+  assert.ok(!output.includes(root));
 });
 
 test("Taskfile commands and dependencies expand without executing them", async t => {

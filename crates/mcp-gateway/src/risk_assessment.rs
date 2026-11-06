@@ -9,7 +9,7 @@ use crate::{
     bash_classifier::{self, OpClass},
     protocol::ToolInfo,
     shell_ast_shadow::{self, AstShadowAssessment, ParseStatus, ShellAstSemanticShape},
-    tool_intent::{NativeToolFamily, native_tool_family},
+    tool_intent::{native_tool_family, NativeToolFamily},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -370,9 +370,13 @@ impl RiskPipelineAssessment {
     /// These known effects require an explicit capability even in a normally
     /// unrestricted state. Separate classifier approval cannot supply it.
     pub fn requires_explicit_execution_capability(&self) -> bool {
-        self.deterministic.required_capability.is_some_and(|capability| {
-            capability.split('+').any(|part| matches!(part, "BoundedLocalExecution" | "GitLocalWrite"))
-        })
+        self.deterministic
+            .required_capability
+            .is_some_and(|capability| {
+                capability
+                    .split('+')
+                    .any(|part| matches!(part, "BoundedLocalExecution" | "GitLocalWrite"))
+            })
     }
 
     fn reformulation_allowed(basis: &str) -> bool {
@@ -1983,6 +1987,129 @@ struct LocalCommandFile {
     sha256: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandListEvidence {
+    schema: String,
+    tool_name: String,
+    command: String,
+    requested_cwd: Option<String>,
+    collected_at_ms: i64,
+    leaves: Vec<CommandLeafEvidence>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandLeafEvidence {
+    command: String,
+    evidence: Option<serde_json::Value>,
+}
+
+fn apply_command_list_evidence(
+    pipeline: RiskPipelineAssessment,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    command: &str,
+    evidence: &serde_json::Value,
+) -> RiskPipelineAssessment {
+    if evidence.to_string().len() > 128 * 1024 {
+        return pipeline;
+    }
+    let Ok(proof) = serde_json::from_value::<CommandListEvidence>(evidence.clone()) else {
+        return pipeline;
+    };
+    let Some(units) = shell_ast_shadow::literal_command_units(command) else {
+        return pipeline;
+    };
+    let age = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_sub(proof.collected_at_ms);
+    if proof.schema != "statewright/command-list-evidence/v1"
+        || proof.command != command
+        || proof.tool_name != tool_name
+        || proof.requested_cwd.as_deref()
+            != arguments
+                .get("workdir")
+                .or_else(|| arguments.get("cwd"))
+                .and_then(|v| v.as_str())
+        || !(-5000..=30000).contains(&age)
+        || units.len() < 2
+        || units.len() != proof.leaves.len()
+        || units.iter().zip(&proof.leaves).any(|(unit, leaf)| {
+            *unit != leaf.command
+                || leaf
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|value| value["schema"] != "statewright/local-command-evidence/v1")
+        })
+    {
+        return pipeline;
+    }
+
+    let mut classes = Vec::new();
+    let mut evidence_invalidated = false;
+    for (unit, leaf) in units.iter().zip(&proof.leaves) {
+        let mut input = arguments.clone();
+        input["command"] = serde_json::json!(unit);
+        input.as_object_mut().unwrap().remove("cmd");
+        let deterministic = assess_invocation(
+            None,
+            tool_name,
+            &input,
+            pipeline.deterministic.state_intent.as_deref(),
+        );
+        let assessed = apply_native_command_evidence(
+            pipeline_from_parts(deterministic, pipeline.semantic.clone(), false),
+            None,
+            tool_name,
+            &input,
+            if evidence_invalidated {
+                None
+            } else {
+                leaf.evidence.as_ref()
+            },
+        );
+        let effect = &assessed.deterministic;
+        // Every later leaf was inspected before execution. Once a preceding
+        // leaf could mutate files/process state, its following manifest/bin
+        // snapshots cannot prove what will run. This applies to all list
+        // connectives, including || (a failed command can still write).
+        evidence_invalidated |=
+            effect.risk != RiskBand::Low || effect.exposure != ExposureBand::Local;
+        // This envelope expands local repository execution, not remote-read
+        // policy. Never erase a separate location boundary while reducing it.
+        if effect.risk == RiskBand::Low && effect.exposure != ExposureBand::Local {
+            return pipeline;
+        }
+        match (effect.risk, effect.exposure) {
+            (RiskBand::Critical, _) => classes.push(OpClass::Destructive),
+            (RiskBand::High, _) => classes.push(OpClass::Network),
+            (RiskBand::Low, _) => classes.push(OpClass::SafeOutput),
+            (_, ExposureBand::Unknown) => classes.push(OpClass::Opaque),
+            (_, ExposureBand::External | ExposureBand::Account) => classes.push(OpClass::Network),
+            _ => {}
+        }
+        if let Some(required) = effect.required_capability {
+            for part in required.split('+') {
+                classes.push(match part {
+                    "Write" => OpClass::LocalWrite,
+                    "BoundedLocalExecution" => OpClass::BoundedLocalExecution,
+                    "GitLocalWrite" => OpClass::GitLocalWrite,
+                    _ => OpClass::Opaque,
+                });
+            }
+        } else if effect.risk == RiskBand::Moderate && effect.exposure == ExposureBand::Local {
+            classes.push(OpClass::LocalWrite);
+        }
+    }
+    merge_native_effects(
+        pipeline.deterministic,
+        pipeline.semantic,
+        &classes,
+        "native_command_list_evidence",
+    )
+}
+
 /// Only the native adapter invokes this boundary. Evidence is generated from
 /// current local bytes by the managed hook, not from model-authored tool input.
 /// As with GitLocalWrite, the local account/plugin is trusted, not attested
@@ -2013,6 +2140,9 @@ pub fn apply_native_command_evidence(
     let Some(command) = command else {
         return pipeline;
     };
+    if evidence["schema"] == "statewright/command-list-evidence/v1" {
+        return apply_command_list_evidence(pipeline, tool_name, arguments, command, evidence);
+    }
     let Some(invocation) = bash_classifier::literal_invocation(command) else {
         return pipeline;
     };
@@ -2034,7 +2164,7 @@ pub fn apply_native_command_evidence(
     if !supported_root {
         return pipeline;
     }
-    let mut deterministic = pipeline.deterministic;
+    let deterministic = pipeline.deterministic;
     let incomplete = |mut value: ShadowAssessment| {
         value.risk = RiskBand::Moderate;
         value.exposure = ExposureBand::Unknown;
@@ -2058,6 +2188,7 @@ pub fn apply_native_command_evidence(
         || proof.tool_name != tool_name
         || proof.command != command
         || proof.invocation != invocation
+        || !requested_cwd.is_some_and(|cwd| std::path::Path::new(cwd).is_absolute())
         || proof.requested_cwd.as_deref() != requested_cwd
         || !proof
             .cwd
@@ -2138,6 +2269,20 @@ pub fn apply_native_command_evidence(
         }
         classes.extend(ast.classes);
     }
+    merge_native_effects(
+        deterministic,
+        pipeline.semantic,
+        &classes,
+        "native_command_evidence",
+    )
+}
+
+fn merge_native_effects(
+    mut deterministic: ShadowAssessment,
+    semantic: SemanticAssessmentReceipt,
+    classes: &[OpClass],
+    source: &'static str,
+) -> RiskPipelineAssessment {
     // Every expanded execution unit contributes to the risk/capability union.
     // Incomplete leaves cannot erase a known write, delete or network operation.
     let known = if classes.contains(&OpClass::Destructive) {
@@ -2149,16 +2294,25 @@ pub fn apply_native_command_evidence(
         .any(|c| matches!(c, OpClass::Opaque | OpClass::Passthrough))
     {
         (RiskBand::Moderate, ExposureBand::Unknown)
+    } else if !classes.is_empty()
+        && classes.iter().all(|class| {
+            matches!(
+                class,
+                OpClass::SafeOutput | OpClass::FileRead | OpClass::ContentSearch | OpClass::GitRead
+            )
+        })
+    {
+        (RiskBand::Low, ExposureBand::Local)
     } else {
         (RiskBand::Moderate, ExposureBand::Local)
     };
     deterministic.risk = known.0;
     deterministic.exposure = known.1;
-    deterministic.required_capability = local_effect_capability(&classes);
-    deterministic.source = "native_command_evidence";
+    deterministic.required_capability = local_effect_capability(classes);
+    deterministic.source = source;
     // Unresolved expansions need more structural evidence, not a probability
     // inferred from the innocent name of their original wrapper.
-    pipeline_from_parts(deterministic, pipeline.semantic, false)
+    pipeline_from_parts(deterministic, semantic, false)
 }
 
 fn semantic_failsafe_floor(
@@ -2907,6 +3061,141 @@ mod tests {
     }
 
     #[test]
+    fn native_command_list_evidence_preserves_all_ast_leaves_and_identity() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let script = "node scripts/check.mjs";
+        let now = chrono::Utc::now().timestamp_millis();
+        let script_proof = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":script, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(script).unwrap(),
+            "collected_at_ms":now, "complete":true,
+            "files":[{"path":"scripts/check.mjs","sha256":"a".repeat(64)}],
+            "commands":[{"original":script,"resolved":script,"cwd":".",
+                "invocation":bash_classifier::literal_invocation(script)}],
+        });
+        for separator in ["&&", "||", ";"] {
+            let command = format!("git diff --check {separator} {script}");
+            let input = json!({"cmd":command,"workdir":"/workspace"});
+            let base = || {
+                let deterministic = assess_invocation(None, "exec_command", &input, None);
+                let request = deterministic.semantic_request.as_ref().unwrap().clone();
+                pipeline_from_parts(
+                    deterministic,
+                    semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                    false,
+                )
+            };
+            let proof = json!({"schema":"statewright/command-list-evidence/v1",
+            "tool_name":"exec_command", "command":command,"requested_cwd":"/workspace",
+            "collected_at_ms":now,"leaves":[
+                {"command":"git diff --check","evidence":null},
+                {"command":script,"evidence":script_proof}
+            ]});
+            assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+            let admitted =
+                apply_native_command_evidence(base(), None, "exec_command", &input, Some(&proof));
+            assert_eq!(
+                admitted.resolve_effect(),
+                ResolvedEffect::BoundedLocalExecution,
+                "{separator}"
+            );
+            assert_eq!(
+                admitted.deterministic.invocation_fingerprint,
+                base().deterministic.invocation_fingerprint
+            );
+            assert!(!admitted
+                .visible_json()
+                .to_string()
+                .contains("scripts/check"));
+            for mutation in [
+                "drop",
+                "reorder",
+                "command",
+                "cwd",
+                "stale",
+                "nested_stale",
+                "nested_list",
+            ] {
+                let mut bad = proof.clone();
+                match mutation {
+                    "drop" => {
+                        bad["leaves"].as_array_mut().unwrap().remove(0);
+                    }
+                    "reorder" => bad["leaves"].as_array_mut().unwrap().reverse(),
+                    "command" => bad["command"] = json!(script),
+                    "cwd" => bad["requested_cwd"] = json!("/foreign"),
+                    "stale" => bad["collected_at_ms"] = json!(now - 60_000),
+                    "nested_stale" => {
+                        bad["leaves"][1]["evidence"]["collected_at_ms"] = json!(now - 60_000)
+                    }
+                    "nested_list" => bad["leaves"][1]["evidence"] = proof.clone(),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    apply_native_command_evidence(base(), None, "exec_command", &input, Some(&bad))
+                        .resolve_effect(),
+                    ResolvedEffect::DenyUncertain,
+                    "{separator}/{mutation}"
+                );
+            }
+        }
+        for (prefix, suffix, separator, prior_proof) in [
+            ("cp replacement.yml Taskfile.yml", script, "&&", None),
+            ("cp replacement.yml Taskfile.yml", script, "||", None),
+            (script, script, ";", Some(script_proof.clone())),
+            ("git diff --check", script, "|", None),
+        ] {
+            let command = format!("{prefix} {separator} {suffix}");
+            let input = json!({"cmd":command,"workdir":"/workspace"});
+            let deterministic = assess_invocation(None, "exec_command", &input, None);
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            let base = pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                false,
+            );
+            let proof = json!({"schema":"statewright/command-list-evidence/v1",
+                "tool_name":"exec_command", "command":command,"requested_cwd":"/workspace",
+                "collected_at_ms":now,"leaves":[{"command":prefix,"evidence":prior_proof},{"command":suffix,"evidence":script_proof}]});
+            assert_eq!(
+                apply_native_command_evidence(base, None, "exec_command", &input, Some(&proof))
+                    .resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "in-list invalidation: {command}"
+            );
+        }
+        for suffix in [
+            "unknown_fixture",
+            "curl https://example.invalid",
+            "rm -rf fixture",
+            "cd ../foreign",
+        ] {
+            let command = format!("{script} && {suffix}");
+            let input = json!({"cmd":command,"workdir":"/workspace"});
+            let deterministic = assess_invocation(None, "exec_command", &input, None);
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            let base = pipeline_from_parts(
+                deterministic,
+                semantic_receipt(&request, SemanticAssessorStatus::Disabled),
+                false,
+            );
+            let proof = json!({"schema":"statewright/command-list-evidence/v1",
+                "tool_name":"exec_command", "command":command,"requested_cwd":"/workspace",
+                "collected_at_ms":now,"leaves":[{"command":script,"evidence":script_proof},{"command":suffix,"evidence":null}]});
+            assert!(
+                matches!(
+                    apply_native_command_evidence(base, None, "exec_command", &input, Some(&proof))
+                        .resolve_effect(),
+                    ResolvedEffect::DenyKnownRisk | ResolvedEffect::DenyUncertain
+                ),
+                "{suffix}"
+            );
+        }
+        set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
     fn agent_delegation_is_known_transitive_authority() {
         for tool_name in [
             "mcp__collaboration__spawn_agent",
@@ -3254,11 +3543,9 @@ mod tests {
             &json!({"action":"private-unknown-sentinel"}),
             None,
         );
-        assert!(
-            !serde_json::to_string(&opaque.semantic_request)
-                .unwrap()
-                .contains("sentinel")
-        );
+        assert!(!serde_json::to_string(&opaque.semantic_request)
+            .unwrap()
+            .contains("sentinel"));
     }
 
     #[test]
@@ -3784,10 +4071,10 @@ mod tests {
 
     #[tokio::test]
     async fn laya_local_keeps_timeout_and_refuses_redirects() {
-        use axum::{Router, response::Redirect, routing::post};
+        use axum::{response::Redirect, routing::post, Router};
         use std::sync::{
-            Arc,
             atomic::{AtomicUsize, Ordering},
+            Arc,
         };
         let followed = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
@@ -3845,18 +4132,16 @@ mod tests {
         .unwrap();
         assert_eq!(result, Err(SemanticAssessorStatus::Timeout));
         provider.endpoint = format!("{base}/redirect");
-        assert!(
-            assess_with_provider(&client, &provider, &request)
-                .await
-                .is_err()
-        );
+        assert!(assess_with_provider(&client, &provider, &request)
+            .await
+            .is_err());
         assert_eq!(followed.load(Ordering::SeqCst), 0);
         server.abort();
     }
 
     #[tokio::test]
     async fn provider_returns_redacted_assessed_vector() {
-        use axum::{Json, Router, routing::post};
+        use axum::{routing::post, Json, Router};
         use std::sync::{Arc, Mutex};
         let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
         let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));
@@ -3918,7 +4203,7 @@ mod tests {
 
     #[tokio::test]
     async fn typesafe_system_one_provider_uses_typed_nouls_and_redacted_state() {
-        use axum::{Json, Router, routing::post};
+        use axum::{routing::post, Json, Router};
         use std::sync::{Arc, Mutex};
         let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
         let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));
@@ -3985,11 +4270,9 @@ mod tests {
         let seen = seen_receiver.await.unwrap();
         assert_eq!(seen["model"], "jev-latest");
         assert_eq!(seen["questions"]["read_only"]["type"], "noul");
-        assert!(
-            seen["questions"]
-                .as_object()
-                .is_some_and(|questions| questions.len() == 6)
-        );
+        assert!(seen["questions"]
+            .as_object()
+            .is_some_and(|questions| questions.len() == 6));
         let rendered = seen.to_string();
         assert_eq!(seen["state"]["mcp_shape"]["selector_intent"], "read");
         assert_eq!(seen["state"]["mcp_shape"]["registered_metadata"], true);
@@ -3999,10 +4282,10 @@ mod tests {
     #[tokio::test]
     async fn provider_body_timeout_is_not_reported_as_malformed() {
         use axum::{
-            Router,
             body::{Body, Bytes},
             response::Response,
             routing::post,
+            Router,
         };
         use std::convert::Infallible;
         use tokio_stream::wrappers::ReceiverStream;
@@ -4080,7 +4363,7 @@ mod tests {
 
     #[tokio::test]
     async fn semantic_dispatcher_uses_explicit_staging_config_and_bounded_worker() {
-        use axum::{Router, http::StatusCode, routing::post};
+        use axum::{http::StatusCode, routing::post, Router};
 
         let request = semantic_request(
             None,
@@ -4138,11 +4421,9 @@ mod tests {
             false,
         );
         let (receipt_sender, mut receipt_receiver) = mpsc::channel(1);
-        assert!(
-            receipt_sender
-                .try_send(semantic_receipt(&request, SemanticAssessorStatus::Disabled))
-                .is_ok()
-        );
+        assert!(receipt_sender
+            .try_send(semantic_receipt(&request, SemanticAssessorStatus::Disabled))
+            .is_ok());
         assert!(!try_emit_semantic_receipt(
             &receipt_sender,
             semantic_receipt(&request, SemanticAssessorStatus::Unavailable),
@@ -4654,11 +4935,9 @@ mod tests {
         assert_eq!(known_risk["reformulation_allowed"], false);
         assert_eq!(known_risk["exact_invocation_retry_allowed"], false);
         assert_eq!(known_risk["separate_approval_allowed"], false);
-        assert!(
-            visible["intent_fingerprint"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("intent_v1_"))
-        );
+        assert!(visible["intent_fingerprint"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("intent_v1_")));
         assert!(!visible.to_string().contains("secret-helper"));
 
         for command in [
@@ -4762,12 +5041,10 @@ mod tests {
         let shape = ast.shell_ast_shape.as_ref().unwrap();
         assert!(shape.conditional_nodes >= 1);
         assert!(shape.effect_candidates.contains(&"git_write"));
-        assert!(
-            shape
-                .commands
-                .iter()
-                .any(|command| command.operation.as_deref() == Some("push"))
-        );
+        assert!(shape
+            .commands
+            .iter()
+            .any(|command| command.operation.as_deref() == Some("push")));
         let serialized = serde_json::to_string(ast).unwrap();
         assert!(serialized.contains("shell_ast_shape"));
         assert!(!serialized.contains("private-canary-path"));
@@ -5540,11 +5817,9 @@ mod tests {
         let request = opaque.semantic_request.as_ref().unwrap();
         assert!(request.tool_name.ends_with("_ast_authority"));
         assert!(request.shell_ast_shape.is_some());
-        assert!(
-            !serde_json::to_string(request)
-                .unwrap()
-                .contains("opaque-value")
-        );
+        assert!(!serde_json::to_string(request)
+            .unwrap()
+            .contains("opaque-value"));
         let semantic = semantic_receipt(request, SemanticAssessorStatus::Unavailable);
         let pipeline = pipeline_from_parts(opaque, semantic, true);
         assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyUncertain);
@@ -5554,7 +5829,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_ast_shadow_features_reach_the_system_one_provider_without_source_values() {
-        use axum::{Json, Router, routing::post};
+        use axum::{routing::post, Json, Router};
         use std::sync::{Arc, Mutex};
         let (seen_sender, seen_receiver) = tokio::sync::oneshot::channel();
         let seen_sender = Arc::new(Mutex::new(Some(seen_sender)));

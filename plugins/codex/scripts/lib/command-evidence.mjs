@@ -73,10 +73,52 @@ function inside(root, path) {
   return rel !== "" && !isAbsolute(rel) && rel !== ".." && !rel.startsWith("../");
 }
 
+// Candidate boundaries only, not shell authority. Rust independently parses
+// the full original AST and requires exactly these leaves, in this order.
+export function literalCommandList(command) {
+  if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00\\$`<>()]/.test(command)) return null;
+  let quote = null, start = 0;
+  const units = [];
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    if (quote) { if (char === quote) quote = null; continue; }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char !== ";" && char !== "&" && char !== "|") continue;
+    if (char === "&" && command[index + 1] !== "&") return null;
+    const unit = command.slice(start, index).trim();
+    if (!literalInvocation(unit)) return null;
+    units.push(unit);
+    if (char !== ";" && command[index + 1] === char) index++;
+    start = index + 1;
+  }
+  const last = command.slice(start).trim();
+  if (quote || !literalInvocation(last)) return null;
+  units.push(last);
+  return units.length > 1 && units.length <= MAX_COMMANDS ? units : null;
+}
+
 /** Inspect fresh local bytes. Never spawn task/npm/npx or evaluate a template. */
 export async function collectCommandEvidence(toolName, input, { cwd = process.cwd(), now = Date.now } = {}) {
   if (!["exec_command", "bash", "shell", "terminal", "run_command"].includes(String(toolName).toLowerCase())) return null;
   const command = input?.command ?? input?.cmd;
+  const units = literalCommandList(command);
+  if (units) {
+    const leaves = [];
+    let bytes = 0;
+    for (const unit of units) {
+      const leafInput = {...input, command: unit};
+      delete leafInput.cmd;
+      const leaf = {command: unit, evidence: await collectCommandEvidence(toolName, leafInput, {cwd, now})};
+      bytes += Buffer.byteLength(JSON.stringify(leaf));
+      if (bytes > MAX_BYTES) return null;
+      leaves.push(leaf);
+    }
+    if (!leaves.some(leaf => leaf.evidence)) return null;
+    const proof = {schema: "statewright/command-list-evidence/v1", tool_name: toolName,
+      command, requested_cwd: input.workdir ?? input.cwd ?? null,
+      collected_at_ms: now(), leaves};
+    return Buffer.byteLength(JSON.stringify(proof)) <= MAX_BYTES ? proof : null;
+  }
   const invocation = literalInvocation(command);
   const argv = invocation ? [invocation.executable, ...invocation.args] : null;
   if (!argv || !["task", "npm", "pnpm", "npx", "vitest", "node"].includes(argv[0])) return null;
@@ -89,7 +131,9 @@ export async function collectCommandEvidence(toolName, input, { cwd = process.cw
     invocation, collected_at_ms: now(), complete: false, commands: [], files: [],
   };
   try {
-    const requested = input.workdir ?? input.cwd ?? cwd;
+    // The bridge's process.cwd() is not necessarily the native thread cwd.
+    // Until the host binds an omitted cwd authoritatively, do not borrow it.
+    const requested = input.workdir ?? input.cwd;
     if (typeof requested !== "string" || !isAbsolute(requested)) fail("absolute_cwd_required");
     const root = await realpath(requested);
     evidence.cwd = root;

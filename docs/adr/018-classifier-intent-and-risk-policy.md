@@ -140,6 +140,20 @@ are separate release gates.
 
 ## Rollout and rollback
 
+### Repository execution consistency (2026-10-22)
+
+The explicit `BoundedLocalExecution` contract covers recognized repository
+build/test entrypoints, not a no-network sandbox. Cargo test/check/build use
+that same contract as Node/npm/Vite instead of making `--offline` a prerequisite
+for recognition. Ordinary configured dependency resolution may use the network;
+repository build/test code could already do so in offline mode. Explicit
+execution authority is still required, read-only policy still rejects these
+operations, and unknown/injected/publish/install commands do not inherit it.
+Shell composition retains every independently recognized effect and unknown.
+See [the repair and validation ledger](../research/repository-execution-contract-20261022.md)
+for the intentional scope expansion and remaining limits. This does not change
+generic Network/GitWrite policy, enable S1, or relax any score threshold.
+
 The change must be committed and independently reviewed before staging. The
 staging artifact must identify the exact reviewed source revision and pass the
 native-alias, shell-AST, structured-denial, OAuth, and source-annotation

@@ -27,9 +27,12 @@ pub enum OpClass {
     GitRead,
     /// A bounded local state change (requires Write).
     LocalWrite,
-    /// A narrowly parsed local validation command. The command may execute
-    /// repository code, but its launcher grammar forbids network-enabling,
-    /// installation, redirection, substitution, and path-escape forms.
+    /// A narrowly parsed repository build/test entrypoint. This authorizes
+    /// repository code (including build scripts, test code and configuration),
+    /// not a filesystem/network sandbox. Ordinary dependency resolution may
+    /// access configured registries. Installation/publication, configuration
+    /// injection and path-escape forms are not part of this launcher contract;
+    /// redirects and other shell leaves retain their own required capabilities.
     /// Requires explicit BoundedLocalExecution workflow authority.
     BoundedLocalExecution,
     /// A bounded, helper-backed local Git closeout (requires GitLocalWrite).
@@ -104,10 +107,23 @@ fn runtime_injection_environment(name: &str) -> bool {
             | "GIT_EXEC_PATH"
             | "GIT_SSH"
             | "GIT_SSH_COMMAND"
+            | "RUSTC"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "RUSTDOC"
+            | "RUSTDOCFLAGS"
+            | "RUSTFLAGS"
+            | "RUSTFMT"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "RUSTUP_TOOLCHAIN"
     ) || upper.starts_with("LD_")
         || upper.starts_with("DYLD_")
         || upper.starts_with("GIT_CONFIG_")
         || upper.starts_with("NPM_CONFIG_")
+        || upper.starts_with("CARGO_BUILD_")
+        || upper.starts_with("CARGO_TARGET_")
+        || upper.starts_with("CARGO_ENCODED_")
 }
 
 /// Normalize the literal launcher shape used by both deterministic
@@ -1211,6 +1227,16 @@ fn readonly_sed_args(args: &[String]) -> bool {
 }
 
 fn readonly_sed_print_program(program: &str) -> bool {
+    let mut commands = program.split(';');
+    let Some(first) = commands.next() else {
+        return false;
+    };
+    readonly_sed_single_print_program(first)
+        && commands.take(15).all(readonly_sed_single_print_program)
+        && program.split(';').count() <= 16
+}
+
+fn readonly_sed_single_print_program(program: &str) -> bool {
     let Some(addresses) = program.strip_suffix('p') else {
         return false;
     };
@@ -1314,6 +1340,18 @@ fn split_segments(command: &str) -> Vec<String> {
 
 /// Classify a single command segment (no pipes, no `&&`/`;`).
 fn classify_segment(segment: &str) -> OpClass {
+    // `command -v NAME` queries shell resolution; it does not invoke NAME.
+    // Recognize the literal query before normalizing execution wrappers.
+    if simple_command_tokens(segment).is_some_and(|tokens| {
+        tokens.len() >= 3
+            && tokens[0] == "command"
+            && tokens[1] == "-v"
+            && tokens[2..]
+                .iter()
+                .all(|name| !name.is_empty() && !name.starts_with('-'))
+    }) {
+        return OpClass::SafeOutput;
+    }
     let Some(invocation) = literal_invocation(segment) else {
         return classify_nonliteral_segment(segment);
     };
@@ -1436,6 +1474,10 @@ fn classify_segment(segment: &str) -> OpClass {
                 && bounded_version_probe(&invocation, base_cmd) =>
         {
             OpClass::SafeOutput
+        }
+
+        "cargo" | "rustfmt" if rust_format_effect(&invocation, base_cmd).is_some() => {
+            rust_format_effect(&invocation, base_cmd).unwrap()
         }
 
         // Runner-specific grammars normalize to one execution intent. This is
@@ -1607,23 +1649,28 @@ fn bounded_node_local_execution(invocation: &LiteralInvocation) -> bool {
                     .is_some_and(|value| !value.is_empty())
                 && !paths.is_empty() =>
         {
-            paths.iter().all(|path| bounded_node_path(path, true))
+            paths.iter().all(|path| bounded_node_test_path(path))
         }
         [flag, paths @ ..] if flag == "--test" && !paths.is_empty() => {
-            paths.iter().all(|path| bounded_node_path(path, true))
+            paths.iter().all(|path| bounded_node_test_path(path))
         }
-        [flag, path] if flag == "--check" => bounded_node_path(path, false),
+        [flag, path] if flag == "--check" => bounded_node_script_path(path),
         _ => false,
     }
 }
 
-fn bounded_node_path(path: &str, test: bool) -> bool {
-    let suffixes = if test {
-        [".test.mjs", ".test.cjs", ".test.js"]
-    } else {
-        [".mjs", ".cjs", ".js"]
-    };
-    suffixes
+// Node's built-in test runner executes JavaScript CommonJS and ESM test files.
+// This remains BoundedLocalExecution, never read-only authority: every path
+// stays a literal repository-relative test entrypoint and other Node options
+// are rejected by the argv grammar above.
+fn bounded_node_test_path(path: &str) -> bool {
+    [".test.js", ".test.mjs", ".test.cjs"]
+        .iter()
+        .any(|suffix| bounded_relative_path(path, suffix))
+}
+
+fn bounded_node_script_path(path: &str) -> bool {
+    [".js", ".mjs", ".cjs"]
         .iter()
         .any(|suffix| bounded_relative_path(path, suffix))
 }
@@ -1646,40 +1693,65 @@ pub(crate) fn bounded_node_repository_entrypoint(invocation: &LiteralInvocation)
     Some(entrypoint)
 }
 
+// Offline is a dependency-resolution choice, not proof that repository code
+// has only local effects: build.rs, proc macros and test executables may all
+// perform arbitrary I/O even with --offline. Use the same explicit execution
+// capability as Node/npm/Vite, rather than requiring an offline spelling for
+// one runner. This does not grant Read, generic Bash, or remote-write authority.
 fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
     let args = invocation.args.as_slice();
-    if args.first().map(String::as_str) != Some("test")
-        || !args.iter().any(|arg| arg == "--offline")
-    {
+    let Some(operation @ ("test" | "check" | "build")) = args.first().map(String::as_str) else {
         return false;
-    }
+    };
 
     let mut index = 1;
     let mut positional_filters = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--offline"
-            | "--locked"
+        let (flag, inline) = option_parts(&args[index]);
+        match flag {
+            "--offline" | "--frozen" if inline.is_none() => {
+                index += 1;
+            }
+            "--locked"
             | "--lib"
             | "--quiet"
-            | "--no-fail-fast"
             | "--workspace"
             | "--all-targets"
             | "--tests"
+            | "--bins"
+            | "--examples"
             | "--all-features"
-            | "--no-default-features" => {
+            | "--no-default-features"
+                if inline.is_none() =>
+            {
                 index += 1;
             }
-            "-p" | "--package" => {
-                let Some(package) = args.get(index + 1) else {
+            "--no-fail-fast" | "--no-run" if operation == "test" && inline.is_none() => {
+                index += 1;
+            }
+            "-p" | "--package" | "--features" | "--manifest-path" | "--bin" | "--test"
+            | "--example" => {
+                let Some(value) = option_value(args, &mut index, inline) else {
                     return false;
                 };
-                if !bounded_label(package) {
+                let valid = match flag {
+                    "--manifest-path" => bounded_manifest_path(value),
+                    "--features" => value.split(',').all(bounded_label),
+                    _ => bounded_label(value),
+                };
+                if !valid {
                     return false;
                 }
-                index += 2;
             }
-            value if !value.starts_with('-') && bounded_test_filter(value) => {
+            "--" if operation == "test" && inline.is_none() => {
+                return bounded_libtest_options(&args[index + 1..]);
+            }
+            value
+                if operation == "test"
+                    && inline.is_none()
+                    && !value.starts_with('-')
+                    && bounded_test_filter(value) =>
+            {
                 positional_filters += 1;
                 if positional_filters > 1 {
                     return false;
@@ -1690,6 +1762,136 @@ fn bounded_cargo_local_execution(invocation: &LiteralInvocation) -> bool {
         }
     }
     true
+}
+
+// Preserve option/value binding, including --flag=value, across Rust adapters.
+// Unknown options never consume a following token speculatively.
+fn option_parts(value: &str) -> (&str, Option<&str>) {
+    value
+        .split_once('=')
+        .map_or((value, None), |(flag, value)| (flag, Some(value)))
+}
+
+fn option_value<'a>(
+    args: &'a [String],
+    index: &mut usize,
+    inline: Option<&'a str>,
+) -> Option<&'a str> {
+    if let Some(value) = inline {
+        *index += 1;
+        return (!value.is_empty()).then_some(value);
+    }
+    let value = args.get(*index + 1)?;
+    *index += 2;
+    (!value.is_empty() && !value.starts_with('-')).then_some(value.as_str())
+}
+
+fn bounded_manifest_path(value: &str) -> bool {
+    bounded_relative_path(value, "Cargo.toml") && value.rsplit('/').next() == Some("Cargo.toml")
+}
+
+fn bounded_libtest_options(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let (flag, inline) = option_parts(&args[index]);
+        match flag {
+            "--exact" | "--nocapture" | "--show-output" | "--ignored" | "--include-ignored"
+            | "--list"
+                if inline.is_none() =>
+            {
+                index += 1
+            }
+            "--test-threads" => {
+                let Some(value) = option_value(args, &mut index, inline) else {
+                    return false;
+                };
+                if !value.bytes().all(|c| c.is_ascii_digit())
+                    || !value.parse::<u32>().is_ok_and(|n| n > 0)
+                {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Direct rustfmt is a source mutation unless check mode is selected.
+/// Cargo fmt can dispatch a configured alias instead of rustfmt, so even
+/// --check requires repository-code execution authority, never Read or Write
+/// alone. As with npm test, this is an entrypoint contract, not a sandbox.
+/// Configuration overrides, alternate toolchains and output destinations stay
+/// unresolved; ordinary repository formatter configuration remains in scope.
+fn rust_format_effect(invocation: &LiteralInvocation, executable: &str) -> Option<OpClass> {
+    // A suffix such as /.cargo/bin/rustfmt is not executable provenance.
+    // Do not extend Cargo's older validation-path convention to read/write
+    // formatter authority; absolute launchers need independent identity proof.
+    if invocation.executable != executable {
+        return None;
+    }
+    let args = &invocation.args;
+    let cargo = executable == "cargo";
+    if cargo && args.first().map(String::as_str) != Some("fmt") {
+        return None;
+    }
+    let mut index = usize::from(cargo);
+    let mut formatter_args = !cargo;
+    let mut check = false;
+    let mut paths = 0;
+    while index < args.len() {
+        let (flag, inline) = option_parts(&args[index]);
+        match flag {
+            "--" if cargo && !formatter_args && inline.is_none() => {
+                formatter_args = true;
+                index += 1;
+            }
+            "--check" if inline.is_none() => {
+                check = true;
+                index += 1;
+            }
+            "--all" | "-q" | "--quiet" if cargo && !formatter_args && inline.is_none() => {
+                index += 1
+            }
+            "-p" | "--package" | "--manifest-path" if cargo && !formatter_args => {
+                let value = option_value(args, &mut index, inline)?;
+                if !(if flag == "--manifest-path" {
+                    bounded_manifest_path(value)
+                } else {
+                    bounded_label(value)
+                }) {
+                    return None;
+                }
+            }
+            "--edition" if formatter_args => {
+                if !matches!(
+                    option_value(args, &mut index, inline)?,
+                    "2015" | "2018" | "2021" | "2024"
+                ) {
+                    return None;
+                }
+            }
+            path if !cargo
+                && inline.is_none()
+                && !path.starts_with('-')
+                && bounded_relative_path(path, ".rs") =>
+            {
+                paths += 1;
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+    if !cargo && paths == 0 {
+        return None;
+    }
+    Some(if cargo {
+        OpClass::BoundedLocalExecution
+    } else if check {
+        OpClass::FileRead
+    } else {
+        OpClass::FileModify
+    })
 }
 
 /// Admit only the package manager's conventional test-script entry point.
@@ -2521,9 +2723,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_is_passthrough() {
+    fn cargo_test_is_explicit_repository_execution() {
         let classes = classify("cargo test");
-        assert!(classes.contains(&OpClass::Passthrough));
+        assert_eq!(classes, vec![OpClass::BoundedLocalExecution]);
+        assert_eq!(readonly_capabilities("cargo test"), None);
     }
 
     #[test]
@@ -2549,13 +2752,113 @@ mod tests {
     }
 
     #[test]
+    fn command_lookup_is_not_execution_wrapper_or_shell_code() {
+        for command in [
+            "command -v cargo-nextest",
+            "command -v cargo rustfmt",
+            "command -v /usr/bin/false",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+        for command in [
+            "command -v",
+            "command -v -p cargo",
+            "command -p cargo",
+            "command -v $(unknown_program)",
+            "command -v `unknown_program`",
+            "command -v cargo > receipt",
+            "command -v cargo; rm receipt",
+            "command cargo test",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+    }
+
+    #[test]
+    fn rust_validation_family_keeps_format_write_and_execution_separate() {
+        for command in ["rustfmt --edition 2024 crates/core/src/lib.rs"] {
+            assert_eq!(classify(command), vec![OpClass::FileModify], "{command}");
+            assert!(readonly_capabilities(command).is_none(), "{command}");
+        }
+        for command in ["rustfmt --check --edition=2024 crates/core/src/lib.rs"] {
+            assert_eq!(classify(command), vec![OpClass::FileRead], "{command}");
+            assert_eq!(
+                readonly_capabilities(command),
+                Some(vec!["Read"]),
+                "{command}"
+            );
+        }
+        for command in [
+            "cargo fmt --all",
+            "cargo fmt --manifest-path crates/core/Cargo.toml -p core",
+            "cargo fmt --all -- --check",
+            "cargo fmt --check",
+            "cargo test --offline --manifest-path crates/core/Cargo.toml --lib adaptation",
+            "cargo check --manifest-path=crates/core/Cargo.toml --tests --offline",
+            "cargo build --frozen --workspace --all-targets",
+            "cargo test --offline --features alpha,beta --lib filter -- --exact",
+            "cargo test --offline --lib -- --nocapture --test-threads=1",
+            "cargo test --offline --lib -- --test-threads 2",
+            "cargo test --manifest-path crates/core/Cargo.toml --lib adaptation",
+            "cargo check --manifest-path crates/core/Cargo.toml --tests",
+            "cargo check --locked",
+            "cargo test -p statewright-mcp-gateway",
+            "cargo test --workspace",
+        ] {
+            assert_eq!(
+                classify(command),
+                vec![OpClass::BoundedLocalExecution],
+                "{command}"
+            );
+            assert!(readonly_capabilities(command).is_none(), "{command}");
+        }
+        for command in [
+            "cargo fmt --config-path /tmp/other",
+            "cargo fmt --manifest-path ../Cargo.toml",
+            "cargo fmt --all -- --emit files",
+            "cargo fmt --all --check -- --config disable_all_formatting=false",
+            "rustfmt --check --emit files src/lib.rs",
+            "rustfmt --config-path /tmp/other src/lib.rs",
+            "rustfmt /tmp/outside.rs",
+            "rustfmt ../outside.rs",
+            "/tmp/rustfmt --check src/lib.rs",
+            "/tmp/attacker/.cargo/bin/rustfmt --check src/lib.rs",
+            "/tmp/attacker/.cargo/bin/cargo fmt --check",
+            "/tmp/attacker/.cargo/bin/cargo fmt --all",
+            "/Users/ben/.cargo/bin/rustfmt --edition 2024 src/lib.rs",
+            "cargo test --offline --manifest-path ../Cargo.toml",
+            "cargo test --offline --target-dir /tmp/outside",
+            "cargo test --offline --config net.offline=false",
+            "cargo test --offline -- --logfile outside.txt",
+            "cargo test --offline -- --test-threads 0",
+            "cargo test --offline -- --test-threads --exact",
+            "cargo check --offline --manifest-path",
+            "cargo build --offline --features",
+            "cargo install --offline anything",
+            "cargo publish --offline",
+            "RUSTC_WRAPPER=other cargo check --offline",
+            "RUSTFMT=other cargo fmt --all",
+        ] {
+            let classes = classify(command);
+            assert!(
+                classes.contains(&OpClass::Passthrough) || classes.contains(&OpClass::Opaque),
+                "{command}: {classes:?}"
+            );
+        }
+    }
+
+    #[test]
     fn bounded_local_execution_requires_a_small_literal_grammar() {
         for command in [
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.js",
+            "node --test plugins/executor/tests/codex-native-approval-proxy.test.cjs",
             "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern='codex invalid key' plugins/executor/tests/browser-onboarding.test.mjs plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "/opt/toolchains/bin/node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs",
             "node --check plugins/executor/lib/codex-app-server-route-proxy.mjs",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.js",
+            "node --check plugins/executor/lib/codex-app-server-route-proxy.cjs",
             "cargo test --offline -p statewright-mcp-gateway",
             "cargo test --offline --workspace",
             "cargo test --workspace --all-targets --all-features --offline",
@@ -2570,23 +2873,26 @@ mod tests {
         }
         for command in [
             "node arbitrary-script.mjs",
+            "node --test plugins/executor/tests/not-a-test.js",
+            "node --test plugins/executor/tests/browser-onboarding.test.ts",
             "node --test ../outside.test.mjs",
             "node --test --test-name-pattern= plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex",
             "node --test --test-name-pattern=codex /tmp/outside.test.mjs",
             "node --test --test-name-pattern=codex ../outside.test.mjs",
+            "node --test --require fixture plugins/executor/tests/codex-native-approval-proxy.test.js",
+            "node --check ../outside.js",
+            "node --check /tmp/outside.cjs",
             "node --test --test-name-pattern=codex --watch plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex --require=fixture plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex --test-name-pattern=other plugins/executor/tests/browser-onboarding.test.mjs",
             "node --test --test-name-pattern=codex plugins/executor/tests/browser-onboarding.test.mjs > receipt.txt",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs && curl https://example.invalid",
             "node --test plugins/executor/tests/codex-native-approval-proxy.test.mjs > receipt.txt",
-            "cargo test -p statewright-mcp-gateway",
             "cargo test --offline --manifest-path ../outside/Cargo.toml",
-            "cargo test --workspace",
             "cargo test --offline --workspace --target-dir /tmp/outside",
             "cargo test --offline --workspace --config net.offline=false",
-            "cargo test --offline -p statewright-mcp-gateway -- --nocapture",
+            "cargo test --offline -p statewright-mcp-gateway -- --logfile output.txt",
         ] {
             assert_ne!(
                 classify(command),
@@ -2863,6 +3169,31 @@ mod tests {
     }
 
     #[test]
+    fn readonly_sed_accepts_only_bounded_print_program_lists() {
+        for command in [
+            "sed -n '1,20p;40,60p' README.md",
+            "sed -n '1p;20p;$p' README.md",
+            "sed -n -e '1,20p;40,60p' README.md",
+        ] {
+            assert_eq!(
+                readonly_capabilities(command),
+                Some(vec!["Read"]),
+                "{command}"
+            );
+        }
+        for command in [
+            "sed -n '1,20p;w receipt.txt' README.md",
+            "sed -n '1,20p;e id' README.md",
+            "sed -n '1,20p;r script.sed' README.md",
+            "sed -n '1,20p;;40p' README.md",
+            "sed -n '1p;2p;3p;4p;5p;6p;7p;8p;9p;10p;11p;12p;13p;14p;15p;16p;17p' README.md",
+            "sed -n '1,20p;40d' README.md",
+        ] {
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn redirect_in_single_quotes_not_file_write() {
         let classes = classify("echo '> not a redirect'");
         assert!(!classes.contains(&OpClass::FileWrite));
@@ -2919,8 +3250,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_test_allowed_with_just_bash() {
+    fn cargo_test_requires_execution_even_under_legacy_tool_policy() {
         let allowed = vec!["Bash".into()];
+        assert!(check_against_allowed("cargo test", &allowed).is_err());
+        let allowed = vec!["Bash".into(), "BoundedLocalExecution".into()];
         assert!(check_against_allowed("cargo test", &allowed).is_ok());
     }
 

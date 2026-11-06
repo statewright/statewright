@@ -1,0 +1,917 @@
+{
+  "schema": "statewright/classifier-denial-audit/v1",
+  "cutoff": "2026-10-20T14:00:00Z",
+  "selection": {
+    "candidate": "newest 100 actual command-hook denial events retained locally before cutoff",
+    "deduplication": "timestamp+call_id across mirrored session roots",
+    "excluded": {
+      "non_command_patch_events": 3,
+      "gateway_unavailable_events": 0,
+      "audit_activity_after_cutoff": true
+    },
+    "coverage": "local session JSONL only; not cloud, other hosts, deleted sessions, or every error encoding"
+  },
+  "record_count": 100,
+  "records": [
+    {
+      "timestamp": "2026-10-20T02:01:32.533Z",
+      "call_id": "call_483515f0a24041cb8592cbcd8bbeeed4",
+      "source_session": "rollout-2026-10-19T20-46-49-01a156c6-7735-7c01-89da-4b31ca57cec2.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-20T02:01:09.268Z",
+      "call_id": "call_wDOnOUNQwUEpEVXQzB42SbSi",
+      "source_session": "rollout-2026-09-14T12-53-30-01a0a0d6-8bbd-7480-884c-abde791aebf5.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-20T01:36:48.298Z",
+      "call_id": "call_7bb362d1c46d41aab7df0f1892c0587a",
+      "source_session": "rollout-2026-10-18T14-59-03-01a15061-b640-7e43-b504-581f01364b89.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "network",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-20T01:36:32.246Z",
+      "call_id": "call_5df4e082f86e4664a5f727c7aab3cd45",
+      "source_session": "rollout-2026-10-18T14-59-03-01a15061-b640-7e43-b504-581f01364b89.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-20T01:36:17.907Z",
+      "call_id": "call_f164119a3bdc43febc01b2c2148474f4",
+      "source_session": "rollout-2026-10-18T14-59-03-01a15061-b640-7e43-b504-581f01364b89.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-19T21:03:52.443Z",
+      "call_id": "call_2b4d18cdb4864f15ab589b0715c4aa2a",
+      "source_session": "rollout-2026-10-19T16-53-35-01a155f0-eebd-7cd1-9be5-af1120b55d37.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-19T21:03:48.001Z",
+      "call_id": "call_430081791298403e8bf36dd3fea280ad",
+      "source_session": "rollout-2026-10-19T16-53-35-01a155f0-eebd-7cd1-9be5-af1120b55d37.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-19T21:03:33.035Z",
+      "call_id": "call_ad1c7f1e1b1f4325aaf7573c9c75a112",
+      "source_session": "rollout-2026-10-19T16-53-35-01a155f0-eebd-7cd1-9be5-af1120b55d37.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-19T20:55:48.544Z",
+      "call_id": "call_b42e788099104a299c5574b09ac37911",
+      "source_session": "rollout-2026-10-19T16-53-35-01a155f0-eebd-7cd1-9be5-af1120b55d37.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:55:14.419Z",
+      "call_id": "call_6f47c89711934ca6a3201e459a3b5406",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:41:42.607Z",
+      "call_id": "call_041460f2c0b143bb8487b1215c6861e9",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:40:14.765Z",
+      "call_id": "call_59c7a7281db849478845f8e613ad42bd",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:39:03.285Z",
+      "call_id": "call_c8ed5efd7c374a9c91b153b68731e865",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:37:46.398Z",
+      "call_id": "call_398a313160f44453ba24e2da7391e214",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:37:40.025Z",
+      "call_id": "call_14806dd57643495ea9e02892a13ae0fe",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:37:29.831Z",
+      "call_id": "call_12da74c5f7e14e079e1bec2a350c7857",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:33:27.425Z",
+      "call_id": "call_4fb60702501b4fad835c7d0e048aa1e1",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:33:08.594Z",
+      "call_id": "call_9a861118fa044a039c1931d3ed36a009",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T18:18:46.334Z",
+      "call_id": "call_a84f92923b2f4a1bab4750aadff34ef4",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:22:00.823Z",
+      "call_id": "call_ccc60d84474544efa8ed6f289bf53c2d",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:19:12.498Z",
+      "call_id": "call_28b08d8b41c54d8db54810830504f292",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:15:33.205Z",
+      "call_id": "call_b7283b4ccfb1488e87bb74538933c261",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:10:54.992Z",
+      "call_id": "call_025a0ceba5334f638b7e7ae01d9d38bb",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:08:58.205Z",
+      "call_id": "call_8ed1c3ae53434c489ee20508ac88f645",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-16T17:05:23.263Z",
+      "call_id": "call_e04da7f4a5254afa96ddcf86cbbcbfb8",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "sed",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T16:21:27.837Z",
+      "call_id": "call_30c2b247157349c6a25d284b935069ca",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T16:20:08.460Z",
+      "call_id": "call_3d5790fc6de04143a1e6cb6b15596ffc",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T16:14:36.813Z",
+      "call_id": "call_db1a33e41bc94753808c3d7ab6a2d46a",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T16:13:12.546Z",
+      "call_id": "call_859c69856a2a4028a13c21d4c8bd2ec5",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T16:05:44.602Z",
+      "call_id": "call_9963971bac87482fab49be6d00802ef3",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "network",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T14:59:19.040Z",
+      "call_id": "call_06f3337e9f344e9ba860479fd88aefae",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T14:59:01.025Z",
+      "call_id": "call_bef8b6ff0a334f2aab908e679a573f81",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T14:53:12.866Z",
+      "call_id": "call_14f6a422118f42da888c4a718e5e0631",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T14:52:26.645Z",
+      "call_id": "call_7023992e6f0b4eb3a2895401352ad1ed",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "network",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T04:38:35.107Z",
+      "call_id": "call_a21d611e5bea4d70835574054d7edb75",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T04:34:01.501Z",
+      "call_id": "call_052c6279d94e434cb4692f1b079a5770",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T04:31:40.728Z",
+      "call_id": "call_6d5a6ebb295b438e86bb4c379e0334f3",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T04:15:18.009Z",
+      "call_id": "call_bac7eaaf67db44c0a648208b73b7f4cc",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T04:06:09.228Z",
+      "call_id": "call_6536787d0497465e9dc50ef1a16a7ddf",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "sed",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:43:28.479Z",
+      "call_id": "call_dd1744ce7b2541e998918e2dac5a40c9",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:43:11.615Z",
+      "call_id": "call_5517d94acaa04207a426febe527290fe",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:36:30.656Z",
+      "call_id": "call_4645750cef7a442bb1caceb4effed594",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:33:30.188Z",
+      "call_id": "call_d1001dc550e846d2a74573b2840cf7dd",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:24:16.479Z",
+      "call_id": "call_d94290ae38c94b038f2e3899a7390b0d",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:23:40.722Z",
+      "call_id": "call_417ce61c1c314c5399927ec41bb52420",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:14:06.824Z",
+      "call_id": "call_36b3d53695d247a3acee94ee22478c89",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T03:13:29.440Z",
+      "call_id": "call_8b798629168e4b20bf4f5b0cf2869bdc",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T02:40:34.921Z",
+      "call_id": "call_90078529691549078ac2d895c04606b1",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T02:40:20.069Z",
+      "call_id": "call_3c2b15f7464548379fcc2c20f3f06412",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T01:26:06.177Z",
+      "call_id": "call_b807bacec1f1428582c5538f52f9166c",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T01:25:28.119Z",
+      "call_id": "call_9d12d0bc457b485080590e820b49d267",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T01:14:00.718Z",
+      "call_id": "call_970df9a457ad4efa8c9cdf305e606889",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-15T01:07:12.537Z",
+      "call_id": "call_433a8d79a85f407dbeb873ec799862d0",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-11T14:28:30.533Z",
+      "call_id": "call_04b3c0bf61c641b89fe7d5f752ffa99c",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-11T14:26:34.749Z",
+      "call_id": "call_7dfd6211a7854ee8944a40f6ca900001",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "uncertain_structural",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-11T14:25:01.858Z",
+      "call_id": "call_159deb83c22d46ce8015ccf27314cb16",
+      "source_session": "rollout-2026-10-06T01-33-55-01a0f99b-604e-7d82-9341-87fe405ade11_01a10fb4-45fc-7481-84b4-15c12f38306f.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-05T14:29:06.896Z",
+      "call_id": "call_RQrWAte2ZCLKY6gePrbhqskx",
+      "source_session": "rollout-2026-10-01T18-35-04-01a0f99b-604e-7d82-9341-87fe405ade11.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-05T14:18:15.383Z",
+      "call_id": "call_6C2CK6E2f5UN0DOlULI2AO50",
+      "source_session": "rollout-2026-10-01T18-35-04-01a0f99b-604e-7d82-9341-87fe405ade11.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-05T14:12:28.331Z",
+      "call_id": "call_GfpVKQdJIOUrtuN9DtDzokwx",
+      "source_session": "rollout-2026-10-01T18-35-04-01a0f99b-604e-7d82-9341-87fe405ade11.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-05T14:05:38.947Z",
+      "call_id": "call_lEndpisMfplhPkFNG8x8fi9m",
+      "source_session": "rollout-2026-10-01T18-35-04-01a0f99b-604e-7d82-9341-87fe405ade11.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T06:42:47.617Z",
+      "call_id": "call_fZs97xaeFljW41e615Ua7kEx",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T06:41:21.328Z",
+      "call_id": "call_jfus0gDomp5fDYXu5Fnx4mb0",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T02:30:37.025Z",
+      "call_id": "call_ZCU7K1VfIliEnNJfrhYZaRSC",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T01:38:18.291Z",
+      "call_id": "call_f90180976fab48f3aa8a41379297b5f7",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "separate_approval_required",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T01:35:14.370Z",
+      "call_id": "call_tMvK4d15kOQpHgPVbtMPiJuX",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T01:31:54.927Z",
+      "call_id": "call_aCKiYC0L2K7Z2NYVr9Cspx0h",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T01:31:05.940Z",
+      "call_id": "call_7SruXHf62gIAvzOAd2faIFDo",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-03T01:29:12.265Z",
+      "call_id": "call_d5TmwsqVsvKEVNBSZtMYU8sB",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-02T17:37:13.563Z",
+      "call_id": "call_QbL4AjCIZN90WI9kdAZc277D",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-02T17:35:33.729Z",
+      "call_id": "call_DeC64FqftnpvYhg6kMzeRtQn",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-02T17:34:33.268Z",
+      "call_id": "call_trzc1QT5DjVZCmYtiS2N2qEI",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-02T01:44:17.609Z",
+      "call_id": "call_W1L1lCuJoSF8BWzSQnFtkulr",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T14:04:22.330Z",
+      "call_id": "call_878aa5d08bb94f64a1163f0edd5a18e2",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T13:59:37.623Z",
+      "call_id": "call_lyWMhqUPPWeIyyWBZUq24Yne",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T13:59:10.825Z",
+      "call_id": "call_6G2SmftzRPJUFbg1fEyX1wIJ",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T13:27:09.980Z",
+      "call_id": "call_HxPqpYgeE12ohUvqTpvbuSOx",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T13:21:47.117Z",
+      "call_id": "call_iXtqm71wikKKfqo1zRAJVOvu",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T11:53:18.430Z",
+      "call_id": "call_x4YrPENssvwHi3qDdkqWErBG",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T11:35:39.335Z",
+      "call_id": "call_UXjGixkTOx0wfOJLRF3p7zia",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T11:20:59.703Z",
+      "call_id": "call_5x8cDKzYpGPf7fU2kb74xUx6",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T11:20:16.832Z",
+      "call_id": "call_1V9c1fD5VwJVUbGUJW3titXF",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:09:07.748Z",
+      "call_id": "call_VkjZb1TyATyazNjmtxsT4MYw",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:08:25.362Z",
+      "call_id": "call_NmENsethBm5FsczbOYTSjqjh",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:06:26.750Z",
+      "call_id": "call_MFH9B9jQcquqRwL28njWrHTE",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:03:09.166Z",
+      "call_id": "call_CxOfj17QxJHTzsUsY09UTcD2",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:02:52.533Z",
+      "call_id": "call_OgoGLaG6EPtAGuvDSLkLcf1q",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "node",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:02:27.659Z",
+      "call_id": "call_Br6tNGSfeXyLCMmGIfCI3ggp",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "sed",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:02:09.415Z",
+      "call_id": "call_Tj3r2kNYAMp8i40j5Y2yEpWM",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-10-01T03:01:43.993Z",
+      "call_id": "call_BoWAAPOXVON6zEhmmQDowo6h",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "git",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-29T18:14:18.934Z",
+      "call_id": "call_y4E3raTvF0pJg3pUsbFZTwzQ",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "legacy_or_other",
+      "command_family": "local_inspection",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-29T17:45:23.395Z",
+      "call_id": "call_YqfwiqneSvmBj5XIwqJ71Y2N",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "legacy_or_other",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-29T05:02:40.137Z",
+      "call_id": "call_xAHtKZkEeQLK0MrWBaHA5PLE",
+      "source_session": "rollout-2026-09-28T14-52-10-01a0e95c-3993-7eb1-a562-0b3991eb2858.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T19:10:22.781Z",
+      "call_id": "call_H5sNfTe1hsqUynvXj6rSdSQR",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "ripgrep",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T19:04:51.093Z",
+      "call_id": "call_xOMwjRfTKdrG5GwIcDitMHyx",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T18:56:05.857Z",
+      "call_id": "call_8f60IEQnMh5dVYGl2u0B183n",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "other",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T18:27:31.435Z",
+      "call_id": "call_xNhCR7BKGlm1NJJhQBwzYCwQ",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "project_task",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T18:19:41.249Z",
+      "call_id": "call_SAN6Gq9Ahv4nJw65MrjpgkzT",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-278f-7fe2-be89-75202b5f6179.jsonl",
+      "project": "unknown",
+      "denial_category": "phase_capability_denied",
+      "command_family": "cargo",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T18:18:50.244Z",
+      "call_id": "call_vw4keGgHKcqcfmOzvPd6jKFo",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "uninspected_record",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T18:18:33.413Z",
+      "call_id": "call_jCZ2t5I1d8POjZdKHIrMB2iB",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-278f-7fe2-be89-75202b5f6179.jsonl",
+      "project": "unknown",
+      "denial_category": "semantic_uncertain",
+      "command_family": "uninspected_record",
+      "adjudication_status": "unreviewed"
+    },
+    {
+      "timestamp": "2026-09-28T17:27:17.646Z",
+      "call_id": "call_t7AtkKX7pI9M0RFpgx7Zl8nz",
+      "source_session": "rollout-2026-09-28T13-23-37-01a0e90b-2721-7c21-8c32-7aebd0bb23c1.jsonl",
+      "project": "unknown",
+      "denial_category": "legacy_or_other",
+      "command_family": "uninspected_record",
+      "adjudication_status": "unreviewed"
+    }
+  ]
+}

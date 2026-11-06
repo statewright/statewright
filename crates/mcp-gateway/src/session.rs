@@ -59,6 +59,10 @@ pub struct GatewaySession {
     pub files_read: std::collections::HashMap<String, u32>,
     /// Pending approval gate — transition parked until human approves/rejects.
     pub pending_approval: Option<PendingApproval>,
+    /// Hash of the private host origin proof captured at run creation. Legacy
+    /// checkpoints remain unbound; later reads/resume never manufacture it.
+    #[serde(default)]
+    pub approval_origin_hash: Option<String>,
     /// Set while a named invoked workflow owns this session's current state.
     pub subflow: Option<ActiveSubflow>,
 }
@@ -90,6 +94,9 @@ impl GatewaySession {
             || !session.context.is_object()
         {
             return Err("Paused session identity or state mismatch".into());
+        }
+        if session.approval_origin_hash.as_deref().is_some_and(|hash| !crate::approval_origin::valid_hash(hash)) {
+            return Err("Invalid approval origin checkpoint".into());
         }
         if let Some(pending) = &session.pending_approval {
             if pending.approval_id.is_empty()
@@ -134,6 +141,7 @@ impl GatewaySession {
             context_bytes: 0,
             files_read: std::collections::HashMap::new(),
             pending_approval: None,
+            approval_origin_hash: None,
             subflow: None,
         }
     }

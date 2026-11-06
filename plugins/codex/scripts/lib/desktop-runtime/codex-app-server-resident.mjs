@@ -15,6 +15,7 @@ import { resolveApiKey } from "./remote-client.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
+import { approvalOriginProof } from "./approval-origin.mjs";
 import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -24,6 +25,8 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "codex-app-server-transport.mjs"),
   join(EXECUTOR_ROOT, "codex-app-server-route-proxy.mjs"),
   join(EXECUTOR_ROOT, "approval-pipeline.mjs"),
+  join(EXECUTOR_ROOT, "approval-origin.mjs"),
+  join(EXECUTOR_ROOT, "managed-mcp-bridge.mjs"),
   join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
   join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
   join(EXECUTOR_ROOT, "human-approval.mjs"),
@@ -188,11 +191,13 @@ function telemetryWriter(environment) {
   });
 }
 
-async function createManagedMcpBridge({ environment, clientId }) {
+async function createManagedMcpBridge({ environment, clientId, home }) {
+  const gatewayUrl = environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
   const bridge = new ManagedMcpBridge({
-    gatewayUrl: environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai",
+    gatewayUrl,
     apiKey: await resolveApiKey(environment),
     clientId,
+    originProof: await approvalOriginProof({home, clientId, gatewayUrl}),
   });
   await bridge.start();
   return bridge;
@@ -275,9 +280,10 @@ async function main() {
   const manifestPath = join(root, "manifest.json");
   await mkdir(controlDir, { recursive: true, mode: 0o700 });
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
-  const bridge = await createManagedMcpBridge({ environment: process.env, clientId });
+  const bridge = await createManagedMcpBridge({ environment: process.env, clientId, home });
   const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
       apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
+      originProof: bridge.originProof,
       pbUrl: process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai",
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
       ownsThread: async threadId => (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId });

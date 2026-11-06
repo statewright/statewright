@@ -712,7 +712,7 @@ async fn handle_streamable_http(
 
     // If we need a new session, do the expensive fetch_workflows OUTSIDE any lock
     let new_session = if needs_create {
-        let result = validated;
+        let result = &validated;
 
         let session_id = session_key.clone();
         let default_def = match result.workflows.get(&result.default) {
@@ -739,11 +739,11 @@ async fn handle_streamable_http(
             session_manager.clone(),
             UpstreamManager::empty(),
             session_id,
-            result.workflows,
+            result.workflows.clone(),
             // Keep the machine definition available for `load_workflow`, but
             // do not activate it until this client explicitly asks.
             None,
-            result.owner_id,
+            result.owner_id.clone(),
             state.db_pool.clone(),
         );
         gateway.set_api_key_fingerprint(&api_key);
@@ -756,7 +756,7 @@ async fn handle_streamable_http(
         Some(Arc::new(Mutex::new(RemoteSession {
             gateway,
             tx,
-            resource,
+            resource: resource.clone(),
             native_revision: uuid::Uuid::new_v4().to_string(),
             telemetry_consent: None,
             telemetry_watermark: None,
@@ -779,6 +779,18 @@ async fn handle_streamable_http(
         sessions.get(&session_key).cloned().unwrap()
     };
     let mut session = session.lock().await;
+    if !session.gateway.owned_by(&validated.owner_id) || session.resource != resource {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // Approval recovery uses only its exact checkpoint. Normal authenticated
+    // traffic restores the current authorized catalog without replacing the
+    // active run's pinned machine, origin or pending decision.
+    session.gateway.refresh_native_catalog(validated.workflows);
+    let proof = headers.get(crate::approval_origin::HEADER).and_then(|value| value.to_str().ok());
+    if proof.is_some_and(|value| crate::approval_origin::proof_hash(value).is_none()) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    session.gateway.set_request_approval_origin(proof);
     session
         .gateway
         .set_remote_host_model_control(client_id.is_none());
@@ -1219,6 +1231,7 @@ pub fn build_router(state: Arc<RemoteState>) -> Router {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RuntimeApprovalRequest {
     run_id: String,
     run_session_id: String,
@@ -1232,6 +1245,9 @@ async fn handle_runtime_approval(
     headers: HeaderMap,
     Json(body): Json<RuntimeApprovalRequest>,
 ) -> axum::response::Response {
+    if headers.contains_key(header::ORIGIN) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(key) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -1272,6 +1288,16 @@ async fn handle_runtime_approval(
         .await
         .get(&body.run_session_id)
         .cloned();
+    let resource = match &session {
+        Some(session) => session.lock().await.resource.clone(),
+        None => resource_url(&state, "/mcp"),
+    };
+    // A cached session proves neither current key validity nor entitlement.
+    // Revalidate scope, expiry, revocation, resource and owner on every call;
+    // the separate endpoint has no paid-plan/catalog/quota prerequisite.
+    let Some(identity) = approval_identity(&state, key, &resource).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     if session.is_none() {
         // The gateway process may have been replaced while a human decision
         // was parked. A durable checkpoint is the only authority for reviving
@@ -1280,18 +1306,14 @@ async fn handle_runtime_approval(
             return StatusCode::NOT_FOUND.into_response();
         }
         let resource = resource_url(&state, "/mcp");
-        let workflows = match fetch_workflows(&state.pb_url, key, &resource).await {
-            Ok(value) if !value.workflows.is_empty() => value,
-            _ => return StatusCode::NOT_FOUND.into_response(),
-        };
         let manager = state.get_session_manager(&fingerprint).await;
         let mut gateway = Gateway::new(
             manager,
             UpstreamManager::empty(),
             body.run_session_id.clone(),
-            workflows.workflows,
+            HashMap::new(),
             None,
-            workflows.owner_id,
+            identity.clone(),
             state.db_pool.clone(),
         );
         gateway.set_api_key_fingerprint(key);
@@ -1318,7 +1340,7 @@ async fn handle_runtime_approval(
     }
     let session = session.expect("approval session was restored or already present");
     let mut session = session.lock().await;
-    if !session.gateway.verify_owner_key(key) {
+    if !session.gateway.verify_owner_key(key) || !session.gateway.owned_by(&identity) {
         return StatusCode::FORBIDDEN.into_response();
     }
     if session
@@ -1340,6 +1362,14 @@ async fn handle_runtime_approval(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     projection["decision"] = serde_json::json!(body.decision);
+    let proof = headers.get(crate::approval_origin::HEADER).and_then(|value| value.to_str().ok());
+    let verified = session.gateway.approval_origin_verified(proof);
+    projection["decision_context"] = if verified {
+        serde_json::json!({"channel":"originating", "origin_verified":true,
+            "origin_binding":projection["origin_binding"].clone()})
+    } else {
+        serde_json::json!({"channel":"unverified_runtime"})
+    };
     let Some(receipt) = approval_service_receipt(&state, &projection).await else {
         return StatusCode::BAD_GATEWAY.into_response();
     };
@@ -1358,6 +1388,16 @@ async fn handle_runtime_approval(
     }
     session.gateway.publish_lifecycle_change(&before).await;
     Json(receipt).into_response()
+}
+
+async fn approval_identity(state: &RemoteState, key: &str, resource: &str) -> Option<String> {
+    let response = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().ok()?
+        .get(format!("{}/api/gateway/approval-identity", state.pb_url.trim_end_matches('/')))
+        .bearer_auth(key).header("X-Statewright-OAuth-Resource", resource)
+        .timeout(std::time::Duration::from_secs(10)).send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let value: serde_json::Value = response.json().await.ok()?;
+    value["owner_id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
 async fn approval_service_receipt(
@@ -1886,6 +1926,26 @@ mod tests {
             approval_secret: secret.into(),
             classifier_denial_capture: false,
         })
+    }
+
+    async fn approval_identity_stub(owner: &'static str) -> (String, tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>) {
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let current = valid.clone();
+        let app = Router::new().route("/api/gateway/approval-identity", get(move |headers:HeaderMap| {
+            let current = current.clone();
+            async move {
+                if !current.load(std::sync::atomic::Ordering::SeqCst)
+                    || headers.get("authorization").and_then(|v|v.to_str().ok()) != Some("Bearer key")
+                    || headers.get("x-statewright-oauth-resource").and_then(|v|v.to_str().ok()) != Some("https://mcp.statewright.example/mcp") {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error":"invalid"})));
+                }
+                (StatusCode::OK, Json(json!({"owner_id":owner,"verified":true})))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}",listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener,app).await.unwrap(); });
+        (url,server,valid)
     }
 
     async fn test_state_with_revalidating_pb(
@@ -2954,6 +3014,75 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn runtime_approval_origin_context_comes_from_checkpoint_and_auth_is_always_fresh() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let valid = Arc::new(AtomicBool::new(true));
+        let check = valid.clone();
+        let observed = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+        let captures = observed.clone();
+        let pb = Router::new()
+            .route("/api/gateway/approval-identity", get(move |headers:HeaderMap| {
+                let check=check.clone(); async move {
+                    assert_eq!(headers["x-statewright-oauth-resource"],"https://mcp.statewright.example/mcp");
+                    if !check.load(Ordering::SeqCst) {return (StatusCode::UNAUTHORIZED,Json(json!({})));}
+                    (StatusCode::OK,Json(json!({"owner_id":"owner1"})))
+                }
+            }))
+            .route("/api/internal/human-approval", post(move |headers:HeaderMap,Json(value):Json<serde_json::Value>| {
+                let captures=captures.clone(); async move {
+                    assert_eq!(headers["authorization"],"Bearer private-callback");
+                    captures.lock().await.push(value.clone());
+                    Json(json!({"approval_id":value["approval_id"],"run_id":value["run_id"],
+                        "instance_id":value["instance_id"],"from_state":"working","to_state":"deployed",
+                        "status":"pending","can_decide":value["decision_context"]["origin_verified"] == true}))
+                }
+            }));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pb_url=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,pb).await.unwrap();});
+        let fingerprint=uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID,b"key").to_string();
+        let root=streamable_session_key(&fingerprint,Some("own-client"),None);
+        let mut state=test_state_with_session(&root,"key").await;
+        let mutable=Arc::get_mut(&mut state).unwrap();
+        mutable.pb_url=pb_url; mutable.approval_secret="private-callback".into();
+        let proof="a".repeat(64);
+        {
+            let session=state.sessions.read().await.get(&root).cloned().unwrap();
+            let mut session=session.lock().await;
+            session.gateway.seed_native_usage_run("run","working");
+            let mut checkpoint=session.gateway.session_manager.get(&root).unwrap();
+            checkpoint.approval_origin_hash=crate::approval_origin::proof_hash(&proof);
+            session.gateway.session_manager.restore(checkpoint);
+            session.gateway.session_manager.set_pending_approval(&root,crate::session::PendingApproval {
+                approval_id:"apr_origin".into(),event:"DEPLOY".into(),from_state:"working".into(),to_state:"deployed".into(),new_context:json!({}),message:None,
+            });
+        }
+        let request=|proof:Option<&str>,body:serde_json::Value| {
+            let mut request=Request::post("/api/runtime-approval").header("content-type","application/json")
+                .header("authorization","Bearer key").header(CLIENT_ID_HEADER,"own-client");
+            if let Some(proof)=proof {request=request.header(crate::approval_origin::HEADER,proof);}
+            request.body(Body::from(body.to_string())).unwrap()
+        };
+        let ticket=json!({"run_id":"run","run_session_id":root,"approval_id":"apr_origin"});
+        for (candidate,expected) in [(None,false),(Some(proof.as_str()),true),(Some("wrong"),false)] {
+            let response=build_router(state.clone()).oneshot(request(candidate,ticket.clone())).await.unwrap();
+            assert_eq!(response.status(),StatusCode::OK);
+            let value:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap()).unwrap();
+            assert_eq!(value["can_decide"],expected);
+        }
+        let mut forged=ticket.clone(); forged["decision_context"]=json!({"origin_verified":true});
+        assert_eq!(build_router(state.clone()).oneshot(request(None,forged)).await.unwrap().status(),StatusCode::UNPROCESSABLE_ENTITY);
+        valid.store(false,Ordering::SeqCst);
+        let mut decision=ticket; decision["decision"]=json!("approved");
+        assert_eq!(build_router(state.clone()).oneshot(request(Some(&proof),decision)).await.unwrap().status(),StatusCode::UNAUTHORIZED);
+        let received=observed.lock().await;
+        assert_eq!(received.len(),3,"forged/revoked requests never reach decision persistence");
+        assert!(received.iter().all(|value|value["decision"].is_null()));
+        assert!(!serde_json::to_string(&*received).unwrap().contains(&proof));
+        server.abort();
+    }
+
     #[cfg(feature = "metering")]
     #[tokio::test]
     #[ignore = "requires STATEWRIGHT_TEST_DATABASE_URL; uses connection-local temporary table only"]
@@ -2990,17 +3119,29 @@ mod tests {
                 message: None,
             },
         );
+        let mut origin = manager.get(&root).unwrap();
+        origin.approval_origin_hash = crate::approval_origin::proof_hash(&"a".repeat(64));
+        manager.restore(origin);
         let checkpoint = manager.get(&root).unwrap().checkpoint();
         sqlx::query("INSERT INTO workflow_runs (id, owner, workflow_name, status, session_id, project_id, final_state, context_snapshot) VALUES ('run-1', 'owner-a', 'test', 'running', $1, 'project-a', 'working', $2)")
             .bind(&root).bind(&checkpoint).execute(&pool).await.unwrap();
 
-        let response =
-            json!({"default": "test", "owner_id": "owner-a", "workflows": {"test": definition}});
-        let pb = axum::Router::new().route(
+        let catalog_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = catalog_calls.clone();
+        let catalog_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let available = catalog_available.clone();
+        let catalog = json!({"default":"test", "owner_id":"owner-a", "workflows":{
+            "test":definition, "later":definition,
+        }});
+        let pb = axum::Router::new().route("/api/gateway/approval-identity", get(||async {
+            Json(json!({"owner_id":"owner-a","verified":true}))
+        })).route(
             "/api/gateway/workflows",
             get(move || {
-                let response = response.clone();
-                async move { Json(response) }
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let enabled = available.load(std::sync::atomic::Ordering::SeqCst);
+                let catalog = catalog.clone();
+                async move { if enabled {Json(catalog).into_response()} else {StatusCode::SERVICE_UNAVAILABLE.into_response()} }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3070,6 +3211,26 @@ mod tests {
             "deployed"
         );
         drop(stored);
+        assert_eq!(catalog_calls.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "exact pending recovery must not depend on current workflow catalog");
+        catalog_available.store(true, std::sync::atomic::Ordering::SeqCst);
+        let response = build_router(state.clone()).oneshot(Request::post("/mcp")
+            .header("content-type","application/json").header("authorization","Bearer key")
+            .header(CLIENT_ID_HEADER,"own-client")
+            .header(crate::approval_origin::HEADER,"b".repeat(64))
+            .body(Body::from(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"statewright_list_workflows","arguments":{}}}).to_string())).unwrap())
+            .await.unwrap();
+        assert_eq!(response.status(),StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body:serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["result"]["content"][0]["text"].as_str().unwrap().contains("later"),"fresh catalog is visible after checkpoint-only recovery");
+        let stored = state.sessions.read().await.get(&root).cloned().unwrap();
+        let stored = stored.lock().await;
+        assert_eq!(stored.gateway.approval_projection("run-1","apr_recover").unwrap()["pending"]["to_state"],"deployed");
+        assert!(stored.gateway.approval_origin_verified(Some(&"a".repeat(64))));
+        assert!(!stored.gateway.approval_origin_verified(Some(&"b".repeat(64))));
+        drop(stored);
         pb_server.abort();
         pool.close().await;
     }
@@ -3079,7 +3240,9 @@ mod tests {
         let fingerprint = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"key").to_string();
         let root = streamable_session_key(&fingerprint, Some("own-client"), None);
         let branch = format!("{root}_br_test_branch");
-        let state = test_state_with_session(&branch, "key").await;
+        let mut state = test_state_with_session(&branch, "key").await;
+        let (pb_url,pb_server,valid) = approval_identity_stub("owner1").await;
+        Arc::get_mut(&mut state).unwrap().pb_url = pb_url;
         {
             let rs = state.sessions.read().await.get(&branch).cloned().unwrap();
             let mut rs = rs.lock().await;
@@ -3122,6 +3285,12 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
+        // A cached run and matching account fingerprint cannot revive a
+        // revoked credential. Authorization is checked on every call.
+        valid.store(false,std::sync::atomic::Ordering::SeqCst);
+        let response = build_router(state.clone()).oneshot(make(branch.clone())).await.unwrap();
+        assert_eq!(response.status(),StatusCode::UNAUTHORIZED);
+
         // A branch under a different client root stays forbidden even with the
         // same account key.
         let other_root = streamable_session_key(&fingerprint, Some("other-client"), None);
@@ -3133,11 +3302,13 @@ mod tests {
 
         // A branch under the own root that has no stored session must not be
         // served by a sibling session.
+        valid.store(true,std::sync::atomic::Ordering::SeqCst);
         let response = build_router(state)
             .oneshot(make(format!("{root}_br_missing")))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        pb_server.abort();
     }
 
     #[tokio::test]

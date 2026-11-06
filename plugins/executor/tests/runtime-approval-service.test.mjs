@@ -39,6 +39,20 @@ test("private read endpoint uses exact identity allowlist and host client header
   assert(f.calls[0].signal instanceof AbortSignal);
 });
 
+test("private origin proof is transport metadata and proof-bearing requests refuse redirects", async t => {
+  const proof = "a".repeat(64);
+  const f = await fixture(t,{originProof:proof});
+  await f.service.read(ticket);
+  f.respond({result:{structuredContent:state}});
+  await f.service.getState();
+  for (const call of f.calls) {
+    assert.equal(call.headers["x-statewright-approval-origin"],proof);
+    assert.equal(call.redirect,"error");
+    assert.equal(JSON.stringify(call.body).includes(proof),false);
+    assert.equal(new URL(call.url).origin,"https://gateway.invalid");
+  }
+});
+
 for (const decision of ["approved", "rejected"]) test(`private ${decision} request has exactly the permitted fields`, async t => {
   const f = await fixture(t);
   f.respond({ ...receipt, status: decision });

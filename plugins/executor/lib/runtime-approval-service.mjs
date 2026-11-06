@@ -1,5 +1,6 @@
 import { approvalJournal } from "./approval-journal.mjs";
 import { openExternalUrl, uploadApprovalEvidence } from "./approval-evidence.mjs";
+import { APPROVAL_ORIGIN_HEADER, validApprovalOriginProof } from "./approval-origin.mjs";
 
 function openEvidenceReview(url) {
   return new Promise((resolve, reject) => {
@@ -9,12 +10,14 @@ function openEvidenceReview(url) {
   });
 }
 
-export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, journalClientId = clientId,
+export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, originProof, journalClientId = clientId,
   fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true }) {
   const journal = approvalJournal(root, journalClientId);
+  if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
   const prepared = new Set();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`,
-    "x-statewright-client-id": clientId };
+    "x-statewright-client-id": clientId,
+    ...(originProof ? {[APPROVAL_ORIGIN_HEADER]:originProof} : {}) };
   const endpoint = gatewayUrl.replace(/\/+$/, "");
   const verify = (ticket, receipt) => {
     if (["approval_id", "run_id", "from_state", "to_state"].some(key => receipt?.[key] !== ticket[key])
@@ -29,7 +32,7 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
     if (ownsThread && !await ownsThread(ticket.threadId)) throw new Error("Approval belongs to a different root thread");
     signal?.throwIfAborted();
     const response = await fetchImpl(new URL("/api/runtime-approval", endpoint).href, {
-      method: "POST", headers,
+      method: "POST", headers, redirect:"error",
       body: JSON.stringify({ approval_id: ticket.approval_id, run_id: ticket.run_id,
         run_session_id: ticket.run_session_id, ...(decision ? { decision } : {}) }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
@@ -62,7 +65,7 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
       } else await result;
     },
     async getState() {
-      const response = await fetchImpl(endpoint, { method: "POST", headers,
+      const response = await fetchImpl(endpoint, { method: "POST", headers, redirect:"error",
         body: JSON.stringify({ jsonrpc: "2.0", id: "statewright-approval-state", method: "tools/call",
           params: { name: "statewright_get_state", arguments: {} } }), signal: AbortSignal.timeout(15000) });
       if (!response.ok) throw new Error(`Approval state HTTP ${response.status}`);

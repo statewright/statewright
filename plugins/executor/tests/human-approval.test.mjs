@@ -186,7 +186,7 @@ for (const [action, status] of [["accept", "approved"], ["decline", "rejected"]]
 });
 
 test('authorized approval opens its evidence packet once and links it in the dialog', async () => {
-  const f=fixture(); f.set({...ticket,status:'pending',can_decide:true,review_url:'https://statewright.test/approvals/gate',
+  const f=fixture(); f.set({...ticket,status:'pending',can_decide:true,remote_can_decide:true,review_url:'https://statewright.test/approvals/gate',
     approval_requirement:{reviewers:[]}});
   const waiting=f.wait(); await Promise.resolve(); await Promise.resolve();
   assert.deepEqual(f.opened,['https://statewright.test/approvals/gate']);
@@ -194,6 +194,19 @@ test('authorized approval opens its evidence packet once and links it in the dia
   await new Promise(resolve=>setTimeout(resolve,15));
   assert.equal(f.opened.length,1);
   f.abort.abort(new Error('done')); await assert.rejects(waiting,/done/);
+});
+
+test('originating owner without remote entitlement gets the native form and can cancel without a decision', async () => {
+  const f=fixture(); f.set({...ticket,status:'pending',can_decide:true,remote_can_decide:false,
+    review_url:'https://statewright.test/approvals/gate',approval_requirement:{reviewers:[]}});
+  const waiting=f.wait(); const cancelled=assert.rejects(waiting,/dismissed/);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.sent[0].method,'mcpServer/elicitation/request');
+  assert.deepEqual(f.opened,[]);
+  f.controller.handleReply({id:f.sent[0].id,result:{action:'cancel'}});
+  await cancelled;
+  assert.deepEqual(f.resolutions,[]);
+  assert.equal(f.controller.tickets.size,0);
 });
 
 test("approval requirement formatting supports a future threshold reviewer list", () => {

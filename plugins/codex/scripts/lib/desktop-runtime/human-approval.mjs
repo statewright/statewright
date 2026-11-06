@@ -19,6 +19,10 @@ export function approvalRequirementText(requirement) {
 
 function deniedCapabilityText(result) {
   switch (result?.authorization?.reason) {
+    case "origin_session_unverified":
+      return "This connection cannot prove it is the workflow's originating session. The request remains pending. Cancel this dialog or safely deactivate the owned run; an eligible remote reviewer can use its approval page.";
+    case "enterprise_reviewer_entitlement_required":
+      return "Approval by a different designated reviewer requires the workflow owner's Enterprise entitlement. The request remains pending; the reviewer requirement has not changed.";
     case "approval_queue_entitlement_required":
       return "The workflow owner does not currently have a verified plan with approval queues. Check the owner's billing and subscription configuration; the request remains pending.";
     case "pro_entitlement_required":
@@ -143,7 +147,7 @@ export class HumanApprovalController {
       }
       entry.requestId = `statewright-approval-${randomUUID()}`;
       this.requests.set(entry.requestId, entry);
-      if (!entry.reviewOpened && typeof result.review_url === "string" && result.review_url) {
+      if (!entry.reviewOpened && result.remote_can_decide === true && typeof result.review_url === "string" && result.review_url) {
         entry.reviewOpened = true;
         void this.openReview(result.review_url).catch(() => {});
       }

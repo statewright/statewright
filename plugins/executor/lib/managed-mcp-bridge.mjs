@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { annotateToolsListResponse } from "./tool-annotations.mjs";
 import { canonicalGateway } from "./gateway-profile.mjs";
 import { normalizeMcpHttpResponse } from "./mcp-recovery.mjs";
+import { APPROVAL_ORIGIN_HEADER, validApprovalOriginProof } from "./approval-origin.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -40,12 +41,14 @@ async function readBody(request) {
 }
 
 export class ManagedMcpBridge {
-  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), fetch = globalThis.fetch, nativeUsage = null, projectUsage }) {
+  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage }) {
+    if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
     if (nativeUsage && typeof projectUsage !== "function") throw new Error("Native usage requires a payload projector");
     this.gatewayUrl = canonicalGateway(gatewayUrl);
     this.apiKey = apiKey;
     this.clientId = clientId;
     this.token = token;
+    this.originProof = originProof;
     this.fetch = fetch;
     this.server = null;
     this.url = null;
@@ -85,12 +88,14 @@ export class ManagedMcpBridge {
           "Content-Type": request.headers["content-type"] ?? "application/json",
           Authorization: `Bearer ${this.apiKey}`,
           "X-Statewright-Client-Id": this.clientId,
+          ...(this.originProof ? {[APPROVAL_ORIGIN_HEADER]:this.originProof} : {}),
         };
         for (const name of ["accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]) {
           if (request.headers[name]) forwardedHeaders[name] = request.headers[name];
         }
         const upstream = await this.fetch(this.gatewayUrl, {
           method: "POST",
+          redirect: "error",
           headers: forwardedHeaders,
           body,
           signal: AbortSignal.timeout(timeoutForManagedMcpRequest(body)),

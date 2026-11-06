@@ -1,3 +1,4 @@
+mod approval_origin;
 pub mod bash_classifier;
 pub mod config;
 pub mod custom_tools;

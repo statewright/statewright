@@ -401,6 +401,10 @@ async fn begin(
         return fail(request.id, "Approval checkpoint unavailable");
     }
     projection["decision"] = Value::Null;
+    // This OAuth elicitation adapter has no persisted private host-origin
+    // proof yet. Preserve its existing entitled review path without claiming
+    // the new all-plan originating-session exemption from a client label.
+    projection["decision_context"] = json!({"channel":"remote"});
     let Some(receipt) = approval_service_receipt(&state, &projection).await else {
         return fail(
             request.id,

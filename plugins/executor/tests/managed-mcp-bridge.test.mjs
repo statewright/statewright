@@ -51,6 +51,21 @@ test("managed MCP bridge forwards one immutable client identity", async () => {
   }
 });
 
+test("managed host supplies its own private proof and never follows a redirect with it", async t => {
+  const proof = "a".repeat(64), calls=[];
+  const bridge = await new ManagedMcpBridge({gatewayUrl:"https://gateway.example/mcp",apiKey:"key",clientId:"owner",token:"token",originProof:proof,
+    fetch:async (url,options) => {calls.push({url,...options}); return Response.json({jsonrpc:"2.0",id:1,result:{ok:true}});}}).start();
+  t.after(() => bridge.close());
+  const response = await fetch(`${bridge.url}/mcp`,{method:"POST",headers:{Authorization:"Bearer token","x-statewright-approval-origin":"foreign"},
+    body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"statewright_get_state",arguments:{}}})});
+  assert.equal(response.status,200);
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].headers["x-statewright-approval-origin"],proof);
+  assert.equal(calls[0].redirect,"error");
+  assert.equal(calls[0].body.includes(proof),false);
+  assert.equal((await response.text()).includes(proof),false);
+});
+
 test("managed MCP bridge rejects a caller without its supervisor token", async () => {
   const upstream = await startServer((_request, response) => response.writeHead(500).end());
   const bridge = await new ManagedMcpBridge({

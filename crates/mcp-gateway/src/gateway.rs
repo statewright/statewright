@@ -130,6 +130,9 @@ pub struct Gateway {
     owner_id: String,
     /// API key fingerprint for session ownership verification (UUID v5 hash).
     api_key_fingerprint: String,
+    /// Private transport metadata for this request, never agent context. It is
+    /// copied only into a newly born run, not a resumed or recovered checkpoint.
+    request_approval_origin_hash: Option<String>,
     /// Database pool for run recording and step metering.
     db_pool: crate::DbPool,
     /// Current run ID (set on workflow load, used for transition/log linkage).
@@ -276,6 +279,7 @@ impl Gateway {
             active_workflow,
             owner_id,
             api_key_fingerprint: String::new(),
+            request_approval_origin_hash: None,
             db_pool,
             current_run_id: None,
             project_id: None,
@@ -296,6 +300,17 @@ impl Gateway {
 
     pub(crate) fn owned_by(&self, owner: &str) -> bool {
         !owner.is_empty() && self.owner_id == owner
+    }
+
+    pub(crate) fn set_request_approval_origin(&mut self, proof: Option<&str>) {
+        self.request_approval_origin_hash = proof.and_then(crate::approval_origin::proof_hash);
+    }
+
+    pub(crate) fn approval_origin_verified(&self, proof: Option<&str>) -> bool {
+        let Some(observed) = proof.and_then(crate::approval_origin::proof_hash) else { return false; };
+        self.session_manager.get(&self.session_id)
+            .and_then(|session| session.approval_origin_hash)
+            .is_some_and(|expected| expected == observed)
     }
 
     pub(crate) fn web_instructions() -> &'static str {
@@ -330,7 +345,10 @@ impl Gateway {
         };
         Ok(
             json!({"owner": self.owner_id, "instance_id": self.transport_session_id,
-            "run_id": run_id, "approval_id": approval_id, "pending": pending}),
+            "run_id": run_id, "approval_id": approval_id, "pending": pending,
+            "origin_binding": session.approval_origin_hash.as_ref().map(|hash| json!({
+                "version":1, "session_id":self.transport_session_id, "run_id":run_id, "proof_hash":hash
+            }))}),
         )
     }
 
@@ -3377,7 +3395,10 @@ impl Gateway {
                 } else {
                     None
                 };
-                let prepared_session = prepared.get(&self.session_id).expect("prepared session");
+                let mut prepared_session = prepared.get(&self.session_id).expect("prepared session");
+                if resumed_state.is_none() {
+                    prepared_session.approval_origin_hash = self.request_approval_origin_hash.clone();
+                }
                 if resumed_state.is_none() {
                     if let Some(rid) = run_id.as_deref() {
                         if let Err(error) = self.record_run_start(
@@ -4181,6 +4202,39 @@ mod tests {
             String::new(),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn approval_origin_is_captured_at_birth_and_survives_checkpoint_without_rebinding() {
+        let mut gateway = test_gateway();
+        let first = "a".repeat(64);
+        let next = "b".repeat(64);
+        gateway.set_request_approval_origin(Some(&first));
+        assert!(!gateway.approval_origin_verified(Some(&first)), "legacy run cannot be rebound by a request header");
+        let load = || JsonRpcRequest {jsonrpc:"2.0".into(), id:Some(json!(1)), method:"tools/call".into(),
+            params:Some(json!({"name":"statewright_load_workflow","arguments":{"name":"test"}}))};
+        let result = gateway.handle_message(load()).await.unwrap();
+        assert!(result.error.is_none());
+        assert!(!result.result.unwrap().to_string().contains(&first));
+        assert!(gateway.approval_origin_verified(Some(&first)));
+        let session = gateway.session_manager.get("test-session").unwrap();
+        let checkpoint = session.checkpoint();
+        assert!(!checkpoint.to_string().contains(&first));
+        let restored = crate::session::GatewaySession::from_checkpoint(checkpoint.clone(), "test-session", &session.current_state).unwrap();
+        gateway.session_manager.restore(restored);
+        gateway.set_request_approval_origin(Some(&next));
+        assert!(gateway.approval_origin_verified(Some(&first)));
+        assert!(!gateway.approval_origin_verified(Some(&next)));
+        let mut malformed = checkpoint.clone();
+        malformed["session"]["approval_origin_hash"] = json!("client-label");
+        assert!(crate::session::GatewaySession::from_checkpoint(malformed, "test-session", &session.current_state).is_err());
+        let mut legacy = checkpoint;
+        legacy["session"].as_object_mut().unwrap().remove("approval_origin_hash");
+        let restored = crate::session::GatewaySession::from_checkpoint(legacy, "test-session", &session.current_state).unwrap();
+        assert!(restored.approval_origin_hash.is_none());
+        gateway.handle_message(load()).await.unwrap();
+        assert!(gateway.approval_origin_verified(Some(&next)), "fresh run captures its own current proof");
+        assert!(!gateway.approval_origin_verified(Some(&first)));
     }
 
     fn delegation_gateway() -> Gateway {

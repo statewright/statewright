@@ -1650,7 +1650,7 @@ fn classify_segment(segment: &str) -> OpClass {
         // Exact metadata probes are output-only. Keep this grammar separate
         // from general interpreter/build execution so extra argv, path-
         // qualified lookalikes, and shell syntax remain unclassified.
-        "node" | "cargo" | "rustc" | "npm" | "pnpm" | "pytest"
+        "node" | "cargo" | "rustc" | "npm" | "pnpm"
             if invoked == base_cmd
                 && invocation.environment_names.is_empty()
                 && bounded_version_probe(&invocation, base_cmd) =>
@@ -1785,15 +1785,16 @@ fn classify_nonliteral_segment(segment: &str) -> OpClass {
 }
 
 fn bounded_version_probe(invocation: &LiteralInvocation, executable: &str) -> bool {
-    let mut tokens = Vec::with_capacity(invocation.args.len() + 1);
-    tokens.push(invocation.executable.as_str());
-    tokens.extend(invocation.args.iter().map(String::as_str));
-    matches!(
-        tokens.as_slice(),
-        [actual, flag]
-            if *actual == executable
-                && matches!(*flag, "--version" | "-V" | "-v")
-    )
+    let [flag] = invocation.args.as_slice() else { return false; };
+    if invocation.executable != executable { return false; }
+    // Flag spellings are not interchangeable across programs: pytest -v
+    // executes tests, and even pytest --version loads configured plugins.
+    // Keep inspection separate from the execution-intent adapter below.
+    match executable {
+        "node" | "npm" | "pnpm" => matches!(flag.as_str(), "--version" | "-v"),
+        "cargo" | "rustc" => matches!(flag.as_str(), "--version" | "-V"),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1810,6 +1811,7 @@ fn local_execution_intent(
 ) -> Option<LocalExecutionIntent> {
     let validation = match executable {
         "node" => bounded_node_local_execution(invocation),
+        "python" | "python3" => bounded_python_unittest_execution(invocation),
         "cargo" => bounded_cargo_local_execution(invocation),
         "npm" | "pnpm" => bounded_package_test_local_execution(invocation, executable),
         "vitest" => bounded_vitest_local_execution(invocation),
@@ -1817,6 +1819,60 @@ fn local_execution_intent(
         _ => false,
     };
     validation.then_some(LocalExecutionIntent::Validation)
+}
+
+// The standard module runner declares repository-test execution, not Read.
+// Import hooks, test code and configuration remain code under the existing
+// execution capability, just as with Node/Cargo. This is not a sandbox or proof
+// of transitive effects. Interpreter options, other modules and direct scripts
+// cannot acquire this intent from a filename or a superficial "test" label.
+fn bounded_python_unittest_execution(invocation: &LiteralInvocation) -> bool {
+    // Explicit interpreter controls can change startup or enter interactive
+    // execution after the runner. Do not infer a bounded runner from argv alone.
+    if invocation.environment_names.iter().any(|name| name.starts_with("PYTHON")) {
+        return false;
+    }
+    let [module_flag, module, tail @ ..] = invocation.args.as_slice() else { return false; };
+    if module_flag != "-m" || module != "unittest" || tail.len() > 64 { return false; }
+    let discovery = tail.first().is_some_and(|arg| arg == "discover");
+    let args = if discovery { &tail[1..] } else { tail };
+    let directory = |value: &str| value == "." || (!value.starts_with('-') && bounded_relative_path(value, ""));
+    let pattern = |value: &str| !value.is_empty() && value.len() <= 256
+        && !value.starts_with('-') && value.ends_with(".py")
+        && value.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.*?-".contains(ch));
+    let selector = |value: &str| !value.starts_with('-') && (
+        bounded_relative_path(value, ".py") || value.split('.').all(|part| {
+            !part.is_empty() && part.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+                && part.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        }));
+    let mut seen = [false; 3];
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        index += 1;
+        let (flag, inline) = option_parts(arg);
+        if matches!(flag, "-v" | "--verbose" | "-q" | "--quiet" | "-f" | "--failfast" | "-c" | "--catch" | "-b" | "--buffer") && inline.is_none() {
+            continue;
+        }
+        if discovery {
+            let slot = match flag {
+                "-s" | "--start-directory" => 0,
+                "-t" | "--top-level-directory" => 1,
+                "-p" | "--pattern" => 2,
+                _ => return false,
+            };
+            if seen[slot] { return false; }
+            seen[slot] = true;
+            let value = if let Some(value) = inline { value } else {
+                let Some(value) = args.get(index) else { return false; };
+                index += 1;
+                value.as_str()
+            };
+            if !(if slot == 2 { pattern(value) } else { directory(value) }) { return false; }
+        } else if !selector(arg) {
+            return false;
+        }
+    }
+    true
 }
 
 fn bounded_node_local_execution(invocation: &LiteralInvocation) -> bool {
@@ -3008,7 +3064,6 @@ mod tests {
             "rustc -V",
             "npm -v",
             "pnpm --version",
-            "pytest --version",
         ] {
             assert_eq!(classify(command), vec![OpClass::SafeOutput], "{command}");
         }
@@ -3019,6 +3074,47 @@ mod tests {
             "node -e 'process.exit(0)'",
         ] {
             assert_ne!(classify(command), vec![OpClass::SafeOutput], "{command}");
+        }
+    }
+
+    #[test]
+    fn version_probe_flags_do_not_inherit_other_tools_semantics() {
+        for command in ["pytest -v", "pytest -V", "pytest --version", "cargo -v", "rustc -v", "node -V", "npm -V", "pnpm -V"] {
+            assert_ne!(classify(command), vec![OpClass::SafeOutput], "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn python_unittest_is_repository_execution_never_a_read_probe() {
+        for command in [
+            "python3 -m unittest discover -s weekly -p test_build.py",
+            "python -m unittest",
+            "python3 -m unittest discover",
+            "python3 -m unittest discover --start-directory=tests --pattern='test_*.py' --top-level-directory=.",
+            "python3 -m unittest -v tests.test_parser.TestParser",
+            "command -- python3 -m unittest -q tests/test_parser.py",
+            "env CI=1 python3 -m unittest discover -s tests -p 'test_*.py'",
+        ] {
+            assert_eq!(classify(command), vec![OpClass::BoundedLocalExecution], "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
+        }
+        for command in [
+            "python3 -m unrelated", "python3 -c 'print(1)'", "python3 tests/test_parser.py",
+            "python3 -m unittest discover -s ../outside", "python3 -m unittest discover -s /outside",
+            "python3 -m unittest discover -p '../test.py'", "python3 -m unittest discover -s",
+            "python3 -m unittest discover --start-directory=", "python3 -m unittest --load-plugin=evil",
+            "python3 -m unittest tests..test_parser", "python3 -m unittest -v ../tests/test_parser.py",
+            "python3 -m unittest discover -s tests -s other", "python3 -m unittest discover tests",
+            "PYTHONPATH=/outside python3 -m unittest discover",
+            "PYTHONINSPECT=1 python3 -m unittest",
+            "env PYTHONINSPECT=1 python3 -m unittest",
+            "env PYTHONSTARTUP=fixture.py python3 -m unittest",
+            "env -S python3 -m unittest discover", "/tmp/python3 -m unittest discover",
+            "python3 -m unittest discover -p test_*.py",
+        ] {
+            assert_ne!(classify(command), vec![OpClass::BoundedLocalExecution], "{command}");
+            assert_eq!(readonly_capabilities(command), None, "{command}");
         }
     }
 

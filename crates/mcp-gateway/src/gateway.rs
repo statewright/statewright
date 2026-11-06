@@ -7880,7 +7880,8 @@ mod tests {
         risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
         let cases = [
             ("opaque_version", "./vendor/tool --version", false, true),
-            ("python_discovery", "python3 -m unittest discover -s weekly -p test_build.py", false, true),
+            // Python's recognized module runner has the separate capability
+            // matrix below; direct-script execution remains unresolved here.
             ("python_entrypoint", "python3 weekly/test_build.py", false, true),
             ("bash_syntax", "bash -n scripts/check.sh", false, true),
             ("process_pipeline", "ps -Ao pid=,command= | rg 'fixture|other' || true", true, false),
@@ -7931,6 +7932,55 @@ mod tests {
                     assert_eq!(result["classifier_context"]["state_epoch"], epoch);
                 }
                 assert_eq!(gateway.session_manager.get("ledger-session").unwrap().current_state, "inspect");
+                assert_eq!(gateway.usage.state_epoch(), epoch);
+            }
+        }
+        risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
+    async fn python_runner_intent_preserves_execution_and_independent_denials() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        for (command, bounded) in [
+            ("python3 -m unittest discover -s weekly -p test_build.py", true),
+            ("python -m unittest -v tests.test_parser", true),
+            ("python3 -m unittest discover -s ../outside", false),
+            ("python3 -m unrelated", false),
+            ("python3 tests/test_parser.py", false),
+            ("PYTHONINSPECT=1 python3 -m unittest", false),
+            ("env PYTHONINSPECT=1 python3 -m unittest", false),
+            ("pytest -v", false),
+            ("pytest --version", false),
+            ("python3 -m unittest && rm fixture.txt", false),
+            ("python3 -m unittest && curl https://example.invalid", false),
+            ("python3 -m unittest > receipt.txt", false),
+        ] {
+            for (label, allowed, denied) in [
+                ("read", json!(["Read", "Bash"]), json!([])),
+                ("write", json!(["Read", "Write", "Bash"]), json!([])),
+                ("bounded", json!(["Read", "Bash", "BoundedLocalExecution"]), json!([])),
+                ("empty", json!([]), json!([])),
+                ("deny_bash", json!(["Read", "Bash", "BoundedLocalExecution"]), json!(["Bash"])),
+                ("deny_execution", json!(["Read", "Bash", "BoundedLocalExecution"]), json!(["BoundedLocalExecution"])),
+            ] {
+                let definition: MachineDefinition = serde_json::from_value(json!({
+                    "id":"python-runner-policy", "initial":"validate",
+                    "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                    "states":{"validate":{"allowed_tools":allowed,"disallowed_tools":denied,
+                        "on":{"DONE":"done"}},"done":{"type":"final"}}
+                })).unwrap();
+                let manager = SessionManager::new();
+                manager.create("python-runner-session".into(), definition.clone());
+                let mut workflows = HashMap::new();
+                workflows.insert("python-runner-policy".into(), definition);
+                let mut gateway = Gateway::new(manager, UpstreamManager::empty(),
+                    "python-runner-session".into(), workflows, Some("python-runner-policy".into()), String::new(), None);
+                gateway.current_run_id = Some("python-runner-run".into());
+                let epoch = gateway.usage.state_epoch();
+                let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
+                assert_eq!(result["decision"], if bounded && label == "bounded" { "allow" } else { "deny" }, "{command}/{label}: {result}");
+                assert!(result["classifier_context"].is_null(), "{command}/{label}: {result}");
+                assert_eq!(gateway.session_manager.get("python-runner-session").unwrap().current_state, "validate");
                 assert_eq!(gateway.usage.state_epoch(), epoch);
             }
         }

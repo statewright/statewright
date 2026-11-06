@@ -5477,6 +5477,15 @@ mod tests {
         };
 
         assert_eq!(resolved("node --version"), ResolvedEffect::ReadOnly);
+        for command in ["pytest -v", "pytest --version", "cargo -v"] {
+            assert_eq!(resolved(command), ResolvedEffect::DenyUncertain, "{command}");
+        }
+        for command in [
+            "python3 -m unittest discover -s weekly -p test_build.py",
+            "python -m unittest -v tests.test_parser",
+        ] {
+            assert_eq!(resolved(command), ResolvedEffect::BoundedLocalExecution, "{command}");
+        }
         let focused_node_test = assess_invocation(
             None,
             "exec_command",

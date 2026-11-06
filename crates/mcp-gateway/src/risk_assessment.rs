@@ -1120,6 +1120,22 @@ pub struct ShadowAssessment {
     ast_semantic_request: Option<SemanticAssessmentRequest>,
 }
 
+impl ShadowAssessment {
+    /// Read-only diagnostic access to the already-redacted provider inputs.
+    /// No provider invocation, score reconciliation or execution authority.
+    pub fn evaluation_requests(
+        &self,
+    ) -> (
+        Option<&SemanticAssessmentRequest>,
+        Option<&SemanticAssessmentRequest>,
+    ) {
+        (
+            self.semantic_request.as_ref(),
+            self.ast_semantic_request.as_ref(),
+        )
+    }
+}
+
 /// The bounded record emitted by the shadow path.  It deliberately has no
 /// argument, command, path, or payload field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3219,6 +3235,24 @@ mod tests {
             );
         }
         set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn evaluation_accessors_preserve_redacted_argument_boundary() {
+        let assessment = assess_invocation(
+            None,
+            "exec_command",
+            &json!({
+                "cmd":"node /synthetic-secret-path/check.mjs synthetic-secret-value",
+                "workdir":"/synthetic-secret-workdir"
+            }),
+            None,
+        );
+        let (primary, ast) = assessment.evaluation_requests();
+        assert!(primary.is_some());
+        let rendered = serde_json::to_string(&(primary, ast)).unwrap();
+        assert!(!rendered.contains("synthetic-secret"));
+        assert!(rendered.contains("node"));
     }
 
     #[test]

@@ -1,5 +1,10 @@
 # Classifier evidence and human-review delivery
 
+Latest local-model measurement: [offline diagnostic results](032-local-judgment-diagnostics.md).
+Both tested Laya configurations remain unsuitable for enforcement with this
+contract; neither was enabled. Historical preparation/checkpoint sections below
+retain their original evidence boundaries.
+
 Status: source preparation, not installed or enabled. No live System One
 configuration was changed or reverified. This note does not authorize deployment
 or a policy change.

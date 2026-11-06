@@ -1,0 +1,491 @@
+{
+  "id": "agentic-engineering-v2-turbo",
+  "initial": "intake",
+  "context": {
+    "capability_contract": {
+      "normalized_capabilities": {
+        "Read": "Maps native Codex/Claude read, search, and glob invocations.",
+        "Write": "Maps native Codex/Claude file creation, replacement, patch, and edit invocations.",
+        "Bash": "Maps native shell invocation; the structural classifier resolves each execution unit to an effect capability.",
+        "GitLocalWrite": "Maps only the managed-client-installed bounded local Git closeout helper; it does not authorize arbitrary file edits or generic Git mutation. The local OS account, managed shim directory, and installed plugin bundle are trusted control-plane inputs; this capability is not a boundary against deliberate same-user tampering.",
+        "BoundedLocalExecution": "Maps structurally classified local test, build, and format execution that may create bounded workspace artifacts without external or destructive effects.",
+        "Grep": "Maps bounded repository content searches such as rg.",
+        "Glob": "Maps bounded repository file discovery such as rg --files or find.",
+        "WebSearch": "Maps bounded external-source search for evidence collection.",
+        "WebFetch": "Maps opening or navigating sources selected during bounded evidence collection."
+      },
+      "invariant": "Do not require provider-specific tool names in a workflow. Adapter normalizes native tools to Read, Write, Bash."
+    },
+    "budget_enforcement": "observed_only",
+    "reserve_policy": "Preserve capacity for validation, one evidence-backed recovery loop, review, and handoff.",
+    "route_contract": "Requested model and effort must be honored or fail closed. Recovery may use only the state's explicit ordered model_ladder; no silent provider/model fallback or reroute.",
+    "implementation_design_contract": {
+      "schema": "statewright/implementation-design/v1",
+      "producer_state": "design",
+      "acceptance_field": "implementation_design_status",
+      "acceptance_value": "accepted",
+      "required_fields": [
+        "objective",
+        "evidence_snapshot",
+        "scope",
+        "invariants",
+        "implementation_sequence",
+        "acceptance_criteria",
+        "validation",
+        "exclusions",
+        "risks",
+        "delegation"
+      ]
+    },
+    "implementation_design_enforcement": "The design_gate deterministically requires the schema, acceptance marker, and every declared top-level contract field before the sole source-editing Write capability becomes available. Semantic completeness and freshness are agent-enforced until the controller supports producer-side artifact-schema validation.",
+    "delegation_policy": "Prefer inline execution so evidence remains in this workflow. Per-state model changes are inline routing, not delegation. Raw agent spawning is not an escape path. Use only a Statewright-managed linked child for genuinely independent isolated work; until automatic child binding is available, record that dependency and block instead of creating an unmanaged child.",
+    "profile": "agentic-engineering-v2-turbo",
+    "speed_policy": "priority (/fast) for all actionable Codex states",
+    "provider_policy": "Requested model and effort must be honored or fail closed. The optional Anthropic devils_advocate phase is temporarily deferred at Ben's request until a clear baseline release; no Claude adapter or recovery integration is required for this temporary workflow.",
+    "change_required": true,
+    "commit_sha": null,
+    "commit_verified": false,
+    "commit_scope_verified": false,
+    "tool_policy_mode": "denylist_heuristic_v1",
+    "temporary_review_deferral": {
+      "phase": "devils_advocate",
+      "status": "deferred",
+      "authorized_by": "Ben",
+      "reason": "Temporarily removed to establish a clear baseline release; reintroduce integrations one at a time after stability.",
+      "original_model": "anthropic/claude-opus-5-5"
+    },
+    "no_change_contract_version": 1
+  },
+  "states": {
+    "intake": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Capture the bounded objective, acceptance criteria, existing work, and exact next evidence. Do not implement. When a live terminal dialog is the reported evidence surface, capture the current pane once with tmux capture-pane -p; do not enumerate sessions, attach, send keys, alter tmux state, or treat an unavailable pane as a failure. At the context threshold, emit a compact packet and transition BLOCKED.",
+      "on": {
+        "INTAKE_COMPLETE": "localize",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ]
+    },
+    "localize": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Collect only the minimum current code, tests, runtime evidence, and, when necessary, primary-source external evidence. Use repository search only to localize the task. Record source URLs and the specific claim each source supports; do not edit.",
+      "on": {
+        "LOCALIZED": "baseline",
+        "DECISION_REQUIRED": "decision",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "WebSearch",
+        "WebFetch"
+      ]
+    },
+    "baseline": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Characterize the current behavior or red baseline and select the smallest valid slice. Use external research only when needed to establish primary-source evidence, and record source URLs with the claims they support. Incorporate an existing decision packet without reopening it. Do not edit or design the implementation. At the context threshold, emit a compact packet and transition BLOCKED. For a no-change milestone, send NO_CHANGE_NEEDED with data.change_required=false and the no-change evidence. The record phase also accepts this declaration if it was omitted here.",
+      "on": {
+        "BASELINED": "design",
+        "NO_CHANGE_NEEDED": "validate",
+        "DECISION_REQUIRED": "decision",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "BoundedLocalExecution",
+        "WebSearch",
+        "WebFetch"
+      ]
+    },
+    "decision": {
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking_level": "high",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Resolve only the bounded high-consequence decision from the compact packet. Return the decision, constraints, and risks; do not produce or implement the implementation design. Re-enter baseline so the decision is grounded before frontier design.",
+      "on": {
+        "DECIDED": "baseline",
+        "SCOPE_CHANGED": "baseline",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ]
+    },
+    "design": {
+      "model": "openai-codex/gpt-6-astra",
+      "thinking_level": "high",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Own the implementation design from the compact localization, baseline, and optional decision evidence. Do not rediscover the repository, edit files, run broad verification, or delegate. Produce exactly one statewright/implementation-design/v1 contract with objective, evidence_snapshot, exact files/symbols and scope, invariants, ordered implementation_sequence, acceptance_criteria, validation commands, exclusions, risks, and delegation guidance. Prefer inline execution; ordinary per-state model routing stays in this workflow. Raw agent spawning is prohibited. A genuinely independent child that requires isolation must be Statewright-managed and linked; if that facility is required but unavailable, BLOCK rather than forking unmanaged. Transition DESIGN_RECORDED only with data containing implementation_design_status=accepted, implementation_design_schema=statewright/implementation-design/v1, implementation_design_objective, implementation_design_evidence_snapshot, implementation_design_scope, implementation_design_invariants, implementation_design_sequence, implementation_design_acceptance_criteria, implementation_design_validation, implementation_design_exclusions, implementation_design_risks, and implementation_design_delegation. If the evidence proves no source change is required, use NO_CHANGE_NEEDED and record why. If required evidence is missing, block with the exact gap. When using NO_CHANGE_NEEDED, include data.change_required=false and the no-change evidence.",
+      "on": {
+        "DESIGN_RECORDED": "design_gate",
+        "NO_CHANGE_NEEDED": "validate",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read"
+      ]
+    },
+    "design_gate": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 8192,
+      "max_iterations": 1,
+      "instructions": "Perform no repository work, design, editing, validation, or delegation. Check only that the recorded implementation design uses the declared schema and contains every required top-level contract field. Use CONTRACT_ACCEPTED only for a complete record; the transition guards enforce field presence before Write is exposed. Otherwise use CONTRACT_INVALID with the exact missing field. This is a presence gate: semantic completeness and freshness remain explicitly agent-enforced until controller-side artifact-schema validation exists.",
+      "on": {
+        "CONTRACT_ACCEPTED": {
+          "target": "implement",
+          "guards": [
+            "implementation_design_accepted",
+            "implementation_design_schema_valid",
+            "implementation_design_objective_exists",
+            "implementation_design_evidence_snapshot_exists",
+            "implementation_design_scope_exists",
+            "implementation_design_invariants_exists",
+            "implementation_design_sequence_exists",
+            "implementation_design_acceptance_exists",
+            "implementation_design_validation_exists",
+            "implementation_design_exclusions_exists",
+            "implementation_design_risks_exists",
+            "implementation_design_delegation_exists"
+          ]
+        },
+        "CONTRACT_INVALID": "blocked",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": []
+    },
+    "implement": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 6,
+      "instructions": "Implement only the current accepted statewright/implementation-design/v1 contract. Before editing, verify implementation_design_status is accepted and the contract contains every required field; otherwise use HYPOTHESIS_REJECTED without editing. Terra executes the design but must not replace, broaden, or silently reinterpret it. Keep work inline. Raw agent spawning is prohibited; if the accepted design requires an unavailable Statewright-managed linked child, block. Native Codex or Claude edit/patch/write calls are authorized through Write. Preserve unrelated changes. When the source checkout is dirty, create a clean linked worktree under the existing .agent-worktrees/ boundary from committed HEAD; apply only the accepted patch there and run its focused test there before IMPLEMENTED. Do not commit in this state. At the context threshold, emit a compact packet and transition BLOCKED.",
+      "on": {
+        "IMPLEMENTED": "validate",
+        "HYPOTHESIS_REJECTED": "reconcile",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Write",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "validate": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 4,
+      "instructions": "Run the smallest relevant verification first and record exact results. A failed, skipped, or unavailable check is not a pass. At the context threshold, emit a compact packet and transition BLOCKED.",
+      "on": {
+        "VALIDATED": "crosscheck",
+        "VALIDATION_FAILED": "reconcile",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "reconcile": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 3,
+      "instructions": "Classify the failed evidence and form one new discriminating hypothesis. Do not edit in reconciliation. Use REPAIR_PACKET_READY only when the repair preserves the prior scope, architecture, invariants, and acceptance criteria; frontier design must still record a fresh contract before the sole write state. Any change to those boundaries requires REDESIGN_REQUIRED. A no-change path cannot authorize implementation from this state. Do not repeat an identical failure or use unmanaged delegation. At the context threshold, stop and BLOCK with a compact evidence packet.",
+      "on": {
+        "REPAIR_PACKET_READY": "design",
+        "REDESIGN_REQUIRED": "baseline",
+        "SCOPE_CHANGED": "baseline",
+        "PRODUCT_DEFECT": "localize",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "crosscheck": {
+      "model": "openai-codex/gpt-5.6-sol",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Independently inspect the compact change and validation packet. Return cited findings only; do not edit.",
+      "on": {
+        "CROSSCHECKED": "frontier_review",
+        "REWORK_REQUIRED": "reconcile",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "frontier_review": {
+      "model": "openai-codex/gpt-6-astra",
+      "thinking_level": "high",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 1,
+      "instructions": "Perform one bounded adversarial review of the supplied packet and diff. Do not rediscover the repository or edit. At the context threshold, emit a compact finding and transition BLOCKED.",
+      "on": {
+        "APPROVED": "record",
+        "REWORK_REQUIRED": "reconcile",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "record": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 32768,
+      "max_iterations": 2,
+      "instructions": "Record outcome, validation, residual risk, rollback, and exact next handoff. For an implementation milestone, transition RECORDED to commit. For a no-change milestone, send NO_CHANGE_RECORDED with data.change_required=false and no-change evidence; this records the declaration and enters no_change_finalize, it does not complete the run. It is valid to record that declaration here even if an earlier NO_CHANGE_NEEDED event omitted it. Do not use a no-change declaration for an implemented change. Do not claim unavailable evidence passed. Do not push, merge, deploy, or publish. Explicitly record devils_advocate as deferred at Ben's request for this temporary baseline; never report that phase executed, approved, or passed.",
+      "on": {
+        "RECORDED": "commit",
+        "NO_CHANGE_RECORDED": "no_change_finalize",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ]
+    },
+    "complete": {
+      "type": "final"
+    },
+    "blocked": {
+      "type": "final"
+    },
+    "commit": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 16384,
+      "max_iterations": 2,
+      "instructions": "Commit the already implemented and validated scoped milestone in its isolated linked worktree. Recheck status and ownership, then run the bundled helper with this exact grammar: statewright-git-closeout --message <literal-message> -- <accepted-repository-relative-path> [path ...]. The standalone -- separator is mandatory; omitting it is an invalid invocation that must not receive GitLocalWrite authority. The helper requires an empty index and no unrelated changes, stages exact regular-file bytes without filters or hooks, creates one local commit, and returns its SHA. Record that SHA and worktree in COMMIT_RECORDED data. Do not use generic Git mutation, native Write, push, merge, deploy, publish, or remove any worktree. At the context threshold, emit a compact packet and transition BLOCKED.",
+      "on": {
+        "COMMIT_RECORDED": "commit_verify",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "GitLocalWrite"
+      ]
+    },
+    "commit_verify": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "medium",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 16384,
+      "max_iterations": 2,
+      "instructions": "Independently verify the recorded commit in its isolated linked worktree: resolve the recorded SHA, inspect git show and status, confirm only the accepted files changed, and rerun the focused project Taskfile test there. Bash plus BoundedLocalExecution authorize that bounded verification without exposing source-editing Write. On success transition VERIFY_PASSED with data.commit_verified=true and data.commit_scope_verified=true. If validation fails, transition VALIDATION_FAILED; do not treat inherited validation as this check.",
+      "on": {
+        "VERIFY_PASSED": "commit_finalize",
+        "VALIDATION_FAILED": "reconcile",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "BoundedLocalExecution"
+      ]
+    },
+    "commit_finalize": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 8192,
+      "max_iterations": 1,
+      "instructions": "Complete only after the prior transitions have persisted a commit SHA and both verification receipts. This state intentionally evaluates those pre-existing context fields. If any receipt is absent or inconsistent, transition REVERIFY; do not complete.",
+      "on": {
+        "COMMITTED": {
+          "target": "complete",
+          "guards": [
+            "commit_sha_recorded",
+            "commit_verified",
+            "commit_scope_verified"
+          ]
+        },
+        "REVERIFY": "commit_verify",
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": [
+        "Read",
+        "Bash"
+      ]
+    },
+    "no_change_finalize": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "thinking_level": "low",
+      "env_overrides": {
+        "STATEWRIGHT_CODEX_SERVICE_TIER": "priority"
+      },
+      "context_budget_bytes": 8192,
+      "max_iterations": 1,
+      "instructions": "Verify only the already recorded no-change outcome and evidence. Do not read files, run tests, edit, or delegate in this state. When the saved context has change_required=false and the record accurately describes a no-change milestone, send NO_CHANGE_CONFIRMED to complete. Its guard checks the pre-existing context: data on this event cannot satisfy it. If evidence is missing or inconsistent, send BLOCKED with the exact gap. Never claim an implementation milestone completed without its required commit verification.",
+      "on": {
+        "NO_CHANGE_CONFIRMED": {
+          "target": "complete",
+          "guard": "no_change_milestone"
+        },
+        "BLOCKED": "blocked"
+      },
+      "allowed_tools": []
+    }
+  },
+  "guards": {
+    "implementation_design_accepted": {
+      "field": "implementation_design_status",
+      "op": "eq",
+      "value": "accepted"
+    },
+    "implementation_design_schema_valid": {
+      "field": "implementation_design_schema",
+      "op": "eq",
+      "value": "statewright/implementation-design/v1"
+    },
+    "implementation_design_objective_exists": {
+      "field": "implementation_design_objective",
+      "op": "exists"
+    },
+    "implementation_design_evidence_snapshot_exists": {
+      "field": "implementation_design_evidence_snapshot",
+      "op": "exists"
+    },
+    "implementation_design_scope_exists": {
+      "field": "implementation_design_scope",
+      "op": "exists"
+    },
+    "implementation_design_invariants_exists": {
+      "field": "implementation_design_invariants",
+      "op": "exists"
+    },
+    "implementation_design_sequence_exists": {
+      "field": "implementation_design_sequence",
+      "op": "exists"
+    },
+    "implementation_design_acceptance_exists": {
+      "field": "implementation_design_acceptance_criteria",
+      "op": "exists"
+    },
+    "implementation_design_validation_exists": {
+      "field": "implementation_design_validation",
+      "op": "exists"
+    },
+    "implementation_design_exclusions_exists": {
+      "field": "implementation_design_exclusions",
+      "op": "exists"
+    },
+    "implementation_design_risks_exists": {
+      "field": "implementation_design_risks",
+      "op": "exists"
+    },
+    "implementation_design_delegation_exists": {
+      "field": "implementation_design_delegation",
+      "op": "exists"
+    },
+    "implementation_milestone": {
+      "field": "change_required",
+      "op": "eq",
+      "value": true
+    },
+    "no_change_milestone": {
+      "field": "change_required",
+      "op": "eq",
+      "value": false
+    },
+    "commit_sha_recorded": {
+      "field": "commit_sha",
+      "op": "exists"
+    },
+    "commit_verified": {
+      "field": "commit_verified",
+      "op": "eq",
+      "value": true
+    },
+    "commit_scope_verified": {
+      "field": "commit_scope_verified",
+      "op": "eq",
+      "value": true
+    }
+  }
+}

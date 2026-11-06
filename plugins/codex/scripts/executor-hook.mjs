@@ -2,6 +2,8 @@
 import { NATIVE_STATEWRIGHT_GUIDANCE } from "./lib/desktop-runtime/native-statewright-guidance.mjs";
 import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "./classifier-approval.mjs";
 
+import { classifierDenialDisplay, classifierReworkDisplay } from './guard-denial.mjs';
+
 const TIMEOUT_MS = 5_000;
 
 function stateContext(state) {
@@ -43,8 +45,6 @@ export function formatGuardDenial(result) {
     };
   }
 
-  const basis = String(risk.final_denial_basis ?? risk.resolution_basis ?? "unknown");
-  const required = String(risk.required_authority ?? "approved execution path");
   const delegationDenied = risk.deterministic_source === "unmanaged_agent_delegation";
   const delegation = result?.delegation;
   let display;
@@ -60,39 +60,12 @@ export function formatGuardDenial(result) {
     } else {
       display = "Statewright guard: denied · continue inline by default so evidence stays attached to the current workflow. A raw delegated agent would receive a separate, unbounded tool surface.";
     }
-  } else if ([
-    "semantic_threshold_not_met",
-    "incomplete_structural_evidence",
-    "semantic_vector_unavailable",
-    "semantic_assessment_incomplete",
-    "semantic_authorization_disabled",
-  ].includes(basis)) {
-    display = basis === "semantic_authorization_disabled"
-      ? "Statewright guard: denied · structural analysis did not establish the complete effect, and semantic authorization is disabled."
-      : "Statewright guard: denied · command intent is not yet proven. Next: prefer one bounded native operation instead of a heredoc or inline interpreter; use the approved execution path when code must run.";
-  } else if (basis === "deterministic_nonlocal_risk") {
-    display = "Statewright guard: denied · known non-local effect. Next: use the approved execution path.";
-  } else if (basis.startsWith("workflow_capability_")) {
-    display = `Statewright guard: denied · this phase does not allow the resolved effect. Next: transition to a phase that grants ${required}.`;
-  } else if (basis.startsWith("classifier_policy_")) {
-    display = `Statewright guard: denied · this workflow risk band is too narrow. Next: use a workflow state with ${required}.`;
-  } else if (basis === "workflow_approval_policy") {
-    display = `Statewright guard: denied · ${result.reason} Classifier approval cannot override this workflow restriction.`;
   } else {
-    display = `Statewright guard: denied · classifier policy requires ${required}.`;
-  }
-  const vector = risk.semantic_vector;
-  if (risk.semantic_status === "Assessed" && vector && typeof vector === "object") {
-    const percent = value => `${Math.round((Number.isFinite(value) ? value : 0) * 100)}%`;
-    display += ` System One signals: read-only ${percent(vector.read_only)}, write ${percent(vector.may_write)}, destructive ${percent(vector.destructive)}, external ${percent(vector.external_or_account_effect)}.`;
+    display = classifierDenialDisplay(result);
   }
   const rework = result?.classifier_rework ?? result?.classifierRework;
   const approval = result?.classifier_approval;
-  if (!delegationDenied && rework?.action === "rework") {
-    display += ` Rework attempt ${rework.attempts}/${rework.max_reworks}; after this budget, the same classified intent must be sent for human approval.`;
-  } else if (!delegationDenied && rework?.action === "approval_required") {
-    display += " Rework budget exhausted; this exact classified intent now requires native human approval.";
-  }
+  if (!delegationDenied) display += classifierReworkDisplay(rework);
   if (approval?.action === "unavailable") {
     display += ` Native approval was not presented: ${approval.reason}. A matching connected native owner and a gateway-bound approval receipt are required; do not retry this denied invocation or switch clients.`;
   } else if (approval?.action === "deny") {

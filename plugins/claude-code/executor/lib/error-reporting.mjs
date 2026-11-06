@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { DEFAULT_SENTRY_DSN, diagnosticEvent, diagnosticsAllowed, formatEnvelope, sentryEndpoint, validTelemetryConsent } from './diagnostic-event.mjs';
+import { DEFAULT_SENTRY_DSN, diagnosticEvent, diagnosticsAllowed, formatEnvelope, sentryEndpoint } from './diagnostic-event.mjs';
 export { DEFAULT_SENTRY_DSN, diagnosticsAllowed, formatEnvelope, sanitizeContext, sanitizeError, sentryEndpoint } from './diagnostic-event.mjs';
 
 export function isExpectedExit({ code, signal, shuttingDown = false } = {}) {
@@ -20,23 +20,24 @@ export function isExpectedPluginError(error) {
 const timeout = env => Math.min(2000, Math.max(100, Number(env.STATEWRIGHT_SENTRY_TIMEOUT_MS) || 1000));
 
 export function createErrorReporter({ plugin, version = process.env.npm_package_version ?? 'unknown',
-  environment = process.env, send = defaultSend, consent } = {}) {
+  environment = process.env, send = defaultSend } = {}) {
   const seen = new Set(), pending = new Set();
   let last = { outcome: 'idle' }, attempts = 0, installed = false;
   const tags = { plugin, release: `statewright-${plugin}@${version}` };
   async function prepare(error, context, handled) {
-    if (environment.STATEWRIGHT_SENTRY_DISABLED === 'true' || environment.STATEWRIGHT_SENTRY_ENABLED === 'false') {
+    if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) {
       last = { outcome: 'disabled' }; return null;
     }
     const source = environment, identity = [source.STATEWRIGHT_API_KEY, source.STATEWRIGHT_PB_URL, source.STATEWRIGHT_GATEWAY_URL];
-    const grant = await (consent ? consent() : readAccountConsent(environment));
+    // Preserve the async boundary so an emergency disable or identity change
+    // made during this turn is checked again before an envelope is sent.
+    await Promise.resolve();
     if (source !== environment || identity.some((value, i) => value !== [environment.STATEWRIGHT_API_KEY, environment.STATEWRIGHT_PB_URL, environment.STATEWRIGHT_GATEWAY_URL][i])) {
       last = { outcome: 'disabled' }; return null;
     }
-    // A local withdrawal while the account request was in flight still wins.
-    const enabled = diagnosticsAllowed({ enabled: environment.STATEWRIGHT_SENTRY_ENABLED,
-      disabled: environment.STATEWRIGHT_SENTRY_DISABLED, consent: grant });
-    if (!enabled) { last = { outcome: 'disabled' }; return null; }
+    if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) {
+      last = { outcome: 'disabled' }; return null;
+    }
     const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN, endpoint = sentryEndpoint(dsn);
     if (!endpoint) { last = { outcome: 'invalid_dsn' }; return null; }
     return packet(error, context, handled, dsn, endpoint);
@@ -72,10 +73,10 @@ export function createErrorReporter({ plugin, version = process.env.npm_package_
     installed = true;
     // Async work in this monitor is abandoned when Node exits. A bounded child
     // sends only a scrubbed envelope without swallowing the native exception.
-    // A fatal path cannot refresh account consent: only explicit local opt-in.
+    // Fatal paths use the same scrubber and emergency disable without a lookup.
     process.on('uncaughtExceptionMonitor', (error, origin) => {
       try {
-        if (!diagnosticsAllowed({ enabled: environment.STATEWRIGHT_SENTRY_ENABLED, disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) return;
+        if (!diagnosticsAllowed({ disabled: environment.STATEWRIGHT_SENTRY_DISABLED })) return;
         const dsn = environment.STATEWRIGHT_SENTRY_DSN ?? DEFAULT_SENTRY_DSN, endpoint = sentryEndpoint(dsn);
         if (!endpoint) return;
         const payload = packet(error, { mechanism: origin === 'unhandledRejection' ? 'unhandled_rejection' : 'uncaught_exception' }, false, dsn, endpoint);
@@ -85,21 +86,6 @@ export function createErrorReporter({ plugin, version = process.env.npm_package_
   }
   return { report, reportFailure, installProcessHandlers, tags, status: () => ({ ...last }),
     setEnvironment: value => { environment = value; } };
-}
-export async function readAccountConsent(environment, fetchImpl = fetch) {
-  const key = environment.STATEWRIGHT_API_KEY, base = environment.STATEWRIGHT_PB_URL;
-  if (!key || !base || !environment.STATEWRIGHT_GATEWAY_URL) return null;
-  try {
-    const url = new URL(base);
-    if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
-    const response = await fetchImpl(`${base.replace(/\/$/, '')}/api/gateway/telemetry`, {
-      headers: { Authorization: `Bearer ${key}`, 'X-Statewright-OAuth-Resource': environment.STATEWRIGHT_GATEWAY_URL },
-      redirect: 'error', signal: AbortSignal.timeout(1000),
-    });
-    if (!response.ok) { await response.body?.cancel(); return null; }
-    const value = await response.json();
-    return validTelemetryConsent(value) ? value : null;
-  } catch { return null; }
 }
 async function defaultSend({ endpoint, dsn, event, environment }) {
   const response = await fetch(endpoint, { method: 'POST', redirect: 'error',

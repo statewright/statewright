@@ -64,7 +64,8 @@ test("unavailable pinned Node still serves the fixed discovery catalog", async t
   const result = await fixture(t, { pinned: "/missing-statewright-node", pathNode: true });
   const response = result.responses.find(value => value.id === 2);
   assert.ok(response?.result?.tools.some(tool => tool.name === "statewright_load_workflow"), result.stderr);
-  assert.match(response.result._meta.statewright.recovery.message, /Node response helper/);
+  assert.equal(response.result._meta.statewright.recovery.data.reason, "node_executable_unavailable");
+  assert.equal(response.result._meta.statewright.recovery.data.upstreamOutcome, "not_forwarded");
 });
 
 test("missing Node without a pinned or bundled runtime still serves the fixed discovery catalog", async t => {

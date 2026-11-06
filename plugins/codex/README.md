@@ -123,12 +123,12 @@ Statewright key. Each destination supplies its own Statewright integration and
 credential. This does not rebind an already-running shared daemon or enable
 Statewright on an unconfigured remote server.
 
-### Optional diagnostic reports
+### Error diagnostics
 
-Plugin failure reports follow your current Statewright account telemetry choice.
-Set `STATEWRIGHT_SENTRY_DISABLED=true` to opt out locally. Reports exclude prompts,
-commands, code and credentials. Pre-login and fatal-exit coverage has additional
-consent limits; see [telemetry and privacy](../../docs/guides/optional-telemetry.md).
+Limited plugin failure reports run automatically through Statewright's self-hosted
+GlitchTip service. Reports exclude prompts, commands, code and credentials,
+including for pre-login and fatal-exit failures. Website session recording is a
+separate opt-in; see [telemetry and privacy](../../docs/guides/optional-telemetry.md).
 
 ### Exact native token telemetry
 
@@ -494,6 +494,23 @@ MCP proxy join the executor's authenticated loopback adapter before performing
 any standalone bootstrap. The executor remains the sole owner of the remote
 workflow session, credentials, delivery lifecycle, and telemetry. OMX uses
 this same Codex-native path when launched with `--host omx`.
+
+## MCP runtime lifetime
+
+The stdio proxy preserves its selected package in a verified, content-addressed
+runtime under `~/.statewright/runtime/codex-mcp` before accepting requests. It
+then executes that same package with the existing stdio and managed-client
+binding. Cache eviction or another installed version does not replace the
+running proxy's helpers. Snapshots are retained; this path does not garbage
+collect runtimes used by other sessions.
+
+This is not attachment to an arbitrary healthy server or automatic replay.
+A failed response helper can leave the upstream outcome unknown; inspect the
+operation before explicitly retrying. Startup failures report `not_forwarded`
+and keep local discovery available. If the host tries to launch a cache path
+already removed before startup, use its normal MCP refresh/restart lifecycle;
+the missing executable cannot repair itself. Native hooks remain host-owned and
+are not redirected by this MCP-only retention mechanism.
 
 ## License
 

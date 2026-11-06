@@ -5,6 +5,34 @@ Both tested Laya configurations remain unsuitable for enforcement with this
 contract; neither was enabled. Historical preparation/checkpoint sections below
 retain their original evidence boundaries.
 
+## Reconciliation with the deployed staging line
+
+The native-helper preparation branch was not a complete hosted staging baseline.
+Fresh pod identities and the existing staging controller revealed the deployed
+gateway source `b6fe252` and source-equivalent diagnostic successor `8a232f6`.
+The latter is now merged into this preparation, preserving web guidance/events,
+quota infrastructure, hosted docs search, native cache retention and telemetry
+behavior instead of replacing those features with the older helper branch.
+This is source integration, not a new deployment or activation of dormant quota.
+
+Two conflicts were reconciled deliberately: receipt-only classifier diagnostics
+combine with actual native approval dispatch/outcome notices; Desktop handoff
+fixtures retain both origin-restoration and missing-provider options. Generated
+executor/Desktop copies pass synchronization checks. Independent source review
+found no authority bypass in the inspected merged paths or conflict resolutions.
+
+Fresh post-merge checks: default gateway library 440 passed / 4 ignored; deployed
+`metering` feature library 445 passed / 17 ignored; affected denial, hook,
+retention, Desktop handoff, diagnostic and package tests 87 passed / 1 skipped.
+No failures. Ignored database/native tests and the skipped real-native settings
+canary remain unproven. Before this merge, the broader approval/collector/package
+set passed 171 tests; that result is not a fresh post-merge native UI result.
+
+Prepared package identity: `0.3.9+codex.20261106021933`. The previously installed
+`0.3.9+codex.20261104065101` is distinct; no reinstall or runtime rollover is
+implied by these source changes. Real installed approve/deny/cancel and waiting
+notification gates remain outstanding.
+
 Status: source preparation, not installed or enabled. No live System One
 configuration was changed or reverified. This note does not authorize deployment
 or a policy change.

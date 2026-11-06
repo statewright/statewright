@@ -1,56 +1,36 @@
-# Optional telemetry
+# Telemetry and privacy
 
-Statewright asks for one optional telemetry choice on its website. The current
-wording covers website session recordings and diagnostic
-reports from connected plugins. Declining does not limit workflows or change
-your host's permissions. An older recording-only approval does not authorize
-plugin diagnostics; accept the new wording if you want to enable them.
+Statewright runs limited Sentry/GlitchTip error diagnostics automatically for
+the website and supported native plugins. These reports help identify connection,
+credential-store, permission, command and plugin failures. They are not a
+telemetry preference and do not depend on login or an account grant.
 
-Basic website analytics through Umami runs independently of this choice.
-Declining optional telemetry stops session recording and diagnostic reports,
-not basic website analytics.
+**Website session recording is optional.** It starts off and requires you to
+turn on the **Session recording** switch in website telemetry preferences. You
+can turn it off at any time. An older explicit combined telemetry grant retains
+its recording choice; an unversioned grant does not enable recording. Native
+plugins do not start website session recording.
 
-When signed in, **Telemetry preferences** saves this choice to your Statewright
-account. Supported plugins follow that account's choice for the gateway they
-are connected to. An anonymous browser choice alone does not authorize a plugin.
-This preference is separate from OAuth login, command permissions and workflow
-approvals. Statewright does not inherit permission from Claude or OpenAI.
+Basic website analytics through Umami runs independently of recording. Choosing
+whether to record a website session does not change login, workflows, host
+permissions, or the limited error diagnostics.
 
-## Turn it off
-
-- On the website, open **Telemetry preferences** and choose **Decline telemetry**.
-- In Claude, run `/statewright configure` and turn **Diagnostic reports** off.
-  This veto applies even when your account allows telemetry.
-- For Node-based integrations, set `STATEWRIGHT_SENTRY_DISABLED=true` in the
-  launching environment. `STATEWRIGHT_SENTRY_ENABLED=false` also disables them.
-
-Website account preferences refresh on focus and periodically (normally within
-a minute). Claude requires a recently verified account preference, no older
-than one minute, and receives updates with its workflow reads. Node reporters
-query the authenticated account service before sending. Missing, stale or
-unavailable consent means no account-authorized report. An event already sent
-cannot be recalled by changing the setting.
-
-For a deliberate diagnostic session, `STATEWRIGHT_SENTRY_ENABLED=true` is an
-explicit local opt-in. A local disable or a known account withdrawal still wins.
-Pre-login failures cannot infer an account grant. Fatal Node exits cannot wait
-for an account lookup, so their bounded exit-time reporter requires this local
-opt-in. Nothing is queued for retrospective upload after you sign in.
-
-## What plugin reports contain
+## What error reports contain
 
 Reports contain a fixed failure category, operation category, plugin version,
 platform and, when available, a numeric status or exit code. They can describe
-connection, credential-store, permission, command and plugin failures without
-including the command or its output. Exception messages and stacks are withheld.
-Prompts, source code, credentials, filesystem paths, account identifiers and
-workflow contents are excluded from these reports.
+pre-login and fatal-exit failures. They exclude prompts, source code, commands,
+credentials, filesystem paths, account identifiers, workflow contents, raw
+exception messages and stacks. Reports are deduplicated and attempts are capped
+per process. Failed delivery does not change the operation's outcome or replay
+a command. Nothing is queued for later upload.
 
-Reports go to Statewright's self-hosted GlitchTip service using Sentry envelopes.
-Repeated failures are deduplicated and attempts are capped per process. Failed
-delivery does not change the original operation's outcome or replay a command.
+Reports go to Statewright's self-hosted GlitchTip service using Sentry
+envelopes. `STATEWRIGHT_SENTRY_DISABLED=true` remains an operator emergency
+control for outages and isolated test environments; it is not an additional
+telemetry preference.
 
-Website recordings are different from plugin reports: they capture page
+Website recordings are different from error reports: they capture page
 interactions with form-input masking. Receiving infrastructure necessarily
 handles network data such as IP addresses. Payload filtering alone is not a
 claim of anonymity or GDPR compliance; retention, access controls and the

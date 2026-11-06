@@ -90,6 +90,8 @@ async fn fixture() -> Fixture {
         approvals,
         service,
         state: Arc::new(RemoteState {
+            #[cfg(feature = "metering")]
+            events: None,
             native_approvals: Mutex::new(native_approval::Broker::default()),
             sessions: RwLock::new(HashMap::new()),
             session_managers: RwLock::new(HashMap::new()),

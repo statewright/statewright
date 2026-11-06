@@ -345,6 +345,24 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations {
+                open_world_hint: Some(true),
+                ..ToolAnnotations::read_only()
+            }),
+            name: "statewright_search_docs".into(),
+            description: Some(
+                "Search Statewright's public documentation for workflow creation, schema fields, examples, and troubleshooting. Returns short excerpts and links to the matching pages.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "minLength": 1, "maxLength": 200 }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        ToolInfo {
             annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_get_workflow".into(),
             description: Some(
@@ -537,6 +555,7 @@ pub fn is_custom_tool(name: &str) -> bool {
             | "statewright_get_usage"
             | "statewright_report_runtime_usage"
             | "statewright_list_workflows"
+            | "statewright_search_docs"
             | "statewright_get_workflow"
             | "statewright_load_workflow"
             | "statewright_deactivate"
@@ -727,11 +746,12 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_usage"));
         assert!(tools.iter().any(|t| t.name == "statewright_list_workflows"));
+        assert!(tools.iter().any(|t| t.name == "statewright_search_docs"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_load_workflow"));
         assert!(tools.iter().any(|t| t.name == "statewright_deactivate"));
@@ -766,6 +786,13 @@ mod tests {
                     "{}",
                     tool.name
                 );
+            } else if tool.name == "statewright_search_docs" {
+                assert_eq!(
+                    value["annotations"],
+                    json!({
+                        "readOnlyHint": true, "destructiveHint": false, "openWorldHint": true
+                    })
+                );
             } else {
                 assert!(
                     value.get("annotations").is_none(),
@@ -781,6 +808,7 @@ mod tests {
         assert!(is_custom_tool("statewright_transition"));
         assert!(is_custom_tool("statewright_get_state"));
         assert!(is_custom_tool("statewright_list_workflows"));
+        assert!(is_custom_tool("statewright_search_docs"));
         assert!(is_custom_tool("statewright_load_workflow"));
         assert!(is_custom_tool("statewright_deactivate"));
         assert!(is_custom_tool("statewright_get_status"));

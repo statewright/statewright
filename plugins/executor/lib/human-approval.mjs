@@ -33,10 +33,13 @@ function deniedCapabilityText(result) {
 }
 
 export function pendingApprovalSnapshot(item) {
-  if (item?.type !== "mcpToolCall" || item.server !== "statewright"
+  if (!["mcpToolCall", "McpToolCall"].includes(item?.type) || item.server !== "statewright"
+      || (item.status !== undefined && item.status !== "completed")
+      || item.error || item.result?.isError === true
       || !["statewright_transition", "statewright_get_state"].includes(item.tool)) return null;
   const result = item.result;
-  const candidates = [result?.structuredContent, ...(result?.content ?? []).filter(x => x.type === "text").map(x => {
+  const content = Array.isArray(result?.content) ? result.content : [];
+  const candidates = [result?.structuredContent, ...content.filter(x => x?.type === "text").map(x => {
     try { return JSON.parse(x.text); } catch { return null; }
   })];
   for (const x of candidates) {
@@ -60,11 +63,20 @@ export class HumanApprovalController {
     this.tickets = new Map();
   }
 
+  recordSafely(event) {
+    void Promise.resolve().then(() => this.record(event)).catch(() => {});
+  }
+
+  // Delivery failure must neither grant approval nor strand promise cleanup.
+  notify(message) {
+    try { void Promise.resolve(this.send(message)).catch(() => {}); } catch {}
+  }
+
   remind(ticket) {
     const key = JSON.stringify([ticket.threadId, ticket.run_id, ticket.approval_id, ticket.run_session_id ?? null]);
     const entry = this.tickets.get(key);
     if (!entry || entry.lastResult?.status !== "pending" || entry.lastResult.can_decide === true) return false;
-    entry.present(entry.lastResult, true);
+    void entry.present(entry.lastResult, true).catch(() => {});
     return true;
   }
 
@@ -93,7 +105,7 @@ export class HumanApprovalController {
       if (entry.requestId) this.requests.delete(entry.requestId);
       this.tickets.delete(key);
       if (entry.presented && entry.requestId) {
-        this.send({ method: "serverRequest/resolved", params: { threadId: ticket.threadId, requestId: entry.requestId } });
+        this.notify({ method: "serverRequest/resolved", params: { threadId: ticket.threadId, requestId: entry.requestId } });
       }
       if (error) entry.reject(error); else entry.accept(value);
     };
@@ -101,23 +113,30 @@ export class HumanApprovalController {
     entry.abort = () => finish(signal.reason ?? new Error("Approval wait cancelled"));
     signal.addEventListener("abort", entry.abort, { once: true });
     this.tickets.set(key, entry);
-    const present = (result, force = false) => {
+    const present = async (result, force = false) => {
+      if (entry.settled || entry.presenting) return;
       const canDecide = result.can_decide === true;
       const requirement = approvalRequirementText(result.approval_requirement);
       const fingerprint = JSON.stringify([canDecide, result?.authorization?.reason ?? null, requirement]);
       if (!force && entry.presented && entry.presentationFingerprint === fingerprint) return;
       if (entry.presented && entry.requestId) {
-        this.send({method: "serverRequest/resolved", params: {threadId: ticket.threadId, requestId: entry.requestId}});
+        this.notify({method: "serverRequest/resolved", params: {threadId: ticket.threadId, requestId: entry.requestId}});
         this.requests.delete(entry.requestId);
       }
       entry.canDecide = canDecide;
       entry.approvalRequirement = result.approval_requirement;
-      entry.presentationFingerprint = fingerprint;
-      entry.presented = true;
+      entry.presentationFingerprint = null;
+      entry.presented = false;
+      entry.presenting = true;
+      try {
       if (!canDecide) {
         entry.requestId = null;
-        this.send({ method: "warning", params: { threadId: ticket.threadId,
+        await this.send({ method: "warning", params: { threadId: ticket.threadId,
           message: `Statewright approval ${ticket.approval_id} remains parked.\n${requirement}\n${deniedCapabilityText(result)}` } });
+        if (!entry.settled) {
+          entry.presented = true;
+          entry.presentationFingerprint = fingerprint;
+        }
         return;
       }
       entry.requestId = `statewright-approval-${randomUUID()}`;
@@ -128,11 +147,25 @@ export class HumanApprovalController {
       }
       const review = typeof result.review_url === "string" && result.review_url
         ? `\nReview evidence: ${result.review_url}` : "";
-      this.send({ id: entry.requestId, method: "mcpServer/elicitation/request", params: {
+      // Register before sending: a real native reply can race its send callback.
+      entry.presented = true;
+      await this.send({ id: entry.requestId, method: "mcpServer/elicitation/request", params: {
         threadId: ticket.threadId, turnId: ticket.turnId ?? null, serverName: "statewright", mode: "form",
         message: `Statewright approval ${ticket.approval_id}\n${ticket.from_state} -> ${ticket.to_state}\n${ticket.message ?? "Approve this workflow transition?"}\n${requirement}${review}\nThe active Statewright identity is authorized to decide this request.`,
         requestedSchema: { type: "object", properties: {} },
       } });
+      if (!entry.settled) entry.presentationFingerprint = fingerprint;
+      else this.notify({ method: "serverRequest/resolved", params: {
+        threadId: ticket.threadId, requestId: entry.requestId,
+      } });
+      } catch (error) {
+        entry.presented = false;
+        if (entry.requestId) this.requests.delete(entry.requestId);
+        entry.requestId = null;
+        throw error;
+      } finally {
+        entry.presenting = false;
+      }
     };
     entry.present = present;
     const poll = async () => {
@@ -144,15 +177,27 @@ export class HumanApprovalController {
         entry.lastResult = result;
         if (entry.settled) return;
         if (result.status !== "pending") { finish(null, result); return; }
-        present(result);
+        // Native transport progress must not gate authoritative website decisions.
+        // present() serializes delivery; replies still revalidate current authority.
+        void present(result).then(() => {
+          entry.reportedPresentationError = false;
+        }).catch(() => {
+          if (!entry.reportedPresentationError) {
+            entry.reportedPresentationError = true;
+            this.recordSafely({ type: "approval_notification_unavailable", threadId: ticket.threadId,
+              approval_id: ticket.approval_id });
+          }
+          // Retry delivery on the existing poll, after reading current authority.
+          // Never remember an unacknowledged send as a displayed prompt.
+        });
       } catch (error) {
         if (signal.aborted) { finish(signal.reason); return; }
         // Transport loss is not permission. Keep waiting without inference.
         if (!entry.reportedReadError) {
           entry.reportedReadError = true;
-          await this.record({ type: "approval_read_unavailable", threadId: ticket.threadId, approval_id: ticket.approval_id });
+          this.recordSafely({ type: "approval_read_unavailable", threadId: ticket.threadId, approval_id: ticket.approval_id });
           const missingSession = /Approval service HTTP 404/.test(String(error?.message));
-          this.send({ method: "warning", params: { threadId: ticket.threadId,
+          this.notify({ method: "warning", params: { threadId: ticket.threadId,
             message: `Statewright approval ${ticket.approval_id} remains parked. ${missingSession
               ? "The gateway no longer has this approval session; restore its authoritative checkpoint before deciding."
               : "The approval service is unavailable; no decision can be made until it responds."}` } });

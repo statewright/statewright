@@ -3,6 +3,157 @@ import assert from "node:assert/strict";
 import { approvalRequirementText, HumanApprovalController, pendingApprovalSnapshot } from "../lib/human-approval.mjs";
 
 const ticket = { approval_id: "apr_test", run_id: "run1", threadId: "thread1", from_state: "review", to_state: "frontier" };
+
+test("a failed native notification is not remembered as delivered", async () => {
+  const sent = [];
+  let unavailable = true;
+  const abort = new AbortController();
+  const controller = new HumanApprovalController({ pollMs: 5,
+    read: async () => ({ ...ticket, status: "pending", can_decide: true }),
+    resolve: async () => assert.fail("transport recovery must not decide"),
+    send: message => {
+      if (unavailable) throw new Error("native transport unavailable");
+      sent.push(message);
+    },
+  });
+  const waiting = controller.wait(ticket, { signal: abort.signal });
+  // Capture early rejection so a broken notifier cannot make the test hang.
+  let rejected;
+  void waiting.catch(error => { rejected = error; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    unavailable = false;
+    for (let n = 0; n < 40 && !sent.some(x => x.method === "mcpServer/elicitation/request"); n++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(rejected, undefined);
+    assert.equal(sent.filter(x => x.method === "mcpServer/elicitation/request").length, 1);
+  } finally {
+    abort.abort(new Error("test cleanup"));
+    await assert.rejects(waiting);
+  }
+});
+
+test("disconnect during dismissal cannot strand the wait promise", async () => {
+  let disconnected = false;
+  const abort = new AbortController();
+  const controller = new HumanApprovalController({ pollMs: 5,
+    read: async () => ({ ...ticket, status: "pending", can_decide: true }),
+    send: () => { if (disconnected) throw new Error("closed socket"); },
+  });
+  const waiting = controller.wait(ticket, { signal: abort.signal });
+  const settled = assert.rejects(waiting, /test disconnect/);
+  await Promise.resolve();
+  disconnected = true;
+  abort.abort(new Error("test disconnect"));
+  await settled;
+  assert.equal(controller.requests.size, 0);
+  assert.equal(controller.tickets.size, 0);
+});
+
+test("asynchronous native send failure retries the same pending ticket, not a decision", async () => {
+  const abort = new AbortController();
+  const sent = [], events = [];
+  let attempts = 0;
+  const controller = new HumanApprovalController({ pollMs: 5,
+    read: async () => ({ ...ticket, status: "pending", can_decide: true }),
+    resolve: async () => assert.fail("no human reply occurred"),
+    record: event => events.push(event),
+    send: async message => {
+      if (message.method === "mcpServer/elicitation/request" && ++attempts === 1) {
+        throw new Error("asynchronous socket failure");
+      }
+      sent.push(message);
+    },
+  });
+  const waiting = controller.wait(ticket, { signal: abort.signal });
+  try {
+    for (let n = 0; n < 40 && !sent.length; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(sent.filter(x => x.method === "mcpServer/elicitation/request").length, 1);
+    assert.equal(events.filter(x => x.type === "approval_notification_unavailable").length, 1);
+    assert.equal(controller.requests.size, 1);
+    assert.equal(controller.tickets.size, 1);
+  } finally {
+    abort.abort(new Error("test cleanup"));
+    await assert.rejects(waiting, /test cleanup/);
+  }
+});
+
+for (const status of ["approved", "rejected"]) test(`stalled native delivery does not block website ${status}`, async () => {
+  let acknowledge;
+  let current = "pending";
+  let reads = 0;
+  const sent = [];
+  const abort = new AbortController();
+  const controller = new HumanApprovalController({ pollMs: 5,
+    read: async () => { reads++; return { ...ticket, status: current, can_decide: true }; },
+    resolve: async () => assert.fail("website decision must not submit a native decision"),
+    send: message => {
+      sent.push(message);
+      if (message.method === "mcpServer/elicitation/request") {
+        return new Promise(resolve => { acknowledge = resolve; });
+      }
+    },
+  });
+  const waiting = controller.wait(ticket, { signal: abort.signal });
+  const timeout = setTimeout(() => abort.abort(new Error("authority polling stalled")), 500);
+  try {
+    await Promise.resolve();
+    assert.equal(typeof acknowledge, "function");
+    current = status;
+    assert.equal((await waiting).status, status);
+    assert.ok(reads >= 2);
+    assert.equal(controller.requests.size, 0);
+    assert.equal(controller.tickets.size, 0);
+    acknowledge();
+    await Promise.resolve();
+    assert.equal(sent.at(-1).method, "serverRequest/resolved");
+    controller.handleReply({ id: sent[0].id, result: { action: "accept" } });
+    assert.equal(controller.tickets.size, 0);
+  } finally {
+    clearTimeout(timeout);
+    acknowledge?.();
+    abort.abort(new Error("test cleanup"));
+  }
+});
+
+test("waiting-for-review notice retries failed delivery without creating decision authority", async () => {
+  let attempts = 0;
+  const sent = [];
+  const abort = new AbortController();
+  const controller = new HumanApprovalController({ pollMs: 5,
+    read: async () => ({ ...ticket, status: "pending", can_decide: false,
+      authorization: { reason: "reviewer_mismatch" } }),
+    resolve: async () => assert.fail("waiting notice is not approval authority"),
+    send: async message => {
+      if (++attempts === 1) throw new Error("native notice unavailable");
+      sent.push(message);
+    },
+  });
+  const waiting = controller.wait(ticket, { signal: abort.signal });
+  try {
+    for (let n = 0; n < 40 && !sent.length; n++) await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].method, "warning");
+    assert.match(sent[0].params.message, /remains parked/);
+    assert.equal(controller.requests.size, 0);
+    assert.equal(controller.tickets.size, 1);
+  } finally {
+    abort.abort(new Error("test cleanup"));
+    await assert.rejects(waiting, /test cleanup/);
+  }
+});
+
+test("failed or malformed native MCP events never manufacture approval hints", () => {
+  const snapshot = { run_id: "run1", pending_approval: { approval_id: "apr_test" } };
+  const item = { type: "mcpToolCall", server: "statewright", tool: "statewright_transition",
+    status: "completed", result: { structuredContent: snapshot } };
+  assert.equal(pendingApprovalSnapshot({ ...item, result: { ...item.result, isError: true } }), null);
+  assert.equal(pendingApprovalSnapshot({ ...item, status: "failed" }), null);
+  assert.equal(pendingApprovalSnapshot({ ...item, result: { content: {} } }), null);
+  assert.equal(pendingApprovalSnapshot({ ...item, result: { content: [null] } }), null);
+  assert.deepEqual(pendingApprovalSnapshot({ ...item, type: "McpToolCall" }), snapshot);
+});
 function fixture(status = "pending", approvalTicket = ticket) {
   const sent = [], resolutions = [], opened = [], recorded = [];
   let result = { ...approvalTicket, status, can_decide: true, approval_requirement: {mode: "single", required_approvals: 1,

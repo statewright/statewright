@@ -1370,7 +1370,7 @@ export async function startCodexAppServerRouteProxy({
         scheduleIdle();
       },
       rpc: internalRpc,
-      send: value => { void forwardWhenOpen(downstream, JSON.stringify(value)).catch(reportApprovalFailure); },
+      send: value => forwardWhenOpen(downstream, JSON.stringify(value)),
       record: event => onHandoffStatus({ schema: "statewright/approval-lifecycle/v1", ...event }),
       continueApproved: async ({ threadId, state, fromState, goal, check }) => {
         const checkOwner = async () => { check(); await gate.assertOwner(threadId); check(); };

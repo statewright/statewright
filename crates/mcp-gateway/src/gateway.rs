@@ -7938,6 +7938,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn literal_output_proof_preserves_independent_capability_denials() {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        for command in ["printf '%s' 'rm fixture.txt'", "cat 'file$(not_a_command)'"] {
+            for (label, allowed, denied, expected) in [
+                ("read", json!(["Read"]), json!([]), "allow"),
+                ("missing", json!([]), json!([]), "deny"),
+                ("deny_read", json!(["Read"]), json!(["Read"]), "deny"),
+                ("deny_bash", json!(["Read"]), json!(["Bash"]), "deny"),
+            ] {
+                let definition: MachineDefinition = serde_json::from_value(json!({
+                    "id":"literal-output-policy", "initial":"inspect",
+                    "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                    "states":{"inspect":{"allowed_tools":allowed,"disallowed_tools":denied,
+                        "on":{"DONE":"done"}},"done":{"type":"final"}}
+                })).unwrap();
+                let manager = SessionManager::new();
+                manager.create("literal-output-session".into(), definition.clone());
+                let mut workflows = HashMap::new();
+                workflows.insert("literal-output-policy".into(), definition);
+                let mut gateway = Gateway::new(manager, UpstreamManager::empty(),
+                    "literal-output-session".into(), workflows, Some("literal-output-policy".into()), String::new(), None);
+                gateway.current_run_id = Some("literal-output-run".into());
+                let epoch = gateway.usage.state_epoch();
+                let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
+                assert_eq!(result["decision"], expected, "{label}: {result}");
+                assert!(result["classifier_context"].is_null(), "{label}: {result}");
+                assert_eq!(gateway.session_manager.get("literal-output-session").unwrap().current_state, "inspect");
+                assert_eq!(gateway.usage.state_epoch(), epoch);
+            }
+        }
+        risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
     #[ignore = "operator-supplied private ledger, static decision audit only"]
     async fn private_ledger_decisions_without_execution() {
         // Commands are data passed only to the pre-tool decision function.

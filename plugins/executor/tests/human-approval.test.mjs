@@ -284,6 +284,29 @@ test('entitlement denial names the entitlement instead of blaming identity', asy
   f.abort.abort(new Error('done')); await assert.rejects(waiting,/done/);
 });
 
+test('approval-queue entitlement notice identifies owner plan and never offers a decision', async () => {
+  const f = fixture();
+  f.set({ ...ticket, status: 'pending', can_decide: false,
+    authorization: { can_decide: false, reason: 'approval_queue_entitlement_required' },
+    approval_requirement: { reviewers: [] } });
+  const waiting = f.wait();
+  try {
+    await Promise.resolve();
+    assert.equal(f.sent[0].method, 'warning');
+    assert.match(f.sent[0].params.message, /workflow owner.*verified plan with approval queues/i);
+    assert.match(f.sent[0].params.message, /billing.*subscription/i);
+    assert.doesNotMatch(f.sent[0].params.message, /credentials|active Pro entitlement/);
+    assert.equal(f.controller.requests.size, 0);
+    assert.equal(f.controller.tickets.size, 1);
+    f.controller.handleReply({ id: 'statewright-approval-forged', result: { action: 'accept' } });
+    assert.equal(f.resolutions.length, 0);
+    assert.equal(f.controller.tickets.size, 1);
+  } finally {
+    f.abort.abort(new Error('test cleanup'));
+    await assert.rejects(waiting, /test cleanup/);
+  }
+});
+
 test("optional gateway session identity is checked only when the receipt provides it", () => {
   const f = fixture();
   const bound = { ...ticket, run_session_id: "session1" };

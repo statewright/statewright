@@ -19,6 +19,8 @@ export function approvalRequirementText(requirement) {
 
 function deniedCapabilityText(result) {
   switch (result?.authorization?.reason) {
+    case "approval_queue_entitlement_required":
+      return "The workflow owner does not currently have a verified plan with approval queues. Check the owner's billing and subscription configuration; the request remains pending.";
     case "pro_entitlement_required":
       return "This Statewright account needs an active Pro entitlement to decide the request.";
     case "reviewer_mismatch":

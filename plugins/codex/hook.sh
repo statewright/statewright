@@ -316,12 +316,22 @@ fetch_local_state() {
 
 statewright_tools_label() {
   local state_json="$1"
-  local policy_mode allowed disallowed
+  local policy_mode allowed disallowed has_capabilities intent
   policy_mode=$(printf '%s' "$state_json" | jq -r '.context.tool_policy_mode // .tool_policy_mode // empty' 2>/dev/null || true)
   allowed=$(printf '%s' "$state_json" | jq -r '.allowed_tools // [] | join(", ")' 2>/dev/null || true)
   disallowed=$(printf '%s' "$state_json" | jq -r '.disallowed_tools // [] | join(", ")' 2>/dev/null || true)
+  has_capabilities=$(printf '%s' "$state_json" | jq -r '.allowed_tools | type == "array"' 2>/dev/null || true)
+  intent=$(printf '%s' "$state_json" | jq -r '.intent // empty' 2>/dev/null || true)
   if statewright_policy_mode_is_denylist "$policy_mode"; then
-    printf 'unrestricted except explicit blocks: %s' "${disallowed:-(none)}"
+    # Denylist mode does not remove effect capabilities. In particular, an
+    # unknown shell effect cannot acquire missing capabilities through approval.
+    if [ "$intent" = "exploratory_read_only" ]; then
+      printf 'proven read-only effects only; explicit blocks: %s; classifier and approval policy still apply' "${disallowed:-(none)}"
+    elif [ "$has_capabilities" = "true" ]; then
+      printf 'effect capabilities: %s; explicit blocks: %s; classifier and approval policy still apply' "${allowed:-(none)}" "${disallowed:-(none)}"
+    else
+      printf 'no capability list; explicit blocks: %s; classifier and approval policy still apply' "${disallowed:-(none)}"
+    fi
   elif [ -n "$allowed" ]; then
     printf '%s' "$allowed"
   else
@@ -995,7 +1005,7 @@ case "$ENDPOINT" in
           --arg run_session_id "$RUN_SESSION_ID" --arg state "$CURRENT" \
           --arg state_epoch "$STATE_EPOCH" '
           .risk_assessment? as $risk
-          | if ($risk | type) != "object" then empty else {
+          | if ($risk | type) != "object" or $risk.separate_approval_allowed != true then empty else {
               schema: "statewright/classifier-approval-request/v2",
               thread_id: $thread_id,
               run_id: $run_id,

@@ -209,6 +209,15 @@ async function startNativeGateway() {
           command: "private-command-sentinel",
         },
       };
+      const uncertainEligibility = {
+        classifier_denied_eligibility_missing: undefined,
+        classifier_denied_eligibility_null: null,
+        classifier_denied_eligibility_string: "true",
+        classifier_denied_eligibility_number: 1,
+      };
+      if (Object.hasOwn(uncertainEligibility, toolName)) {
+        decision.risk_assessment.separate_approval_allowed = uncertainEligibility[toolName];
+      }
     } else if (toolName === "policy_denied" || toolName === "capability_denied") {
       const capability = toolName === "capability_denied";
       decision = {
@@ -433,6 +442,41 @@ test("native Codex hook leaves malformed workflow-load results inactive", async 
   }
 });
 
+test("native denylist phase labels preserve capability limits and never promise unrestricted execution", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "statewright-policy-label-"));
+  try {
+    const cases = [
+      ["validation", {allowed_tools: ["Read", "Grep", "Glob", "Bash", "BoundedLocalExecution"]},
+        /effect capabilities: Read, Grep, Glob, Bash, BoundedLocalExecution; explicit blocks: \(none\)/],
+      ["empty", {allowed_tools: []}, /effect capabilities: \(none\)/],
+      ["absent", {}, /no capability list/],
+      ["null", {allowed_tools: null}, /no capability list/],
+      ["read-intent", {intent: "exploratory_read_only", allowed_tools: ["Bash", "Write"]},
+        /proven read-only effects only/],
+      ["explicit-deny", {allowed_tools: ["Read", "Bash"], disallowed_tools: ["Write"]},
+        /effect capabilities: Read, Bash; explicit blocks: Write/],
+    ];
+    for (const [label, limits, expected] of cases) {
+      const snapshot = {...loadedState.state_snapshot, ...limits,
+        context: {tool_policy_mode: "denylist_heuristic_v1"}};
+      if (label === "absent") delete snapshot.allowed_tools;
+      const result = await invoke("bash", [resolve(codexRoot, "hook.sh"), "post-tool"], {
+        session_id: `policy-label-${label}`,
+        tool_name: "mcp__statewright__statewright_load_workflow",
+        tool_response: {state_snapshot: snapshot},
+      }, {HOME: home, STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
+        STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false"});
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+      const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+      assert.match(context, expected, label);
+      assert.match(context, /classifier and approval policy still apply/, label);
+      assert.doesNotMatch(context, /unrestricted/, label);
+    }
+  } finally {
+    await rm(home, {recursive: true, force: true});
+  }
+});
+
 for (const host of ["companion", "managed-symlink"]) {
 test(`native Codex hook delegates denylist policy to the authoritative gateway (${host})`, async () => {
   const home = await mkdtemp(resolve(tmpdir(), "statewright-native-hook-"));
@@ -472,7 +516,7 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     assert.equal(post.status, 0, post.stderr);
     assert.match(
       JSON.parse(post.stdout).hookSpecificOutput.additionalContext,
-      /Tools: unrestricted except explicit blocks: Write/,
+      /Tools: effect capabilities: Read, Bash; explicit blocks: Write; classifier and approval policy still apply/,
       post.stdout,
     );
 
@@ -616,7 +660,9 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     assert.equal(classifierApproval.requests.length, 3);
     assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-(command|input)-sentinel/);
 
-    for (const tool_name of ["policy_denied", "capability_denied"]) {
+    for (const tool_name of ["policy_denied", "capability_denied",
+      "classifier_denied_eligibility_missing", "classifier_denied_eligibility_null",
+      "classifier_denied_eligibility_string", "classifier_denied_eligibility_number"]) {
       const requestCount = classifierApproval.requests.length;
       const ineligible = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
         session_id, tool_name, tool_input: {command: "private-input-sentinel"},
@@ -625,6 +671,8 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
       assert.equal(ineligibleOutput.permissionDecision, "deny");
       assert.equal(classifierApproval.requests.length, requestCount,
         `${tool_name} must not enter native classifier approval`);
+      assert.doesNotMatch(ineligibleOutput.additionalContext ?? "", /invalid_redacted_classifier_receipt/,
+        "An authoritative ineligible denial is not a malformed approval request");
     }
 
     const approvalUnavailable = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {

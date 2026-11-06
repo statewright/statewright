@@ -8026,6 +8026,86 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "operator-collected local evidence, static decisions only"]
+    async fn private_collected_evidence_decisions_without_execution() {
+        assert!(!risk_assessment::SemanticShadowConfig::from_env().enabled,
+            "static evidence audit refuses an enabled semantic provider before reading inputs");
+        let path = std::env::var("STATEWRIGHT_STATIC_EVIDENCE").expect("evidence path required");
+        let bytes = std::fs::read(path).expect("read evidence");
+        assert!(bytes.len() <= 1024 * 1024);
+        let input: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON evidence");
+        assert_eq!(input["schema"], "statewright/private-collector-audit/v1");
+        let rows = input["rows"].as_array().expect("rows required");
+        assert!(!rows.is_empty() && rows.len() <= 100);
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
+        for row in rows {
+            let command = row["command"].as_str().expect("command required");
+            let cwd = row["cwd"].as_str().expect("cwd required");
+            let fresh_validate_allow = row["expected_fresh_validate_allow"]
+                .as_bool().expect("independently declared expected decision required");
+            assert!(!command.is_empty() && command.len() <= 8192);
+            assert!(std::path::Path::new(cwd).is_absolute());
+            for variant in ["absent", "fresh", "expired", "wrong_cwd"] {
+                let mut proof = row["evidence"].clone();
+                if variant == "expired" { proof["collected_at_ms"] = json!(0); }
+                if variant == "wrong_cwd" { proof["requested_cwd"] = json!("/unrelated-audit-root"); }
+                for (policy, capabilities) in [
+                    ("read", json!(["Read", "Grep", "Glob", "Bash"])),
+                    ("validate", json!(["Read", "Grep", "Glob", "Bash", "BoundedLocalExecution"])),
+                    ("explicit_deny", json!(["Read", "Grep", "Glob", "Bash", "BoundedLocalExecution"])),
+                ] {
+                    let definition: MachineDefinition = serde_json::from_value(json!({
+                        "id":"static-evidence", "initial":"inspect",
+                        "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                        "states":{"inspect":{"allowed_tools":capabilities,
+                            "disallowed_tools":if policy == "explicit_deny" { json!(["Bash"]) } else { json!([]) },
+                            "on":{"DONE":"done"}},"done":{"type":"final"}}
+                    })).unwrap();
+                    let manager = SessionManager::new();
+                    manager.create("static-evidence-session".into(), definition.clone());
+                    let mut workflows = HashMap::new();
+                    workflows.insert("static-evidence".into(), definition);
+                    let mut gateway = Gateway::new(manager, UpstreamManager::empty(),
+                        "static-evidence-session".into(), workflows, Some("static-evidence".into()), String::new(), None);
+                    gateway.current_run_id = Some("static-evidence-run".into());
+                    let epoch = gateway.usage.state_epoch();
+                    let result = gateway.adapter_pre_tool_with_evidence("exec_command",
+                        &json!({"cmd":command,"workdir":cwd}),
+                        if variant == "absent" { None } else { Some(&proof) }).await;
+                    assert_eq!(result["risk_assessment"]["semantic_status"], "Disabled");
+                    assert_eq!(gateway.session_manager.get("static-evidence-session").unwrap().current_state, "inspect");
+                    assert_eq!(gateway.usage.state_epoch(), epoch);
+                    let expected = if fresh_validate_allow && variant == "fresh" && policy == "validate" {
+                        "allow"
+                    } else {
+                        "deny"
+                    };
+                    assert_eq!(result["decision"], expected,
+                        "line {} / {policy} / {variant}", row["ledger_line"]);
+                    assert!(!result["classifier_context"].is_object(),
+                        "restricted capability policies must not become classifier approval eligible");
+                    assert_ne!(result["risk_assessment"]["separate_approval_allowed"], json!(true));
+                    if fresh_validate_allow && variant == "fresh" && policy == "read" {
+                        assert_eq!(result["risk_assessment"]["final_denial_basis"],
+                            "workflow_capability_bounded_local_execution_not_allowed");
+                    }
+                    if fresh_validate_allow && variant == "fresh" && policy == "explicit_deny" {
+                        assert_eq!(result["risk_assessment"]["final_denial_basis"], "workflow_tool_policy");
+                    }
+                    println!("COLLECTED_LEDGER {}", json!({
+                        "ledger_line":row["ledger_line"], "policy":policy, "variant":variant,
+                        "command_fingerprint":uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, command.as_bytes()).to_string(),
+                        "decision":result["decision"], "risk":result["risk_assessment"],
+                        "approval_context_present":result["classifier_context"].is_object(),
+                        "execution":"not_executed", "context":"current_source_scenario_not_historical_binding"
+                    }));
+                }
+            }
+        }
+        risk_assessment::set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[tokio::test]
     async fn checkpoint_cannot_bypass_denylist_write_capability() {
         let definition: MachineDefinition = serde_json::from_value(json!({
             "id":"checkpoint-policy", "initial":"inspect",

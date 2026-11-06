@@ -40,6 +40,9 @@ Checkpoints and runtimes:
 - Qwen: `mlx-community/Qwen3.5-4B-4bit`, revision
   `0e7ffd5c629ef7719d4cbc04069232580bfa9d9c`, actual MLX GPU. Observed peak GPU
   allocation 3,099,495,194 bytes; 6 GiB advisory limit was not exceeded.
+  Artifact identity is pinned; its upstream training-variant lineage is not
+  established by that revision's metadata. See
+  [the subsequent lineage check](036-local-model-lineage-boundary.md).
 - Laya: `convaiinnovations/laya`, typed-decisions, revision
   `7b928d828b7b0e022f929d9bd2e44165aa270148`, Laya 0.3.20, actual Apple MPS.
   Complete sequences were 295–500 tokens; no truncation occurred. Vendor warned

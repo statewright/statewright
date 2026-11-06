@@ -268,6 +268,56 @@ test("App Server transport creates bounded, filesystem-safe temporary home names
   assert.match(appServerHomePrefixForClient("x".repeat(100)), /^statewright-x{60}$/);
 });
 
+test("App Server keeps native hook trust in the selected canonical profile across cold starts", {timeout: 10_000}, async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-profile-persistence-"));
+  const fake = join(home, "fake-codex.mjs");
+  const observedPath = join(home, "observed.json");
+  const firstProfile = join(home, "staging");
+  const otherProfile = join(home, "other");
+  const original = 'model = "fixture-original"\napproval_policy = "on-request"\n';
+  const trusted = original + '\n[hooks.state."fixture@staging:hooks/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:' + 'a'.repeat(64) + '"\n';
+  let runtime;
+  try {
+    for (const profile of [firstProfile, otherProfile]) {
+      await mkdir(profile);
+      await writeFile(join(profile, "config.toml"), original, {mode: 0o600});
+    }
+    await writeFile(fake, `#!/usr/bin/env node
+import { createServer } from "node:http";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(${JSON.stringify(observedPath)}, JSON.stringify({home:process.env.CODEX_HOME, config:readFileSync(join(process.env.CODEX_HOME,"config.toml"),"utf8")}));
+const url = new URL(process.argv.at(-1));
+createServer((_request,response)=>{response.writeHead(200);response.end("ok");}).listen(Number(url.port),url.hostname);
+`, {mode: 0o700});
+    const start = profile => startCodexAppServerRuntime({command: fake, home, cwd: home,
+      clientId: "swc_hook_persistence_fixture", reporter: {async report() {}},
+      environment: {PATH: process.env.PATH, CODEX_HOME: profile,
+        STATEWRIGHT_QWEN_ENABLED: "false", STATEWRIGHT_SENTRY_DISABLED: "true"}});
+    runtime = await start(firstProfile);
+    let observed = JSON.parse(await readFile(observedPath, "utf8"));
+    assert.equal(observed.home, firstProfile, "native config writes must target the selected profile, not a throwaway copy");
+    assert.equal(observed.config, original, "transport must not create trust or alter model/security settings");
+    // Fixture-only stand-in for a native user-confirmed config write. This
+    // proves persistence/selection, not the vendor's trust validation or UI.
+    await writeFile(join(observed.home, "config.toml"), trusted);
+    await runtime.close(); runtime = null;
+    runtime = await start(firstProfile);
+    observed = JSON.parse(await readFile(observedPath, "utf8"));
+    assert.equal(observed.home, firstProfile);
+    assert.equal(observed.config, trusted);
+    await runtime.close(); runtime = null;
+    runtime = await start(otherProfile);
+    observed = JSON.parse(await readFile(observedPath, "utf8"));
+    assert.equal(observed.home, otherProfile);
+    assert.equal(observed.config, original, "trust must never transfer to a different selected profile");
+    assert.equal(await readFile(join(firstProfile, "config.toml"), "utf8"), trusted);
+  } finally {
+    await runtime?.close();
+    await rm(home, {recursive: true, force: true});
+  }
+});
+
 test("App Server runtime confirms its owned child exits before close completes", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-app-server-close-"));
   const codexHome = join(home, ".codex");
@@ -289,8 +339,7 @@ test("App Server runtime confirms its owned child exits before close completes",
     const pid = Number(await readFile(pidPath, "utf8"));
     await runtime.close();
     assert.throws(() => process.kill(pid, 0));
-    const retainedHomes = (await readdir(tmpdir())).filter((entry) => entry.startsWith("statewright-swc_shutdown_test-app-server-"));
-    assert.ok(retainedHomes.length >= 1, "the isolated home must remain addressable after shutdown");
+    await access(codexHome); // Caller-owned history/config remains addressable after shutdown.
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -361,6 +410,12 @@ createServer((_request, response) => { response.writeHead(200); response.end("ok
       const args = JSON.parse(await readFile(argsPath, "utf8"));
       assert.ok(args.some((value) => value.startsWith("model_catalog_json=")));
       assert.ok(args.some((value) => value.includes("model_providers.qwen_private=") && value.includes("https://qwen.example.test/v1")));
+      const catalogPath = JSON.parse(args.find(value => value.startsWith("model_catalog_json=")).slice("model_catalog_json=".length));
+      assert.notEqual(join(codexHome, "statewright-model-catalog.json"), catalogPath);
+      assert.match(catalogPath, /statewright-swc_qwen_startup_test-catalog-/);
+      const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
+      assert.deepEqual(catalog.models.map(model => model.slug), ["gpt-5.6-terra", "qwen3.8-27b"]);
+      await assert.rejects(access(join(codexHome, "statewright-model-catalog.json")), {code: "ENOENT"});
     } finally {
       await runtime.close();
     }

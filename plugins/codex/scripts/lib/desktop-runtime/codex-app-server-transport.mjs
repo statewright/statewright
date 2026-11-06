@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { chmod, cp, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { routeIdentity, startCodexAppServerRouteProxy } from "./codex-app-server-route-proxy.mjs";
@@ -81,34 +81,11 @@ export function routeConfigEdits(route) {
   return edits;
 }
 
-async function prepareAppServerHome(codexHome, clientId) {
-  const appServerHome = await mkdtemp(join(tmpdir(), `${appServerHomePrefixForClient(clientId)}-app-server-`));
-  await chmod(appServerHome, 0o700);
-  const entries = await readdir(codexHome, { withFileTypes: true }).catch((error) => {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  });
-  for (const entry of entries) {
-    const source = join(codexHome, entry.name);
-    const target = join(appServerHome, entry.name);
-    // The isolated config must be mutable for config/batchWrite. Everything else,
-    // including auth and installed plugins, is shared read-only by path.
-    if (entry.name === "config.toml") {
-      await cp(source, target);
-    } else {
-      await symlink(source, target, entry.isDirectory() ? "dir" : "file");
-    }
-  }
-  const configPath = join(appServerHome, "config.toml");
-  await writeFile(configPath, "# Statewright ephemeral App Server configuration.\n", { flag: "a", mode: 0o600 });
-  return { appServerHome, configPath };
-}
-
 function providerConfigArgument(provider) {
   return `{name=${JSON.stringify(provider.name)},base_url=${JSON.stringify(provider.base_url)},wire_api=${JSON.stringify(provider.wire_api)},requires_openai_auth=${provider.requires_openai_auth ? "true" : "false"}}`;
 }
 
-async function optionalQwenStartupArgs({ codexHome, appServerHome, environment }) {
+async function optionalQwenStartupArgs({ codexHome, clientId, environment }) {
   if (environment.STATEWRIGHT_QWEN_ENABLED === "false") return [];
   if (!environment.STATEWRIGHT_QWEN_BASE_URL && environment.STATEWRIGHT_QWEN_ENABLED !== "true") return [];
   const identity = routeIdentity("casa/qwen3.8-27b", environment);
@@ -132,7 +109,11 @@ async function optionalQwenStartupArgs({ codexHome, appServerHome, environment }
     if (typeof model?.slug === "string" && model.slug) models.set(model.slug, model);
   }
   if (!models.has(identity.model)) return [];
-  const catalogPath = join(appServerHome, "statewright-model-catalog.json");
+  // Generated provider data is private and per launch, not a replacement for
+  // the user's config/trust store. Never write it into the selected profile.
+  const catalogHome = await mkdtemp(join(tmpdir(), `${appServerHomePrefixForClient(clientId)}-catalog-`));
+  await chmod(catalogHome, 0o700);
+  const catalogPath = join(catalogHome, "statewright-model-catalog.json");
   await writeFile(catalogPath, `${JSON.stringify({ models: [...models.values()] })}\n`, { mode: 0o600 });
   const provider = identity.config["model_providers.qwen_private"];
   return [
@@ -292,8 +273,11 @@ export async function startCodexAppServerRuntime({
   const port = await reserveLoopbackPort();
   const url = `ws://127.0.0.1:${port}`;
   const classifierApprovalToken = classifierApprovalService ? randomUUID() : null;
-  const { appServerHome } = await prepareAppServerHome(codexHome, clientId);
-  const providerArgs = await optionalQwenStartupArgs({ codexHome, appServerHome, environment });
+  // Routing is thread-scoped (settings/update and turn parameters), not a
+  // config/batchWrite override. Keep the native profile address stable so a
+  // user's hook review is persisted by Codex itself across cold starts. Do not
+  // copy, remap, or manufacture trust from earlier temporary projections.
+  const providerArgs = await optionalQwenStartupArgs({ codexHome, clientId, environment });
   if (historyArgs.length) {
     const storage = await resolveCodexHistoryStorage({ home, cwd, environment, args: historyArgs });
     historyArgs = ["-c", `sqlite_home=${JSON.stringify(storage.sqliteHome)}`];
@@ -305,7 +289,7 @@ export async function startCodexAppServerRuntime({
   const launch = providedLaunch ?? await resolveWindowsLaunch(command);
   const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, ...historyArgs, "app-server", "--listen", url], {
     cwd,
-    env: { ...environment, CODEX_HOME: appServerHome },
+    env: { ...environment, CODEX_HOME: codexHome },
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
     shell: launch.shell,
@@ -405,18 +389,15 @@ export async function startCodexAppServerRuntime({
           await reporter.report(error, { mechanism: "shutdown", host: "codex", operation: "app_server_proxy" }).catch(() => {});
         });
         await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
-        // Keep the isolated home addressable after shutdown. A native TUI can
-        // still be holding the App Server URL while the owned server exits;
-        // deleting the projection turns a recoverable disconnect into
-        // Codex's misleading `no rollout found` resume error. Its entries are
-        // symlinked to the canonical home and can be replaced next launch.
+        // The canonical profile is caller-owned and must outlive this server.
+        // Historic temporary projections are also retained for old resume
+        // pointers; their recovery belongs to the existing history guard.
       },
     };
   } catch (error) {
     closing = true;
     await stopOwnedAppServer(appServer, appServerClosed, shutdownGraceMs);
-    // Preserve the projection for a TUI that may still be unwinding after a
-    // failed startup; see the normal close path above.
+    // Never remove the caller-owned profile after failed startup.
     throw error;
   }
 }

@@ -80,9 +80,9 @@ pub fn pre_call_check_with_pipeline(
     pre_call_check_impl(session, tool_name, arguments, pipeline, false)
 }
 
-/// Eligibility only, never execution authority. An uncertain effect cannot
-/// prove compatibility with a restrictive capability policy. Keep all other
-/// interceptors identical to the ordinary execution path.
+/// Eligibility only, never execution authority. Tool admission is checked by
+/// the gateway first. An allowlist's presence is not a rejection: preserve
+/// explicit effect restrictions and capabilities established by known leaves.
 pub fn classifier_approval_policy_check(
     session: &GatewaySession,
     tool_name: &str,
@@ -112,14 +112,33 @@ fn pre_call_check_impl(
         None => return PreCallDecision::Allow,
     };
 
-    if approval_candidate && (state_def.intent.as_deref() == Some("exploratory_read_only")
-        || state_def.allowed_tools.is_some()
-        || state_def.disallowed_tools.as_ref().is_some_and(|tools| !tools.is_empty())
-        || pipeline.is_some_and(RiskPipelineAssessment::requires_explicit_execution_capability))
-    {
-        return PreCallDecision::Block(
-            "Classifier uncertainty cannot establish compatibility with this state's capability restrictions. Human classifier approval cannot grant missing workflow capabilities.".into(),
-        );
+    if approval_candidate {
+        if state_def.intent.as_deref() == Some("exploratory_read_only") {
+            return PreCallDecision::Block(
+                "Classifier uncertainty cannot establish a read-only effect required by this state's intent.".into(),
+            );
+        }
+        let denied = state_def.disallowed_tools.as_deref().unwrap_or_default();
+        if denied.iter().any(|name| ["Write", "write_file", "GitLocalWrite", "BoundedLocalExecution"]
+            .iter().any(|capability| name.eq_ignore_ascii_case(capability))) {
+            return PreCallDecision::Block(
+                "Classifier approval cannot override this state's explicit effect denial.".into(),
+            );
+        }
+        if let Some(required) = pipeline.and_then(RiskPipelineAssessment::known_required_capability) {
+            let allowed = state_def.allowed_tools.as_deref().unwrap_or_default();
+            if required.split('+').any(|capability| {
+                // Git closeout retains its independent explicit grant. Other
+                // capabilities follow the declared (optional) allowlist.
+                (capability == "GitLocalWrite"
+                    || state_def.allowed_tools.is_some())
+                    && !allowed.iter().any(|name| name.eq_ignore_ascii_case(capability))
+            }) {
+                return PreCallDecision::Block(
+                    "Classifier approval cannot grant a missing capability required by a known command effect.".into(),
+                );
+            }
+        }
     }
 
     let mut warnings: Vec<String> = Vec::new();

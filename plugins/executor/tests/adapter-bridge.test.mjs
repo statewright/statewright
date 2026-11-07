@@ -109,6 +109,15 @@ test("bridge authenticates adapters and preserves one executor identity", async 
     })).json();
     assert.equal(pre.additionalContext, "checkpoint");
 
+    await fetch(`${bridge.url}/hooks/pre-tool`, {
+      method: "POST", headers: {...headers, "Content-Type":"application/json"},
+      body: JSON.stringify({tool_name:"exec_command", tool_input:{cmd:"absent_widget --inspect"}}),
+    });
+    const commandCall = calls.find(call => call.name === "statewright_adapter_pre_tool" && call.args.tool_name === "exec_command");
+    assert.equal(commandCall.args.command_references.schema, "statewright/command-reference/v1");
+    assert.equal(commandCall.args.command_references.command, "absent_widget --inspect");
+    assert.equal(commandCall.args.command_references.entries[0].status, "missing");
+
     const post = await (await fetch(`${bridge.url}/hooks/post-tool`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
@@ -138,6 +147,18 @@ test("bridge authenticates adapters and preserves one executor identity", async 
         fields: {
           host: "pi",
           tool_name: "Read",
+          policy_tool_name: "Read",
+          decision: "allow",
+          state: "implementing",
+          classifier_rework_attempts: null,
+          classifier_rework_action: null,
+        },
+      },
+      {
+        event: "executor_adapter_pre_tool",
+        fields: {
+          host: "pi",
+          tool_name: "exec_command",
           policy_tool_name: "Read",
           decision: "allow",
           state: "implementing",

@@ -54,7 +54,7 @@ function hold() {
   };
 }
 
-async function setup(t) {
+async function setup(t, {maxReworks = 2} = {}) {
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
   upstream.on("connection", socket => socket.on("message", raw => {
@@ -79,6 +79,7 @@ async function setup(t) {
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
+    classifierMaxReworks: maxReworks,
     classifierApprovalService: {
       ownsThread: async id => {
         if (ownerHold) {
@@ -139,7 +140,19 @@ async function setup(t) {
     } };
 }
 
-test("classifier uncertainty reaches one exact native approval after two rewrites", async t => {
+test("classifier uncertainty reaches native approval immediately when rewrites are disabled", async t => {
+  const fixture = await setup(t, {maxReworks: 0});
+  const {client, messages} = await fixture.connectAndOwn();
+  const pending = fixture.post(approvalRequest("immediate"));
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"), "immediate native classifier form");
+  assert.doesNotMatch(modal.params.message, /after 0 rewrites/);
+  client.send(JSON.stringify({id: modal.id, result: {action:"accept"}}));
+  const allowed = await (await pending).json();
+  assert.equal(allowed.action, "allow_once");
+  assert.equal(allowed.invocation_fingerprint, "invocation_v1_immediate");
+});
+
+test("an explicitly configured legacy rewrite budget still reaches one exact native approval", async t => {
   const fixture = await setup(t);
   const { client, messages } = await fixture.connectAndOwn();
   for (const invocation of ["one", "two"]) {

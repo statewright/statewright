@@ -39,7 +39,9 @@ async function runtimeSources() {
       throw new Error(`Managed client runtime import must stay inside executor/lib: ${relative(MANAGED_CLIENT_ENTRY, imported)}`);
     }
   }
-  const pending = [ENTRY, ...managedClientImports];
+  // The resident hashes these bridge modules even when a managed host supplies
+  // the bridge. Include their transitive imports in the installed bundle too.
+  const pending = [ENTRY, resolve(EXECUTOR_LIB, "adapter-bridge.mjs"), ...managedClientImports];
   const sources = new Set();
   while (pending.length) {
     const source = pending.pop();

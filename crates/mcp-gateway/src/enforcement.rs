@@ -513,7 +513,7 @@ pub fn semantic_effect_capability_denial_details(
         }
         ResolvedEffect::BoundedLocalExecution
             if explicitly_denied("BoundedLocalExecution")
-                || !explicitly_allowed("BoundedLocalExecution") =>
+                || (has_capability_allowlist && !explicitly_allowed("BoundedLocalExecution")) =>
         {
             Some(SemanticEffectDenial::new(
                 format!(
@@ -555,7 +555,7 @@ pub fn semantic_effect_capability_denial_details(
             if explicitly_denied("Write")
                 || explicitly_denied("BoundedLocalExecution")
                 || (has_capability_allowlist && !explicitly_allowed("Write"))
-                || !explicitly_allowed("BoundedLocalExecution") =>
+                || (has_capability_allowlist && !explicitly_allowed("BoundedLocalExecution")) =>
         {
             Some(SemanticEffectDenial::new(
                 format!(
@@ -569,7 +569,7 @@ pub fn semantic_effect_capability_denial_details(
         ResolvedEffect::BoundedLocalExecutionAndGitLocalWrite
             if explicitly_denied("BoundedLocalExecution")
                 || explicitly_denied("GitLocalWrite")
-                || !explicitly_allowed("BoundedLocalExecution")
+                || (has_capability_allowlist && !explicitly_allowed("BoundedLocalExecution"))
                 || !explicitly_allowed("GitLocalWrite") =>
         {
             Some(SemanticEffectDenial::new(
@@ -586,7 +586,7 @@ pub fn semantic_effect_capability_denial_details(
                 || explicitly_denied("BoundedLocalExecution")
                 || explicitly_denied("GitLocalWrite")
                 || (has_capability_allowlist && !explicitly_allowed("Write"))
-                || !explicitly_allowed("BoundedLocalExecution")
+                || (has_capability_allowlist && !explicitly_allowed("BoundedLocalExecution"))
                 || !explicitly_allowed("GitLocalWrite") =>
         {
             Some(SemanticEffectDenial::new(

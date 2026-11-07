@@ -534,6 +534,7 @@ export async function startCodexAppServerRouteProxy({
   classifierApprovalService = approvalService,
   classifierApprovalToken = null,
   classifierApprovalTimeoutMs = 10 * 60_000,
+  classifierMaxReworks = 0,
   peekPendingRoute = async () => null,
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
@@ -839,6 +840,7 @@ export async function startCodexAppServerRouteProxy({
       },
       getState: readClassifierState,
       approvalTimeoutMs: classifierApprovalTimeoutMs,
+      maxReworks: classifierMaxReworks,
       record: event => onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event}),
     }) : null;
     classifierOwner = classifierController ? {

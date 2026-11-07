@@ -40,6 +40,17 @@ const currentState = async threadId => {
 const response = async result => result.outcome === ApprovalOutcome.ASK
   ? result.completion : result.response;
 
+test("default uncertainty handling immediately holds for a native human decision", async () => {
+  const sent = [];
+  const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});
+  const decision = await controller.begin(request());
+  assert.equal(decision.outcome, ApprovalOutcome.ASK);
+  const modal = sent.find(value => value.method === "mcpServer/elicitation/request");
+  assert(modal);
+  controller.handleReply({id: modal.id, result: {action:"decline"}});
+  assert.equal((await decision.completion).reason, "human_declined");
+});
+
 test("only explicitly eligible uncertain classifier decisions enter approval", () => {
   for (const basis of eligibleBases) {
     assert.equal(classifierApprovalRequest(request({}, { final_denial_basis: basis }))?.basis, basis);

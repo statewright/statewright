@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { ClassifierReworkGate } from "./classifier-rework-gate.mjs";
 import { collectCommandEvidence } from "./command-evidence.mjs";
+import { collectCommandReferences } from "./command-reference.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 4 * 1024;
@@ -267,10 +268,12 @@ export class AdapterBridge {
           }
           this.assertNativeDispatch();
           const commandEvidence = await collectCommandEvidence(body.tool_name ?? "", body.tool_input ?? {});
+          const commandReferences = await collectCommandReferences(body.tool_name ?? "", body.tool_input ?? {});
           let result = adapterResult(await this.client.call("statewright_adapter_pre_tool", {
             tool_name: body.tool_name ?? "",
             tool_input: body.tool_input ?? {},
             ...(commandEvidence ? { command_evidence: commandEvidence } : {}),
+            ...(commandReferences ? { command_references: commandReferences } : {}),
           }));
           const classifierScope = {
             runId: result?.run_id ?? null,

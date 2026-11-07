@@ -58,12 +58,12 @@ export function classifierApprovalRequest(value) {
  * raw commands and tool arguments stay in the short-lived hook process.
  */
 export class ClassifierApprovalController {
-  constructor({send, record = async () => {}, maxReworks = 2,
+  constructor({send, record = async () => {}, maxReworks = 0,
     ttlMs = 10 * 60_000, approvalTimeoutMs = 10 * 60_000,
     now = () => Date.now(), getState = null} = {}) {
     if (typeof send !== "function") throw new Error("Classifier approval requires a native sender");
-    if (!Number.isSafeInteger(maxReworks) || maxReworks < 1 || maxReworks > 10) {
-      throw new Error("Classifier rework budget must be between 1 and 10");
+    if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
+      throw new Error("Classifier rework budget must be between 0 and 10");
     }
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000) {
       throw new Error("Classifier rework TTL must be at least one second");
@@ -164,7 +164,7 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: `Statewright could not prove this exact invocation after ${this.maxReworks} rewrites.\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
+        message: `Statewright could not resolve this exact invocation through heuristic/semantic assessment.${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
         requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous

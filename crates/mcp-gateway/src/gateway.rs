@@ -1647,6 +1647,16 @@ impl Gateway {
         tool_input: &serde_json::Value,
         command_evidence: Option<&serde_json::Value>,
     ) -> serde_json::Value {
+        self.adapter_pre_tool_with_references(tool_name, tool_input, command_evidence, None).await
+    }
+
+    async fn adapter_pre_tool_with_references(
+        &mut self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        command_evidence: Option<&serde_json::Value>,
+        command_references: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
         if self.active_workflow.is_none() {
             return json!({"decision": "allow", "active": false});
         }
@@ -1665,11 +1675,53 @@ impl Gateway {
             Ok(info) => info,
             Err(reason) => return json!({"decision":"deny", "reason":reason}),
         };
-        let pipeline = risk_assessment::assess_native_pipeline_visible(
+        // Tool admission precedes model work. In particular, an explicit
+        // native-tool/family denial must not consume semantic inference or
+        // become a classifier approval request. This is a pure check: any
+        // ordinary implicit transition is still resolved by the execution
+        // path after effect assessment.
+        let origin = if registered_tool.is_some() {
+            enforcement::AdapterToolOrigin::RegisteredUpstream
+        } else {
+            enforcement::AdapterToolOrigin::NativeUnregistered
+        };
+        // Metadata and deterministic read evidence normalize native aliases;
+        // no semantic provider is invoked by this admission projection.
+        let admission_assessment = risk_assessment::assess_native_policy_rejection(
+            registered_tool, tool_name, tool_input, intent,
+        );
+        let admitted_name = if is_exploratory_read_only_state(&initial_session)
+            && registered_tool.is_some()
+            && !statewright_agent::tool_enforcer::tool_is_explicitly_disallowed(
+                &initial_session.definition, &initial_session.current_state, tool_name,
+            ) {
+            registered_tool.and_then(exploratory_policy_tool)
+                .unwrap_or(tool_name).to_owned()
+        } else {
+            enforcement::resolve_adapter_tool_name_with_pipeline_and_origin(
+                &initial_session, tool_name, tool_input, Some(&admission_assessment), origin,
+            )
+        };
+        if let EnforcementDecision::Block { reason, available_tools } =
+            enforcement::enforce_tool_call(&initial_session, &admitted_name)
+        {
+            return json!({
+                "decision": "deny", "reason": reason,
+                "state": initial_session.current_state,
+                "available_tools": available_tools,
+                "denial_stage": "tool_admission",
+                "separate_approval_allowed": false,
+                "risk_assessment": admission_assessment.visible_json_for_denial(
+                    "workflow_tool_policy", "declared_tool_capability",
+                ),
+            });
+        }
+        let pipeline = risk_assessment::assess_native_pipeline_visible_with_references(
             registered_tool,
             tool_name,
             tool_input,
             intent,
+            command_references,
         )
         .await;
         let pipeline = risk_assessment::apply_native_command_evidence(
@@ -2124,10 +2176,11 @@ impl Gateway {
                     .unwrap_or("");
                 let tool_input = arguments.get("tool_input").cloned().unwrap_or(json!({}));
                 let response = self
-                    .adapter_pre_tool_with_evidence(
+                    .adapter_pre_tool_with_references(
                         tool_name,
                         &tool_input,
                         arguments.get("command_evidence"),
+                        arguments.get("command_references"),
                     )
                     .await;
                 JsonRpcResponse::success(
@@ -7868,6 +7921,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_tool_admission_denial_precedes_semantic_dispatch() {
+        let _ = risk_assessment::take_test_semantic_receipts();
+        let mut gateway = alias_deny_gateway("Bash");
+        let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":"unknown_fixture --inspect"})).await;
+        assert_eq!(result["decision"], "deny");
+        assert_eq!(result["denial_stage"], "tool_admission");
+        assert_eq!(result["risk_assessment"]["separate_approval_allowed"], false);
+        assert!(result["classifier_context"].is_null());
+        assert!(risk_assessment::take_test_semantic_receipts().is_empty());
+    }
+
+    #[tokio::test]
     async fn classifier_approval_context_requires_independent_policy_clearance() {
         for (label, extra, command, eligible) in [
             ("unrestricted", json!({}), "unknown_fixture --inspect", true),
@@ -7875,13 +7940,17 @@ mod tests {
             ("explicit_family", json!({"disallowed_tools":["Bash"]}), "unknown_fixture", false),
             ("capability_denial", json!({"disallowed_tools":["Write"]}), "unknown_fixture", false),
             ("read_only", json!({"intent":"exploratory_read_only"}), "unknown_fixture", false),
-            ("restrictive_capabilities", json!({"allowed_tools":["Bash","Read"]}), "unknown_fixture", false),
+            ("tool_allowlist", json!({"allowed_tools":["Bash","Read"]}), "unknown_fixture", true),
+            ("engineering_capabilities", json!({"allowed_tools":["Bash","Read","Write","BoundedLocalExecution"]}), "unknown_fixture", true),
+            ("unrelated_tool_denial", json!({"disallowed_tools":["unrelated_fixture"]}), "unknown_fixture", true),
             ("state_low_local", json!({"classifier_policy":{"risk_tolerance":"low_local"}}), "unknown_fixture", false),
             ("state_moderate_local", json!({"classifier_policy":{"risk_tolerance":"moderate_local"}}), "unknown_fixture", false),
             ("inherited_low_local", json!({}), "unknown_fixture", false),
             ("inherited_moderate_local", json!({}), "unknown_fixture", false),
             ("state_override", json!({"classifier_policy":{"risk_tolerance":"assessed_moderate_local"}}), "unknown_fixture", true),
-            ("missing_bounded_capability", json!({}), "cargo test && unknown_fixture", false),
+            ("general_engineering_execution", json!({}), "cargo test && unknown_fixture", true),
+            ("missing_bounded_capability", json!({"allowed_tools":["Bash","Read"]}), "cargo test && unknown_fixture", false),
+            ("admitted_bounded_capability", json!({"allowed_tools":["Bash","Read","BoundedLocalExecution"]}), "cargo test && unknown_fixture", true),
             ("missing_git_capability", json!({}), "git commit -m fixture && unknown_fixture", false),
             ("blocked_environment", json!({"blocked_env":["PRIVATE_ENV"]}), "unknown_fixture $PRIVATE_ENV", false),
             ("final", json!({"type":"final"}), "unknown_fixture", false),
@@ -7949,7 +8018,7 @@ mod tests {
             ("check_and_runner", "git diff --check && npx vitest run --exclude '**/generated/**' tests/a.spec.js", false, true),
             ("selected_runner", "npx vitest run --exclude '**/generated/**' tests/a.spec.js", false, true),
             ("inline_interpreter", "node -e \"require('fs').readFileSync('fixture.js','utf8')\"", false, true),
-            ("syntax_and_execution", "git diff --check && node --check scripts/a.js && node scripts/check.mjs", false, false),
+            ("syntax_and_execution", "git diff --check && node --check scripts/a.js && node scripts/check.mjs", false, true),
             ("multiple_selected_tests", "npx vitest run --exclude '**/generated/**' tests/a.spec.js tests/b.spec.js", false, true),
             ("symlink_mutation", "ln -s /workspace/deps node_modules", false, true),
             ("disk_observation", "df -h /Volumes/fixture", true, false),
@@ -7978,9 +8047,11 @@ mod tests {
                 gateway.current_run_id = Some("ledger-run".into());
                 let epoch = gateway.usage.state_epoch();
                 let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
-                let expected_allow = is_read && restriction != "explicit_deny";
+                let expected_allow = (is_read || (label == "bash_syntax" && restriction == "none"))
+                    && restriction != "explicit_deny";
                 assert_eq!(result["decision"], if expected_allow { "allow" } else { "deny" }, "{label}/{restriction}: {result}");
-                let expected_approval = !is_read && uncertain_eligible && restriction == "none";
+                let expected_approval = !expected_allow && uncertain_eligible && restriction != "explicit_deny"
+                    && !(label == "syntax_and_execution" && restriction == "read_only");
                 assert_eq!(result["classifier_context"].is_object(), expected_approval, "{label}/{restriction}: {result}");
                 if label == "bash_syntax" && restriction != "explicit_deny" {
                     assert_eq!(result["risk_assessment"]["resolved_effect"], "bounded_local_execution");
@@ -8050,7 +8121,17 @@ mod tests {
                 let epoch = gateway.usage.state_epoch();
                 let result = gateway.adapter_pre_tool("exec_command", &json!({"cmd":command})).await;
                 assert_eq!(result["decision"], if bounded && label == "bounded" { "allow" } else { "deny" }, "{command}/{label}: {result}");
-                assert!(result["classifier_context"].is_null(), "{command}/{label}: {result}");
+                if bounded || ["empty", "deny_bash", "deny_execution"].contains(&label)
+                    || result["risk_assessment"]["resolved_effect"] != "deny_uncertain"
+                {
+                    assert!(result["classifier_context"].is_null(), "{command}/{label}: {result}");
+                } else if result["classifier_context"].is_object() {
+                    // Admission never executes an unresolved runner. The
+                    // human request remains bound to this unchanged state.
+                    assert_eq!(result["risk_assessment"]["separate_approval_allowed"], true);
+                    assert_eq!(result["classifier_context"]["run_id"], "python-runner-run");
+                    assert_eq!(result["classifier_context"]["state_epoch"], epoch);
+                }
                 assert_eq!(gateway.session_manager.get("python-runner-session").unwrap().current_state, "validate");
                 assert_eq!(gateway.usage.state_epoch(), epoch);
             }

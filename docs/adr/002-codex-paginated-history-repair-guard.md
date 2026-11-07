@@ -77,6 +77,18 @@ replacement; parent-tail appends are permitted. This is not a multi-ancestor
 atomic lock. Malformed fork records do not enter the standalone partial-write
 repair path.
 
+Compressed ancestry is a recoverable dependency rather than evidence of corrupt
+child history. If a required parent exists only as `.jsonl.zst`, guard mode reports
+that ancestor materialization is required. Prompt/auto modes may restore its exact
+bytes under both the requested thread's and ancestor's native writer locks,
+retaining the archive. Before publishing, recovery validates the complete archive
+and the child's exact inherited byte/ordinal prefix, rejects cycles, and rechecks
+the child and any already-resolved ancestor prefixes. It then validates the whole
+dependency chain again, recovering further compressed ancestors as needed within
+the existing depth bound. It never repairs ancestor records or clears ancestor
+projection rows. Declined consent, unsafe child history, ambiguous archives,
+invalid prefixes, active writers, and concurrent history changes block recovery.
+
 October 26 validation: the new positive fork fixture failed on the old guard;
 the repaired history and plugin-runtime contract suites passed 39/39. The
 actual affected history passed both inspection and the launcher's guard-mode

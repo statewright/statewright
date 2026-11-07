@@ -247,7 +247,7 @@ async function decompressRollout(archivePath, boundedOutput, destination, enviro
   }
 }
 
-async function materializeCompressedRollout({ archivePath, sessionId, operations = {}, checkCurrentRequest, environment }) {
+async function materializeCompressedRollout({ archivePath, sessionId, operations = {}, checkCurrentRequest, environment, requiredPrefix = null }) {
   const canonicalPath = archivePath.slice(0, -4);
   if (!recognizedFilename(canonicalPath, sessionId)) {
     throw new CodexHistoryIntegrityError("Statewright found a compressed Codex history with an unrecognized canonical filename and will not materialize it.", { code: "CODEX_HISTORY_UNSAFE" });
@@ -278,6 +278,14 @@ async function materializeCompressedRollout({ archivePath, sessionId, operations
     const inspection = await inspectRolloutPath(temporary, sessionId, { requireCanonicalFilename: false });
     if (inspection.status !== "healthy") {
       throw new CodexHistoryIntegrityError("The compressed Codex history did not satisfy the canonical identity and ordinal contract, so Statewright did not materialize it.", { code: "CODEX_HISTORY_UNSAFE", inspection });
+    }
+    if (requiredPrefix) {
+      const prefix = await inspectRolloutPath(temporary, sessionId, { requireCanonicalFilename: false, endByteExclusive: requiredPrefix.end_byte_offset });
+      if (prefix.status !== "healthy" || prefix.historyMode !== "paginated"
+        || prefix.finalOrdinal !== requiredPrefix.end_ordinal_exclusive - 1
+        || requiredPrefix.ancestorIds.includes(prefix.historyBase?.thread_id)) {
+        throw new CodexHistoryIntegrityError("The compressed Codex ancestor does not match the required inherited prefix or introduces an ancestry cycle. The archive was retained and no ancestor was installed.", { code: "CODEX_HISTORY_UNSAFE", inspection: prefix });
+      }
     }
     await operations.beforeArchiveInstall?.({ archivePath, canonicalPath });
     const currentArchiveIdentity = sourceIdentity(await stat(archivePath));
@@ -313,19 +321,22 @@ export async function findCodexRollout({ home = homedir(), codexHome = join(home
   return matches[0] ?? null;
 }
 
-async function materializeArchivedRollout({ storage, sessionId, mode, confirmRepair, inspection }) {
+async function materializeArchivedRollout({ storage, sessionId, mode, confirmRepair, inspection, dependencyOf = null }) {
   const archives = await findCompressedRollouts(storage.sessionsRoot, sessionId);
   if (archives.length > 1) {
     throw new CodexHistoryIntegrityError("Statewright found more than one compressed rollout for the requested Codex session and will not guess which one is canonical.", { code: "CODEX_HISTORY_AMBIGUOUS" });
   }
   if (archives.length === 0) return null;
   if (mode === "guard") {
-    throw new CodexHistoryIntegrityError("Statewright found valid-looking compressed Codex history but guard mode will not materialize it. Re-run interactively with history repair set to prompt or auto after every writer for this thread is idle.", { code: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED", inspection });
+    const subject = dependencyOf ? "This Codex session requires compressed ancestor history, but" : "Statewright found valid-looking compressed Codex history but";
+    throw new CodexHistoryIntegrityError(`${subject} guard mode will not materialize it. Re-run interactively with history repair set to prompt or auto after every writer for the affected threads is idle.`, { code: "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED", inspection });
   }
   await requireRepairConsent({
     mode,
     confirmRepair,
-    message: "[statewright] Codex retained this session only as compressed history. Materialize and validate the canonical .jsonl without deleting the archive? [y/N] ",
+    message: dependencyOf
+      ? "[statewright] This Codex session requires compressed ancestor history. Materialize and validate its canonical .jsonl without deleting the archive? [y/N] "
+      : "[statewright] Codex retained this session only as compressed history. Materialize and validate the canonical .jsonl without deleting the archive? [y/N] ",
     inspection,
   });
   return archives[0];
@@ -480,7 +491,14 @@ export async function inspectCodexHistory({ home = homedir(), codexHome = join(h
     else {
       visited.add(base.thread_id);
       const parentPath = await findCodexRollout({ codexHome, sessionId: base.thread_id });
-      if (!parentPath) failure = "history_base_missing";
+      if (!parentPath) {
+        const archives = await findCompressedRollouts(join(codexHome, "sessions"), base.thread_id);
+        if (archives.length > 1) {
+          throw new CodexHistoryIntegrityError("Statewright found more than one compressed rollout for a required Codex ancestor and will not guess which one is canonical.", { code: "CODEX_HISTORY_AMBIGUOUS" });
+        }
+        failure = archives.length ? "history_base_compressed" : "history_base_missing";
+        if (archives.length) inspection.compressedHistoryBase = { ...base, archivePath: archives[0], ancestorIds: [...visited] };
+      }
       else {
         const parent = await inspectRolloutPath(parentPath, base.thread_id, { endByteExclusive: base.end_byte_offset });
         if (parent.status !== "healthy" || parent.historyMode !== "paginated"
@@ -498,6 +516,38 @@ export async function inspectCodexHistory({ home = homedir(), codexHome = join(h
     }
   }
   return inspection;
+}
+
+async function recoverCompressedHistoryBase({ inspection, home, storage, sessionId, mode, confirmRepair, environment, withWriterLock, operations, checkCurrentRequest }) {
+  const base = inspection.compressedHistoryBase;
+  const changed = () => new CodexHistoryIntegrityError("Codex history or its required ancestor changed while preparing archive recovery. No unverified ancestor was installed; retry after every affected writer is idle.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+  const archivePath = await materializeArchivedRollout({ storage, sessionId: base.thread_id, mode, confirmRepair, inspection, dependencyOf: sessionId });
+  if (archivePath !== base.archivePath) throw changed();
+  const assertSnapshot = current => {
+    if (current.sourceSha256 !== inspection.sourceSha256
+      || JSON.stringify(current.historyDependencies) !== JSON.stringify(inspection.historyDependencies)
+      || JSON.stringify(current.compressedHistoryBase) !== JSON.stringify(base)) throw changed();
+  };
+  // Own both the requested thread and this exact ancestor. Never repair parent
+  // records or reset a parent's projection while restoring an archived dependency.
+  const lockOptions = { home, codexHome: storage.codexHome, writerLockRoot: storage.writerLockRoot, environment };
+  await withWriterLock({ ...lockOptions, sessionId }, async () => {
+    await withWriterLock({ ...lockOptions, sessionId: base.thread_id }, async () => {
+      checkCurrentRequest();
+      const current = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
+      if (current.sourceSha256 !== inspection.sourceSha256) throw changed();
+      // Another lock owner may have restored the same dependency while consent
+      // was open. Reuse it only after normal ancestry validation succeeds.
+      if (!current.compressedHistoryBase && ["healthy", "repairable"].includes(current.status)) return;
+      assertSnapshot(current);
+      await materializeCompressedRollout({ archivePath, sessionId: base.thread_id, environment, checkCurrentRequest, requiredPrefix: base,
+        operations: { ...operations, beforeArchiveInstall: async details => {
+          await operations.beforeArchiveInstall?.(details);
+          assertSnapshot(await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId }));
+        } },
+      });
+    });
+  });
 }
 
 function waitForWriterLock(child) {
@@ -955,6 +1005,17 @@ export async function guardCodexResumeHistory({
         });
         inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
       }
+    }
+    const restoredAncestors = new Set();
+    while (inspection.compressedHistoryBase) {
+      const ancestorId = inspection.compressedHistoryBase.thread_id;
+      if (restoredAncestors.has(ancestorId) || restoredAncestors.size >= 63) {
+        throw new CodexHistoryIntegrityError("Codex ancestry changed repeatedly during archive recovery. No resume was started.", { code: "CODEX_HISTORY_SOURCE_CHANGED" });
+      }
+      restoredAncestors.add(ancestorId);
+      await recoverCompressedHistoryBase({ inspection, home, storage, sessionId, mode, confirmRepair, environment, withWriterLock,
+        operations: repairOperations, checkCurrentRequest });
+      inspection = await inspectCodexHistory({ home, codexHome: storage.codexHome, sessionId });
     }
     let partialRepairResult = null;
     const partialWriteCandidate = inspection.status === "unsafe"

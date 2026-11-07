@@ -168,6 +168,175 @@ async function writeFork(home, overrides = {}, parentLines = null) {
   return { parent, child, base };
 }
 
+async function compressExistingRollout(path) {
+  const { zstdCompressSync } = await import("node:zlib");
+  const bytes = await readFile(path);
+  await writeFile(`${path}.zst`, zstdCompressSync(bytes), { mode: 0o600 });
+  await rm(path);
+  return bytes;
+}
+
+for (const compressedChild of [false, true]) {
+  test(`fork resume recovers a compressed parent with ${compressedChild ? "compressed" : "uncompressed"} child history`, async () => {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-parent-"));
+    try {
+      const { parent, child } = await writeFork(home);
+      const parentBefore = await compressExistingRollout(parent);
+      const archiveBefore = await readFile(`${parent}.zst`);
+      const childBefore = compressedChild ? await compressExistingRollout(child) : await readFile(child);
+      const locks = [];
+      const result = await guardCodexResumeHistory({
+        home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment(),
+        withWriterLock: async ({ sessionId }, operation) => { locks.push(sessionId); return operation(); },
+      });
+      assert.deepEqual(result, { status: "healthy", finalOrdinal: 3 });
+      assert(locks.includes(SESSION_ID));
+      assert(locks.includes(PARENT_ID));
+      assert.deepEqual(await readFile(child), childBefore);
+      assert.deepEqual(await readFile(parent), parentBefore);
+      assert.deepEqual(await readFile(`${parent}.zst`), archiveBefore);
+      assert.equal((await inspectCodexHistory({ home, sessionId: SESSION_ID })).status, "healthy");
+      await assert.rejects(access(join(home, ".codex", "backups")));
+    } finally { await rm(home, { recursive: true, force: true }); }
+  });
+}
+
+test("compressed parent recovery respects guard mode and declined consent", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-parent-consent-"));
+  try {
+    const { parent, child } = await writeFork(home);
+    await compressExistingRollout(parent);
+    const before = await readFile(child);
+    await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "guard", environment: codexTestEnvironment() }),
+      error => error.code === "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_REQUIRED");
+    let prompts = 0;
+    await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "prompt", environment: codexTestEnvironment(),
+      confirmRepair: async ({ message }) => { prompts++; assert.match(message, /parent|ancestor/i); return false; },
+    }), error => error.code === "CODEX_HISTORY_REPAIR_DECLINED");
+    assert.equal(prompts, 1);
+    assert.deepEqual(await readFile(child), before);
+    await assert.rejects(access(parent));
+    await access(`${parent}.zst`);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("compressed ancestor chains recover with real writer locks and preserve projection rows", { skip: process.platform === "win32" }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-chain-"));
+  const grandparentId = "01a0531f-2295-7852-b575-f9d4c2c1201d";
+  try {
+    const root = record(0, "session_meta", { id: grandparentId, history_mode: "paginated" });
+    const grandparent = await writeRollout(home, [root], grandparentId);
+    const history_base = { thread_id: grandparentId, end_ordinal_exclusive: 1, end_byte_offset: Buffer.byteLength(root + "\n") };
+    const { parent, child } = await writeFork(home, {}, [record(1, "session_meta", { id: PARENT_ID, history_mode: "paginated", history_base })]);
+    const before = await Promise.all([readFile(child), compressExistingRollout(parent), compressExistingRollout(grandparent)]);
+    const projection = createProjection(home);
+    const prompts = [];
+    const result = await guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "prompt", environment: codexTestEnvironment(),
+      confirmRepair: async ({ inspection }) => { prompts.push(inspection.compressedHistoryBase.thread_id); return true; },
+    });
+    assert.deepEqual(result, { status: "healthy", finalOrdinal: 3 });
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(prompts, [PARENT_ID, grandparentId]);
+    assert.deepEqual(await Promise.all([readFile(child), readFile(parent), readFile(grandparent)]), before);
+    const database = new DatabaseSync(projection, { readOnly: true });
+    try { assert.equal(database.prepare("SELECT count(*) AS count FROM thread_history_projection_state").get().count, 2); }
+    finally { database.close(); }
+    await Promise.all([access(`${parent}.zst`), access(`${grandparent}.zst`)]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("compressed parent recovery rejects malformed, foreign, ambiguous and mismatched archives", async () => {
+  for (const scenario of ["malformed", "foreign", "ambiguous", "truncated", "prefix boundary", "unsafe child"]) {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-parent-invalid-"));
+    try {
+      const { parent, child } = await writeFork(home);
+      if (scenario === "malformed") await appendFile(parent, "{broken}\n");
+      if (scenario === "foreign") await writeFile(parent, (await readFile(parent, "utf8")).replace(PARENT_ID, SESSION_ID));
+      if (scenario === "prefix boundary") {
+        const rows = (await readFile(child, "utf8")).trimEnd().split("\n");
+        const root = JSON.parse(rows[0]);
+        root.payload.history_base.end_byte_offset--;
+        rows[0] = JSON.stringify(root);
+        await writeFile(child, rows.join("\n") + "\n");
+      }
+      if (scenario === "unsafe child") await writeFile(child, (await readFile(child, "utf8")).replace('"ordinal":3', '"ordinal":5'));
+      await compressExistingRollout(parent);
+      if (scenario === "truncated") {
+        const bytes = await readFile(`${parent}.zst`);
+        await writeFile(`${parent}.zst`, bytes.subarray(0, bytes.length - 1));
+      }
+      if (scenario === "ambiguous") {
+        const other = join(dirname(parent), "other", basename(parent) + ".zst");
+        await mkdir(dirname(other));
+        await writeFile(other, await readFile(`${parent}.zst`));
+      }
+      const before = await Promise.all([readFile(child), readFile(`${parent}.zst`)]);
+      await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment(),
+        withWriterLock: async (_options, operation) => operation(),
+      }), error => ["CODEX_HISTORY_UNSAFE", "CODEX_HISTORY_AMBIGUOUS", "CODEX_HISTORY_ARCHIVE_MATERIALIZATION_FAILED"].includes(error.code), scenario);
+      assert.deepEqual(await Promise.all([readFile(child), readFile(`${parent}.zst`)]), before, scenario);
+      await assert.rejects(access(parent), scenario);
+      assert(!(await readdir(dirname(parent))).some(name => name.includes("statewright-hydrate")), scenario);
+    } finally { await rm(home, { recursive: true, force: true }); }
+  }
+});
+
+test("compressed parent recovery rejects requested history changes during consent or installation", async () => {
+  for (const changeAt of ["consent", "install"]) {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-parent-race-"));
+    try {
+      const { parent, child } = await writeFork(home);
+      await compressExistingRollout(parent);
+      const archive = await readFile(`${parent}.zst`);
+      const change = () => appendFile(child, record(4, "event_msg", { type: "task_complete" }) + "\n");
+      await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "prompt", environment: codexTestEnvironment(),
+        confirmRepair: async () => { if (changeAt === "consent") await change(); return true; },
+        withWriterLock: async (_options, operation) => operation(),
+        repairOperations: { beforeArchiveInstall: async () => { if (changeAt === "install") await change(); } },
+      }), error => error.code === "CODEX_HISTORY_SOURCE_CHANGED");
+      await assert.rejects(access(parent));
+      assert.deepEqual(await readFile(`${parent}.zst`), archive);
+    } finally { await rm(home, { recursive: true, force: true }); }
+  }
+});
+
+test("compressed parent recovery refuses an active ancestor writer", { skip: process.platform === "win32" }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-parent-writer-"));
+  try {
+    const { parent, child } = await writeFork(home);
+    await compressExistingRollout(parent);
+    const before = await readFile(child);
+    await withCodexWriterLock({ home, sessionId: PARENT_ID }, async () => {
+      await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment() }),
+        error => error.code === "CODEX_HISTORY_ACTIVE_WRITER");
+    });
+    await withCodexWriterLock({ home, sessionId: SESSION_ID }, async () => {});
+    assert.deepEqual(await readFile(child), before);
+    await assert.rejects(access(parent));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("compressed ancestor recovery rechecks an existing inherited prefix before publishing", async () => {
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-archived-prefix-race-"));
+  const grandparentId = "01a0531f-2295-7852-b575-f9d4c2c1201d";
+  try {
+    const root = record(0, "session_meta", { id: grandparentId, history_mode: "paginated" });
+    const grandparent = await writeRollout(home, [root], grandparentId);
+    const history_base = { thread_id: grandparentId, end_ordinal_exclusive: 1, end_byte_offset: Buffer.byteLength(root + "\n") };
+    const { parent, child } = await writeFork(home, {}, [record(1, "session_meta", { id: PARENT_ID, history_mode: "paginated", history_base })]);
+    await compressExistingRollout(grandparent);
+    const childBefore = await readFile(child);
+    await assert.rejects(guardCodexResumeHistory({ home, sessionId: SESSION_ID, mode: "auto", environment: codexTestEnvironment(),
+      withWriterLock: async (_options, operation) => operation(),
+      repairOperations: { beforeArchiveInstall: async () => {
+        await writeFile(parent, (await readFile(parent, "utf8")).replace(PARENT_ID, SESSION_ID));
+      } },
+    }), error => error.code === "CODEX_HISTORY_SOURCE_CHANGED");
+    assert.deepEqual(await readFile(child), childBefore);
+    await assert.rejects(access(grandparent));
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("fork resume validates the inherited prefix and preserves both histories byte-for-byte", async () => {
   const home = await mkdtemp(join(tmpdir(), "statewright-history-fork-"));
   try {

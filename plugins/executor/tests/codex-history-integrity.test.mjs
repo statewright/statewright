@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, truncate, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { readCodexResumePermissions } from "../lib/codex-session-metadata.mjs";
 import {
+  CODEX_HISTORY_RECOVERY_LIMITS,
   guardCodexResumeHistory,
   inspectCodexHistory,
   resolveCodexHistoryStorage,
@@ -1290,5 +1291,50 @@ for (const scenario of ["broken-newest-link", "cancelled", "changed-row"]) {
       assert.equal(result.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(SESSION_ID).rollout_path, scenario === "changed-row" ? "new writer path" : stale);
       result.close();
     } finally { await rm(home, { recursive: true, force: true }); }
+  });
+}
+
+
+test("long-session recovery remains bounded even when overrides request larger limits", async () => {
+  assert.equal(CODEX_HISTORY_RECOVERY_LIMITS.compressedBytes, 256 * 1024 * 1024);
+  assert.equal(CODEX_HISTORY_RECOVERY_LIMITS.materializedBytes, 1024 * 1024 * 1024);
+  const home = await mkdtemp(join(tmpdir(), "statewright-history-hard-cap-"));
+  try {
+    const { archive, canonical } = await writeCompressedRollout(home, [record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" })]);
+    // Sparse file tests the hard cap without allocating hundreds of MiB.
+    await truncate(archive, CODEX_HISTORY_RECOVERY_LIMITS.compressedBytes + 1);
+    await assert.rejects(guardCodexResumeHistory({
+      home, sessionId: SESSION_ID, mode: "repair", environment: codexTestEnvironment(),
+      repairOperations: { maxCompressedBytes: Number.MAX_SAFE_INTEGER },
+    }), error => error.code === "CODEX_HISTORY_ARCHIVE_TOO_LARGE" && error.message.includes("268435456-byte"));
+    await assert.rejects(stat(canonical));
+    assert.equal((await stat(archive)).size, CODEX_HISTORY_RECOVERY_LIMITS.compressedBytes + 1);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+for (const answer of ["y", "n"]) {
+  test(`interactive ${answer} releases stdin after failed or declined recovery`, { timeout: 15000 }, async () => {
+    const home = await mkdtemp(join(tmpdir(), "statewright-history-prompt-exit-"));
+    let child;
+    try {
+      await writeCompressedRollout(home, [record(0, "session_meta", { id: SESSION_ID, history_mode: "paginated" })]);
+      const moduleUrl = new URL("../lib/codex-history-integrity.mjs", import.meta.url).href;
+      child = spawn(process.execPath, ["--input-type=module", "-e", `
+        import { guardCodexResumeHistory } from ${JSON.stringify(moduleUrl)};
+        process.stdin.isTTY = true; process.stderr.isTTY = true;
+        const environment = {...process.env}; delete environment.CODEX_HOME; delete environment.CODEX_SQLITE_HOME;
+        try { await guardCodexResumeHistory({home: ${JSON.stringify(home)}, sessionId: ${JSON.stringify(SESSION_ID)}, mode: "prompt", environment, repairOperations: {maxCompressedBytes: 1}}); }
+        catch (error) { process.stdout.write(error.code); }
+      `], { stdio: ["pipe", "pipe", "pipe"] });
+      let output = "", prompted = false;
+      child.stdout.on("data", chunk => { output += chunk; });
+      child.stderr.on("data", chunk => {
+        if (!prompted && String(chunk).includes("[y/N]")) { prompted = true; child.stdin.write(`${answer}\n`); }
+      });
+      const code = await new Promise((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
+      assert.equal(code, 0);
+      assert.equal(prompted, true);
+      assert.equal(output, answer === "y" ? "CODEX_HISTORY_ARCHIVE_TOO_LARGE" : "CODEX_HISTORY_REPAIR_DECLINED");
+    } finally { child?.kill(); await rm(home, { recursive: true, force: true }); }
   });
 }

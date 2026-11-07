@@ -88,6 +88,10 @@ dependency chain again, recovering further compressed ancestors as needed within
 the existing depth bound. It never repairs ancestor records or clears ancestor
 projection rows. Declined consent, unsafe child history, ambiguous archives,
 invalid prefixes, active writers, and concurrent history changes block recovery.
+Recovery streams to disk with hard limits of 256 MiB compressed and 1 GiB expanded,
+covering long-lived paginated histories without unbounded archive expansion.
+Errors report the applicable byte limit. Interactive consent releases its stdin
+reference afterward so refusal or recovery failure returns to the shell.
 
 October 26 validation: the new positive fork fixture failed on the old guard;
 the repaired history and plugin-runtime contract suites passed 39/39. The

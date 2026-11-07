@@ -7,8 +7,14 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { Transform } from "node:stream";
 
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_COMPRESSED_ROLLOUT_BYTES = 128 * 1024 * 1024;
-const MAX_MATERIALIZED_ROLLOUT_BYTES = 512 * 1024 * 1024;
+// Long-lived paginated sessions can exceed 512 MiB before archival. Recovery
+// streams bytes to disk; these remain hard caps, including for test overrides.
+export const CODEX_HISTORY_RECOVERY_LIMITS = Object.freeze({
+  compressedBytes: 256 * 1024 * 1024,
+  materializedBytes: 1024 * 1024 * 1024,
+});
+const MAX_COMPRESSED_ROLLOUT_BYTES = CODEX_HISTORY_RECOVERY_LIMITS.compressedBytes;
+const MAX_MATERIALIZED_ROLLOUT_BYTES = CODEX_HISTORY_RECOVERY_LIMITS.materializedBytes;
 const REPAIR_MODES = new Set(["guard", "repair", "auto", "prompt", "off"]);
 const CODEX_OPTIONS_WITH_VALUE = new Set([
   "-a", "--ask-for-approval", "-C", "--cd", "-c", "--config", "--local-provider",
@@ -257,7 +263,7 @@ async function materializeCompressedRollout({ archivePath, sessionId, operations
   const maxCompressedBytes = Math.min(operations.maxCompressedBytes ?? MAX_COMPRESSED_ROLLOUT_BYTES, MAX_COMPRESSED_ROLLOUT_BYTES);
   const maxMaterializedBytes = Math.min(operations.maxMaterializedBytes ?? MAX_MATERIALIZED_ROLLOUT_BYTES, MAX_MATERIALIZED_ROLLOUT_BYTES);
   if (archiveIdentity.size > maxCompressedBytes) {
-    throw new CodexHistoryIntegrityError("Statewright will not materialize a compressed Codex rollout larger than the bounded recovery limit. The archive was retained and no resume was started.", { code: "CODEX_HISTORY_ARCHIVE_TOO_LARGE" });
+    throw new CodexHistoryIntegrityError(`Compressed Codex history is ${archiveIdentity.size} bytes, exceeding the ${maxCompressedBytes}-byte recovery limit. The archive was retained and no resume was started.`, { code: "CODEX_HISTORY_ARCHIVE_TOO_LARGE" });
   }
   const archiveSha256 = await sha256(archivePath);
   const temporary = `${canonicalPath}.statewright-hydrate-${process.pid}-${randomUUID()}.tmp`;
@@ -267,7 +273,7 @@ async function materializeCompressedRollout({ archivePath, sessionId, operations
       transform(chunk, encoding, callback) {
         materializedBytes += chunk.length;
         if (materializedBytes > maxMaterializedBytes) {
-          callback(new CodexHistoryIntegrityError("Statewright will not materialize compressed Codex history beyond the bounded recovery limit. The archive was retained and no canonical rollout was installed.", { code: "CODEX_HISTORY_ARCHIVE_EXPANSION_LIMIT" }));
+          callback(new CodexHistoryIntegrityError(`Expanded Codex history exceeds the ${maxMaterializedBytes}-byte recovery limit. The archive was retained and no canonical rollout was installed.`, { code: "CODEX_HISTORY_ARCHIVE_EXPANSION_LIMIT" }));
           return;
         }
         callback(null, chunk);
@@ -816,8 +822,15 @@ async function requestRepairConsent({ message, inspection }) {
     throw new CodexHistoryIntegrityError("Statewright found repairable Codex history but cannot request approval on a non-interactive terminal. Re-run interactively to approve repair.", { code: "CODEX_HISTORY_REPAIR_PROMPT_REQUIRED", inspection });
   }
   process.stderr.write(message);
-  const answer = await new Promise((resolve) => process.stdin.once("data", (chunk) => resolve(String(chunk).trim().toLowerCase())));
-  return answer === "y" || answer === "yes";
+  const wasFlowing = process.stdin.readableFlowing === true;
+  try {
+    const answer = await new Promise((resolve) => process.stdin.once("data", (chunk) => resolve(String(chunk).trim().toLowerCase())));
+    return answer === "y" || answer === "yes";
+  } finally {
+    // A one-shot data listener resumes stdin. Release that reference on both
+    // approval and decline so a failed recovery can return to the shell.
+    if (!wasFlowing) process.stdin.pause();
+  }
 }
 
 async function requireRepairConsent({ mode, confirmRepair, message, inspection }) {

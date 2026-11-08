@@ -57,11 +57,15 @@ pub fn native_tool_family(name: &str) -> Option<NativeToolFamily> {
         | "str_replace" => Some(Write),
         "bash" | "exec_command" | "run_command" | "shell" | "terminal" => Some(Command),
         "run_test" => Some(Test),
-        "webfetch" | "fetch" | "http_request" => Some(Fetch),
+        "webfetch" | "fetch" | "http_request" | "web.run" | "web__run" | "webrun" => Some(Fetch),
         "websearch" | "web_search" => Some(Search),
         "agent" | "subagent" => Some(Agent),
         _ => None,
     }
+}
+
+pub fn is_native_web_run(name: &str) -> bool {
+    matches!(native_leaf_name(name).to_ascii_lowercase().as_str(), "web.run" | "web__run" | "webrun")
 }
 
 #[cfg(test)]

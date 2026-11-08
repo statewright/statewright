@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { approvalDisplayContext } from "./human-interaction.mjs";
+import { approvalDisplayContext, interactionValue } from "./human-interaction.mjs";
 import { approvalAsk, approvalDeny, approvalNotHandled } from "./approval-pipeline.mjs";
 
 const REWORKABLE_BASES = new Set([
@@ -52,7 +52,40 @@ export function classifierApprovalRequest(value) {
   return Object.freeze({threadId, runId, runSessionId, state, stateEpoch, intentFingerprint,
     invocationFingerprint, basis, requiredAuthority, reformulationAllowed,
     exactInvocationRetryAllowed, separateApprovalAllowed,
-    displayContext: approvalDisplayContext(value)});
+    displayContext: approvalDisplayContext(value),
+    reviewContext: interactionValue(receipt.review_context ?? null)});
+}
+
+export function classifierReviewMessage(request) {
+  const display = request.displayContext;
+  const reasons = {
+    semantic_authorization_disabled: "The built-in checks did not prove this request's effects. No semantic model assessment ran because that fallback is disabled.",
+    incomplete_structural_evidence: "Parsing left part of this invocation unexamined; its effects have not been established.",
+    semantic_vector_unavailable: "The semantic assessor returned no usable judgment for this invocation.",
+    semantic_assessment_incomplete: "The semantic assessment did not complete successfully.",
+    semantic_threshold_not_met: "The semantic assessment did not establish a sufficiently safe effect for this invocation.",
+    external_effect_unresolved: "The command reaches an external service, but its effects could not be determined. Remote transport alone is not the concern; the delegated operation remains unverified.",
+  };
+  const lines = ["Statewright approval", `Tool: ${display?.tool ?? "unavailable"}`];
+  if (display?.command) lines.push(`Command: ${display.command}`);
+  if (display?.details) lines.push(`Request: ${JSON.stringify(display.details, null, 2)}`);
+  if (JSON.stringify(display?.details ?? {}).includes("_statewright_omitted_items")) {
+    lines.push("Some actions are omitted above; this card does not display the entire request.");
+  }
+  if (display?.cwd) lines.push(`Working directory: ${display.cwd}`);
+  lines.push("", `Why review: ${reasons[request.basis] ?? "The request has an unresolved effect."}`);
+  const structure = request.reviewContext?.execution_structure;
+  if (Array.isArray(structure)) {
+    for (const node of structure.slice(0, 4)) {
+      const label = [node.executable, node.operation].filter(value => typeof value === "string").join(" ");
+      if (label) lines.push(`Parsed operation: ${label}; location: ${node.location ?? "unknown"}.`);
+      if (node.syntax_complete === false) lines.push("Missing evidence: CLI options or delegated execution could not be fully decomposed.");
+      if (node.operand_values_omitted) lines.push("Argument values were omitted from model evidence; the model did not see the full invocation.");
+    }
+  }
+  if (!display?.command && !display?.details) lines.push("Request details were not supplied by this client; the scope cannot be inspected here.");
+  lines.push(`Phase: ${request.state}`, "Allow this exact invocation once?");
+  return lines.join("\n");
 }
 
 /**
@@ -167,7 +200,7 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: `Statewright approval\nTool: ${request.displayContext?.tool ?? "unavailable"}\nCommand: ${request.displayContext?.command ?? "unavailable (this client did not supply command context)"}\nWorking directory: ${request.displayContext?.cwd ?? "unavailable"}\n\nStatewright could not resolve this exact invocation through heuristic/semantic assessment.${request.basis === "external_effect_unresolved" ? " The command reaches an external service, but its effects could not be determined." : ""}${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
+        message: classifierReviewMessage(request),
         requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous

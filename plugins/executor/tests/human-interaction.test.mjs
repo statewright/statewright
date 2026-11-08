@@ -6,6 +6,25 @@ import {join} from 'node:path';
 import {HumanInteractionRecorder, approvalDisplayContext} from '../lib/human-interaction.mjs';
 import {createTelemetryWriter, humanInteractionOutbox} from '../lib/telemetry.mjs';
 
+test('web approval displays the actual query and target through repeated helper projection', () => {
+  const context = approvalDisplayContext({tool_name:'web.run',tool_input:{
+    search_query:[{q:'documented middleware lifecycle',domains:['example.com']}],
+    open:[{ref_id:'https://example.com/reference'}]}});
+  assert.equal(context.details.search_query[0].q,'documented middleware lifecycle');
+  assert.equal(context.details.open[0].ref_id,'https://example.com/reference');
+  assert.deepEqual(approvalDisplayContext({display_context:context}),context);
+  const http = approvalDisplayContext({tool_name:'http_request',tool_input:{method:'DELETE',url:'https://example.com/resource'}});
+  assert.equal(http.details.method,'DELETE');
+  assert.equal(http.details.url,'https://example.com/resource');
+  const credentials = approvalDisplayContext({tool_name:'web.run',tool_input:{query:{token:'SYNTHETIC_TEST_TOKEN',api_key:'SYNTHETIC_TEST_KEY'}}});
+  assert.equal(credentials.details.query.token,'[redacted]');
+  assert.equal(credentials.details.query.api_key,'[redacted]');
+  const many = approvalDisplayContext({tool_name:'web.run',tool_input:{search_query:
+    Array.from({length:100},(_,i)=>({q:`query ${i}`}))}});
+  assert.deepEqual(many.details.search_query.at(-1),{_statewright_omitted_items:68});
+  assert.deepEqual(approvalDisplayContext({display_context:many}),many);
+});
+
 test('dialog command stays recognizable while credentials are masked', () => {
   assert.deepEqual(approvalDisplayContext({tool_name:'exec_command',tool_input:{
     cmd:'git diff -- pb/hooks/order_fulfillment.pb.js',workdir:'/workspace/project'}}),

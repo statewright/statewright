@@ -16,10 +16,17 @@ export function interactionValue(value, depth = 0) {
   if (depth > 6) return "[truncated]";
   if (typeof value === "string") return interactionText(value);
   if (value == null || typeof value === "boolean" || typeof value === "number") return value;
-  if (Array.isArray(value)) return value.slice(0, 32).map(item => interactionValue(item, depth + 1));
+  if (Array.isArray(value)) {
+    const output = value.slice(0, 32).map(item => interactionValue(item, depth + 1));
+    if (value.length > 32) {
+      const prior = value.length === 33 ? value[32]?._statewright_omitted_items : null;
+      output.push({_statewright_omitted_items: Number.isSafeInteger(prior) && prior > 0 ? prior : value.length - 32});
+    }
+    return output;
+  }
   if (typeof value !== "object") return null;
   return Object.fromEntries(Object.entries(value).slice(0, 64).map(([key, item]) => [
-    key, /^(?:authorization|api[_-]?key|password|secret|access[_-]?token|refresh[_-]?token|proxyToken)$/i.test(key)
+    key, /^(?:authorization|api[_-]?key|password|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|session[_-]?token|cookie|proxyToken)$/i.test(key)
       ? "[redacted]" : interactionValue(item, depth + 1),
   ]));
 }
@@ -30,7 +37,18 @@ export function approvalDisplayContext(value) {
   const tool = interactionText(value?.tool_name ?? display.tool, 128);
   const command = interactionText(input.command ?? input.cmd ?? display.command, 8192);
   const cwd = interactionText(input.workdir ?? input.cwd ?? display.cwd, 1024);
-  return command || tool ? { tool, command, cwd } : null;
+  const details = {};
+  // Display actual requested actions, not a tool-name-only consent card.
+  // This projection is for human review/logging; it never grants authority.
+  const keys = ["search_query", "image_query", "open", "click", "find", "screenshot",
+    "finance", "weather", "sports", "time", "query", "q", "url", "method", "operation", "action"];
+  for (const key of keys) {
+    if (Object.hasOwn(input, key)) details[key] = interactionValue(input[key]);
+    else if (display.details && Object.hasOwn(display.details, key)) details[key] = interactionValue(display.details[key]);
+  }
+  const context = command || tool ? { tool, command, cwd } : null;
+  if (context && Object.keys(details).length) context.details = details;
+  return context;
 }
 
 export class HumanInteractionRecorder {

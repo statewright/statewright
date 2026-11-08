@@ -638,6 +638,10 @@ impl RiskPipelineAssessment {
             "semantic_vector": vector,
             "semantic_failsafe_escalated": self.semantic_failsafe_escalated,
             "semantic_authorization_enabled": self.semantic_authorization_enabled,
+            "review_context": {
+                "execution_structure": self.deterministic.semantic_request.as_ref()
+                    .map(|request| &request.execution_structure),
+            },
             "resolved_effect": resolved_effect.label(),
             "resolution_basis": resolution_basis,
             "final_denial_basis": final_denial_basis,
@@ -1718,6 +1722,30 @@ pub fn assess_invocation(
     assess_invocation_with_origin(tool, tool_name, arguments, state_intent, false)
 }
 
+fn native_web_run_read(arguments: &serde_json::Value) -> bool {
+    let Some(fields) = arguments.as_object() else { return false; };
+    let mut action = false;
+    for (key, value) in fields {
+        if key == "response_length" {
+            if !matches!(value.as_str(), Some("short" | "medium" | "long")) { return false; }
+            continue;
+        }
+        let required = match key.as_str() {
+            "search_query" | "image_query" => "q",
+            "open" | "click" | "find" | "screenshot" => "ref_id",
+            "finance" => "ticker", "weather" => "location", "sports" => "fn", "time" => "utc_offset",
+            _ => return false,
+        };
+        let Some(items) = value.as_array() else { return false; };
+        if items.is_empty() || items.len() > 32
+            || items.iter().any(|item| !item.get(required).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())) {
+            return false;
+        }
+        action = true;
+    }
+    action
+}
+
 fn assess_invocation_with_origin(
     tool: Option<&ToolInfo>,
     tool_name: &str,
@@ -1754,7 +1782,8 @@ fn assess_invocation_with_origin(
             assessment(RiskBand::Low, ExposureBand::Local, "native_tool_discovery")
         } else if trusted_native_adapter
             && tool.is_none()
-            && matches!(tool_name, "WebFetch" | "WebSearch")
+            && (matches!(tool_name, "WebFetch" | "WebSearch")
+                || (crate::tool_intent::is_native_web_run(tool_name) && native_web_run_read(arguments)))
         {
             // These exact native tools observe web content; unlike arbitrary
             // fetch/http_request MCP tools, they cannot select a write method.
@@ -3856,6 +3885,25 @@ mod tests {
             assess_mcp(Some(&writer), "update_task"),
             assessment(RiskBand::Moderate, ExposureBand::External, "mcp_name")
         );
+    }
+
+    #[test]
+    fn native_web_run_decomposes_supported_read_operations_without_trusting_mcp_names() {
+        let input = json!({"search_query":[{"q":"documented lifecycle","domains":["example.com"]}],
+            "open":[{"ref_id":"https://example.com/reference"}],"response_length":"short"});
+        for name in ["web.run", "webrun", "web__run"] {
+            let assessed = assess_invocation_with_origin(None,name,&input,None,true);
+            assert_eq!(assessed.risk,RiskBand::Low,"{name}");
+            assert_eq!(assessed.exposure,ExposureBand::External);
+            assert_ne!(assess_invocation(None,name,&input,None).risk,RiskBand::Low);
+            let collision: ToolInfo = serde_json::from_value(json!({"name":name,"inputSchema":{}})).unwrap();
+            assert_ne!(assess_invocation_with_origin(Some(&collision),name,&input,None,true).risk,RiskBand::Low);
+        }
+        for invalid in [json!({"method":"DELETE","url":"https://example.com/item"}),
+            json!({"search_query":[{"q":"x"}],"delete":[{"url":"https://example.com/item"}]}),
+            json!({"search_query":"unparsed"}), json!({})] {
+            assert_ne!(assess_invocation_with_origin(None,"web.run",&invalid,None,true).risk,RiskBand::Low);
+        }
     }
 
     #[test]

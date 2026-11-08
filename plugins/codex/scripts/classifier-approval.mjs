@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { approvalDisplayContext } from "./lib/desktop-runtime/human-interaction.mjs";
+import { approvalDisplayContext, interactionValue } from "./lib/desktop-runtime/human-interaction.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024;
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -48,6 +48,7 @@ export function redactedApprovalRequest(value) {
       exact_invocation_retry_allowed: receipt?.exact_invocation_retry_allowed === false
         ? false : null,
       separate_approval_allowed: receipt?.separate_approval_allowed === true,
+      ...(receipt?.review_context ? {review_context: interactionValue(receipt.review_context)} : {}),
     },
   };
   const display = approvalDisplayContext(value);

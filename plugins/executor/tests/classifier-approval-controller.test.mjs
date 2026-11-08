@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApprovalOutcome } from "../lib/approval-pipeline.mjs";
-import { ClassifierApprovalController, classifierApprovalRequest } from "../lib/classifier-approval-controller.mjs";
+import { ClassifierApprovalController, classifierApprovalRequest, classifierReviewMessage } from "../lib/classifier-approval-controller.mjs";
 
 const eligibleBases = [
   "semantic_threshold_not_met",
@@ -40,6 +40,18 @@ const currentState = async threadId => {
 };
 const response = async result => result.outcome === ApprovalOutcome.ASK
   ? result.completion : result.response;
+
+test("human review names the requested web operation and omits internal authority codes", () => {
+  const parsed = classifierApprovalRequest(request({tool_name:"web.run",tool_input:{
+    search_query:[{q:"middleware lifecycle reference",domains:["example.com"]}]}}, {
+    final_denial_basis:"semantic_authorization_disabled",
+  }));
+  const message = classifierReviewMessage(parsed);
+  assert.match(message,/middleware lifecycle reference/);
+  assert.match(message,/example.com/);
+  assert.match(message,/No semantic model assessment ran/);
+  assert.doesNotMatch(message,/Classifier axis|Required authority|semantic_authorization_disabled|complete_structural_evidence_or_separate_approval/);
+});
 
 test("default uncertainty handling immediately holds for a native human decision", async () => {
   const sent = [];

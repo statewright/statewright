@@ -82,7 +82,7 @@ function inside(root, path) {
 // Selection-only options do not add execution authority. Keep their values
 // bound and quote them again when rendering the resolved installed launcher.
 function vitestSelectionArgs(args) {
-  if (args[0] !== "run" || args.length > 65) return false;
+  if (!["run", "--run"].includes(args[0]) || args.length > 65) return false;
   const pattern = value => value && value.length <= 256 && !value.startsWith("-") && !isAbsolute(value)
     && /^[a-zA-Z0-9_.*?\[\]!\/-]+$/.test(value) && !value.split("/").includes("..");
   for (let i = 1; i < args.length; i++) {
@@ -295,15 +295,29 @@ export async function collectCommandEvidence(toolName, input, { cwd = process.cw
       if (stack.length > 8 || snapshots.length > 64) fail("expansion_limit");
       try { await access(join(activeRoot, ".npmrc")); fail("package_script_config_unresolved"); }
       catch (error) { if (error.code !== "ENOENT") throw error; }
-      const name = tokens.length === 2 && tokens[1] === "test" ? "test"
-        : tokens.length === 3 && tokens[1] === "run" ? tokens[2] : null;
+      const head = tokens[1] === "test" ? 2 : tokens[1] === "run" ? 3 : 0;
+      const name = head === 2 ? "test" : head === 3 ? tokens[2] : null;
+      const tail = tokens.slice(head);
+      if (tail.length && tail[0] !== "--") fail("package_script_unresolved");
+      const forwarded = tail.slice(1);
+      if (forwarded.length > 64) fail("expansion_limit");
       if (!label(name) || stack.includes(`script:${name}`)) fail("package_script_unresolved");
       const pkg = JSON.parse(await bytes(join(activeRoot, "package.json")));
       if (!object(pkg.scripts) || !own(pkg.scripts, name)) fail("package_script_missing");
       // Lifecycle hooks are real execution units, including arbitrary scripts.
       // pnpm hook behavior is configuration-dependent, so conservatively include them.
       for (const key of [`pre${name}`, name, `post${name}`]) {
-        if (own(pkg.scripts, key)) await leaf(pkg.scripts[key], [...stack, `script:${name}`], activeRoot);
+        if (own(pkg.scripts, key)) {
+          let text = pkg.scripts[key];
+          if (key === name && forwarded.length) {
+            // Forward only to the selected script, never pre/post hooks. A
+            // non-literal script needs a shell-aware expansion proof, not
+            // guessed concatenation or a second invocation.
+            if (!literalInvocation(text)) fail("package_script_unresolved");
+            text += " " + forwarded.map(shellLiteral).join(" ");
+          }
+          await leaf(text, [...stack, `script:${name}`], activeRoot);
+        }
       }
     }
     await leaf(command, [], root);

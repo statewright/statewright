@@ -3,7 +3,7 @@ use statewright_engine::{ClassifierRiskTolerance, resolve_transition};
 
 use crate::{
     bash_classifier,
-    risk_assessment::{ResolvedEffect, RiskPipelineAssessment},
+    risk_assessment::{ExposureBand, ResolvedEffect, RiskPipelineAssessment},
     session::{
         DENYLIST_HEURISTIC_POLICY_MODE, GatewaySession, LEGACY_DENYLIST_HEURISTIC_POLICY_MODE,
     },
@@ -368,6 +368,16 @@ pub fn semantic_effect_risk_denial_details(
     }
     let (effect, basis) = pipeline.resolve_effect_with_basis();
     match effect {
+        ResolvedEffect::ReadOnly
+            if pipeline.deterministic.exposure != ExposureBand::Local
+                && classifier_risk_tolerance(session) == ClassifierRiskTolerance::LowLocal =>
+        {
+            Some(SemanticEffectDenial::new(
+                "Operation is a proven remote read, but this workflow explicitly permits only low-risk LOCAL reads. Remote location is not mutation; retain the Read capability and use a workflow policy that permits external reads.",
+                "classifier_policy_low_local_remote_read",
+                "remote_read_policy_and_Read",
+            ))
+        }
         ResolvedEffect::DenyKnownRisk => Some(SemanticEffectDenial::new(
             format!(
                 "Operation denied: classifier axis '{basis}' resolved a known destructive, irreversible, or non-local effect. Required authority: {}. Equivalent retries are not allowed.",
@@ -685,6 +695,17 @@ mod tests {
         }))
         .unwrap();
         GatewaySession::new("denylist-policy".into(), definition)
+    }
+
+    #[test]
+    fn proven_remote_read_does_not_accidentally_expand_low_local_policy() {
+        let pipeline = semantic_pipeline("kubectl -n target get deployment app -o json", None);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);
+        let strict = denylist_session_with_tolerance("low_local");
+        assert_eq!(semantic_effect_risk_denial_details(&strict, &pipeline).unwrap().basis,
+            "classifier_policy_low_local_remote_read");
+        let permissive = denylist_session_with_tolerance("moderate_local");
+        assert!(semantic_effect_risk_denial_details(&permissive, &pipeline).is_none());
     }
 
     #[test]

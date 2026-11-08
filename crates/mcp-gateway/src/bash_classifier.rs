@@ -13,6 +13,8 @@ pub enum OpClass {
     FileModify,
     /// Reading file contents (requires Read).
     FileRead,
+    /// Proven observation of remote state, not generic network/mutation authority.
+    RemoteRead,
     /// Searching file contents (requires Read).
     ContentSearch,
     /// Searching for files by name/path (requires Read).
@@ -253,9 +255,9 @@ pub fn semantic_command_shapes(command: &str) -> Option<Vec<SemanticCommandShape
         if !semantic_label(&executable) {
             return None;
         }
-        let operation = semantic_operation(&executable, &invocation.args);
-        let delegates_unknown_effect =
-            semantic_delegates_unknown_effect(&executable, operation.as_deref());
+        let operation = semantic_command_shapes_for_invocation(&invocation);
+        let delegates_unknown_effect = !crate::command_structure::kubectl_read(&invocation)
+            && semantic_delegates_unknown_effect(&executable, operation.as_deref());
         shapes.push(SemanticCommandShape {
             executable,
             operation,
@@ -314,6 +316,24 @@ pub fn references_environment_variable(command: &str, name: &str) -> bool {
     false
 }
 
+pub(crate) fn semantic_command_shapes_for_invocation(invocation: &LiteralInvocation) -> Option<String> {
+    semantic_operation(invocation.executable.rsplit('/').next()?, &invocation.args)
+}
+
+pub fn execution_structures(command: &str) -> Vec<crate::command_structure::ExecutionShape> {
+    execution_structures_at_depth(command, 0)
+}
+
+pub(crate) fn execution_structures_at_depth(command: &str, depth: usize) -> Vec<crate::command_structure::ExecutionShape> {
+    split_segments(command).iter().take(32).filter_map(|segment| {
+        let invocation = literal_invocation(segment)?;
+        let location = if matches!(invocation.executable.rsplit('/').next(), Some("kubectl" | "docker" | "podman")) {
+            "external"
+        } else { "local" };
+        Some(crate::command_structure::execution_shape(&invocation, location, depth))
+    }).collect()
+}
+
 fn semantic_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -328,6 +348,8 @@ fn semantic_operation(executable: &str, tokens: &[String]) -> Option<String> {
     }
     let index = if executable == "git" {
         git_subcommand_index(tokens, 0)?
+    } else if matches!(executable, "kubectl" | "docker" | "podman" | "cargo") {
+        crate::command_structure::operation_index(executable, tokens)?
     } else {
         0
     };
@@ -457,7 +479,7 @@ impl OpClass {
             OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite => &["Write"],
             OpClass::BoundedLocalExecution => &["BoundedLocalExecution"],
             OpClass::GitLocalWrite => &["GitLocalWrite"],
-            OpClass::FileRead => &["Read"],
+            OpClass::FileRead | OpClass::RemoteRead => &["Read"],
             // Read is the provider-neutral umbrella for native search/glob
             // calls as well as read-only shell searches.  Grep and Glob are
             // retained here solely for legacy state definitions: they were
@@ -615,7 +637,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             continue;
         }
         let capability = match classify_segment(segment) {
-            OpClass::FileRead | OpClass::GitRead => "Read",
+            OpClass::FileRead | OpClass::GitRead | OpClass::RemoteRead => "Read",
             OpClass::ContentSearch => "Grep",
             OpClass::FileSearch => "Glob",
             OpClass::SafeOutput => "Read",
@@ -1597,6 +1619,8 @@ fn classify_segment(segment: &str) -> OpClass {
     let trusted_executable = trusted_executable_spelling(invoked, base_cmd);
 
     let class = match base_cmd {
+        "kubectl" if crate::command_structure::kubectl_read(&invocation) => OpClass::RemoteRead,
+        "kubectl" => OpClass::ExternalUnknown,
         "echo" | "printf" if safe_output_command(&invocation, invoked, segment) => OpClass::SafeOutput,
 
         // File read commands
@@ -2266,7 +2290,7 @@ fn bounded_vitest_local_execution(invocation: &LiteralInvocation) -> bool {
     let [operation, paths @ ..] = invocation.args.as_slice() else {
         return false;
     };
-    if invocation.executable != "node_modules/.bin/vitest" || operation != "run" || paths.len() > 64
+    if invocation.executable != "node_modules/.bin/vitest" || !matches!(operation.as_str(), "run" | "--run") || paths.len() > 64
     {
         return false;
     }
@@ -3721,6 +3745,15 @@ mod tests {
     }
 
     // --- check_against_allowed() tests ---
+
+    #[test]
+    fn remote_observation_requires_read_never_webfetch_or_generic_wrapper_authority() {
+        let command = "kubectl --request-timeout=5s -n target get deployment app -o json";
+        assert_eq!(classify(command), vec![OpClass::RemoteRead]);
+        assert!(check_against_allowed(command, &["Read".into()]).is_ok());
+        assert!(check_against_allowed(command, &["WebFetch".into()]).is_err());
+        assert!(check_against_allowed("kubectl exec pod -- cat config", &["Read".into()]).is_err());
+    }
 
     #[test]
     fn cat_allowed_when_read_in_tools() {

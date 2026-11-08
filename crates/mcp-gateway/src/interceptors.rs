@@ -740,6 +740,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_read_proof_never_overrides_explicit_read_denial() {
+        let mut session = session_with_read_grep_glob();
+        let args = json!({"cmd":"kubectl -n target get deployment app -o json"});
+        let pipeline = crate::risk_assessment::assess_native_policy_rejection(None, "exec_command", &args, Some("planning"));
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);
+        assert!(!matches!(pre_call_check_with_pipeline(&session, "exec_command", &args, Some(&pipeline)), PreCallDecision::Block(_)));
+        let resolved = crate::enforcement::resolve_adapter_tool_name_with_pipeline(&session, "exec_command", &args, Some(&pipeline));
+        assert_eq!(resolved, "Read");
+        assert!(matches!(crate::enforcement::enforce_tool_call(&session, &resolved), crate::enforcement::EnforcementDecision::Allow));
+        session.definition.states.get_mut("planning").unwrap().disallowed_tools = Some(vec!["Read".into()]);
+        let resolved = crate::enforcement::resolve_adapter_tool_name_with_pipeline(&session, "exec_command", &args, Some(&pipeline));
+        assert!(matches!(crate::enforcement::enforce_tool_call(&session, &resolved), crate::enforcement::EnforcementDecision::Block {..}));
+    }
+
+    #[test]
     fn bash_cat_read_allowed_in_planning() {
         let s = session_with_read_grep_glob();
         let args = json!({ "command": "cat src/main.rs" });

@@ -63,6 +63,7 @@ pub struct AstShadowAssessment {
     pub foreign_code_units_with_complete_effect_evidence: usize,
     pub classes: Vec<OpClass>,
     pub semantic_shapes: Vec<bash_classifier::SemanticCommandShape>,
+    pub execution_structure: Vec<crate::command_structure::ExecutionShape>,
 }
 
 impl AstShadowAssessment {
@@ -85,6 +86,7 @@ impl AstShadowAssessment {
             foreign_code_units_with_complete_effect_evidence: 0,
             classes: vec![OpClass::Opaque],
             semantic_shapes: Vec::new(),
+            execution_structure: Vec::new(),
         }
     }
 
@@ -101,6 +103,7 @@ impl AstShadowAssessment {
         self.classes.sort_by_key(|class| *class as u8);
         self.classes.dedup();
         self.semantic_shapes.truncate(MAX_EXECUTABLE_NODES);
+        self.execution_structure.truncate(MAX_EXECUTABLE_NODES);
     }
 
     fn absorb_nested(&mut self, nested: AstShadowAssessment) {
@@ -138,6 +141,7 @@ impl AstShadowAssessment {
             self.push_class(class);
         }
         self.semantic_shapes.extend(nested.semantic_shapes);
+        self.execution_structure.extend(nested.execution_structure);
         if !matches!(nested.status, ParseStatus::Parsed) {
             self.status = nested.status;
             self.push_class(OpClass::Opaque);
@@ -168,11 +172,12 @@ impl AstShadowAssessment {
     }
 }
 
-fn effect_label(class: &OpClass) -> &'static str {
+pub(crate) fn effect_label(class: &OpClass) -> &'static str {
     match class {
         OpClass::FileWrite => "file_write",
         OpClass::FileModify => "file_modify",
         OpClass::FileRead => "file_read",
+        OpClass::RemoteRead => "remote_read",
         OpClass::ContentSearch => "content_search",
         OpClass::FileSearch => "file_search",
         OpClass::Destructive => "destructive",
@@ -246,7 +251,7 @@ pub(crate) fn literal_command_units(command: &str) -> Option<Vec<&str>> {
     (!units.is_empty()).then_some(units)
 }
 
-fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAssessment {
+pub(crate) fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAssessment {
     if command.len() > MAX_SHELL_BYTES || recursive_shell_depth > MAX_RECURSIVE_SHELL_DEPTH {
         return AstShadowAssessment::unavailable(ParseStatus::LimitExceeded);
     }
@@ -282,6 +287,7 @@ fn assess_at_depth(command: &str, recursive_shell_depth: usize) -> AstShadowAsse
         foreign_code_units_with_complete_effect_evidence: 0,
         classes: Vec::new(),
         semantic_shapes: Vec::new(),
+        execution_structure: Vec::new(),
     };
     walk(
         tree.root_node(),
@@ -326,6 +332,7 @@ fn walk(
         "command" => {
             assessment.executable_nodes += 1;
             if let Ok(text) = node.utf8_text(source) {
+                assessment.execution_structure.extend(bash_classifier::execution_structures_at_depth(text, recursive_shell_depth));
                 let mut classes = bash_classifier::classify(text);
                 // Shell expansion in an operand makes the legacy token parser
                 // opaque, but the Bash AST still proves an exact literal Git

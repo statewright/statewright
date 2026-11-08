@@ -37,6 +37,29 @@ async function invokeCollector(path, request) {
   return JSON.parse(stdout);
 }
 
+test("forwarded package arguments retain script and lifecycle execution units", async t => {
+  const root = await fixture(t);
+  await vitest(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({scripts: {
+    "pretest:unit": "git status --short",
+    "test:unit": "vitest",
+    "posttest:unit": "git diff --check",
+  }}));
+  const command = "npm run test:unit -- --run src/components/__tests__/Example.spec.js --exclude '.agent-worktrees/**'";
+  const proof = await inspect(root, command);
+  assert.equal(proof.complete, true, proof.reason);
+  assert.equal(proof.commands.length, 3);
+  assert.equal(proof.commands[0].original, "git status --short");
+  assert.equal(proof.commands[2].original, "git diff --check");
+  assert.deepEqual(literalArgv(proof.commands[1].resolved), [
+    "node_modules/.bin/vitest", "--run", "src/components/__tests__/Example.spec.js", "--exclude", ".agent-worktrees/**",
+  ]);
+  assert.equal(proof.files.some(file => file.path === "package.json"), true);
+  for (const forwarded of ["--config ../outside.js", "--reporter evil", "--run --outputFile outside.json"]) {
+    assert.equal((await inspect(root, `npm run test:unit -- ${forwarded}`)).complete, false);
+  }
+});
+
 test("literal launcher parser rejects shell execution and malformed quoting", () => {
   assert.deepEqual(literalArgv("npx vitest run 'tests/a.spec.js'"), ["npx", "vitest", "run", "tests/a.spec.js"]);
   for (const text of ["task test && curl x", "task $(x)", "task `x`", "task test > x", "task 'test", "task test\nwhoami", "task te\\st"]) {

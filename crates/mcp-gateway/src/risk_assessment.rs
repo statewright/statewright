@@ -180,6 +180,7 @@ pub struct SemanticAssessmentRequest {
     pub state_intent: Option<String>,
     pub argument_keys: Vec<String>,
     pub shell_shape: Vec<bash_classifier::SemanticCommandShape>,
+    pub execution_structure: Vec<crate::command_structure::ExecutionShape>,
     #[serde(skip)]
     pub local_invocation_evidence: Vec<bash_classifier::LocalInvocationEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1413,8 +1414,9 @@ fn submit_semantic_pipeline_with(
 
 pub fn assess_shell(command: &str) -> ShadowAssessment {
     let classes = bash_classifier::classify(command);
+    let known_location = if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Local };
     if classes.contains(&OpClass::Destructive) {
-        return assessment(RiskBand::Critical, ExposureBand::Local, "shell");
+        return assessment(RiskBand::Critical, known_location, "shell");
     }
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell");
@@ -1425,9 +1427,17 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
     // The read-only proof is stricter than the broad operation classifier and
     // rejects redirects, expansions, and path-qualified lookalikes.
     if bash_classifier::readonly_capabilities(command).is_some() {
-        return assessment(RiskBand::Low, ExposureBand::Local, "shell");
+        return assessment(RiskBand::Low, if classes.contains(&OpClass::RemoteRead) {
+            ExposureBand::External
+        } else { ExposureBand::Local }, "shell");
     }
     let required_capability = local_effect_capability(&classes);
+    if classes.contains(&OpClass::RemoteRead) {
+        // A read plus another effect is not a local-only operation. Until the
+        // capability reducer supports this mixed location union, retain an
+        // unresolved external boundary instead of manufacturing local proof.
+        return external_unknown_assessment(&classes, "shell");
+    }
     // A proven local effect cannot erase another segment whose effect remains
     // unclassified. Known harmless stdout commands use SafeOutput instead.
     if classes
@@ -1533,8 +1543,9 @@ fn shell_ast_mode() -> ShellAstMode {
 
 fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     let classes = &ast.classes;
+    let known_location = if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Local };
     if classes.contains(&OpClass::Destructive) {
-        return assessment(RiskBand::Critical, ExposureBand::Local, "shell_ast");
+        return assessment(RiskBand::Critical, known_location, "shell_ast");
     }
     if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         return assessment(RiskBand::High, ExposureBand::External, "shell_ast");
@@ -1544,6 +1555,11 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
     }
     let required_capability = local_effect_capability(classes);
     let opaque_is_covered_foreign_wrapper = foreign_wrapper_is_fully_classified(ast);
+    if classes.contains(&OpClass::RemoteRead)
+        && (required_capability.is_some()
+            || classes.iter().any(|class| matches!(class, OpClass::Opaque | OpClass::Passthrough))) {
+        return external_unknown_assessment(classes, "shell_ast");
+    }
     if (classes.contains(&OpClass::Opaque) || classes.contains(&OpClass::Passthrough))
         && !opaque_is_covered_foreign_wrapper
     {
@@ -1560,6 +1576,9 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         );
     }
     if let Some(capability) = required_capability {
+        if classes.contains(&OpClass::RemoteRead) {
+            return external_unknown_assessment(classes, "shell_ast");
+        }
         return assessment_with_capability(
             RiskBand::Moderate,
             ExposureBand::Local,
@@ -1571,6 +1590,7 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         matches!(
             class,
             OpClass::FileRead
+                | OpClass::RemoteRead
                 | OpClass::ContentSearch
                 | OpClass::FileSearch
                 | OpClass::GitRead
@@ -1578,7 +1598,9 @@ fn assess_shell_ast(ast: &AstShadowAssessment) -> ShadowAssessment {
         ) || (opaque_is_covered_foreign_wrapper
             && matches!(class, OpClass::Opaque | OpClass::Passthrough))
     }) {
-        return assessment(RiskBand::Low, ExposureBand::Local, "shell_ast");
+        return assessment(RiskBand::Low, if classes.contains(&OpClass::RemoteRead) {
+            ExposureBand::External
+        } else { ExposureBand::Local }, "shell_ast");
     }
     assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell_ast")
 }
@@ -1623,7 +1645,7 @@ fn ast_authority_wins(
     legacy.risk == RiskBand::Moderate
         && legacy.exposure == ExposureBand::Unknown
         && ast.risk == RiskBand::Low
-        && ast.exposure == ExposureBand::Local
+        && matches!(ast.exposure, ExposureBand::Local | ExposureBand::External)
 }
 
 fn apply_shell_ast_authority(
@@ -2319,6 +2341,12 @@ pub fn apply_native_command_evidence(
         }
         ("npm" | "pnpm", [op]) => op == "test",
         ("npm" | "pnpm", [op, name]) => op == "run" && !name.starts_with('-'),
+        ("npm" | "pnpm", [op, separator, forwarded @ ..]) if op == "test" => {
+            separator == "--" && forwarded.len() <= 64
+        }
+        ("npm" | "pnpm", [op, name, separator, forwarded @ ..]) => {
+            op == "run" && !name.starts_with('-') && separator == "--" && forwarded.len() <= 64
+        }
         ("npx", [runner, op, ..]) => runner == "vitest" && op == "run",
         ("vitest", [op, ..]) => op == "run",
         ("node", _) => bash_classifier::bounded_node_repository_entrypoint(&invocation).is_some(),
@@ -2413,13 +2441,19 @@ pub fn apply_native_command_evidence(
             let Some(unit_invocation) = parsed_unit_invocation.as_ref() else {
                 return incomplete(deterministic);
             };
-            if unit_invocation.executable != "npx"
-                || unit_invocation.args.first().map(String::as_str) != Some("vitest")
+            if !matches!(unit_invocation.executable.as_str(), "npx" | "vitest")
+                || (unit_invocation.executable == "npx"
+                    && unit_invocation.args.first().map(String::as_str) != Some("vitest"))
             {
                 return incomplete(deterministic);
             }
             let mut expected = vec!["node_modules/.bin/vitest".to_owned()];
-            expected.extend(unit_invocation.args.iter().skip(1).cloned());
+            expected.extend(unit_invocation.args.iter().skip(usize::from(unit_invocation.executable == "npx")).cloned());
+            if unit_invocation.executable == "vitest"
+                && !proof.files.iter().any(|file| file.path == "node_modules/vitest/package.json"
+                    || file.path.ends_with("/node_modules/vitest/package.json")) {
+                return incomplete(deterministic);
+            }
             if bash_classifier::simple_command_tokens(&unit.resolved).as_ref() != Some(&expected)
                 || bash_classifier::classify(&unit.resolved) != vec![OpClass::BoundedLocalExecution]
             {
@@ -2449,7 +2483,7 @@ fn merge_native_effects(
     // Every expanded execution unit contributes to the risk/capability union.
     // Incomplete leaves cannot erase a known write, delete or network operation.
     let known = if classes.contains(&OpClass::Destructive) {
-        (RiskBand::Critical, ExposureBand::Local)
+        (RiskBand::Critical, if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Local })
     } else if classes.contains(&OpClass::Network) || classes.contains(&OpClass::GitWrite) {
         (RiskBand::High, ExposureBand::External)
     } else if classes.contains(&OpClass::ExternalUnknown) {
@@ -2458,23 +2492,23 @@ fn merge_native_effects(
         .iter()
         .any(|c| matches!(c, OpClass::Opaque | OpClass::Passthrough))
     {
-        (RiskBand::Moderate, ExposureBand::Unknown)
+        (RiskBand::Moderate, if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Unknown })
     } else if !classes.is_empty()
         && classes.iter().all(|class| {
             matches!(
                 class,
-                OpClass::SafeOutput | OpClass::FileRead | OpClass::ContentSearch | OpClass::GitRead
+                OpClass::SafeOutput | OpClass::FileRead | OpClass::RemoteRead | OpClass::ContentSearch | OpClass::GitRead
             )
         })
     {
-        (RiskBand::Low, ExposureBand::Local)
+        (RiskBand::Low, if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Local })
     } else {
-        (RiskBand::Moderate, ExposureBand::Local)
+        (RiskBand::Moderate, if classes.contains(&OpClass::RemoteRead) { ExposureBand::External } else { ExposureBand::Local })
     };
     deterministic.risk = known.0;
     deterministic.exposure = known.1;
     deterministic.external_unknown = known == (RiskBand::Moderate, ExposureBand::External)
-        && classes.contains(&OpClass::ExternalUnknown);
+        && (classes.contains(&OpClass::ExternalUnknown) || classes.contains(&OpClass::RemoteRead));
     deterministic.required_capability = local_effect_capability(classes);
     deterministic.source = source;
     // Unresolved expansions need more structural evidence, not a probability
@@ -2668,6 +2702,10 @@ fn semantic_request(
         state_intent: state_intent.map(bounded_metadata_label),
         argument_keys,
         shell_shape,
+        execution_structure: if is_shell {
+            arguments.get("command").or_else(|| arguments.get("cmd")).and_then(|v| v.as_str())
+                .map(bash_classifier::execution_structures).unwrap_or_default()
+        } else { Vec::new() },
         local_invocation_evidence: if is_shell {
             arguments.get("command").or_else(|| arguments.get("cmd"))
                 .and_then(|value| value.as_str())
@@ -2700,6 +2738,7 @@ fn shell_ast_semantic_request(
     };
     request.tool_name = bounded_metadata_label(&format!("{}_{}", legacy.tool_name, suffix));
     request.shell_shape = ast.semantic_shapes.clone();
+    request.execution_structure = ast.execution_structure.clone();
     request.shell_ast_shape = Some(ast.semantic_shape());
     request
 }
@@ -2746,6 +2785,45 @@ mod tests {
             {let mut v=envelope.clone();v["entries"][0]["references"][0]["excerpt"]=serde_json::json!("x".repeat(13000));v},
         ] {
             assert!(validated_command_references("exec_command", &args, Some(&invalid)).is_none());
+        }
+    }
+
+    #[test]
+    fn documented_remote_read_retains_verb_flags_and_external_location() {
+        let command = "kubectl --kubeconfig=/fixture/kubeconfig --request-timeout=5s -n example get deployment app -o jsonpath='{.spec.template.spec.containers[0].image}'";
+        for assessment in [assess_shell(command), assess_shell_ast(&shell_ast_shadow::assess(command))] {
+            assert_eq!(assessment.risk, RiskBand::Low);
+            assert_eq!(assessment.exposure, ExposureBand::External);
+        }
+        let shapes = bash_classifier::semantic_command_shapes(command).unwrap();
+        assert_eq!(shapes[0].operation.as_deref(), Some("get"));
+        assert!(!shapes[0].delegates_unknown_effect);
+        for mixed in ["kubectl get pods; touch output", "kubectl get pods && opaque_fixture --mutate"] {
+            for result in [assess_shell(mixed), assess_shell_ast(&shell_ast_shadow::assess(mixed))] {
+                assert_eq!(result.exposure, ExposureBand::External, "{mixed}");
+                assert_ne!(result.risk, RiskBand::Low, "{mixed}");
+            }
+        }
+        let input = json!({"cmd":command});
+        let deterministic = assess_invocation(None, "exec_command", &input, Some("localize"));
+        let request = deterministic.semantic_request.as_ref().unwrap().clone();
+        let pipeline = pipeline_from_parts(deterministic, semantic_receipt(&request, SemanticAssessorStatus::Disabled), false);
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly);
+        for unsafe_command in [
+            "kubectl get pods --raw /api/v1/namespaces/default/pods/example/exec",
+            "kubectl get pods --output=go-template-file=/tmp/template",
+            "kubectl --profile=cpu get pods",
+            "kubectl get pods; rm output",
+            "kubectl get pods && opaque_fixture --mutate",
+            "kubectl get pods > output",
+            "kubectl exec pod -- cat /etc/config",
+            "/tmp/kubectl get pods",
+            "kubectl get pods $(opaque_fixture)",
+        ] {
+            let deterministic = assess_invocation(None, "exec_command", &json!({"cmd":unsafe_command}), Some("localize"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            let pipeline = pipeline_from_parts(deterministic, semantic_receipt(&request, SemanticAssessorStatus::Disabled), false);
+            assert_ne!(pipeline.resolve_effect(), ResolvedEffect::ReadOnly, "{unsafe_command}");
         }
     }
 
@@ -3318,6 +3396,56 @@ mod tests {
             ExposureBand::Unknown
         );
         set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_forwarded_package_script_evidence_preserves_lifecycle_and_runner_authority() {
+        let command = "npm run test:unit -- --run src/components/__tests__/Example.spec.js --exclude '.agent-worktrees/**'";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let base = || {
+            let deterministic = assess_invocation(None, "exec_command", &input, Some("validate"));
+            let request = deterministic.semantic_request.as_ref().unwrap().clone();
+            pipeline_from_parts(deterministic, semantic_receipt(&request, SemanticAssessorStatus::Disabled), false)
+        };
+        let original = "vitest --run src/components/__tests__/Example.spec.js --exclude '.agent-worktrees/**'";
+        let resolved = "node_modules/.bin/vitest --run src/components/__tests__/Example.spec.js --exclude '.agent-worktrees/**'";
+        let unit = |original: &str, resolved: &str| json!({
+            "original":original,"resolved":resolved,"cwd":".",
+            "invocation":bash_classifier::literal_invocation(original),
+        });
+        let proof = json!({
+            "schema":"statewright/local-command-evidence/v1", "tool_name":"exec_command",
+            "command":command, "requested_cwd":"/workspace", "cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(), "complete":true,
+            "files":[{"path":"package.json","sha256":"a".repeat(64)},
+                {"path":"node_modules/vitest/package.json","sha256":"b".repeat(64)},
+                {"path":"node_modules/vitest/vitest.mjs","sha256":"c".repeat(64)}],
+            "commands":[unit("git status --short", "git status --short"), unit(original,resolved),
+                unit("git diff --check", "git diff --check")],
+        });
+        assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
+        assert_eq!(apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof)).resolve_effect(),
+            ResolvedEffect::BoundedLocalExecution);
+        for hazardous in ["rm file", "git push origin main", "opaque_fixture --mutate"] {
+            let mut mutated = proof.clone();
+            mutated["commands"][0] = unit(hazardous,hazardous);
+            assert!(!matches!(apply_native_command_evidence(base(),None,"exec_command",&input,Some(&mutated)).resolve_effect(),
+                ResolvedEffect::ReadOnly | ResolvedEffect::BoundedLocalExecution), "{hazardous}");
+        }
+        let mut remote = proof.clone();
+        remote["commands"][0] = unit("kubectl get pods", "kubectl get pods");
+        let remote_result = apply_native_command_evidence(base(),None,"exec_command",&input,Some(&remote));
+        assert_eq!(remote_result.deterministic.exposure, ExposureBand::External);
+        assert_eq!(remote_result.resolve_effect(), ResolvedEffect::DenyUncertain);
+        remote["commands"][2] = unit("rm output", "rm output");
+        let destructive = apply_native_command_evidence(base(),None,"exec_command",&input,Some(&remote));
+        assert_eq!(destructive.deterministic.exposure, ExposureBand::External);
+        assert_eq!(destructive.resolve_effect(), ResolvedEffect::DenyKnownRisk);
+        let mut mismatched = proof.clone();
+        mismatched["commands"][1]["resolved"] = json!("node_modules/.bin/vitest --run other.spec.js");
+        assert_eq!(apply_native_command_evidence(base(),None,"exec_command",&input,Some(&mismatched)).resolve_effect(),
+            ResolvedEffect::DenyUncertain);
     }
 
     #[test]

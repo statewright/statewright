@@ -9,6 +9,7 @@ const eligibleBases = [
   "semantic_vector_unavailable",
   "semantic_assessment_incomplete",
   "semantic_authorization_disabled",
+  "external_effect_unresolved",
 ];
 
 function request(overrides = {}, receiptOverrides = {}) {
@@ -49,6 +50,19 @@ test("default uncertainty handling immediately holds for a native human decision
   assert(modal);
   controller.handleReply({id: modal.id, result: {action:"decline"}});
   assert.equal((await decision.completion).reason, "human_declined");
+});
+
+test("external uncertainty explains the review and keeps the exact invocation bound", async () => {
+  const sent = [];
+  const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});
+  const decision = await controller.begin(request({}, {final_denial_basis: "external_effect_unresolved"}));
+  assert.equal(decision.outcome, ApprovalOutcome.ASK);
+  const modal = sent.find(value => value.method === "mcpServer/elicitation/request");
+  assert.match(modal.params.message, /reaches an external service, but its effects could not be determined/);
+  controller.handleReply({id: modal.id, result: {action: "accept"}});
+  const result = await decision.completion;
+  assert.equal(result.action, "allow_once");
+  assert.equal(result.invocation_fingerprint, "invocation_v1_exact-one");
 });
 
 test("only explicitly eligible uncertain classifier decisions enter approval", () => {

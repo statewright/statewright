@@ -4,6 +4,7 @@ const REWORKABLE_BASES = new Set([
   "semantic_vector_unavailable",
   "semantic_assessment_incomplete",
   "semantic_authorization_disabled",
+  "external_effect_unresolved",
 ]);
 
 function printable(value) {

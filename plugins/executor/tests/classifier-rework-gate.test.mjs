@@ -51,6 +51,16 @@ test("exact invocation replay is denied without consuming rework budget", () => 
   assert.equal(gate.observeDenial({receipt: receipt("two"), scope}).attempts, 2);
 });
 
+test("unresolved external effects escalate only when separate approval is eligible", () => {
+  const gate = new ClassifierReworkGate({maxReworks: 1});
+  const scope = {runId: "run", state: "implement", hostSessionId: "thread"};
+  const first = receipt("one", "intent_v1_external", "external_effect_unresolved");
+  const second = receipt("two", "intent_v1_external", "external_effect_unresolved");
+  assert.equal(gate.observeDenial({receipt: first, scope})?.action, "rework");
+  assert.equal(gate.observeDenial({receipt: second, scope})?.action, "approval_required");
+  assert.equal(classifierIntent({...first, separate_approval_allowed: false}).reworkable, false);
+});
+
 test("isolates workflow scope and resets only the matching successful intent", () => {
   const gate = new ClassifierReworkGate();
   const left = { runId: "left", state: "implement", hostSessionId: "thread" };

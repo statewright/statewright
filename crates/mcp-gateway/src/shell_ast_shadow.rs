@@ -177,6 +177,7 @@ fn effect_label(class: &OpClass) -> &'static str {
         OpClass::FileSearch => "file_search",
         OpClass::Destructive => "destructive",
         OpClass::Network => "network",
+        OpClass::ExternalUnknown => "external_unknown",
         OpClass::GitWrite => "git_write",
         OpClass::GitRead => "git_read",
         OpClass::LocalWrite => "local_write",

@@ -21,6 +21,9 @@ pub enum OpClass {
     Destructive,
     /// Network operations (requires WebFetch or explicit allowance).
     Network,
+    /// External activity whose concrete effects have not been established.
+    /// This is never a read proof or execution authority.
+    ExternalUnknown,
     /// Git write operations (requires explicit allowance).
     GitWrite,
     /// Git read operations (requires Read).
@@ -56,6 +59,43 @@ pub struct SemanticCommandShape {
     pub executable: String,
     pub operation: Option<String>,
     pub delegates_unknown_effect: bool,
+}
+
+/// Bounded code-owned structural facts for a local assessor. Values and
+/// arbitrary option spellings never enter this representation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LocalInvocationEvidence {
+    pub index: usize,
+    pub effect: &'static str,
+    pub options: Vec<&'static str>,
+    pub complete: bool,
+}
+
+pub fn local_invocation_evidence(command: &str) -> Vec<LocalInvocationEvidence> {
+    split_segments(command).iter().take(32).enumerate().map(|(index, segment)| {
+        let invocation = literal_invocation(segment);
+        let effect = match classify_segment(segment) {
+            OpClass::ExternalUnknown => "external_unknown",
+            OpClass::Network | OpClass::GitWrite => "restricted_external",
+            OpClass::Destructive => "destructive",
+            OpClass::Opaque | OpClass::Passthrough => "unknown",
+            _ => "other_known_effect",
+        };
+        let options = invocation.as_ref().map(|invocation| {
+            invocation.args.iter().filter(|arg| arg.starts_with('-')).take(32).map(|arg| {
+                match arg.split('=').next().unwrap_or("") {
+                    "--request" => "request_method",
+                    "--data" | "--data-binary" | "--data-raw" | "--post-data" | "--post-file" => "payload",
+                    "--upload-file" => "upload",
+                    "--output" | "--output-document" => "output",
+                    "--config" => "config",
+                    "--max-time" => "timeout",
+                    _ => "unrecognized_option",
+                }
+            }).collect()
+        }).unwrap_or_default();
+        LocalInvocationEvidence { index, effect, options, complete: false }
+    }).collect()
 }
 
 /// One literal shell invocation after removing only structurally transparent
@@ -425,7 +465,7 @@ impl OpClass {
             OpClass::ContentSearch => &["Read", "Grep"],
             OpClass::FileSearch => &["Read", "Glob"],
             OpClass::Destructive => &["__DESTRUCTIVE__"],
-            OpClass::Network => &["WebFetch"],
+            OpClass::Network | OpClass::ExternalUnknown => &["WebFetch"],
             OpClass::GitWrite => &["__GIT_WRITE__"],
             OpClass::GitRead => &["Read"],
             OpClass::SafeOutput | OpClass::Opaque | OpClass::Passthrough => &[],
@@ -446,7 +486,17 @@ pub fn classify(command: &str) -> Vec<OpClass> {
         if seg.is_empty() {
             continue;
         }
-        classes.push(classify_segment(seg));
+        let class = classify_segment(seg);
+        classes.push(class);
+        // wget ordinarily saves a response locally. Uncertain remote effects
+        // must not erase that independently known local write capability.
+        if class == OpClass::ExternalUnknown
+            && literal_invocation(seg).is_some_and(|invocation| {
+                invocation.executable.rsplit('/').next() == Some("wget")
+            })
+        {
+            classes.push(OpClass::FileWrite);
+        }
     }
 
     // A known outer command does not make nested shell execution safe. Keep
@@ -578,6 +628,7 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
             | OpClass::GitLocalWrite
             | OpClass::Destructive
             | OpClass::Network
+            | OpClass::ExternalUnknown
             | OpClass::GitWrite => return None,
         };
         capabilities.push(capability);
@@ -1623,6 +1674,7 @@ fn classify_segment(segment: &str) -> OpClass {
         "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
 
         // Network
+        "curl" | "wget" if trusted_executable => external_client_effect(base_cmd, &invocation.args),
         "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
 
         // Git — classify by subcommand
@@ -1694,10 +1746,47 @@ fn classify_segment(segment: &str) -> OpClass {
     // authority from an assignment-prefixed spelling.
     if !invocation.environment_names.is_empty() && !matches!(class, OpClass::BoundedLocalExecution)
     {
-        OpClass::Opaque
+        if class == OpClass::ExternalUnknown {
+            OpClass::Network
+        } else {
+            OpClass::Opaque
+        }
     } else {
         class
     }
+}
+
+/// The client name establishes external exposure, not a safe effect. Obvious
+/// upload, local-output, configuration, and credential options retain the
+/// stronger network classification; every other form remains unresolved.
+fn external_client_effect(client: &str, args: &[String]) -> OpClass {
+    let restricted_long = [
+        "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+        "--json", "--form", "--form-string", "--upload-file", "--request", "--output",
+        "--remote-name", "--remote-name-all", "--config", "--user", "--proxy-user",
+        "--header", "--cookie", "--cookie-jar", "--netrc", "--netrc-file", "--cert",
+        "--key", "--post-data", "--post-file", "--body-data", "--body-file",
+        "--method", "--output-document", "--directory-prefix", "--input-file",
+        "--execute", "--user-agent", "--password", "--http-password", "--http-user",
+        "--oauth2-bearer", "--proxy-header", "--aws-sigv4", "--resolve", "--connect-to",
+        "--trace", "--trace-ascii", "--dump-header", "--write-out", "--next", "--url-query",
+    ];
+    for arg in args {
+        let option = arg.split('=').next().unwrap_or(arg);
+        if restricted_long.contains(&option) || arg.contains('@')
+            || ["file:", "ftp:", "ftps:", "sftp:", "scp:", "gopher:"]
+                .iter().any(|scheme| arg.to_ascii_lowercase().starts_with(scheme))
+        {
+            return OpClass::Network;
+        }
+        if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
+            let restricted = if client == "curl" { "dFTXoOKuHbEcwA:" } else { "OPiUe" };
+            if arg[1..].chars().any(|ch| restricted.contains(ch)) {
+                return OpClass::Network;
+            }
+        }
+    }
+    OpClass::ExternalUnknown
 }
 
 fn trusted_executable_spelling(invoked: &str, base: &str) -> bool {
@@ -3054,13 +3143,15 @@ mod tests {
     #[test]
     fn curl_is_network() {
         let classes = classify("curl https://example.com");
-        assert!(classes.contains(&OpClass::Network));
+        assert!(classes.contains(&OpClass::ExternalUnknown));
+        assert_eq!(readonly_capabilities("curl https://example.com"), None);
     }
 
     #[test]
     fn wget_is_network() {
         let classes = classify("wget https://example.com/file.tar.gz");
-        assert!(classes.contains(&OpClass::Network));
+        assert!(classes.contains(&OpClass::ExternalUnknown));
+        assert_eq!(readonly_capabilities("wget https://example.com/file.tar.gz"), None);
     }
 
     #[test]
@@ -3482,7 +3573,7 @@ mod tests {
         );
         assert!(classes.contains(&OpClass::BoundedLocalExecution));
         assert!(classes.contains(&OpClass::FileWrite));
-        assert!(classes.contains(&OpClass::Network));
+        assert!(classes.contains(&OpClass::ExternalUnknown));
     }
 
     #[test]
@@ -3573,7 +3664,7 @@ mod tests {
         assert_eq!(readonly_capabilities(&destructive), None);
 
         let external = format!("{command}; curl https://example.invalid");
-        assert!(classify(&external).contains(&OpClass::Network));
+        assert!(classify(&external).contains(&OpClass::ExternalUnknown));
         assert_eq!(readonly_capabilities(&external), None);
 
         assert_eq!(classify("/tmp/nl -ba README.md"), vec![OpClass::Opaque]);

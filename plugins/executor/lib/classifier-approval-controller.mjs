@@ -7,6 +7,7 @@ const REWORKABLE_BASES = new Set([
   "semantic_vector_unavailable",
   "semantic_assessment_incomplete",
   "semantic_authorization_disabled",
+  "external_effect_unresolved",
 ]);
 
 function printable(value, maximum = 256) {
@@ -164,7 +165,7 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: `Statewright could not resolve this exact invocation through heuristic/semantic assessment.${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
+        message: `Statewright could not resolve this exact invocation through heuristic/semantic assessment.${request.basis === "external_effect_unresolved" ? " The command reaches an external service, but its effects could not be determined." : ""}${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
         requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous

@@ -119,6 +119,16 @@ fn pre_call_check_impl(
             );
         }
         let denied = state_def.disallowed_tools.as_deref().unwrap_or_default();
+        if pipeline.is_some_and(RiskPipelineAssessment::has_external_unknown)
+            && (denied.iter().any(|name| name.eq_ignore_ascii_case("WebFetch") || name.eq_ignore_ascii_case("Read"))
+                || state_def.allowed_tools.as_ref().is_some_and(|allowed| {
+                    !allowed.iter().any(|name| name.eq_ignore_ascii_case("WebFetch"))
+                }))
+        {
+            return PreCallDecision::Block(
+                "Classifier approval cannot grant a missing external capability.".into(),
+            );
+        }
         if denied.iter().any(|name| ["Write", "write_file", "GitLocalWrite", "BoundedLocalExecution"]
             .iter().any(|capability| name.eq_ignore_ascii_case(capability))) {
             return PreCallDecision::Block(

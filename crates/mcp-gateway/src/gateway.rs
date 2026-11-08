@@ -7936,6 +7936,15 @@ mod tests {
     async fn classifier_approval_context_requires_independent_policy_clearance() {
         for (label, extra, command, eligible) in [
             ("unrestricted", json!({}), "unknown_fixture --inspect", true),
+            ("external_uncertain", json!({}), "curl -sS https://example.invalid/status", true),
+            ("external_denied", json!({"disallowed_tools":["WebFetch"]}), "curl -sS https://example.invalid/status", false),
+            ("external_read_denied", json!({"disallowed_tools":["Read"]}), "curl -sS https://example.invalid/status", false),
+            ("external_missing_capability", json!({"allowed_tools":["Bash","Read"]}), "curl -sS https://example.invalid/status", false),
+            ("external_capability", json!({"allowed_tools":["Bash","WebFetch"]}), "curl -sS https://example.invalid/status", true),
+            ("external_upload", json!({}), "curl --data example https://example.invalid", false),
+            ("external_local_write_denied", json!({"disallowed_tools":["Write"]}), "wget -q https://example.invalid/file", false),
+            ("external_local_write_missing", json!({"allowed_tools":["Bash","WebFetch"]}), "wget -q https://example.invalid/file", false),
+            ("external_local_write_granted", json!({"allowed_tools":["Bash","WebFetch","Write"]}), "wget -q https://example.invalid/file", true),
             ("explicit_tool", json!({"disallowed_tools":["exec_command"]}), "unknown_fixture", false),
             ("explicit_family", json!({"disallowed_tools":["Bash"]}), "unknown_fixture", false),
             ("capability_denial", json!({"disallowed_tools":["Write"]}), "unknown_fixture", false),

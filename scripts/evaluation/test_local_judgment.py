@@ -21,6 +21,13 @@ class FakeAgent:
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_frozen_question_profiles_are_explicit_and_missing_profile_fails(self):
+        corpus = {"questions": {"command": {"old": {}}}, "question_profiles": {"focused": {"new": {}}}}
+        self.assertEqual(module.case_questions(corpus, {"task": "command"}), {"old": {}})
+        self.assertEqual(module.case_questions(corpus, {"task": "command", "question_profile": "focused"}), {"new": {}})
+        with self.assertRaises(ValueError):
+            module.case_questions(corpus, {"task": "command", "question_profile": "missing"})
+
     def test_captured_input_hash_binds_parsed_bytes_not_later_file(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "input.json"

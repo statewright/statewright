@@ -918,11 +918,7 @@ struct TypeSafeNoulAnswer {
     noul: f32,
 }
 
-async fn assess_with_provider(
-    client: &reqwest::Client,
-    provider: &SemanticProviderConfig,
-    request: &SemanticAssessmentRequest,
-) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+fn semantic_provider_state(request: &SemanticAssessmentRequest, local: bool) -> serde_json::Value {
     let mut request_shape = serde_json::json!({
         "contract": crate::semantic_contract::VERSION,
         "effect_instructions": crate::semantic_contract::CONTEXT,
@@ -938,14 +934,14 @@ async fn assess_with_provider(
         request_shape["assessment_profile"] = serde_json::json!("native_web_effects/v1");
         request_shape["web_effect_instructions"] = serde_json::json!(crate::web_effect::CONTEXT);
         request_shape["web_request"] = serde_json::json!(web);
-        if provider.kind == SemanticProviderKind::LayaLocal {
+        if local {
             request_shape["local_web_request"] = serde_json::json!(web.local_request);
         }
     }
     if let Some(shape) = request.shell_ast_shape.as_ref() {
         request_shape["shell_ast_shape"] = serde_json::json!(shape);
     }
-    if provider.kind == SemanticProviderKind::LayaLocal {
+    if local {
         request_shape["local_invocation_evidence"] = serde_json::json!(request.local_invocation_evidence);
         if let Some(reference) = &request.reference_context {
             request_shape["command_reference"] = serde_json::json!({
@@ -954,6 +950,15 @@ async fn assess_with_provider(
             });
         }
     }
+    request_shape
+}
+
+async fn assess_with_provider(
+    client: &reqwest::Client,
+    provider: &SemanticProviderConfig,
+    request: &SemanticAssessmentRequest,
+) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
+    let request_shape=semantic_provider_state(request, provider.kind == SemanticProviderKind::LayaLocal);
     let (url, body) = match provider.kind {
         SemanticProviderKind::OpenAiCompatible => (
             format!("{}/chat/completions", provider.endpoint),
@@ -1165,6 +1170,11 @@ pub struct ShadowAssessment {
 }
 
 impl ShadowAssessment {
+    /// Pure diagnostic projection using the exact production provider builder.
+    /// Explicit local=true includes local-only evidence; does not call a model.
+    pub fn evaluation_provider_state(&self, local: bool) -> Option<serde_json::Value> {
+        self.semantic_request.as_ref().map(|request|semantic_provider_state(request,local))
+    }
     /// Read-only diagnostic access to the already-redacted provider inputs.
     /// No provider invocation, score reconciliation or execution authority.
     pub fn evaluation_requests(

@@ -61,6 +61,16 @@ def token_evidence(agent, state, questions, build_sequence, render_options):
     return truncated, counts
 
 
+def case_questions(corpus, case):
+    profile = case.get("question_profile")
+    if profile is None:
+        return corpus["questions"][case["task"]]
+    profiles = corpus.get("question_profiles", {})
+    if not isinstance(profile, str) or profile not in profiles or not profiles[profile]:
+        raise ValueError("unknown or empty frozen question profile")
+    return profiles[profile]
+
+
 def main():
     harness_hash = digest(Path(__file__))
     started_at = datetime.now(timezone.utc).isoformat()
@@ -144,12 +154,14 @@ def main():
     # hashes: nominal Hub revision alone does not describe effective bytes.
     rows = []
     for case in cases:
-        questions = corpus["questions"][case["task"]]
+        questions = case_questions(corpus, case)
         state = case["state"]
         truncated, token_counts = token_evidence(agent, state, questions, build_sequence, render_options)
         row = {"id": case["id"], "task": case["task"], "arm": case["arm"],
                "input_hash": json_hash(state), "questions_hash": json_hash(questions),
                "expected": case["expected"], "tokens": token_counts, "truncated": truncated}
+        row["question_profile"] = case.get("question_profile")
+        row["diagnostic_context"] = {key: case[key] for key in ("draft_effect", "heuristic_risk", "heuristic_exposure") if key in case}
         if truncated:
             row.update(status="abstain_truncated", latency_ms=None)
         else:

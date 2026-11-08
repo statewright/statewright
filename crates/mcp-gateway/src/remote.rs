@@ -157,6 +157,7 @@ fn classifier_denial_basis(value: &str) -> bool {
             | "semantic_authorization_disabled"
             | "exploratory_effect_unresolved"
             | "external_effect_unresolved"
+            | "workflow_approval_policy"
     ) || value.starts_with("classifier_policy_")
         || value.starts_with("workflow_capability_")
 }
@@ -2117,6 +2118,8 @@ mod tests {
         let sample = classifier_denial_sample(&request, &response, "owned-session").unwrap();
         assert_eq!(sample["final_denial_basis"], "external_effect_unresolved");
         assert!(!classifier_denial_basis("approval_pending"));
+        // Recording a policy denial never makes it eligible for approval.
+        assert!(classifier_denial_basis("workflow_approval_policy"));
     }
 
     #[test]

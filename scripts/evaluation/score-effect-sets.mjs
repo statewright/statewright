@@ -34,8 +34,13 @@ export function rankAuc(points) {
 
 export function validateBatch(corpus,receipt,input) {
   const document=input.document;
-  assert.equal(document.schema,'statewright/public-effect-set-evaluation/v1');
-  assert.equal(document.classification,'public_command_data');
+  const privateData=corpus.classification==='private_sanitized_local_only';
+  assert.equal(document.schema,privateData?'statewright/private-effect-set-evaluation/v1':'statewright/public-effect-set-evaluation/v1');
+  assert.equal(document.classification,privateData?'private_sanitized_local_only':'public_command_data');
+  if(privateData) {
+    assert.equal(receipt.classification,'private_sanitized_local_only');
+    assert.deepEqual(receipt.privacy,corpus.privacy,'private handling label changed');
+  }
   assert.deepEqual(document.source_cases,corpus,'source corpus binding changed');
   assert.equal(receipt.input_file_hash,input.sha256,'receipt does not bind these input bytes');
   const planned=new Map(document.cases.map(row=>[row.arm+'/'+row.id,row]));
@@ -101,7 +106,7 @@ function add(total,want,allow,origin) {
 }
 
 export function scoreEffectSets(corpus,receipts,inputs) {
-  assert.equal(corpus.schema,'statewright/public-effect-set-cases/v1');assert.equal(corpus.enforcement,'none');
+  assert.equal(corpus.schema,corpus.classification==='private_sanitized_local_only'?'statewright/private-effect-set-cases/v1':'statewright/public-effect-set-cases/v1');assert.equal(corpus.enforcement,'none');
   assert.equal(inputs.length,receipts.length);
   const cases=new Map(corpus.cases.map(row=>[row.id,row]));assert.equal(cases.size,corpus.cases.length);
   const seen=new Set(),rows=[],provenance=[];
@@ -153,7 +158,7 @@ export function scoreEffectSets(corpus,receipts,inputs) {
       report.unresolved_rank_auc=rankAuc(selected.filter(row=>row.status==='assessed').map(row=>[cases.get(row.id).mask===null,row.result.answers.effect_set.probabilities.unresolved]));
     }
     for(let allowed=0;allowed<=7;allowed++)for(const threshold of thresholds)for(const mode of ['model_only','heuristic_then_model']) {
-      const total=metrics(),by_kind={imported:metrics(),synthetic:metrics()};
+      const total=metrics(),by_kind=Object.fromEntries([...new Set(corpus.cases.map(row=>row.kind))].map(kind=>[kind,metrics()]));
       for(const row of selected) {
         const expected=cases.get(row.id),want=expected.mask===null?'unknown':subset(expected.mask,allowed)?'permitted':'forbidden';
         let {allow,mass}=compatible(row,allowed,threshold),origin='model';
@@ -171,7 +176,7 @@ export function scoreEffectSets(corpus,receipts,inputs) {
       report.policies[`${allowed}/${threshold}/${mode}`]={...total,by_kind};
     }
   }
-  return {schema:'statewright/effect-set-simulation/v1',enforcement:'none',label_status:corpus.label_status,
+  return {schema:'statewright/effect-set-simulation/v1',classification:corpus.classification,privacy:corpus.privacy??null,enforcement:'none',label_status:corpus.label_status,
     interpretation:'Paired agent-labeled development experiment. Raw model scores are uncalibrated. Threshold sweeps are diagnostic, not a selected release policy. Heuristic fast path uses only the existing ReadOnly effect decision; legacy risk classes cannot prove the new effect bits. Numeric legacy branches omit other Rust gates. No native/installed/production acceptance.',
     cases:cases.size,requests:rows.length,thresholds,heuristic_errors:heuristicErrors,reports,failures};
 }

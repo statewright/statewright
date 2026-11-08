@@ -1,0 +1,797 @@
+{
+  "schema": "statewright/effect-extension-labels/v1",
+  "classification": "private_sanitized_local_only",
+  "selection": "Manually reviewed zsh, direct Claude JSONL and literal Codex orchestration candidates. Current experiment source-inspection commands are excluded from the Codex selection. Orchestration literals do not prove actual dispatch. No raw commands or private payloads are stored in this labels file. Execution is modeled under declared command-scoped fixture assumptions, not reconstructed historical outcomes.",
+  "items": [
+    [
+      "e596899f114b",
+      0,
+      "Exit terminates only the command-scoped shell in this simulation."
+    ],
+    [
+      "aa3e0c315e09",
+      null,
+      "Attaches to an interactive session whose program state is unavailable."
+    ],
+    [
+      "79cf2c087b11",
+      null,
+      "Custom launcher definition and delegated execution are unavailable."
+    ],
+    [
+      "971fed8d6b7c",
+      null,
+      "Sourced startup configuration and launcher definition are unavailable."
+    ],
+    [
+      "c7b68ac37f36",
+      1,
+      "Lists current directory metadata."
+    ],
+    [
+      "2c635938844b",
+      0,
+      "Cwd is ephemeral command context; no managed resource change."
+    ],
+    [
+      "ecc78bda27b8",
+      0,
+      "Cwd is ephemeral command context; no managed resource change."
+    ],
+    [
+      "5990d3680a0f",
+      null,
+      "Interactive remote session has no supplied command/effect boundary."
+    ],
+    [
+      "e014ad2f4333",
+      2,
+      "Changes managed power/sleep assertion state."
+    ],
+    [
+      "e9e3a75ba7d4",
+      2,
+      "Creates a directory."
+    ],
+    [
+      "b98141391abc",
+      null,
+      "Interactive pager has no supplied interaction boundary."
+    ],
+    [
+      "70ed1162ddf9",
+      1,
+      "Observes metadata for a named file."
+    ],
+    [
+      "913a4cb91be2",
+      0,
+      "Emits terminal display control output without changing managed resources."
+    ],
+    [
+      "c8afd6a9ea6f",
+      null,
+      "Unavailable custom launcher/resume implementation."
+    ],
+    [
+      "adb519257aeb",
+      null,
+      "Interactive session server/client behavior is not bounded by supplied source."
+    ],
+    [
+      "529cd57f6eae",
+      null,
+      "Interactive pager has no supplied interaction boundary."
+    ],
+    [
+      "73c500d2e1d1",
+      null,
+      "Agent launcher can execute unspecified subsequent actions; read-only flag text is not complete effect evidence."
+    ],
+    [
+      "2bb9929bc451",
+      null,
+      "Custom launcher definition unavailable."
+    ],
+    [
+      "e7607ce9aa2d",
+      null,
+      "Task definition and deployment scripts unavailable."
+    ],
+    [
+      "abff3befebdf",
+      null,
+      "Interactive resumed session contents unavailable."
+    ],
+    [
+      "7096adab7fe6",
+      null,
+      "Custom agent launcher definition unavailable."
+    ],
+    [
+      "c857d09db23e",
+      null,
+      "Interactive agent activity is unspecified."
+    ],
+    [
+      "e3f0fc5b85f9",
+      4,
+      "Explicitly terminates a selected managed process."
+    ],
+    [
+      "720ebf3299c6",
+      null,
+      "Custom launcher/resume implementation unavailable."
+    ],
+    [
+      "e04a92efc73d",
+      null,
+      "Alias/function definition is not supplied; do not assume a kubectl alias."
+    ],
+    [
+      "ef4bbe26100d",
+      1,
+      "Ordinary Kubernetes readiness GET observes remote state; kubeconfig is only a sanitized path reference."
+    ],
+    [
+      "be39848ed4f8",
+      1,
+      "Observes shell command/type metadata without invoking the target."
+    ],
+    [
+      "ed540b3210b0",
+      1,
+      "Lists history entries without executing them."
+    ],
+    [
+      "25e483d971a4",
+      null,
+      "Downloaded installer/package code is not supplied."
+    ],
+    [
+      "01be30bb4a27",
+      null,
+      "Interactive terminal reset/configuration boundary is not supplied."
+    ],
+    [
+      "0b15be91fc67",
+      1,
+      "Observes an alias definition; does not execute it."
+    ],
+    [
+      "e61e0f1a419c",
+      4,
+      "Explicit termination of managed processes."
+    ],
+    [
+      "0dd0d73d762b",
+      null,
+      "Interactive editor actions are not supplied."
+    ],
+    [
+      "7cf3ee4f81b2",
+      null,
+      "Delegated JavaScript program source unavailable."
+    ],
+    [
+      "9de050a71258",
+      0,
+      "Rebuilds only ephemeral shell command lookup bookkeeping."
+    ],
+    [
+      "300c267d0eb6",
+      null,
+      "Custom tool operation semantics/source are unavailable; do not classify by kill spelling alone."
+    ],
+    [
+      "b5b0e3e9a232",
+      1,
+      "Observes command lookup and environment state."
+    ],
+    [
+      "22fe205aff51",
+      null,
+      "Delegated shell program body unavailable."
+    ],
+    [
+      "4e0baa93f243",
+      null,
+      "Downloads and executes unavailable shell code."
+    ],
+    [
+      "b81d9bfaeffb",
+      null,
+      "Package installation executes unavailable formula/install code."
+    ],
+    [
+      "85b42e170287",
+      null,
+      "Custom program/agent execution body unavailable."
+    ],
+    [
+      "7756d62141c6",
+      null,
+      "Custom launcher definition unavailable."
+    ],
+    [
+      "a1159e9df367",
+      1,
+      "Observes current working directory."
+    ],
+    [
+      "81b2126b98d3",
+      2,
+      "Moves/renames resources; ordinary replacement is Write in the frozen contract."
+    ],
+    [
+      "7e013d862ccc",
+      2,
+      "Renames a resource."
+    ],
+    [
+      "162035ec2d28",
+      1,
+      "Lists container metadata."
+    ],
+    [
+      "798339512a50",
+      1,
+      "Observes filesystem capacity."
+    ],
+    [
+      "f676a65cb6f1",
+      null,
+      "Task/delegation definitions unavailable; option names do not establish complete effects."
+    ],
+    [
+      "0449cca93aff",
+      null,
+      "Repository recovery state and discard behavior are not supplied; retain as unresolved."
+    ],
+    [
+      "6168258aa694",
+      0,
+      "Prints literal quoted text; its words are not executed."
+    ],
+    [
+      "0444f0679118",
+      2,
+      "Updates VPN/network connection configuration under the documented system-tool contract."
+    ],
+    [
+      "b06d5d5c5d5f",
+      null,
+      "Service program lifetime and configuration are not supplied."
+    ],
+    [
+      "be7e8404d30d",
+      null,
+      "Package/formula installation code unavailable."
+    ],
+    [
+      "89257687e5cd",
+      1,
+      "Reads an environment variable and prints it; no value is included in the fixture."
+    ],
+    [
+      "e62b04aadf39",
+      1,
+      "Observes repository status."
+    ],
+    [
+      "98c55721b833",
+      null,
+      "Interactive editor actions and file contents unavailable."
+    ],
+    [
+      "e99162d5c9c4",
+      null,
+      "Package install lifecycle code unavailable."
+    ],
+    [
+      "c380779f6175",
+      null,
+      "Resumes an unspecified interactive job."
+    ],
+    [
+      "4f3a6c3d4e88",
+      1,
+      "Documented non-pager Markdown rendering reads a file and emits output."
+    ],
+    [
+      "2587cefc8339",
+      null,
+      "Interactive pager/job actions are unavailable."
+    ],
+    [
+      "030c9a692e7a",
+      null,
+      "Interactive cluster UI has no action/effect boundary."
+    ],
+    [
+      "ae00966e0738",
+      1,
+      "Lists disk metadata."
+    ],
+    [
+      "ff899d00be9b",
+      0,
+      "No diskutil verb: usage output, no requested resource operation."
+    ],
+    [
+      "651f6b59a035",
+      1,
+      "Kubernetes get observes remote resource metadata."
+    ],
+    [
+      "71650aae1df7",
+      null,
+      "Unknown custom program; a help flag alone is not source/provenance evidence."
+    ],
+    [
+      "d85143414e64",
+      null,
+      "Downloaded shell program is unavailable."
+    ],
+    [
+      "971ac4540e93",
+      null,
+      "Resumes an unspecified job."
+    ],
+    [
+      "77993ebff2e7",
+      6,
+      "Removes a resource tree and creates a directory."
+    ],
+    [
+      "3e92044972da",
+      1,
+      "Reads an environment value and emits it; value itself is unavailable."
+    ],
+    [
+      "87fb4afdb0eb",
+      1,
+      "Observes command lookup metadata."
+    ],
+    [
+      "cf86614e7fe2",
+      null,
+      "Unknown script body; output redirection alone does not bound its other effects."
+    ],
+    [
+      "7494138479d9",
+      null,
+      "Agent prompt delegates unbounded actions; quoted requests are not direct effect proof."
+    ],
+    [
+      "28e3b80fb0ff",
+      1,
+      "Reads log files and filters output; literal stderr null sink adds no Write."
+    ],
+    [
+      "bb311b0aad7f",
+      1,
+      "Find name predicate only observes."
+    ],
+    [
+      "d41d35a0305e",
+      4,
+      "Removes a resource."
+    ],
+    [
+      "8333daae1c53",
+      3,
+      "Reads source resources and writes copies."
+    ],
+    [
+      "4a444f32a776",
+      null,
+      "Cargo install executes unavailable build/package code."
+    ],
+    [
+      "f9cfe9280f2d",
+      null,
+      "Unknown script body; name alone does not prove reset effects."
+    ],
+    [
+      "246050b60c62",
+      1,
+      "Observes repository differences under the default-tool fixture context."
+    ],
+    [
+      "c5768f3fc175",
+      1,
+      "Observes repository history."
+    ],
+    [
+      "793ab9d5d08d",
+      3,
+      "Reads a file and updates the staging index under default no-extra-hook/filter fixture configuration."
+    ],
+    [
+      "2ed32cc628ec",
+      3,
+      "Reads staged data and creates a commit under default no-extra-hook/filter fixture configuration."
+    ],
+    [
+      "ae0380b79183",
+      3,
+      "Reads staged data and creates a commit under default no-extra-hook/filter fixture configuration."
+    ],
+    [
+      "417075fee054",
+      3,
+      "Reads staged data and creates a commit under default no-extra-hook/filter fixture configuration."
+    ],
+    [
+      "fb2c4dbfad71",
+      6,
+      "Removes a tracked resource and updates repository index state."
+    ],
+    [
+      "0b86411d62c1",
+      6,
+      "Removes a tracked resource and updates repository index state."
+    ],
+    [
+      "077d9cc35fcb",
+      null,
+      "Unknown/misspelled Git operation with unavailable intended semantics."
+    ],
+    [
+      "dcd5f9650a03",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "db82a46fbde1",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "6dcdd182e3c2",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "a39cace5e1da",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "9fef8f76ac5d",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "a76469ddb02b",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "a4eb1746b5ab",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "193d191722d1",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "4bde8e8431e8",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "63541c2d02d4",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "d3fd2c378d1f",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "246aa4720d01",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "f7d5ef98b954",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "8690a16c745e",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "ca864ad82a65",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "cf74be63122e",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "329d6b91f578",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "b2cad00e72ca",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "03b2802d14c7",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "4b6a36653a50",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "33f80130d0b2",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "43f61ef1f199",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "7d93694aaff6",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "459dfd294fb0",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "9bef63c85639",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "346fb18e5f0a",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "d88e5b8cd7c4",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "a52eef7e7f85",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "6e4f0ef4d9c2",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "1138b41df188",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "da26706688fb",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "3896c2d80461",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "30c108e1168a",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "89fcd71b0d6d",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "5be76c128813",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "8abf8cd311f7",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "61775c1721fc",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "5b91301a4c02",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "56c6ba7bf728",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "b5f56e5ef152",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "1f4f65764793",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "c403b2c3af4d",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "38ccdbeba913",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "711d27979195",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "2dcf19960a0a",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "08a237497fbb",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "eaab9a2e1ba7",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "5f1c5172ff34",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "eaabeaa2b174",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "e006b8e8c46d",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "3ec076d0e3d1",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "dbfc4b7070a8",
+      1,
+      "Manually reviewed read-only repository/configuration/log inspection and formatting chain. Cwd changes are command-scoped context, not persistent resource mutation."
+    ],
+    [
+      "831b2a739b27",
+      null,
+      "Delegated report script is unavailable; prior read commands do not provide its contents."
+    ],
+    ["fee7df5be362",1,"Pane capture and process inspection read existing state; no input is sent."],
+    ["c684b5f393e3",1,"Source and documentation inspections with bounded pipelines read fixtures."],
+    ["fca1bff909c4",1,"Source, directory and receipt inspections read fixtures."],
+    ["f314dc995f09",1,"Source inspection, find discovery and disk usage read metadata and files."],
+    ["a52c1b818ea5",1,"Log tail, repository status and manifest head only read fixtures."],
+    ["7ee55e83c535",null,"Delegated sync script is unavailable even with a check-named flag."],
+    ["946cd85df946",1,"Pane capture plus filtered process enumeration are observations."],
+    ["349663da1f3d",1,"Source discovery, text search, cwd and Git status are reads."],
+    ["2262e856c592",1,"Multiple source and package reads plus Git status."],
+    ["738ae6bd437b",1,"Source inspection and globs select read operands, not execution."],
+    ["93e8145362d7",1,"Read-only file discovery and source search; redirect discards stderr."],
+    ["30768cfbccb2",null,"Remote SQL uses unavailable environment-derived database/user selection; cannot bind target semantics completely."],
+    ["925545e3969b",null,"Node tests delegate to unavailable program bodies; a test name is not an effect proof."],
+    ["c283d8d1b566",1,"Bounded source and telemetry-code inspection does not run that code."],
+    ["39fa5175ed14",1,"Source searches and source excerpts are read-only."],
+    ["6f07c32d1639",1,"Source and migration inspections plus directory listing are reads."],
+    ["a27c711b2e57",1,"Source discovery, excerpts and Git status do not execute migrations."],
+    ["86c0abe6e7eb",1,"Source excerpts and Git diff inspect only."],
+    ["05ce92bb5e9d",1,"Source inspection and Docker image inspect read local metadata."],
+    ["42d788f89fb2",1,"Tails, diff summary, status and directory listing are read-only."],
+    ["3f6354f67401",null,"Unavailable delegated tests may have arbitrary effects; explicit output redirect is insufficient to bound them."],
+    ["930db39afc46",1,"Diff summaries and tailed logs are read-only."],
+    ["d39b61965019",1,"Two log tails read existing files."],
+    ["d5a951c6ca36",1,"A bounded log tail reads a file."],
+    ["9070439d5f21",1,"Filtered error search with tail reads a log."],
+    ["c60e642dadad",null,"Node test bodies are unavailable; stdout/stderr file redirect establishes a write but not a complete effect set."],
+    ["80c81acf586e",1,"Whitespace check, source excerpts, tails and status only inspect."],
+    ["539136f0b51e",1,"Existing test log tail is read-only."],
+    ["82b4f482cb59",1,"Log filtering and source inspection do not execute the tests."],
+    ["e2896c5a559c",1,"Diff checks and summaries plus source/log inspection read fixtures."],
+    ["f34e65cb2d15",3,"Git add and commit read contents and write repository objects and references under declared no-extra-hooks assumption."],
+    ["6804e9c8fd07",1,"Git status and source excerpts are reads."],
+    ["43d4393954bb",null,"Audit-named script body is unavailable; name does not bound effects."],
+    ["1c5d90c07879",1,"Kubernetes context enumeration, machine metadata, disk usage and file excerpts are reads."],
+    ["136e89e6f7e8",null,"Task definition is unavailable; test naming is not evidence of its effects."],
+    ["a06352294673",2,"Create a new temporary directory; resource creation is Write."],
+    ["26ae0698259f",null,"Test runner executes unavailable test and configuration bodies."],
+    ["d84227febc38",null,"Unavailable Node test code cannot be bounded by the test flag."],
+    ["a11d934e023f",1,"Inline Node only reads package metadata and prints scripts; remaining Git and file reads do not invoke them."],
+    ["08b1eaafcf6d",null,"Build tool configuration and plugins are unavailable; output directory alone does not bound effects."],
+    ["1f03cf1760cf",1,"Pane capture reads screen contents without sending input."],
+    ["37197fb5fe6f",1,"Inspect selected process metadata."],
+    ["930bf0c48541",0,"Trusted standard executable version flag emits tool metadata without resource read/write/destroy."],
+    ["72b9526652de",1,"Readonly SQLite SELECT inspects existing log records."],
+    ["0c966fb1e62a",1,"Process enumeration is an observation of existing state."],
+    ["44df479b13e1",1,"Diff and numbered source display inspect files."],
+    ["2588cda23bf4",0,"Inline JavaScript arithmetic prints a constant with no resource effects."],
+    ["0a67553117cf",1,"Loop over PDF files reads metadata and text; stdout piped to bounded consumers."],
+    ["0af2508574f6",1,"PDF text extraction to stdout and search over files are reads."],
+    ["30fee304dc1b",1,"Finite loop tests file existence and prints file contents; no evaluated file source."],
+    ["9563b01d7e5e",1,"Command lookup searches shell executable metadata; no selected program is invoked."],
+    ["738992601d46",null,"Context restoration script body is unavailable; affirmative option gives no effect bound."],
+    ["77d91b6afbcf",1,"HTTP GET defaults and /dev/null output perform remote reads; extra URL operands remain reads."],
+    ["1e3ecc848b23",1,"Kubernetes exec unwraps to shell lookup and directory listing, both read-only."],
+    ["0f493dc3c9cd",1,"Default HTTP GET reads a fixture URL; network location is separate from effect."],
+    ["6a80366a2b7c",1,"Multiple HTTP GET reads and stdout search do not mutate resources."],
+    ["79b5b20232b7",1,"DNS queries and redirect-following HTTP HEAD requests read remote metadata."],
+    ["9524144da569",1,"DNS lookups at several explicit resolvers are reads, not account changes."],
+    ["bd50fa343fbf",1,"DNS and HTTP HEAD metadata reads with bounded stdout."],
+    ["50ea04c555ac",null,"Server dry-run admission can invoke unavailable external admission hooks; cannot prove complete resource effects."],
+    ["d9a8cf43055f",4,"Delete an existing Kubernetes ingress resource; scope and authority checked separately."],
+    ["08897f94d3ca",null,"Applied manifest is unavailable and may specify arbitrary resource effects or workload code."],
+    ["ff148b1e0cd7",null,"Manifest contents are missing; apply verb alone cannot establish full effect set."],
+    ["18030bdfeca2",4,"Remove a named temporary file without reading its contents."],
+    ["3f51f110f8cf",1,"JSON validation to null sink plus Git checks read existing source and metadata."],
+    ["ed5261464f1a",4,"Cancel a running managed CI execution; explicit process termination is Destroy."],
+    ["ef725da4b4cb",3,"Observe remote CI status and write a local log via output redirection."],
+    ["4187b6b10034",7,"Cancel execution, create a rerun, and read notes to modify release metadata combine Destroy, Write and Read."],
+    ["24aabcf34633",3,"Remote CI status observation and local log redirection combine Read and Write."],
+    ["58692bb26438",null,"Verification script source unavailable; cannot infer effects from filename."],
+    ["554efa59fe3f",3,"Non-clobber copy reads a source and creates destination content; normal Write, not Destroy."],
+    ["ddfdc040af2b",null,"Package script definition unavailable; npm run delegates to unknown code."],
+    ["46865511fcec",3,"SCP reads a local source and writes remote file content; ordinary replacement is Write."],
+    ["54fbdf1a6dfd",1,"Process table filtered through search remains a read."],
+    ["d1808cb03d0f",null,"Taskfile source can execute code during template evaluation; unavailable configuration prevents complete bound."],
+    ["27522255f358",1,"Docker context show reads active configuration metadata."],
+    ["846f12969d8c",1,"Docker context inspect with output format reads metadata."],
+    ["e2cde7688ae2",1,"HTTP GET through a Unix socket is a remote resource read; socket transport is not itself mutation."],
+    ["7d4b3339a1d1",1,"Enumerate configured Docker context metadata."],
+    ["da2216be1066",4,"Interrupt an explicitly selected managed process."],
+    ["09d1b6dc1846",4,"Terminate explicitly selected managed processes."],
+    ["d56230a40e12",4,"Kill explicitly selected managed processes."],
+    ["f409f36ed746",null,"Package installation wrapper and delegated Python body unavailable."],
+    ["c958081b536c",1,"Head piped to tail reads a bounded text excerpt."],
+    ["9ab907bce434",null,"Delegated Python source unavailable; summary filename is not an effect proof."],
+    ["8b592ca0e207",3,"Python py_compile reads source and writes bytecode without executing source body under standard interpreter assumptions."],
+    ["5035830de99b",1,"Find searches fixture metadata and discards errors, with no exec or delete action."],
+    ["c5361b038bf7",1,"PDF extraction to stdout and text search are reads."],
+    ["13816f671fe1",1,"Find expression uses names, depth and implicit printing only."],
+    ["9155403bceb8",1,"Executable lookup enumerates path metadata without running matches."]
+  ]
+}

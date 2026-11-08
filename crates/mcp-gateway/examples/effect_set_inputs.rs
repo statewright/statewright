@@ -1,5 +1,5 @@
 //! Offline experiment inputs. Public command strings are parsed, never executed.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use statewright_mcp_gateway::{
     bash_classifier::OpClass, risk_assessment, semantic_contract, shell_ast_shadow,
 };
@@ -11,9 +11,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("expected public case manifest and NEW output prefix".into());
     }
     let corpus: Value = serde_json::from_slice(&std::fs::read(&args[0])?)?;
-    if corpus["schema"] != "statewright/public-effect-set-cases/v1"
-        || corpus["classification"] != "public_command_data"
-    {
+    let private_data = corpus["schema"] == "statewright/private-effect-set-cases/v1"
+        && corpus["classification"] == "private_sanitized_local_only"
+        && corpus["privacy"]["manual_sanitized_review"] == true
+        && corpus["privacy"]["local_only"] == true;
+    let public_data = corpus["schema"] == "statewright/public-effect-set-cases/v1"
+        && corpus["classification"] == "public_command_data";
+    if !private_data && !public_data {
         return Err("unsupported public input".into());
     }
     let axes = json!({
@@ -76,10 +80,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "unresolved":unresolved,"classes":format!("{:?}",ast.classes),"current_effect":format!("{:?}",assessment.resolve_effect())});
         // The same rich evidence is supplied to all three contract experiments.
         // Labels, expected masks and heuristic mask are never sent to the model.
-        let rich = json!({"tool":"exec_command","invocation":command,
+        let mut rich = json!({"tool":"exec_command","invocation":command,
             "environment":corpus["context"]["environment"],"scope":corpus["context"]["scope"],
             "execution_structure":request.execution_structure,
             "delegated_source":row["delegated_source"]});
+        if private_data {
+            rich["privacy_context"] = corpus["context"]["use"].clone();
+            rich["redactions"] = row["redactions"].clone();
+            rich["evidence_loss"] = row["evidence_loss"].clone();
+        }
         for (arm, state, profile) in [
             ("current_provider_six", provider, "six"),
             ("literal_six", rich.clone(), "six"),
@@ -95,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for (index, chunk) in cases.chunks(128).enumerate() {
         let output = format!("{}-{}.json", args[1], index + 1);
-        let document = json!({"schema":"statewright/public-effect-set-evaluation/v1","classification":"public_command_data",
+        let document = json!({"schema":if private_data{"statewright/private-effect-set-evaluation/v1"}else{"statewright/public-effect-set-evaluation/v1"},"classification":corpus["classification"],
             "label_status":corpus["label_status"],"source_contract":semantic_contract::VERSION,
             "source_cases":corpus,"questions":{},"question_profiles":{"six":semantic_contract::typed_questions(),"axes":axes,"sets":sets},"cases":chunk});
         let mut file = std::fs::OpenOptions::new()

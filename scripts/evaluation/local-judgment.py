@@ -71,10 +71,16 @@ def case_questions(corpus, case):
     return profiles[profile]
 
 
-def validate_public_corpus(corpus):
+def validate_public_corpus(corpus, allow_private=False):
     supported = (("statewright/synthetic-judgment-evaluation/v1", "public_synthetic"),
                  ("statewright/public-effect-set-evaluation/v1", "public_command_data"))
-    if (corpus.get("schema"), corpus.get("classification")) not in supported:
+    private_input = (corpus.get("schema"), corpus.get("classification")) == (
+        "statewright/private-effect-set-evaluation/v1", "private_sanitized_local_only")
+    if private_input:
+        privacy = corpus.get("source_cases", {}).get("privacy", {})
+        if not allow_private or privacy != {"raw_history_persisted": False, "manual_sanitized_review": True, "local_only": True}:
+            raise ValueError("private history requires explicit local-only opt-in and sanitized review receipt")
+    elif (corpus.get("schema"), corpus.get("classification")) not in supported:
         raise ValueError("only explicit public evaluation inputs are supported")
     cases = corpus.get("cases")
     if not isinstance(cases, list) or not 1 <= len(cases) <= 128:
@@ -97,6 +103,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", choices=("cpu", "mps"), default="mps")
     parser.add_argument("--checkpoint", choices=("english", "typed-decisions"), default="english")
+    parser.add_argument("--allow-private-sanitized-history", action="store_true",
+                        help="Only for explicitly authorized, manually reviewed sanitized history; offline local inference")
     args = parser.parse_args()
     root = args.root.resolve(strict=True)
     if not str(root).startswith("/Volumes/sidecar/") or not os.path.ismount("/Volumes/sidecar"):
@@ -133,7 +141,7 @@ def main():
     if not args.input:
         raise ValueError("bounded synthetic input file required")
     corpus, input_hash = capture_input(args.input)
-    cases = validate_public_corpus(corpus)
+    cases = validate_public_corpus(corpus, args.allow_private_sanitized_history)
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     manifest = json.loads(manifest_path.read_text())
@@ -191,6 +199,8 @@ def main():
         rows.append(row)
         print(json.dumps({"id": row["id"], "arm": row["arm"], "status": row["status"], "latency_ms": row["latency_ms"]}), flush=True)
     receipt = {"schema": "statewright/local-judgment-diagnostic/v1", "enforcement": "none",
+               "classification": corpus.get("classification"),
+               "privacy": corpus.get("source_cases", {}).get("privacy"),
                "label_status": corpus["label_status"], "input_file_hash": input_hash,
                "harness_hash": harness_hash, "checkpoint": manifest,
                "started_at": started_at, "completed_at": datetime.now(timezone.utc).isoformat(),

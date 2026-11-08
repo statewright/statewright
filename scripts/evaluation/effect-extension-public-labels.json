@@ -1,0 +1,677 @@
+{
+  "schema": "statewright/effect-extension-labels/v1",
+  "classification": "public_command_data",
+  "selection": "First two SHA256-ordered unseen strings in each of 67 manually chosen command families; prospective extension with frozen existing questions, not representative or human-validated.",
+  "items": [
+    [
+      "0baafa52fa49",
+      0,
+      "Basename formats a path string without observing a filesystem resource."
+    ],
+    [
+      "0c695ee5df35",
+      0,
+      "Basename formats a path string without observing a filesystem resource."
+    ],
+    [
+      "16cf5bfedfb1",
+      3,
+      "Compression reads input and creates output; the second form also removes originals because keep is absent."
+    ],
+    [
+      "3019792e04c4",
+      7,
+      "Compression reads input and creates output; the second form also removes originals because keep is absent."
+    ],
+    [
+      "0224be7602c9",
+      1,
+      "First reads a file and probes hosts; second only transforms generated streams and waits. Resource/time budgets are separate."
+    ],
+    [
+      "04c2135034ee",
+      0,
+      "First reads a file and probes hosts; second only transforms generated streams and waits. Resource/time budgets are separate."
+    ],
+    [
+      "0d61837aa5e8",
+      2,
+      "Changes group metadata; incidental metadata checks are not a separate substantive Read."
+    ],
+    [
+      "34b774aa3f82",
+      2,
+      "Changes group metadata; incidental metadata checks are not a separate substantive Read."
+    ],
+    [
+      "1a618f0aeb1e",
+      2,
+      "Changes mode bits."
+    ],
+    [
+      "1a921977c2ff",
+      2,
+      "Changes mode bits."
+    ],
+    [
+      "0cd5192180ca",
+      2,
+      "Changes ownership metadata."
+    ],
+    [
+      "0e8c8543e7d2",
+      2,
+      "Changes ownership metadata."
+    ],
+    [
+      "06594369e19e",
+      1,
+      "Reads file/directory input and compares streams."
+    ],
+    [
+      "08f66bce8785",
+      1,
+      "Reads file/directory input and compares streams."
+    ],
+    [
+      "024f315eb06c",
+      3,
+      "Reads source data and writes copies; mktemp also creates a destination."
+    ],
+    [
+      "0ce69fe5dcab",
+      3,
+      "Reads source data and writes copies; mktemp also creates a destination."
+    ],
+    [
+      "251ae956980f",
+      null,
+      "Unavailable scheduled program content or dynamic sed program prevents complete effects of the installed automation being established."
+    ],
+    [
+      "256c8e388115",
+      null,
+      "Unavailable scheduled program content or dynamic sed program prevents complete effects of the installed automation being established."
+    ],
+    [
+      "13c113b0b605",
+      1,
+      "Reads input and performs observation/filtering, including DNS reads."
+    ],
+    [
+      "14c9376d0c75",
+      1,
+      "Reads input and performs observation/filtering, including DNS reads."
+    ],
+    [
+      "0526b90446b8",
+      1,
+      "Observes the clock; stdin/read and ordinary output do not add resource mutation."
+    ],
+    [
+      "11c6ff53351a",
+      1,
+      "Observes the clock; stdin/read and ordinary output do not add resource mutation."
+    ],
+    [
+      "0204bd840beb",
+      1,
+      "Observes capacity then filters the result."
+    ],
+    [
+      "05d09d022e92",
+      1,
+      "Observes capacity then filters the result."
+    ],
+    [
+      "01fd027bffa6",
+      1,
+      "Compares existing contents and filters output."
+    ],
+    [
+      "0d93b3e6bc76",
+      1,
+      "Compares existing contents and filters output."
+    ],
+    [
+      "00d27b37e0be",
+      1,
+      "DNS lookup and result filtering are remote observation in this effect-only scope."
+    ],
+    [
+      "03d27f569ed9",
+      1,
+      "DNS lookup and result filtering are remote observation in this effect-only scope."
+    ],
+    [
+      "16d7a6831d94",
+      0,
+      "Literal dirname is string formatting; pwd substitution observes working-directory state."
+    ],
+    [
+      "1e7c358597ed",
+      1,
+      "Literal dirname is string formatting; pwd substitution observes working-directory state."
+    ],
+    [
+      "1273020abd4f",
+      1,
+      "Reads disk usage."
+    ],
+    [
+      "14576b07d06a",
+      1,
+      "Reads disk usage."
+    ],
+    [
+      "019bd2777ad9",
+      0,
+      "Numeric literal generation is stream-only; date plus tee observes clock and appends a file."
+    ],
+    [
+      "02b5473c8983",
+      3,
+      "Numeric literal generation is stream-only; date plus tee observes clock and appends a file."
+    ],
+    [
+      "03e06091e037",
+      1,
+      "Reads environment state; public fixture context contains no sensitive values."
+    ],
+    [
+      "22c1f10bf542",
+      1,
+      "Reads environment state; public fixture context contains no sensitive values."
+    ],
+    [
+      "1696320ce725",
+      1,
+      "Inspects file contents/type."
+    ],
+    [
+      "16b1c4352ad9",
+      1,
+      "Inspects file contents/type."
+    ],
+    [
+      "002719805c4e",
+      1,
+      "Find name predicates only observe."
+    ],
+    [
+      "00294da900bf",
+      1,
+      "Find name predicates only observe."
+    ],
+    [
+      "01e059f1918d",
+      0,
+      "First transforms stdin only; second reads a named file."
+    ],
+    [
+      "0622876fc688",
+      1,
+      "First transforms stdin only; second reads a named file."
+    ],
+    [
+      "1065ba0b32ba",
+      1,
+      "Observes account/hostname state even if a getent database selector is invalid."
+    ],
+    [
+      "2fcad75b8bd9",
+      1,
+      "Observes account/hostname state even if a getent database selector is invalid."
+    ],
+    [
+      "26fc2dc69e78",
+      1,
+      "Reads repository metadata/files and formats output."
+    ],
+    [
+      "2d180a95cdff",
+      1,
+      "Reads repository metadata/files and formats output."
+    ],
+    [
+      "0ae363fd0f46",
+      null,
+      "First opens an interactive pager without an interaction contract; second is a content search."
+    ],
+    [
+      "0d9c06c56f05",
+      1,
+      "First opens an interactive pager without an interaction contract; second is a content search."
+    ],
+    [
+      "0acd560787fa",
+      1,
+      "Observes account/group state."
+    ],
+    [
+      "26f47529a1d0",
+      1,
+      "Observes account/group state."
+    ],
+    [
+      "0d6724a1d414",
+      3,
+      "First streams compression into output files; second executes unavailable decompressed shell code."
+    ],
+    [
+      "1b6d40efee06",
+      null,
+      "First streams compression into output files; second executes unavailable decompressed shell code."
+    ],
+    [
+      "1bc07c3ed7fa",
+      1,
+      "Reads device/file data and transforms it."
+    ],
+    [
+      "1ccba6bcba8c",
+      1,
+      "Reads device/file data and transforms it."
+    ],
+    [
+      "03674505bacc",
+      1,
+      "Observes hostname/network configuration."
+    ],
+    [
+      "1a6fe13445d0",
+      1,
+      "Observes hostname/network configuration."
+    ],
+    [
+      "03386a1713d6",
+      1,
+      "Reads and joins existing files."
+    ],
+    [
+      "0c8e2e085a57",
+      1,
+      "Reads and joins existing files."
+    ],
+    [
+      "06aecbb376d2",
+      5,
+      "Observes process identity and terminates matching managed processes."
+    ],
+    [
+      "06c406272457",
+      5,
+      "Observes process identity and terminates matching managed processes."
+    ],
+    [
+      "00bec8f90b66",
+      null,
+      "First is an unterminated shell string; second creates a symlink."
+    ],
+    [
+      "03a2c77fb1d1",
+      2,
+      "First is an unterminated shell string; second creates a symlink."
+    ],
+    [
+      "054bdc86d395",
+      1,
+      "Reads directory metadata; xargs echo emits data rather than executing it."
+    ],
+    [
+      "05799a092395",
+      1,
+      "Reads directory metadata; xargs echo emits data rather than executing it."
+    ],
+    [
+      "00e85de55778",
+      1,
+      "Reads file data into checksums."
+    ],
+    [
+      "0325901f242b",
+      1,
+      "Reads file data into checksums."
+    ],
+    [
+      "03f0e574a3c8",
+      2,
+      "Creates directories; quoted path operands do not introduce another program."
+    ],
+    [
+      "0480030ffe90",
+      2,
+      "Creates directories; quoted path operands do not introduce another program."
+    ],
+    [
+      "02241adc06cf",
+      2,
+      "Changes mount state; system/privilege scope is separately assumed for this effect projection."
+    ],
+    [
+      "02963a9cda1f",
+      2,
+      "Changes mount state; system/privilege scope is separately assumed for this effect projection."
+    ],
+    [
+      "1060eb516300",
+      2,
+      "Rename is Write; the second form additionally executes ls to observe names."
+    ],
+    [
+      "1185cc69e7a0",
+      3,
+      "Rename is Write; the second form additionally executes ls to observe names."
+    ],
+    [
+      "01a5b4efa806",
+      0,
+      "First formats stdin only; second reads a named file."
+    ],
+    [
+      "041de9acf4a8",
+      1,
+      "First formats stdin only; second reads a named file."
+    ],
+    [
+      "07a69f22856d",
+      1,
+      "Reads file/device bytes."
+    ],
+    [
+      "0c465fa7003b",
+      1,
+      "Reads file/device bytes."
+    ],
+    [
+      "11b256504ccd",
+      1,
+      "Reads and combines existing files."
+    ],
+    [
+      "1e615e743a8b",
+      1,
+      "Reads and combines existing files."
+    ],
+    [
+      "21a99381c743",
+      2,
+      "First creates key files without including any key material in the fixture; second emits generated literal data."
+    ],
+    [
+      "28279cb66ddb",
+      0,
+      "First creates key files without including any key material in the fixture; second emits generated literal data."
+    ],
+    [
+      "009be18b4fdc",
+      5,
+      "Reads process state and terminates selected processes; inline program text is supplied."
+    ],
+    [
+      "042c005dd048",
+      5,
+      "Reads process state and terminates selected processes; inline program text is supplied."
+    ],
+    [
+      "035ad12533b2",
+      1,
+      "Observes process trees."
+    ],
+    [
+      "091f645fc249",
+      1,
+      "Observes process trees."
+    ],
+    [
+      "071f9118f34a",
+      3,
+      "First reads cwd and writes clipboard state; second only observes/formats cwd."
+    ],
+    [
+      "29f9f02450df",
+      1,
+      "First reads cwd and writes clipboard state; second only observes/formats cwd."
+    ],
+    [
+      "0070349550ee",
+      1,
+      "Resolves filesystem/path metadata."
+    ],
+    [
+      "0771f41fa9b1",
+      1,
+      "Resolves filesystem/path metadata."
+    ],
+    [
+      "0b88bc71b108",
+      2,
+      "First renames resources; -n previews matching names without applying changes."
+    ],
+    [
+      "281e92d32764",
+      1,
+      "First renames resources; -n previews matching names without applying changes."
+    ],
+    [
+      "0a6d83bf4c94",
+      4,
+      "Removes resource trees."
+    ],
+    [
+      "0a9fb9a0bb87",
+      4,
+      "Removes resource trees."
+    ],
+    [
+      "439b26f14393",
+      4,
+      "Removes directories; dirname calculations themselves only format strings."
+    ],
+    [
+      "925497c9b01f",
+      4,
+      "Removes directories; dirname calculations themselves only format strings."
+    ],
+    [
+      "052b43311c4e",
+      3,
+      "First copies data; unresolved option expansion in the second may introduce additional effects."
+    ],
+    [
+      "078f34bc74c7",
+      null,
+      "First copies data; unresolved option expansion in the second may introduce additional effects."
+    ],
+    [
+      "0e4e466dc429",
+      3,
+      "First reads a source and writes a remote copy; second lacks a complete copy operand contract."
+    ],
+    [
+      "168d8a83140f",
+      null,
+      "First reads a source and writes a remote copy; second lacks a complete copy operand contract."
+    ],
+    [
+      "0ff59a8d7e92",
+      1,
+      "Reads input and formats it to stdout; no output file."
+    ],
+    [
+      "1288944915dc",
+      1,
+      "Reads input and formats it to stdout; no output file."
+    ],
+    [
+      "009780996020",
+      0,
+      "Generates and formats numeric streams without reading managed resource state."
+    ],
+    [
+      "04724e1d549b",
+      0,
+      "Generates and formats numeric streams without reading managed resource state."
+    ],
+    [
+      "1b519bbe62ac",
+      2,
+      "First writes generated bytes through stdout redirection; second overwrites then unlinks a file."
+    ],
+    [
+      "3ff4fa854e4d",
+      6,
+      "First writes generated bytes through stdout redirection; second overwrites then unlinks a file."
+    ],
+    [
+      "0187f47d3551",
+      1,
+      "Sorts existing file data."
+    ],
+    [
+      "05bcbdf775f3",
+      1,
+      "Sorts existing file data."
+    ],
+    [
+      "021943a23fa3",
+      3,
+      "Reads input and creates split output files."
+    ],
+    [
+      "09ff6748f10b",
+      3,
+      "Reads input and creates split output files."
+    ],
+    [
+      "57d9bd168703",
+      1,
+      "Observes file metadata, including nested directory listing."
+    ],
+    [
+      "86c5bc1109e5",
+      1,
+      "Observes file metadata, including nested directory listing."
+    ],
+    [
+      "01195c01d3d3",
+      3,
+      "First observes user identity then changes ownership; second reads and copies file data."
+    ],
+    [
+      "01e3845271ae",
+      3,
+      "First observes user identity then changes ownership; second reads and copies file data."
+    ],
+    [
+      "13133431afa2",
+      3,
+      "First observes logs/clock and writes a destination; second reads logs and computes a line count."
+    ],
+    [
+      "1992e2c97284",
+      1,
+      "First observes logs/clock and writes a destination; second reads logs and computes a line count."
+    ],
+    [
+      "1070be619616",
+      3,
+      "Archive creation/extraction reads input and writes files."
+    ],
+    [
+      "1374ea4bbdee",
+      3,
+      "Archive creation/extraction reads input and writes files."
+    ],
+    [
+      "b4d1049f8f7a",
+      0,
+      "Tee without a file only passes stdin; with a file it writes a resource."
+    ],
+    [
+      "dc9284fc0555",
+      2,
+      "Tee without a file only passes stdin; with a file it writes a resource."
+    ],
+    [
+      "1e800a1a0d18",
+      3,
+      "First observes/formats time then updates metadata; second updates a file."
+    ],
+    [
+      "3c216227a4c8",
+      2,
+      "First observes/formats time then updates metadata; second updates a file."
+    ],
+    [
+      "07462bf7ed41",
+      0,
+      "First transforms stdin; second explicitly redirects a file into stdin."
+    ],
+    [
+      "37a687774a9a",
+      1,
+      "First transforms stdin; second explicitly redirects a file into stdin."
+    ],
+    [
+      "01dedd6ba119",
+      1,
+      "Reads directory trees; supplied Perl only filters."
+    ],
+    [
+      "16b8d5671339",
+      1,
+      "Reads directory trees; supplied Perl only filters."
+    ],
+    [
+      "0e6c50ec7636",
+      1,
+      "Observes system identity."
+    ],
+    [
+      "22680e013f47",
+      1,
+      "Observes system identity."
+    ],
+    [
+      "3a8cab672d5d",
+      0,
+      "First transforms stdin; second reads a named file."
+    ],
+    [
+      "536839fb562b",
+      1,
+      "First transforms stdin; second reads a named file."
+    ],
+    [
+      "0b3c5f845eff",
+      1,
+      "Observes login/session metadata."
+    ],
+    [
+      "11d32595df1f",
+      1,
+      "Observes login/session metadata."
+    ],
+    [
+      "59464f2cb45d",
+      3,
+      "First reads names and creates directories; second removes names supplied as data."
+    ],
+    [
+      "5b7d098270be",
+      4,
+      "First reads names and creates directories; second removes names supplied as data."
+    ],
+    [
+      "0cdbcfe16abe",
+      1,
+      "First reads compressed data; second contains an incomplete illustrative awk program."
+    ],
+    [
+      "0d82ff29ecfb",
+      null,
+      "First reads compressed data; second contains an incomplete illustrative awk program."
+    ]
+  ]
+}

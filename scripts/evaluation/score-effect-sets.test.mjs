@@ -46,6 +46,12 @@ test('canonical hashing preserves question/state bytes and batches reject unboun
   const corpus={cases:[]};
   assert.throws(()=>validateBatch(corpus,{input_file_hash:'other'},{sha256:'expected',document:{schema:'statewright/public-effect-set-evaluation/v1',classification:'public_command_data',source_cases:corpus,cases:[]}}),/input bytes/);
 });
+test('private receipts cannot lose or contradict their local-only handling labels',()=>{
+  const corpus={classification:'private_sanitized_local_only',privacy:{raw_history_persisted:false,manual_sanitized_review:true,local_only:true},cases:[]};
+  const input={sha256:'frozen',document:{schema:'statewright/private-effect-set-evaluation/v1',classification:'private_sanitized_local_only',source_cases:corpus}};
+  assert.throws(()=>validateBatch(corpus,{classification:'public_command_data'},input));
+  assert.throws(()=>validateBatch(corpus,{classification:'private_sanitized_local_only',privacy:{local_only:false}},input),/handling label/);
+});
 test('paired evidence rejects swapped tasks, changed commands, and changed questions',()=>{
   const hash=value=>createHash('sha256').update(pythonCanonical(value)).digest('hex');
   const corpus={cases:[{id:'one',command:'cat fixture.txt',mask:1}]};

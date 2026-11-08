@@ -21,6 +21,17 @@ class FakeAgent:
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_private_history_is_not_relabeled_public_and_requires_local_opt_in(self):
+        corpus = {"schema": "statewright/private-effect-set-evaluation/v1", "classification": "private_sanitized_local_only",
+                  "source_cases": {"privacy": {"raw_history_persisted": False, "manual_sanitized_review": True, "local_only": True}},
+                  "questions": {"axes": {"read": {}}}, "cases": [{"id": "redacted", "arm": "axes", "task": "axes"}]}
+        with self.assertRaises(ValueError):
+            module.validate_public_corpus(corpus)
+        self.assertEqual(len(module.validate_public_corpus(corpus, True)), 1)
+        corpus["source_cases"]["privacy"]["manual_sanitized_review"] = False
+        with self.assertRaises(ValueError):
+            module.validate_public_corpus(corpus, True)
+
     def test_public_data_contract_and_duplicate_requests(self):
         corpus = {"schema": "statewright/public-effect-set-evaluation/v1", "classification": "public_command_data",
                   "questions": {"axes": {"read": {}}}, "cases": [{"id": "public", "arm": "axes", "task": "axes"}]}

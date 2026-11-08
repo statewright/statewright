@@ -71,6 +71,22 @@ def case_questions(corpus, case):
     return profiles[profile]
 
 
+def validate_public_corpus(corpus):
+    supported = (("statewright/synthetic-judgment-evaluation/v1", "public_synthetic"),
+                 ("statewright/public-effect-set-evaluation/v1", "public_command_data"))
+    if (corpus.get("schema"), corpus.get("classification")) not in supported:
+        raise ValueError("only explicit public evaluation inputs are supported")
+    cases = corpus.get("cases")
+    if not isinstance(cases, list) or not 1 <= len(cases) <= 128:
+        raise ValueError("case count outside bounded diagnostic corpus")
+    identities = [(case["id"], case["arm"]) for case in cases]
+    if len(set(identities)) != len(identities):
+        raise ValueError("duplicate case/arm")
+    for case in cases:
+        case_questions(corpus, case)
+    return cases
+
+
 def main():
     harness_hash = digest(Path(__file__))
     started_at = datetime.now(timezone.utc).isoformat()
@@ -117,11 +133,7 @@ def main():
     if not args.input:
         raise ValueError("bounded synthetic input file required")
     corpus, input_hash = capture_input(args.input)
-    if corpus.get("schema") != "statewright/synthetic-judgment-evaluation/v1" or corpus.get("classification") != "public_synthetic":
-        raise ValueError("only explicitly public synthetic evaluation inputs are supported")
-    cases = corpus["cases"]
-    if not isinstance(cases, list) or not 1 <= len(cases) <= 128:
-        raise ValueError("case count outside bounded diagnostic corpus")
+    cases = validate_public_corpus(corpus)
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     manifest = json.loads(manifest_path.read_text())
@@ -162,6 +174,9 @@ def main():
                "expected": case["expected"], "tokens": token_counts, "truncated": truncated}
         row["question_profile"] = case.get("question_profile")
         row["diagnostic_context"] = {key: case[key] for key in ("draft_effect", "heuristic_risk", "heuristic_exposure") if key in case}
+        for key in ("heuristic", "case_kind", "source"):
+            if key in case:
+                row[key] = case[key]
         if truncated:
             row.update(status="abstain_truncated", latency_ms=None)
         else:

@@ -21,6 +21,18 @@ class FakeAgent:
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_public_data_contract_and_duplicate_requests(self):
+        corpus = {"schema": "statewright/public-effect-set-evaluation/v1", "classification": "public_command_data",
+                  "questions": {"axes": {"read": {}}}, "cases": [{"id": "public", "arm": "axes", "task": "axes"}]}
+        self.assertEqual(len(module.validate_public_corpus(corpus)), 1)
+        corpus["classification"] = "private"
+        with self.assertRaises(ValueError):
+            module.validate_public_corpus(corpus)
+        corpus["classification"] = "public_command_data"
+        corpus["cases"] *= 2
+        with self.assertRaises(ValueError):
+            module.validate_public_corpus(corpus)
+
     def test_frozen_question_profiles_are_explicit_and_missing_profile_fails(self):
         corpus = {"questions": {"command": {"old": {}}}, "question_profiles": {"focused": {"new": {}}}}
         self.assertEqual(module.case_questions(corpus, {"task": "command"}), {"old": {}})

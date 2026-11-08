@@ -87,6 +87,8 @@ pub enum ResolvedEffect {
 /// otherwise opaque operation; every other outcome fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SemanticAssessorStatus {
+    /// Complete deterministic evidence made an effect-model call unnecessary.
+    NotRequired,
     Disabled,
     Queued,
     Unavailable,
@@ -189,6 +191,8 @@ pub struct SemanticAssessmentRequest {
     pub destructive_hint: Option<bool>,
     pub open_world_hint: Option<bool>,
     pub mcp_shape: Option<McpInvocationShape>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_request: Option<crate::web_effect::WebEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_context: Option<serde_json::Value>,
 }
@@ -565,6 +569,7 @@ impl RiskPipelineAssessment {
                             segment.operation.is_some() && !segment.delegates_unknown_effect
                         }))
                 } else {
+                    if let Some(web) = &request.web_request { return web.complete; }
                     request.tool_name != "unknown"
                         && request
                             .mcp_shape
@@ -929,6 +934,14 @@ async fn assess_with_provider(
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
     });
+    if let Some(web) = &request.web_request {
+        request_shape["assessment_profile"] = serde_json::json!("native_web_effects/v1");
+        request_shape["web_effect_instructions"] = serde_json::json!(crate::web_effect::CONTEXT);
+        request_shape["web_request"] = serde_json::json!(web);
+        if provider.kind == SemanticProviderKind::LayaLocal {
+            request_shape["local_web_request"] = serde_json::json!(web.local_request);
+        }
+    }
     if let Some(shape) = request.shell_ast_shape.as_ref() {
         request_shape["shell_ast_shape"] = serde_json::json!(shape);
     }
@@ -1723,27 +1736,7 @@ pub fn assess_invocation(
 }
 
 fn native_web_run_read(arguments: &serde_json::Value) -> bool {
-    let Some(fields) = arguments.as_object() else { return false; };
-    let mut action = false;
-    for (key, value) in fields {
-        if key == "response_length" {
-            if !matches!(value.as_str(), Some("short" | "medium" | "long")) { return false; }
-            continue;
-        }
-        let required = match key.as_str() {
-            "search_query" | "image_query" => "q",
-            "open" | "click" | "find" | "screenshot" => "ref_id",
-            "finance" => "ticker", "weather" => "location", "sports" => "fn", "time" => "utc_offset",
-            _ => return false,
-        };
-        let Some(items) = value.as_array() else { return false; };
-        if items.is_empty() || items.len() > 32
-            || items.iter().any(|item| !item.get(required).and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())) {
-            return false;
-        }
-        action = true;
-    }
-    action
+    crate::web_effect::evidence(arguments).complete
 }
 
 fn assess_invocation_with_origin(
@@ -1815,7 +1808,10 @@ fn assess_invocation_with_origin(
     };
     result.invocation_fingerprint = Some(invocation_fingerprint(tool_name, arguments));
     result.state_intent = state_intent.map(str::to_owned);
-    let semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
+    let mut semantic_request = semantic_request(tool, tool_name, arguments, state_intent, is_shell);
+    if trusted_native_adapter && tool.is_none() && crate::tool_intent::is_native_web_run(tool_name) {
+        semantic_request.web_request = Some(crate::web_effect::evidence(arguments));
+    }
     result.semantic_request = Some(semantic_request.clone());
     let ast_mode = shell_ast_mode();
     if ast_mode != ShellAstMode::Disabled {
@@ -2063,6 +2059,12 @@ async fn assess_pipeline_visible_with_runtime_and_references(
     }
     emit_shadow(tool_name, &deterministic);
     let semantic = match deterministic.semantic_request.as_ref() {
+        Some(request) if request.web_request.as_ref().is_some_and(|web| web.complete)
+            && deterministic.risk == RiskBand::Low => {
+            // The web heuristic has full native read-contract evidence. Do not
+            // spend a model call or turn its availability into a read gate.
+            semantic_receipt(request, SemanticAssessorStatus::NotRequired)
+        }
         Some(request) => {
             submit_semantic_pipeline_visible_with(config, runtime, timeout, request).await
         }
@@ -2751,6 +2753,7 @@ fn semantic_request(
         } else {
             Some(mcp_shape(tool, tool_name, arguments))
         },
+        web_request: None,
     }
 }
 
@@ -3904,6 +3907,82 @@ mod tests {
             json!({"search_query":"unparsed"}), json!({})] {
             assert_ne!(assess_invocation_with_origin(None,"web.run",&invalid,None,true).risk,RiskBand::Low);
         }
+    }
+
+    #[test]
+    fn web_request_evidence_reaches_the_semantic_seam_without_borrowing_read_authority() {
+        let input = json!({"open":[{"ref_id":"https://example.com/item", "method":"DELETE"}]});
+        let assessed = assess_invocation_with_origin(None,"web.run",&input,None,true);
+        assert_ne!(assessed.risk,RiskBand::Low);
+        let projected = serde_json::to_value(assessed.semantic_request.unwrap()).unwrap();
+        assert_eq!(projected["web_request"]["actions"][0]["method"], "DELETE");
+        assert_eq!(projected["web_request"]["complete"], false);
+        assert!(!projected.to_string().contains("https://example.com/item"));
+        let collision: ToolInfo = serde_json::from_value(json!({"name":"web.run","inputSchema":{}})).unwrap();
+        let foreign = assess_invocation_with_origin(Some(&collision),"web.run",&input,None,true);
+        assert!(serde_json::to_value(foreign.semantic_request.unwrap()).unwrap().get("web_request").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_web_heuristic_precedes_the_specialized_semantic_fallback() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+        let seen=Arc::new(Mutex::new(Vec::new()));
+        let app=Router::new().route("/",post({
+            let seen=seen.clone();
+            move |Json(body):Json<serde_json::Value>| {
+                let seen=seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({"answers":{
+                        "read_only":{"type":"noul","noul":0.99},"may_write":{"type":"noul","noul":0.01},
+                        "reversible":{"type":"noul","noul":0.99},"destructive":{"type":"noul","noul":0.01},
+                        "irreversible":{"type":"noul","noul":0.01},"external_or_account_effect":{"type":"noul","noul":0.01}
+                    }}))
+                }
+            }
+        }));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint=format!("http://{}/",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
+        let timeout=std::time::Duration::from_secs(1);
+        let config=SemanticShadowConfig {enabled:true,authoritative_enabled:true,evaluation_only:false,queue_capacity:8};
+        let mut provider=SemanticProviderConfig {kind:SemanticProviderKind::TypeSafeSystemOne,
+            endpoint,model:"fixture".into(),bearer_token:None,timeout};
+        let runtime=start_shared_semantic_shadow_runtime(&config,provider.clone());
+        let proven=assess_pipeline_visible_with_runtime(None,"web.run",&json!({"search_query":[{"q":"public-search-value"}]}),None,true,&config,Some(&runtime),timeout).await;
+        assert_eq!(proven.resolve_effect(),ResolvedEffect::ReadOnly);
+        assert_eq!(proven.semantic.status,SemanticAssessorStatus::NotRequired);
+        assert!(seen.lock().unwrap().is_empty());
+        let input=json!({"search_query":[{"q":"public-search-value"}],"open":[{"ref_id":"https://example.com/target","method":"POST"}],"note":"--token SYNTHETIC_CREDENTIAL"});
+        let unresolved=assess_pipeline_visible_with_runtime(None,"web.run",&input,None,true,&config,Some(&runtime),timeout).await;
+        assert_eq!(unresolved.semantic.status,SemanticAssessorStatus::Assessed);
+        assert_eq!(unresolved.resolve_effect(),ResolvedEffect::DenyUncertain);
+        assert_eq!(unresolved.resolve_effect_with_basis().1,"incomplete_structural_evidence");
+        let visible=unresolved.visible_json_for_denial("incomplete_structural_evidence","complete_structural_evidence_or_separate_approval");
+        assert_eq!(visible["separate_approval_allowed"],true);
+        let request=unresolved.deterministic.semantic_request.as_ref().unwrap();
+        provider.kind=SemanticProviderKind::LayaLocal;
+        let _=assess_with_provider(&reqwest::Client::new(),&provider,request).await.unwrap();
+        let requests=seen.lock().unwrap();
+        assert_eq!(requests.len(),2);
+        for body in requests.iter() {
+            assert_eq!(body["state"]["assessment_profile"],"native_web_effects/v1");
+            assert!(body["state"]["web_effect_instructions"].as_str().unwrap().contains("not an authorization decision"));
+            assert_eq!(body["state"]["web_request"]["actions"].as_array().unwrap().len(),3);
+            assert!(!body["state"]["web_request"].to_string().contains("public-search-value"));
+            assert!(!body.to_string().contains("SYNTHETIC_CREDENTIAL"));
+        }
+        assert!(!requests[0].to_string().contains("public-search-value"));
+        assert!(!requests[0].to_string().contains("https://example.com/target"));
+        assert!(requests[1]["state"]["local_web_request"].to_string().contains("public-search-value"));
+        assert!(requests[1]["state"]["local_web_request"].to_string().contains("https://example.com/target"));
+        drop(requests);
+        let no_provider=assess_pipeline_visible_with_runtime(None,"web.run",&input,None,true,&config,None,timeout).await;
+        assert_eq!(no_provider.semantic.status,SemanticAssessorStatus::Unavailable);
+        assert_eq!(no_provider.resolve_effect(),ResolvedEffect::DenyUncertain);
+        assert_eq!(no_provider.visible_json_for_denial("incomplete_structural_evidence","complete_structural_evidence_or_separate_approval")["separate_approval_allowed"],true);
+        server.abort();
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod tool_intent;
 pub mod upstream;
 pub mod usage;
 pub mod web_protocol;
+pub mod web_effect;
 
 /// Database pool type for step metering.
 /// When the `metering` feature is enabled, this is a real Postgres connection pool.

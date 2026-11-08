@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { approvalDisplayContext } from "./human-interaction.mjs";
 import { approvalAsk, approvalDeny, approvalNotHandled } from "./approval-pipeline.mjs";
 
 const REWORKABLE_BASES = new Set([
@@ -50,7 +51,8 @@ export function classifierApprovalRequest(value) {
       || !separateApprovalAllowed) return null;
   return Object.freeze({threadId, runId, runSessionId, state, stateEpoch, intentFingerprint,
     invocationFingerprint, basis, requiredAuthority, reformulationAllowed,
-    exactInvocationRetryAllowed, separateApprovalAllowed});
+    exactInvocationRetryAllowed, separateApprovalAllowed,
+    displayContext: approvalDisplayContext(value)});
 }
 
 /**
@@ -165,7 +167,7 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: `Statewright could not resolve this exact invocation through heuristic/semantic assessment.${request.basis === "external_effect_unresolved" ? " The command reaches an external service, but its effects could not be determined." : ""}${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
+        message: `Statewright approval\nTool: ${request.displayContext?.tool ?? "unavailable"}\nCommand: ${request.displayContext?.command ?? "unavailable (this client did not supply command context)"}\nWorking directory: ${request.displayContext?.cwd ?? "unavailable"}\n\nStatewright could not resolve this exact invocation through heuristic/semantic assessment.${request.basis === "external_effect_unresolved" ? " The command reaches an external service, but its effects could not be determined." : ""}${this.maxReworks ? ` Rewrites attempted: ${this.maxReworks}.` : ""}\nPhase: ${request.state}\nClassifier axis: ${request.basis}\nRequired authority: ${request.requiredAuthority}\nAllow this exact invocation once?`,
         requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous
@@ -208,7 +210,10 @@ export class ClassifierApprovalController {
     this.emit({type: action === "allow_once"
       ? "classifier_human_approval_granted" : "classifier_human_approval_denied",
     threadId: pending.request.threadId, run_id: pending.request.runId,
-    state: pending.request.state, basis: pending.request.basis, reason});
+    state: pending.request.state, basis: pending.request.basis, reason,
+    approval_request_id: pending.requestId,
+    invocation_fingerprint: pending.request.invocationFingerprint,
+    display_context: pending.request.displayContext});
     pending.resolve(this.result(pending.request, action, {reason,
       approval_request_id: pending.requestId, attempts: entry.attempts,
       max_reworks: this.maxReworks}));

@@ -26,6 +26,16 @@ const input = {
   },
 };
 
+test('external uncertainty carries the command and directory through both helper passes',()=>{
+  const request=redactedApprovalRequest({...input,
+    classifier_receipt:{...input.classifier_receipt,final_denial_basis:'external_effect_unresolved'},
+    tool_name:'exec_command',tool_input:{cmd:'git diff -- pb/hooks/order_fulfillment.pb.js',workdir:'/workspace'}});
+  assert(request);
+  assert.equal(request.display_context.command,'git diff -- pb/hooks/order_fulfillment.pb.js');
+  assert.equal(request.display_context.cwd,'/workspace');
+  assert.deepEqual(redactedApprovalRequest(request),request);
+});
+
 test("approval CLI responds through a managed Codex home's symlinked plugin directory", async t => {
   const home = await mkdtemp(join(tmpdir(), "statewright-approval-cli-"));
   t.after(() => rm(home, {recursive: true, force: true}));

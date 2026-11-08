@@ -55,10 +55,13 @@ test("default uncertainty handling immediately holds for a native human decision
 test("external uncertainty explains the review and keeps the exact invocation bound", async () => {
   const sent = [];
   const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});
-  const decision = await controller.begin(request({}, {final_denial_basis: "external_effect_unresolved"}));
+  const decision = await controller.begin(request({display_context:{tool:'exec_command',
+    command:'git diff -- pb/hooks/order_fulfillment.pb.js',cwd:'/workspace'}}, {final_denial_basis: "external_effect_unresolved"}));
   assert.equal(decision.outcome, ApprovalOutcome.ASK);
   const modal = sent.find(value => value.method === "mcpServer/elicitation/request");
   assert.match(modal.params.message, /reaches an external service, but its effects could not be determined/);
+  assert.match(modal.params.message, /Command: git diff -- pb\/hooks\/order_fulfillment.pb.js/);
+  assert.match(modal.params.message, /Working directory: \/workspace/);
   controller.handleReply({id: modal.id, result: {action: "accept"}});
   const result = await decision.completion;
   assert.equal(result.action, "allow_once");

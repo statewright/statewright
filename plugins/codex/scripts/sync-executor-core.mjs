@@ -9,6 +9,7 @@ const CODEX_ROOT = resolve(SCRIPT_ROOT, "..");
 const EXECUTOR_ROOT = resolve(CODEX_ROOT, "..", "executor");
 
 export const EXECUTOR_CORE_FILES = [
+  ["lib/human-interaction.mjs", "scripts/lib/human-interaction.mjs"],
   ["lib/command-evidence.mjs", "scripts/lib/command-evidence.mjs"],
   ["lib/command-yaml.generated.mjs", "scripts/lib/command-yaml.generated.mjs"],
   ["lib/error-reporting.mjs", "scripts/lib/error-reporting.mjs"],

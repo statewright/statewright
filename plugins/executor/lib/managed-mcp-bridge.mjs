@@ -41,7 +41,7 @@ async function readBody(request) {
 }
 
 export class ManagedMcpBridge {
-  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage }) {
+  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage, humanInteractionUrl = null }) {
     if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
     if (nativeUsage && typeof projectUsage !== "function") throw new Error("Native usage requires a payload projector");
     this.gatewayUrl = canonicalGateway(gatewayUrl);
@@ -54,12 +54,14 @@ export class ManagedMcpBridge {
     this.url = null;
     this.nativeUsage = nativeUsage;
     this.projectUsage = projectUsage;
+    this.humanInteractionUrl = humanInteractionUrl;
   }
 
   async start() {
     this.server = createServer(async (request, response) => {
       try {
-        if (request.method !== "POST" || !["/mcp", ...(this.nativeUsage ? ["/native-usage"] : [])].includes(request.url)) {
+        if (request.method !== "POST" || !["/mcp", ...(this.nativeUsage ? ["/native-usage"] : []),
+            ...(this.humanInteractionUrl ? ["/human-interactions"] : [])].includes(request.url)) {
           response.writeHead(404).end();
           return;
         }
@@ -75,6 +77,14 @@ export class ManagedMcpBridge {
           return;
         }
         const body = await readBody(request);
+        if (request.url === "/human-interactions") {
+          const upstream = await this.fetch(this.humanInteractionUrl, {method:"POST", redirect:"error",
+            headers:{"Content-Type":"application/json", Authorization:`Bearer ${this.apiKey}`},
+            body, signal:AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS)});
+          response.writeHead(upstream.status, {"Content-Type":"application/json"});
+          response.end(Buffer.from(await upstream.arrayBuffer()));
+          return;
+        }
         if (request.url === "/native-usage") {
           let event;
           try { event = this.projectUsage(JSON.parse(body.toString("utf8"))); }

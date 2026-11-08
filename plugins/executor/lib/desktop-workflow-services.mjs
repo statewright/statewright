@@ -10,7 +10,10 @@ export function codexWorkflowServices({home, controlDir, clientId, ownsThread, g
   peekRouteRequest = async () => null}) {
   const owns = async threadId => Boolean(await ownsThread(threadId))
     && (await readCodexRootSession(controlDir, clientId))?.sessionId === threadId;
-  const telemetry = createTelemetryWriter(join(home, ".statewright", "telemetry", "codex-routing.jsonl"));
+  const telemetry = createTelemetryWriter(join(home, ".statewright", "telemetry", "codex-routing.jsonl"), {
+    humanEndpoint:bridge ? `${bridge.url}/human-interactions` : null,
+    apiKey:bridge?.token ?? null, clientId,
+  });
   const usage = bridge ? new DesktopUsageRelay({
     path: join(controlDir, "..", "native-usage-relay.jsonl"),
     deliver: async event => {

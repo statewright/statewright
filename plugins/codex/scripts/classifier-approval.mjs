@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { approvalDisplayContext } from "./lib/desktop-runtime/human-interaction.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024;
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -13,6 +14,7 @@ const APPROVABLE_BASES = new Set([
   "semantic_vector_unavailable",
   "semantic_assessment_incomplete",
   "semantic_authorization_disabled",
+  "external_effect_unresolved",
 ]);
 
 function printable(value, maximum = 256) {
@@ -48,6 +50,8 @@ export function redactedApprovalRequest(value) {
       separate_approval_allowed: receipt?.separate_approval_allowed === true,
     },
   };
+  const display = approvalDisplayContext(value);
+  if (display) request.display_context = display;
   return request.thread_id && request.run_id && request.run_session_id
     && request.state && request.state_epoch !== null
     && request.classifier_receipt.intent_fingerprint

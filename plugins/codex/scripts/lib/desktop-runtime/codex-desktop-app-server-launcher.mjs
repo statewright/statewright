@@ -79,6 +79,8 @@ export async function startDesktopMcpBridge({ environment, clientId, home = home
     gatewayUrl: gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"),
     apiKey,
     clientId,
+    humanInteractionUrl: environment.STATEWRIGHT_PB_URL
+      ? new URL("/api/gateway/human-interactions", environment.STATEWRIGHT_PB_URL).href : null,
     ...(nativeUsage ? {nativeUsage, projectUsage: projectDesktopUsage} : {}),
   });
   await bridge.start();

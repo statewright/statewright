@@ -156,6 +156,7 @@ fn classifier_denial_basis(value: &str) -> bool {
             | "semantic_assessment_incomplete"
             | "semantic_authorization_disabled"
             | "exploratory_effect_unresolved"
+            | "external_effect_unresolved"
     ) || value.starts_with("classifier_policy_")
         || value.starts_with("workflow_capability_")
 }
@@ -2100,6 +2101,22 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn classifier_capture_includes_external_uncertainty_without_approval_as_denial() {
+        let request = adapter_request("exec_command", json!({"cmd": "curl https://example.invalid/read"}));
+        let response = adapter_decision(json!({
+            "decision": "deny",
+            "risk_assessment": {
+                "intent_fingerprint": "intent_v1_external",
+                "invocation_fingerprint": "invocation_v1_external",
+                "final_denial_basis": "external_effect_unresolved"
+            }
+        }));
+        let sample = classifier_denial_sample(&request, &response, "owned-session").unwrap();
+        assert_eq!(sample["final_denial_basis"], "external_effect_unresolved");
+        assert!(!classifier_denial_basis("approval_pending"));
     }
 
     #[test]

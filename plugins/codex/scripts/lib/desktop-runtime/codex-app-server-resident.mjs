@@ -33,6 +33,8 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "command-reference.mjs"),
   join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
   join(EXECUTOR_ROOT, "human-approval.mjs"),
+  join(EXECUTOR_ROOT, "human-interaction.mjs"),
+  join(EXECUTOR_ROOT, "telemetry.mjs"),
   join(EXECUTOR_ROOT, "approval-journal.mjs"),
   join(EXECUTOR_ROOT, "codex-approval-gate.mjs"),
   join(EXECUTOR_ROOT, "native-statewright-guidance.mjs"),
@@ -186,12 +188,16 @@ export async function peekCodexResidentRouteRequest(controlDir, clientId, thread
   return null;
 }
 
-function telemetryWriter(environment) {
+async function telemetryWriter(environment) {
+  const profile = await resolveGatewayProfile(environment);
   const explicit = environment.STATEWRIGHT_TELEMETRY_URL?.trim();
-  const pocketbase = environment.STATEWRIGHT_PB_URL?.replace(/\/$/, "");
+  const pocketbase = (environment.STATEWRIGHT_PB_URL || profile.authUrl)?.replace(/\/$/, "");
+  let apiKey = null;
+  try { apiKey = await resolveApiKey({...environment, STATEWRIGHT_GATEWAY_URL:profile.gatewayUrl}); }
+  catch { /* the native connection reports credential failures separately */ }
   return createTelemetryWriter(undefined, {
     endpoint: explicit || (pocketbase ? `${pocketbase}/api/gateway/telemetry/events` : null),
-    apiKey: environment.STATEWRIGHT_API_KEY ?? null,
+    apiKey,
   });
 }
 
@@ -338,7 +344,7 @@ async function main() {
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,
     onIdle: stop,
-    telemetry: telemetryWriter(process.env),
+    telemetry: await telemetryWriter(process.env),
     reporter,
   });
   await writeManifest(manifestPath, {

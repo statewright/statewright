@@ -1,5 +1,6 @@
 import { WebSocket, WebSocketServer } from "../../../vendor/ws/wrapper.mjs";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { HumanInteractionRecorder } from "./human-interaction.mjs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
@@ -793,6 +794,7 @@ export async function startCodexAppServerRouteProxy({
     const explainedTurns = new Map();
     const turnOrigins = new Map();
     const nativeUsage = new DesktopNativeUsage();
+    const humanInteractions = new HumanInteractionRecorder(event => onHandoffStatus(event));
     const pendingTurnStarts = new Map();
     const receipts = new Map();
     const requestMethods = new Map();
@@ -831,6 +833,7 @@ export async function startCodexAppServerRouteProxy({
     };
     const classifierController = classifierApprovalService ? new ClassifierApprovalController({
       send: value => {
+        humanInteractions.request(value);
         if (downstream.readyState !== WebSocket.OPEN) {
           throw new Error("Native Desktop connection is unavailable");
         }
@@ -841,7 +844,12 @@ export async function startCodexAppServerRouteProxy({
       getState: readClassifierState,
       approvalTimeoutMs: classifierApprovalTimeoutMs,
       maxReworks: classifierMaxReworks,
-      record: event => onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event}),
+      record: event => {
+        if (event.approval_request_id) humanInteractions.resolve(event.approval_request_id, {
+          action:event.type === "classifier_human_approval_granted" ? "allow_once" : "deny",
+          reason:event.reason, invocation_fingerprint:event.invocation_fingerprint});
+        return onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event});
+      },
     }) : null;
     classifierOwner = classifierController ? {
       initialized: false,
@@ -1393,7 +1401,10 @@ export async function startCodexAppServerRouteProxy({
         scheduleIdle();
       },
       rpc: internalRpc,
-      send: value => forwardWhenOpen(downstream, JSON.stringify(value)),
+      send: value => {
+        humanInteractions.request(value);
+        return forwardWhenOpen(downstream, JSON.stringify(value));
+      },
       record: event => onHandoffStatus({ schema: "statewright/approval-lifecycle/v1", ...event }),
       continueApproved: async ({ threadId, state, fromState, approvalId, goal, check }) => {
         const checkOwner = async () => { check(); await gate.assertOwner(threadId); check(); };
@@ -1479,6 +1490,7 @@ export async function startCodexAppServerRouteProxy({
         if (message.method && typeof message.id === "string" && message.id.startsWith(internalPrefix)) {
           throw new Error("Statewright internal RPC identities cannot be used for client requests.");
         }
+        humanInteractions.response(message);
         if (classifierController?.handleReply(message)) return;
         if (gate?.handleReply(message)) return;
         if (message.id !== undefined && message.method && requestMethods.has(rpcIdKey(message.id))) {
@@ -1869,6 +1881,8 @@ export async function startCodexAppServerRouteProxy({
           notification = humanInput;
           payload = JSON.stringify(notification);
         }
+        humanInteractions.request(notification);
+        humanInteractions.observeExecution(notification);
         const terminal = notification.method === "turn/completed" ? notification.params : null;
         const priorTurn = terminal && presentation.turns.get(terminal.threadId);
         if (terminal?.turn?.status === "interrupted" && priorTurn?.active && priorTurn.id === terminal.turn.id && explainedTurns.get(terminal.threadId) !== terminal.turn.id) {
@@ -2238,6 +2252,7 @@ export async function startCodexAppServerRouteProxy({
       upstreamDelivery = upstreamDelivery.then(() => handleUpstream(raw)).catch(() => {});
     });
     const closePeer = () => {
+      humanInteractions.close();
       classifierController?.close();
       if (classifierOwner) classifierOwners.delete(classifierOwner);
       gate?.close();
@@ -2258,6 +2273,7 @@ export async function startCodexAppServerRouteProxy({
     };
     let downstreamClosed = false;
     const markDownstreamClosed = () => {
+      humanInteractions.close("native_connection_closed");
       if (!downstreamClosed) {
         downstreamClosed = true;
         connectedClients = Math.max(0, connectedClients - 1);

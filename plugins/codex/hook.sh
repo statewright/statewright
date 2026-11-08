@@ -1003,10 +1003,15 @@ case "$ENDPOINT" in
         APPROVAL_REQUEST=$(printf '%s' "$ADAPTER_RESULT" | jq -c \
           --arg thread_id "$HOOK_SESSION" --arg run_id "$RUN_ID" \
           --arg run_session_id "$RUN_SESSION_ID" --arg state "$CURRENT" \
-          --arg state_epoch "$STATE_EPOCH" '
+          --arg state_epoch "$STATE_EPOCH" --argjson hook "$HOOK_INPUT" '
           .risk_assessment? as $risk
           | if ($risk | type) != "object" or $risk.separate_approval_allowed != true then empty else {
               schema: "statewright/classifier-approval-request/v2",
+              tool_name: $hook.tool_name,
+              tool_input: {
+                command: (($hook.tool_input.command // $hook.tool_input.cmd // "") | tostring | .[0:8192]),
+                workdir: (($hook.tool_input.workdir // $hook.tool_input.cwd // $hook.cwd // "") | tostring | .[0:1024])
+              },
               thread_id: $thread_id,
               run_id: $run_id,
               run_session_id: $run_session_id,

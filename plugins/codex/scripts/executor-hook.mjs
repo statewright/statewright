@@ -164,6 +164,8 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
             ...result.classifier_context,
             thread_id: input.session_id,
             classifier_receipt: risk,
+            tool_name: input.tool_name,
+            tool_input: input.tool_input,
           });
           let approval = { action: "unavailable", reason: "classifier_approval_decision_binding_missing" };
           if (request) {

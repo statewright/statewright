@@ -1,0 +1,79 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {HumanInteractionRecorder, approvalDisplayContext} from '../lib/human-interaction.mjs';
+import {createTelemetryWriter, humanInteractionOutbox} from '../lib/telemetry.mjs';
+
+test('dialog command stays recognizable while credentials are masked', () => {
+  assert.deepEqual(approvalDisplayContext({tool_name:'exec_command',tool_input:{
+    cmd:'git diff -- pb/hooks/order_fulfillment.pb.js',workdir:'/workspace/project'}}),
+  {tool:'exec_command',command:'git diff -- pb/hooks/order_fulfillment.pb.js',cwd:'/workspace/project'});
+  const display=approvalDisplayContext({tool_input:{cmd:'TOKEN=private-one tool --api-key private-two https://user:private-three@example.invalid -H "Authorization: Bearer private-four"'}});
+  assert.doesNotMatch(JSON.stringify(display),/private-(one|two|three|four)/);
+  assert.match(display.command,/tool/);
+});
+
+test('human requests, answers, cancellation and disconnect retain correlation without treating a reply as authority',async()=>{
+  const events=[];const recorder=new HumanInteractionRecorder(event=>events.push(event));
+  const request={id:7,method:'item/tool/requestUserInput',params:{threadId:'thread',questions:[{question:'Which target?',options:['staging','production']}]}};
+  recorder.request(request);recorder.request(request);
+  recorder.response({id:7,result:{answers:{target:'staging'}}});
+  recorder.response({id:7,result:{answers:{target:'production'}}});
+  recorder.request({id:'second',method:'mcpServer/elicitation/request',params:{threadId:'thread',message:'Approve command?'}});
+  recorder.close();await new Promise(setImmediate);
+  assert.deepEqual(events.map(e=>e.stage),['requested','responded','requested','interrupted']);
+  assert.equal(events[0].interaction_id,events[1].interaction_id);
+  assert.equal(events[1].result.answers.target,'staging');
+  assert.equal(events[0].dialog.questions[0].question,'Which target?');
+  assert.equal(events[1].actor_source,'native_client_reply');
+});
+
+test('human interaction outbox survives failure and reconstruction; only acknowledged IDs are removed',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'human-events-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'events.jsonl');const previous=globalThis.fetch;t.after(()=>{globalThis.fetch=previous;});
+  const outbox=humanInteractionOutbox(path,{endpoint:'https://staging.invalid/api/gateway/telemetry/events',apiKey:'fixture'});
+  globalThis.fetch=async()=>new Response('{}',{status:503});
+  const fields={schema:'statewright/human-interaction/v1',interaction_id:'interaction',
+    thread_id:'thread',request_id:'request',method:'mcpServer/elicitation/request',stage:'requested',
+    dialog:{message:'Allow?',command:'git diff -- file',content:{api_key:'private-value'}}};
+  await createTelemetryWriter(path,{endpoint:'https://staging.invalid/api/gateway/telemetry/events',apiKey:'fixture'} )('app_server_handoff_status',fields);
+  assert.equal((await readdir(outbox)).length,1);
+  const delivered=[];
+  globalThis.fetch=async(url,options)=>{
+    assert.equal(String(url),'https://staging.invalid/api/gateway/human-interactions');
+    const events=JSON.parse(options.body).events;delivered.push(...events);
+    return new Response(JSON.stringify({accepted_event_ids:events.map(e=>e.event_id),duplicate_event_ids:[]}));
+  };
+  await createTelemetryWriter(path,{endpoint:'https://staging.invalid/api/gateway/telemetry/events',apiKey:'fixture'} )('app_server_handoff_status',{...fields,stage:'responded',result:{action:'accept'}});
+  assert.equal(delivered.length,2);assert.equal((await readdir(outbox)).length,0);
+  assert.doesNotMatch(await readFile(path,'utf8'),/private-value/);
+  assert.match(await readFile(path,'utf8'),/git diff -- file/);
+  assert(delivered.some(e=>e.result?.action==='accept'));
+});
+
+test('retry queues cannot cross staging/production or account credential boundaries',()=>{
+  const base={endpoint:'https://staging.invalid/api/gateway/telemetry/events',apiKey:'first'};
+  const path='/fixture/events.jsonl';
+  const first=humanInteractionOutbox(path,base);
+  assert.equal(first,humanInteractionOutbox(path,base));
+  assert.notEqual(first,humanInteractionOutbox(path,{...base,apiKey:'second'}));
+  assert.notEqual(first,humanInteractionOutbox(path,{...base,endpoint:'https://production.invalid/events'}));
+  assert.doesNotMatch(first,/first|staging.invalid/);
+});
+
+test('approved native command result is logged only after its exact item completes',async()=>{
+  const events=[];const recorder=new HumanInteractionRecorder(event=>events.push(event));
+  recorder.request({id:'approval',method:'item/commandExecution/requestApproval',
+    params:{threadId:'thread',itemId:'item',command:'git diff -- file'}});
+  recorder.response({id:'approval',result:{decision:'accept'}});
+  recorder.observeExecution({method:'item/completed',params:{threadId:'foreign',item:{id:'item',exitCode:0}}});
+  recorder.observeExecution({method:'item/completed',params:{threadId:'thread',item:{id:'item',exitCode:2,status:'completed',aggregatedOutput:'failed fixture'}}});
+  await new Promise(setImmediate);
+  assert.equal(events.length,3);
+  assert.equal(events[2].stage,'execution_completed');
+  assert.equal(events[2].result.exit_code,2);
+  assert.equal(events[2].result.output,'failed fixture');
+  assert.equal(events[0].interaction_id,events[2].interaction_id);
+});

@@ -51,6 +51,25 @@ test("managed MCP bridge forwards one immutable client identity", async () => {
   }
 });
 
+test('human interaction relay keeps the configured destination, native owner token and client boundary',async t=>{
+  const calls=[];
+  const bridge=await new ManagedMcpBridge({gatewayUrl:'https://gateway.invalid/mcp',apiKey:'server-key',
+    clientId:'owner',token:'local-token',humanInteractionUrl:'https://staging.invalid/api/gateway/human-interactions',
+    fetch:async(url,options)=>{calls.push({url,options});return Response.json({accepted_event_ids:['event']},{status:202});}}).start();
+  t.after(()=>bridge.close());
+  const send=(headers={})=>fetch(bridge.url+'/human-interactions',{method:'POST',
+    headers:{Authorization:'Bearer local-token','X-Statewright-Client-Id':'owner',...headers},
+    body:JSON.stringify({events:[{event_id:'event'}],url:'https://foreign.invalid'})});
+  assert.equal((await send({Authorization:'Bearer wrong'})).status,401);
+  assert.equal((await send({'X-Statewright-Client-Id':'foreign'})).status,403);
+  assert.equal((await send({Origin:'https://foreign.invalid'})).status,401);
+  assert.equal(calls.length,0);
+  assert.equal((await send()).status,202);
+  assert.equal(calls[0].url,'https://staging.invalid/api/gateway/human-interactions');
+  assert.equal(calls[0].options.headers.Authorization,'Bearer server-key');
+  assert.equal(calls[0].options.redirect,'error');
+});
+
 test("managed host supplies its own private proof and never follows a redirect with it", async t => {
   const proof = "a".repeat(64), calls=[];
   const bridge = await new ManagedMcpBridge({gatewayUrl:"https://gateway.example/mcp",apiKey:"key",clientId:"owner",token:"token",originProof:proof,

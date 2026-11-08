@@ -1589,7 +1589,7 @@ case "$ENDPOINT" in
     MAX=$(echo "$STATE_JSON" | jq -r '.max_iterations // "none"' 2>/dev/null || true)
     TOOLS=$(statewright_tools_label "$STATE_JSON")
     TRANSITIONS=$(echo "$STATE_JSON" | jq -r '.transitions // [] | map(.event + " -> " + .target) | join(", ")' 2>/dev/null || true)
-    jq -n --arg reason "Statewright workflow remains active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. Transitions: $TRANSITIONS. CONTINUATION REQUIRED: do not stop, summarize, or wait for a new user prompt. Continue immediately with only the state-allowed tools and call statewright_transition when this phase is complete." '{"decision":"block","reason":$reason}'
+    jq -n --arg reason "Statewright workflow remains active. Phase: $CURRENT (iteration $ITER/$MAX). Tools: $TOOLS. Transitions: $TRANSITIONS. CONTINUATION REQUIRED: do not stop, summarize, or wait for a new user prompt. Continue immediately with only the state-allowed tools and call statewright_transition when this phase is complete. Exception: pending native approval is a wait, not a workflow block. Never cancel its waiting tool or transition BLOCKED solely because review is pending; await the existing approval result." '{"decision":"block","reason":$reason}'
     exit 0
     ;;
 

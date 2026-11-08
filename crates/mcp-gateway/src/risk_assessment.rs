@@ -1170,6 +1170,10 @@ pub struct ShadowAssessment {
 }
 
 impl ShadowAssessment {
+    /// Diagnostic access to code-owned capabilities, not an effect-mask cast.
+    pub fn evaluation_required_capability(&self) -> Option<&'static str> {
+        self.required_capability
+    }
     /// Pure diagnostic projection using the exact production provider builder.
     /// Explicit local=true includes local-only evidence; does not call a model.
     pub fn evaluation_provider_state(&self, local: bool) -> Option<serde_json::Value> {
@@ -1457,6 +1461,20 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
         return assessment(RiskBand::Low, if classes.contains(&OpClass::RemoteRead) {
             ExposureBand::External
         } else { ExposureBand::Local }, "shell");
+    }
+    // Recover syntax-only opacity from complete component evidence before
+    // reduction. Never downgrade the known High/Critical floors above.
+    let proof = crate::effect_evidence::assess(command);
+    if proof.proven_read() {
+        let external = proof.components.iter().any(|part| part.location == crate::effect_evidence::Location::External);
+        return assessment(RiskBand::Low, if external {ExposureBand::External}else{ExposureBand::Local}, "shell_effect_evidence");
+    }
+    if proof.syntax_valid && proof.complete && proof.lower & crate::effect_evidence::WRITE != 0
+        && proof.upper & crate::effect_evidence::DESTROY == 0
+        && classes.iter().any(|class|matches!(class,OpClass::Opaque|OpClass::Passthrough))
+        && proof.components.iter().all(|part|part.location==crate::effect_evidence::Location::Local)
+    {
+        return assessment_with_capability(RiskBand::Moderate,ExposureBand::Local,"shell_effect_evidence","Write");
     }
     let required_capability = local_effect_capability(&classes);
     if classes.contains(&OpClass::RemoteRead) {

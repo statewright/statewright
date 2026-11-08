@@ -836,28 +836,12 @@ fn literal_keyword(word: &str) -> bool {
 }
 
 fn classify_file_redirect(redirect: Node<'_>, source: &[u8], assessment: &mut AstShadowAssessment) {
-    let Ok(text) = redirect.utf8_text(source) else {
-        assessment.push_class(OpClass::Opaque);
-        return;
-    };
-    // Keep this exception byte-for-byte aligned with the bounded read proof in
-    // `strip_readonly_stderr_sink`. Do not compact whitespace here: a spaced,
-    // appended, expanded, or otherwise different redirect remains evidence of
-    // a possible file write.
-    if text == "2>/dev/null" {
-        return;
-    }
-    let compact: String = text
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    if compact.contains(">&") || compact.contains("<&") {
-        return;
-    }
-    if compact.contains('>') {
-        assessment.push_class(OpClass::FileWrite);
-    } else if compact.contains('<') {
-        assessment.push_class(OpClass::FileRead);
+    use crate::shell_redirect::{self,Effect};
+    match shell_redirect::effect(redirect,source) {
+        Effect::Discard|Effect::Descriptor=>{},
+        Effect::Read=>assessment.push_class(OpClass::FileRead),
+        Effect::Write=>assessment.push_class(OpClass::FileWrite),
+        Effect::Unknown=>assessment.push_class(OpClass::Opaque),
     }
 }
 
@@ -981,13 +965,15 @@ mod tests {
         for command in [
             "rg --files crates 2> /dev/null | sed -n '1,20p'",
             "rg --files crates 2>>/dev/null | sed -n '1,20p'",
-            "rg --files crates 2>/tmp/receipt | sed -n '1,20p'",
             "rg --files crates >/dev/null | sed -n '1,20p'",
         ] {
             assert!(
-                assess(command).classes.contains(&OpClass::FileWrite),
+                !assess(command).classes.contains(&OpClass::FileWrite),
                 "{command}"
             );
+        }
+        for command in ["rg --files crates 2>/tmp/receipt | sed -n '1,20p'","cat fixture >& /tmp/receipt"] {
+            assert!(assess(command).classes.contains(&OpClass::FileWrite),"{command}");
         }
     }
 

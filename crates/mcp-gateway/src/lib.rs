@@ -1,10 +1,12 @@
 mod approval_origin;
 pub mod bash_classifier;
 pub mod command_structure;
+mod cli_options;
 pub mod config;
 pub mod custom_tools;
 pub mod docs_search;
 pub mod enforcement;
+pub mod effect_evidence;
 #[cfg(feature = "metering")]
 pub mod event_delivery;
 pub mod events;
@@ -19,6 +21,7 @@ pub mod risk_assessment;
 pub mod semantic_contract;
 pub mod session;
 pub mod shell_ast_shadow;
+mod shell_redirect;
 pub mod tool_intent;
 pub mod upstream;
 pub mod usage;

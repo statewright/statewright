@@ -510,6 +510,14 @@ pub fn classify(command: &str) -> Vec<OpClass> {
         }
         let class = classify_segment(seg);
         classes.push(class);
+        // A known mutating verb does not prove the effects of argv supplied
+        // through shell expansion. Preserve its known write capability AND
+        // missing coverage rather than allowing it to erase unknown flags/code.
+        if matches!(class, OpClass::FileWrite | OpClass::FileModify | OpClass::LocalWrite)
+            && crate::effect_evidence::has_argument_expansion(seg)
+        {
+            classes.push(OpClass::Opaque);
+        }
         // wget ordinarily saves a response locally. Uncertain remote effects
         // must not erase that independently known local write capability.
         if class == OpClass::ExternalUnknown
@@ -660,61 +668,10 @@ pub fn readonly_capabilities(command: &str) -> Option<Vec<&'static str>> {
     (!capabilities.is_empty()).then_some(capabilities)
 }
 
-/// Remove only the shell's exact stderr-to-null discard form. Every other
-/// unquoted redirection stays outside the read-only proof surface.
+/// Remove structurally proven null-device sinks; all other redirection effects
+/// stay outside read-only proof. Shared with the AST reducer.
 fn strip_readonly_stderr_sink(command: &str) -> Option<String> {
-    const SINK: &str = "2>/dev/null";
-    let mut normalized = String::with_capacity(command.len());
-    let mut index = 0;
-    let mut quote = None;
-
-    while index < command.len() {
-        let rest = command.get(index..)?;
-        let character = rest.chars().next()?;
-        if let Some(active_quote) = quote {
-            normalized.push(character);
-            index += character.len_utf8();
-            if character == active_quote {
-                quote = None;
-            } else if active_quote == '"' && character == '\\' {
-                let escaped = command.get(index..)?.chars().next()?;
-                normalized.push(escaped);
-                index += escaped.len_utf8();
-            }
-            continue;
-        }
-        if matches!(character, '\'' | '"') {
-            quote = Some(character);
-            normalized.push(character);
-            index += character.len_utf8();
-            continue;
-        }
-        let previous_is_boundary = index == 0
-            || command[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|value| value.is_whitespace() || matches!(value, ';' | '|' | '&'));
-        if previous_is_boundary && rest.starts_with(SINK) {
-            let end = index + SINK.len();
-            let next_is_boundary = command.get(end..).is_some_and(|tail| {
-                tail.is_empty()
-                    || tail.chars().next().is_some_and(|value| {
-                        value.is_whitespace() || matches!(value, ';' | '|' | '&')
-                    })
-            });
-            if next_is_boundary {
-                normalized.push(' ');
-                index = end;
-                continue;
-            }
-        }
-        if matches!(character, '<' | '>') {
-            return None;
-        }
-        normalized.push(character);
-        index += character.len_utf8();
-    }
-    quote.is_none().then_some(normalized)
+    crate::shell_redirect::strip_discard_redirects(command)
 }
 
 /// `classify_git` is deliberately broad for ordinary Bash capability checks.
@@ -860,6 +817,7 @@ pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
     let mut current = String::new();
     let mut chars = command.chars().peekable();
     let mut quote = None;
+    let mut token_started = false;
 
     while let Some(ch) = chars.next() {
         match quote {
@@ -878,22 +836,32 @@ pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
             },
             Some(_) => unreachable!(),
             None => match ch {
-                '\'' | '"' => quote = Some(ch),
-                '\\' => current.push(chars.next()?),
+                '\'' | '"' => {
+                    token_started = true;
+                    quote = Some(ch);
+                }
+                '\\' => {
+                    token_started = true;
+                    current.push(chars.next()?);
+                }
                 ' ' | '\t' => {
-                    if !current.is_empty() {
+                    if token_started {
                         tokens.push(std::mem::take(&mut current));
+                        token_started = false;
                     }
                 }
                 ';' | '|' | '&' | '>' | '<' | '\n' | '\r' | '`' | '$' => return None,
-                _ => current.push(ch),
+                _ => {
+                    token_started = true;
+                    current.push(ch);
+                }
             },
         }
     }
     if quote.is_some() {
         return None;
     }
-    if !current.is_empty() {
+    if token_started {
         tokens.push(current);
     }
     Some(tokens)
@@ -955,6 +923,8 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
     let mut chars = command.chars().peekable();
     let mut quote = None;
     let mut redirect_target = false;
+    let mut token_started = false;
+    let mut descriptor_candidate = true;
 
     while let Some(ch) = chars.next() {
         match quote {
@@ -976,23 +946,32 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
             },
             Some(_) => unreachable!(),
             None => match ch {
-                '\'' | '"' => quote = Some(ch),
+                '\'' | '"' => {
+                    token_started = true;
+                    descriptor_candidate = false;
+                    quote = Some(ch);
+                }
                 '\\' => {
+                    token_started = true;
+                    descriptor_candidate = false;
                     let escaped = chars.next()?;
                     current.push(escaped);
                 }
                 ' ' | '\t' => {
                     if redirect_target {
-                        if !current.is_empty() {
+                        if token_started {
+                            if current.is_empty() { return None; }
                             if network_pseudo_device_target(&current) {
                                 return None;
                             }
                             redirect_target = false;
                             current.clear();
                         }
-                    } else if !current.is_empty() {
+                    } else if token_started {
                         tokens.push(std::mem::take(&mut current));
                     }
+                    token_started = false;
+                    descriptor_candidate = true;
                 }
                 '>' | '<' => {
                     if chars.peek() == Some(&'(') {
@@ -1004,13 +983,16 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
                         }
                         current.clear();
                     }
-                    if !redirect_target && !current.is_empty() {
-                        if !current.bytes().all(|byte| byte.is_ascii_digit()) {
+                    if !redirect_target && token_started {
+                        if !descriptor_candidate || current.is_empty()
+                            || !current.bytes().all(|byte| byte.is_ascii_digit()) {
                             tokens.push(std::mem::take(&mut current));
                         } else {
                             current.clear();
                         }
                     }
+                    token_started = false;
+                    descriptor_candidate = true;
                     if chars.peek() == Some(&ch) {
                         chars.next();
                     }
@@ -1027,7 +1009,10 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
                 ';' | '|' | '&' | '\n' | '\r' | '`' | '$' | '{' | '}' | '*' | '?' | '[' | ']' => {
                     return None;
                 }
-                _ => current.push(ch),
+                _ => {
+                    token_started = true;
+                    current.push(ch);
+                }
             },
         }
     }
@@ -1037,7 +1022,7 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
     if redirect_target && network_pseudo_device_target(&current) {
         return None;
     }
-    if !redirect_target && !current.is_empty() {
+    if !redirect_target && token_started {
         tokens.push(current);
     }
     Some(tokens)
@@ -1688,7 +1673,8 @@ fn classify_segment(segment: &str) -> OpClass {
 
         // File write
         "tee" => OpClass::FileWrite,
-        "cp" | "mv" | "install" | "rsync" => OpClass::FileWrite,
+        "cp" | "mv" | "install" => OpClass::FileWrite,
+        "rsync" => rsync_effect(&invocation.args),
         "dd" => OpClass::FileWrite,
         // Creating a directory is a bounded local mutation. It is not
         // destructive and does not delegate execution to another program.
@@ -1813,6 +1799,27 @@ fn external_client_effect(client: &str, args: &[String]) -> OpClass {
     OpClass::ExternalUnknown
 }
 
+// CLI semantics adapter. The shared binder owns clusters, arity and `--`;
+// neither a utility name nor these schemas constitutes execution authority.
+fn rsync_effect(args:&[String])->OpClass {
+    let schema=|flag:&str| match flag {
+        "-a"|"-v"|"-z"|"-r"|"-t"|"-p"|"-o"|"-g"|"-l"|"-H"|"-A"|"-X"|"-c"|"-n"|"-u"|"-h"|"-i"|"-q"|"-s"|"-b"|"-R"|"-d"|"-D"|"-K"|"-L"|"-k"|"-x"
+        |"--archive"|"--verbose"|"--compress"|"--recursive"|"--dry-run"|"--update"|"--progress"|"--human-readable"|"--checksum"|"--partial"|"--append"|"--append-verify"|"--inplace"|"--backup"|"--relative"|"--whole-file"
+        |"--del"|"--delete"|"--delete-before"|"--delete-during"|"--delete-delay"|"--delete-after"|"--delete-excluded"|"--delete-missing-args"|"--remove-source-files"=>Some(false),
+        "-e"|"-f"|"-M"|"-B"|"-T"|"--rsh"|"--rsync-path"|"--remote-option"
+        |"--filter"|"--include"|"--exclude"|"--include-from"|"--exclude-from"|"--files-from"|"--chmod"|"--chown"|"--temp-dir"|"--partial-dir"|"--backup-dir"|"--copy-dest"|"--link-dest"|"--log-file"|"--bwlimit"|"--timeout"=>Some(true),
+        _=>None,
+    };
+    let Some(bound)=crate::cli_options::bind(args,schema) else{return OpClass::Opaque;};
+    if bound.options.iter().any(|option| matches!(option.name.as_str(),"--del"|"--delete"|"--delete-before"|"--delete-during"|"--delete-delay"|"--delete-after"|"--delete-excluded"|"--delete-missing-args"|"--remove-source-files")) {
+        OpClass::Destructive
+    }else if bound.options.iter().any(|option|matches!(option.name.as_str(),"-e"|"--rsh"|"--rsync-path"|"-M"|"--remote-option"))
+        ||bound.options.iter().any(|option|option.name=="--files-from"&&option.value.is_some_and(|value|value.contains(':')))
+        ||bound.operands.iter().any(|operand|operand.contains(':')) {
+        OpClass::ExternalUnknown
+    }else{OpClass::FileWrite}
+}
+
 fn trusted_executable_spelling(invoked: &str, base: &str) -> bool {
     if invoked == base
         || invoked == "node_modules/.bin/vitest"
@@ -1848,7 +1855,7 @@ fn classify_nonliteral_segment(segment: &str) -> OpClass {
         return match invoked.rsplit('/').next().unwrap_or(invoked) {
             "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
             "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
-            "tee" | "cp" | "mv" | "install" | "rsync" | "dd" => OpClass::FileWrite,
+            "tee" | "cp" | "mv" | "install" | "dd" => OpClass::FileWrite,
             "patch" => OpClass::FileModify,
             _ => OpClass::Opaque,
         };
@@ -1882,7 +1889,8 @@ fn classify_nonliteral_segment(segment: &str) -> OpClass {
         "fd" if bare && fd_has_execution(args) => OpClass::Destructive,
         "sed" if bare && sed_has_in_place(args) => OpClass::FileModify,
         "patch" if bare => OpClass::FileModify,
-        "tee" | "cp" | "mv" | "install" | "rsync" | "dd" if bare => OpClass::FileWrite,
+        "rsync" if bare => rsync_effect(args),
+        "tee" | "cp" | "mv" | "install" | "dd" if bare => OpClass::FileWrite,
         "mkdir" if bare => OpClass::LocalWrite,
         "rm" | "rmdir" | "shred" | "truncate" | "unlink" => OpClass::Destructive,
         "curl" | "wget" | "nc" | "ncat" | "netcat" | "ssh" | "scp" | "sftp" => OpClass::Network,
@@ -2649,9 +2657,12 @@ fn git_ref_listing_only(tokens: &[&str], index: usize) -> OpClass {
     }
 }
 
-/// Check if the command has output redirect operators (`>` or `>>`).
-/// Excludes redirects inside quotes and `2>` (stderr redirect).
+/// Detect structural file-output effects, including stderr and combined output.
+/// Quoted data, descriptor duplication and proven null sinks are not file writes.
 fn has_output_redirect(command: &str) -> bool {
+    if let Some(write)=crate::shell_redirect::has_file_write(command){return write;}
+    // Conservative fallback for malformed/unsupported syntax; never use this
+    // character scan to prove a read or to remove a redirection.
     let mut chars = command.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
@@ -2710,6 +2721,16 @@ mod tests {
         let classes = classify("cat src/main.rs");
         assert!(classes.contains(&OpClass::FileRead));
         assert!(!classes.contains(&OpClass::FileWrite));
+    }
+
+    #[test]
+    fn structural_null_sink_read_proof_is_not_a_literal_spelling_allowlist() {
+        for command in ["find . -type f 2> /dev/null","cat fixture 2>>/dev/null","cat fixture >'/dev/null'"] {
+            assert!(readonly_capabilities(command).is_some(),"{command}");
+        }
+        for command in ["cat fixture 2>log","cat fixture >&log","cat fixture > /dev/null/log","unknown-runner 2>/dev/null"] {
+            assert!(readonly_capabilities(command).is_none(),"{command}");
+        }
     }
 
     #[test]
@@ -4037,16 +4058,14 @@ mod tests {
     }
 
     #[test]
-    fn readonly_discovery_may_discard_stderr_only_to_dev_null() {
+    fn readonly_discovery_may_discard_literal_output_to_dev_null() {
         let command = "rg --files -g '*oauth*' -g '*receipt*' . /private/statewright 2>/dev/null | sed -n '1,240p'";
         assert_eq!(readonly_capabilities(command), Some(vec!["Grep", "Read"]));
         assert_eq!(readonly_capabilities("sed -n '1,20p'"), Some(vec!["Read"]));
 
         for unsafe_command in [
             "rg --files 2>receipt.txt",
-            "rg --files 2>>/dev/null",
             "rg --files 2>/dev/null/path",
-            "rg --files 3>/dev/null",
             "rg --files 2>&1",
             "rg --files 2>/dev/null && touch marker",
             "/tmp/sed -n '1,20p'",
@@ -4056,6 +4075,9 @@ mod tests {
                 None,
                 "{unsafe_command}"
             );
+        }
+        for safe_command in ["rg --files 2>>/dev/null","rg --files 3>/dev/null","rg --files 2> /dev/null"] {
+            assert_eq!(readonly_capabilities(safe_command),Some(vec!["Grep"]),"{safe_command}");
         }
     }
 

@@ -1,0 +1,498 @@
+//! Code-owned effect bounds. Syntax composition is independent of CLI semantics.
+//! This is evidence, not execution authority: scope and workflow capabilities
+//! remain separate gates. No payload/source text is serialized by this module.
+use crate::{bash_classifier, shell_redirect};
+use serde::Serialize;
+use tree_sitter::{Node, Parser};
+
+pub const READ: u8 = 1;
+pub const WRITE: u8 = 2;
+pub const DESTROY: u8 = 4;
+pub const ALL: u8 = READ | WRITE | DESTROY;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Location {
+    Local,
+    External,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Component {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub kind: &'static str,
+    pub lower: u8,
+    pub upper: u8,
+    pub location: Location,
+    pub complete: bool,
+    pub reason: &'static str,
+    pub required_capabilities: Vec<&'static str>,
+    pub provenance: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Evidence {
+    pub schema: &'static str,
+    pub syntax_valid: bool,
+    pub lower: u8,
+    pub upper: u8,
+    pub complete: bool,
+    pub components: Vec<Component>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compatibility {
+    Compatible,
+    Forbidden,
+    Unresolved,
+}
+
+impl Evidence {
+    /// Effect-only subset check. Compatible never grants scope/capability or
+    /// missing provenance, even when all three effects are permitted.
+    pub fn compatibility(&self, allowed: u8) -> Compatibility {
+        if allowed & !ALL != 0 || !self.syntax_valid {
+            return Compatibility::Unresolved;
+        }
+        if self.lower & !allowed != 0 {
+            return Compatibility::Forbidden;
+        }
+        if self.upper & !allowed == 0 {
+            Compatibility::Compatible
+        } else {
+            Compatibility::Unresolved
+        }
+    }
+    pub fn proven_read(&self) -> bool {
+        self.syntax_valid && self.complete && !self.components.is_empty() && self.upper & !READ == 0
+    }
+    fn push(&mut self, component: Component) {
+        self.lower |= component.lower;
+        self.upper |= component.upper;
+        self.complete &= component.complete;
+        self.components.push(component);
+    }
+}
+
+fn component(
+    node: Node<'_>,
+    kind: &'static str,
+    lower: u8,
+    upper: u8,
+    location: Location,
+    complete: bool,
+    reason: &'static str,
+) -> Component {
+    Component {
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        kind,
+        lower,
+        upper,
+        location,
+        complete,
+        reason,
+        required_capabilities: Vec::new(),
+        provenance: "native_bash_ast_and_strict_leaf_proof_v1",
+    }
+}
+
+fn unknown(node: Node<'_>, reason: &'static str) -> Component {
+    component(node, "unresolved", 0, ALL, Location::Unknown, false, reason)
+}
+
+// Existing utility semantics are an adapter, not the composition core. In
+// particular, do not map legacy FileWrite/Destructive labels into exact bits.
+fn command_leaf(node: Node<'_>, source: &str) -> Component {
+    let Ok(text) = node.utf8_text(source.as_bytes()) else {
+        return unknown(node, "source_unavailable");
+    };
+    let Some(capabilities) = bash_classifier::readonly_capabilities(text) else {
+        return unknown(node, "leaf_effect_evidence_missing");
+    };
+    let external = bash_classifier::classify(text).contains(&bash_classifier::OpClass::RemoteRead);
+    let mut result = component(
+        node,
+        "command",
+        0,
+        READ,
+        if external {
+            Location::External
+        } else {
+            Location::Local
+        },
+        true,
+        "strict_leaf_read_upper_bound",
+    );
+    result.required_capabilities = capabilities;
+    result
+}
+
+/// Parse locally without executing commands, reading program files, changing
+/// runtime flags or requesting model inference. Unknown coverage survives union.
+pub fn assess(source: &str) -> Evidence {
+    let mut out = Evidence {
+        schema: "statewright/effect-evidence/v1",
+        syntax_valid: false,
+        lower: 0,
+        upper: ALL,
+        complete: false,
+        components: Vec::new(),
+    };
+    if source.len() > 256 * 1024 {
+        return out;
+    }
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return out;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return out;
+    };
+    if tree.root_node().has_error() {
+        return out;
+    }
+    out.syntax_valid = true;
+    out.upper = 0;
+    out.complete = true;
+    walk(tree.root_node(), source, 0, &mut out);
+    out
+}
+
+/// Argument values produced by the shell are not literal argv. This fact must
+/// survive a known outer write operation; e.g. an expansion may supply flags.
+pub(crate) fn has_argument_expansion(source: &str) -> bool {
+    if source.len() > 256 * 1024 {
+        return true;
+    }
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        return true;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return true;
+    };
+    fn visit(node: Node<'_>, source: &str, depth: usize) -> bool {
+        if depth > 32 {
+            return true;
+        }
+        if matches!(
+            node.kind(),
+            "simple_expansion"
+                | "expansion"
+                | "command_substitution"
+                | "process_substitution"
+                | "arithmetic_expansion"
+        ) {
+            return true;
+        }
+        // Bash expands unquoted pathname patterns before invoking a program.
+        // A resulting filename can be an option, not merely an operand. Quoted
+        // strings have different AST kinds; escaped metacharacters stay literal.
+        if node.kind() == "word" {
+            let Ok(word) = node.utf8_text(source.as_bytes()) else {
+                return true;
+            };
+            let mut escaped = false;
+            for ch in word.chars() {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if matches!(ch, '*' | '?' | '[') {
+                    return true;
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor)
+            .any(|child| visit(child, source, depth + 1))
+    }
+    tree.root_node().has_error() || visit(tree.root_node(), source, 0)
+}
+
+fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
+    if depth > 32 || out.components.len() >= 64 {
+        // Keep bounds conservative without accumulating an unbounded AST list.
+        out.upper = ALL;
+        out.complete = false;
+        return;
+    }
+    match node.kind() {
+        "command" => out.push(command_leaf(node, source)),
+        "file_redirect" => {
+            use shell_redirect::Effect;
+            let effect = shell_redirect::effect(node, source.as_bytes());
+            let text = node.utf8_text(source.as_bytes()).unwrap_or("");
+            // Dynamic path targets and shell network pseudo-devices do not
+            // establish local-resource authority from a redirection operator.
+            let dynamic = text.contains(['$', '`'])
+                || text.contains("/dev/tcp/")
+                || text.contains("/dev/udp/");
+            let mut item = match (effect, dynamic) {
+                (Effect::Discard | Effect::Descriptor, false) => component(
+                    node,
+                    "redirect",
+                    0,
+                    0,
+                    Location::Local,
+                    true,
+                    "descriptor_or_null_sink",
+                ),
+                (Effect::Read, false) => component(
+                    node,
+                    "redirect",
+                    READ,
+                    READ,
+                    Location::Local,
+                    true,
+                    "file_input_redirect",
+                ),
+                (Effect::Write, false) => component(
+                    node,
+                    "redirect",
+                    WRITE,
+                    WRITE,
+                    Location::Local,
+                    true,
+                    "file_output_redirect",
+                ),
+                _ => unknown(node, "redirect_target_or_semantics_unresolved"),
+            };
+            if item.lower & WRITE != 0 {
+                item.required_capabilities.push("Write");
+            }
+            if item.lower & READ != 0 {
+                item.required_capabilities.push("Read");
+            }
+            out.push(item);
+        }
+        // Bodies/arguments may contain executable substitutions. Never skip
+        // them merely because the outer command has a familiar name.
+        "function_definition" => {
+            out.push(unknown(node, "function_binding_unresolved"));
+            return;
+        }
+        "variable_assignment" => out.push(unknown(node, "shell_environment_change")),
+        "heredoc_redirect" | "herestring_redirect" => {
+            out.push(unknown(node, "delegated_or_data_body_unresolved"))
+        }
+        // Explicit transparent composition and argument-data nodes only.
+        // Unsupported executable/evaluation grammar must never inherit a
+        // neighbor's proof by falling through a default no-op.
+        "program"
+        | "list"
+        | "pipeline"
+        | "redirected_statement"
+        | "subshell"
+        | "command_substitution"
+        | "process_substitution"
+        | "command_name"
+        | "word"
+        | "number"
+        | "file_descriptor"
+        | "raw_string"
+        | "string"
+        | "string_content"
+        | "concatenation"
+        | "comment" => {}
+        _ => out.push(unknown(node, "unsupported_ast_component")),
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        walk(child, source, depth + 1, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn complete_leaf_proofs_compose_without_interpreting_data_as_code() {
+        for text in [
+            "cat a; head b",
+            "cat a | head -2",
+            "cat a 2>/dev/null",
+            "cat a 2>&1",
+            "printf '%s' 'rm -rf; > output' | head -1",
+        ] {
+            let proof = assess(text);
+            assert!(proof.proven_read(), "{text}: {proof:?}");
+            assert_eq!(proof.compatibility(READ), Compatibility::Compatible);
+            assert!(proof.components.iter().all(|p| p.end_byte <= text.len()));
+        }
+    }
+    #[test]
+    fn known_writes_cannot_erase_unknown_children_or_become_read() {
+        for text in [
+            "widget > out",
+            "cat $(rm a) > out",
+            "find . -exec rm '{}' ';' > out",
+        ] {
+            let proof = assess(text);
+            assert!(!proof.complete, "{text}");
+            assert_eq!(proof.lower & WRITE, WRITE, "{text}: {proof:?}");
+            assert_eq!(proof.upper, ALL);
+            assert_eq!(proof.compatibility(READ), Compatibility::Forbidden);
+            assert_eq!(proof.compatibility(READ | WRITE), Compatibility::Unresolved);
+        }
+    }
+    #[test]
+    fn effect_compatibility_is_not_provenance_or_execution_authority() {
+        let proof = assess("widget --inspect");
+        assert_eq!(proof.compatibility(ALL), Compatibility::Compatible);
+        assert!(!proof.complete);
+        assert!(!proof.proven_read());
+    }
+    #[test]
+    fn negative_compositions_remain_held() {
+        for text in [
+            "cat a; rm b",
+            "cat <(rm a)",
+            "cat a | widget",
+            "rsync --delete src dst",
+            "find . -exec cat '{}' ';'",
+            "find . -exec rm '{}' ';'",
+            "/tmp/cat a",
+            "cat a >/dev/tcp/host/80",
+            "cat a >\"$TARGET\"",
+            "cat 'broken",
+            "evil(){ rm a; }; evil",
+            "PATH=/tmp cat a",
+        ] {
+            assert!(!assess(text).proven_read(), "{text}");
+        }
+    }
+    #[test]
+    fn expansions_and_delete_flags_cannot_manufacture_local_write_proof() {
+        use crate::risk_assessment::{assess_native_policy_rejection, ResolvedEffect};
+        for text in [
+            "rsync $OPTS $SOURCE $DEST",
+            "cp $OPTS source dest",
+            "sed -i \"$PROGRAM\" file",
+            "rsync * destination",
+            "rsync [ab]* destination; cat fixture",
+            "cp ? destination",
+        ] {
+            let result = assess_native_policy_rejection(
+                None,
+                "exec_command",
+                &serde_json::json!({"cmd":text}),
+                None,
+            );
+            assert_eq!(
+                result.resolve_effect(),
+                ResolvedEffect::DenyUncertain,
+                "{text}"
+            );
+        }
+        for text in [
+            "rsync --delete src dst",
+            "rsync --remove-source-files src dst",
+            "rsync --delete src dst > log",
+            "rsync --remove-source-files src dst 2>&1",
+            "rsync --exclude '' --delete src dst",
+            "rsync --exclude \"\" --delete src dst > log",
+            "rsync --exclude '2'>log --delete src dst",
+        ] {
+            let result = assess_native_policy_rejection(
+                None,
+                "exec_command",
+                &serde_json::json!({"cmd":text}),
+                None,
+            );
+            assert_eq!(
+                result.resolve_effect(),
+                ResolvedEffect::DenyKnownRisk,
+                "{text}"
+            );
+        }
+        assert!(!has_argument_expansion("printf '%s' '$DATA'"));
+        assert!(has_argument_expansion("printf '%s' \"$DATA\""));
+        assert!(!has_argument_expansion("rsync '*' destination"));
+        assert!(!has_argument_expansion(r"rsync \* destination"));
+        assert_eq!(
+            crate::bash_classifier::simple_command_tokens("utility '' \"\" a''b"),
+            Some(vec!["utility".into(), "".into(), "".into(), "ab".into()])
+        );
+        for text in [
+            "rsync -e'custom-shell' src host:dst",
+            "rsync -avecustom-shell src host:dst",
+            "rsync --rsh=custom-shell src host:dst",
+            "rsync --rsync-pa=custom-shell src host:dst",
+            "rsync --unknown src dst",
+            "rsync --files-from=host:/list src dst",
+            "rsync -e'custom-shell' src host:dst > log",
+            "rsync -avecustom-shell src host:dst > log",
+            "rsync --unknown src dst > log",
+        ] {
+            let result = assess_native_policy_rejection(
+                None,
+                "exec_command",
+                &serde_json::json!({"cmd":text}),
+                None,
+            );
+            assert!(
+                !matches!(
+                    result.resolve_effect(),
+                    ResolvedEffect::ReadOnly | ResolvedEffect::LocalWrite
+                ),
+                "{text}"
+            );
+        }
+        for text in [
+            "rsync --exclude --delete src dst",
+            "rsync -- src --delete",
+            "rsync '*' destination",
+            r"rsync \* destination",
+        ] {
+            let result = assess_native_policy_rejection(
+                None,
+                "exec_command",
+                &serde_json::json!({"cmd":text}),
+                None,
+            );
+            assert_eq!(
+                result.resolve_effect(),
+                ResolvedEffect::LocalWrite,
+                "{text}"
+            );
+        }
+    }
+    #[test]
+    fn unsupported_evaluation_cannot_inherit_a_neighbors_read_proof() {
+        for text in [
+            "unset NAME; cat fixture",
+            "declare value=expression; cat fixture",
+            "((x=1)); cat fixture",
+            "((arr[index]++)); cat fixture",
+            "[[ $DATA ]]; cat fixture",
+        ] {
+            assert!(!assess(text).complete, "{text}");
+            assert!(!assess(text).proven_read(), "{text}");
+        }
+    }
+    #[test]
+    fn file_outputs_are_write_bounds_and_locations_do_not_confer_scope() {
+        let proof = assess("cat input > output");
+        assert!(proof.complete);
+        assert_eq!(proof.lower, WRITE);
+        assert_eq!(proof.upper, READ | WRITE);
+        assert_eq!(proof.compatibility(READ | WRITE), Compatibility::Compatible);
+        assert_eq!(proof.compatibility(READ), Compatibility::Forbidden);
+        let remote = assess("kubectl -n fixture get pods");
+        assert!(remote.proven_read());
+        assert!(remote
+            .components
+            .iter()
+            .any(|p| p.location == Location::External));
+    }
+}

@@ -8150,8 +8150,9 @@ mod tests {
 
     #[tokio::test]
     async fn literal_output_proof_preserves_independent_capability_denials() {
-        risk_assessment::set_test_shell_ast_authority_enabled(Some(true));
-        for command in ["printf '%s' 'rm fixture.txt'", "cat 'file$(not_a_command)'"] {
+        for ast_authority in [false,true] {
+        risk_assessment::set_test_shell_ast_authority_enabled(Some(ast_authority));
+        for command in ["printf '%s' 'rm fixture.txt'", "cat 'file$(not_a_command)'", "cat first 2>&1; head second"] {
             for (label, allowed, denied, expected) in [
                 ("read", json!(["Read"]), json!([]), "allow"),
                 ("missing", json!([]), json!([]), "deny"),
@@ -8178,6 +8179,7 @@ mod tests {
                 assert_eq!(gateway.session_manager.get("literal-output-session").unwrap().current_state, "inspect");
                 assert_eq!(gateway.usage.state_epoch(), epoch);
             }
+        }
         }
         risk_assessment::set_test_shell_ast_authority_enabled(None);
     }

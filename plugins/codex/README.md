@@ -515,3 +515,17 @@ are not redirected by this MCP-only retention mechanism.
 ## License
 
 FSL-1.1-ALv2 (see plugins/LICENSE.md)
+
+
+### Expired credentials during a managed TUI session
+
+If an approval/state request returns HTTP 401, the resident verifies the key
+against the configured authorization service. A confirmed expired or revoked key
+starts the standard browser device-approval flow once per resident. The TUI prints
+the code/link and opens the browser without a Desktop dialog. Human browser
+approval, verification and OS credential storage still apply. HTTP 403, outages,
+and an unconfirmed credential rejection do not initiate provisioning.
+
+The rejected command, turn or approval decision is never replayed. After sign-in,
+restart the affected managed session to use the renewed key, then explicitly retry.
+Existing workflow state and pending approvals remain intact.

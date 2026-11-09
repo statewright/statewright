@@ -291,3 +291,18 @@ test("service composes the original wait signal with its HTTP timeout", async t 
   assert.equal(captured.reason, reason);
   await cancelled;
 });
+
+for (const operation of ["getState", "read", "resolve"]) test(`${operation} starts credential recovery on 401 without replaying the blocked request`, async t => {
+  let provisions=0;
+  const f=await fixture(t,{reprovisionCredential:async()=>{provisions++}});
+  f.response({ok:false,status:401});
+  const call=operation==="getState"?f.service.getState():operation==="read"?f.service.read(ticket):f.service.resolve(ticket,"approved");
+  await assert.rejects(call,error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISIONED");
+  assert.equal(provisions,1);assert.equal(f.calls.length,1);
+});
+test("authorization denial and outage do not reprovision; cancelled provisioning stays blocked",async t=>{
+  let provisions=0;const f=await fixture(t,{reprovisionCredential:async()=>{provisions++;throw Error("user denied")}});
+  for(const status of [403,500]){f.response({ok:false,status});await assert.rejects(f.service.getState(),new RegExp("HTTP "+status))}
+  assert.equal(provisions,0);f.response({ok:false,status:401});await assert.rejects(f.service.getState(),error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISION_REQUIRED");
+  assert.equal(provisions,1);assert.equal(f.calls.length,3);
+});

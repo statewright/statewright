@@ -15,6 +15,7 @@ import { resolveApiKey } from "./remote-client.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
+import { createGatewayCredentialRecovery } from "./gateway-credential-recovery.mjs";
 import { approvalOriginProof } from "./approval-origin.mjs";
 import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
 
@@ -27,6 +28,8 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "approval-pipeline.mjs"),
   join(EXECUTOR_ROOT, "approval-origin.mjs"),
   join(EXECUTOR_ROOT, "managed-mcp-bridge.mjs"),
+  join(EXECUTOR_ROOT, "gateway-credential-recovery.mjs"),
+  join(EXECUTOR_ROOT, "desktop-device-connect.mjs"),
   join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
   join(EXECUTOR_ROOT, "adapter-bridge.mjs"),
   join(EXECUTOR_ROOT, "command-evidence.mjs"),
@@ -293,6 +296,9 @@ async function main() {
   const bridge = await createManagedMcpBridge({ environment: process.env, clientId, home });
   const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
       apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
+      reprovisionCredential: createGatewayCredentialRecovery({ apiKey: bridge.apiKey,
+        gatewayUrl: bridge.gatewayUrl, pbUrl: process.env.STATEWRIGHT_PB_URL,
+        environment: process.env, home }),
       originProof: bridge.originProof,
       pbUrl: process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai",
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",

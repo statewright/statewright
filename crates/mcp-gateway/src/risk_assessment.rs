@@ -384,6 +384,7 @@ impl RiskPipelineAssessment {
     /// This cannot turn a semantic vector or an incomplete AST into evidence.
     /// Callers must still enforce all independent execution/location policies.
     pub fn complete_resource_bounds(&self) -> Option<crate::resource_effects::EffectBounds> {
+        if let Some(bounds)=self.deterministic.native_resource_bounds { return Some(bounds); }
         let proof=self.deterministic.semantic_request.as_ref()?.component_evidence.as_ref()?;
         if !proof.syntax_valid || !proof.complete { return None; }
         crate::resource_effects::EffectBounds::new(
@@ -1184,6 +1185,9 @@ pub struct ShadowAssessment {
     required_capability: Option<&'static str>,
     semantic_request: Option<SemanticAssessmentRequest>,
     ast_semantic_request: Option<SemanticAssessmentRequest>,
+    /// Derived only after validating native manifest-body collection. This is
+    /// separate from the original launcher AST and never model-supplied.
+    native_resource_bounds: Option<crate::resource_effects::EffectBounds>,
 }
 
 impl ShadowAssessment {
@@ -2307,6 +2311,7 @@ fn apply_command_list_evidence(
     }
 
     let mut classes = Vec::new();
+    let mut resource_bounds=Some(crate::resource_effects::EffectBounds::exact(crate::resource_effects::EffectSet::NONE));
     let mut evidence_invalidated = false;
     for (unit, leaf) in units.iter().zip(&proof.leaves) {
         let mut input = arguments.clone();
@@ -2341,33 +2346,15 @@ fn apply_command_list_evidence(
         if effect.risk == RiskBand::Low && effect.exposure != ExposureBand::Local {
             return pipeline;
         }
-        match (effect.risk, effect.exposure) {
-            (RiskBand::Critical, _) => classes.push(OpClass::Destructive),
-            (RiskBand::High, _) => classes.push(OpClass::Network),
-            (RiskBand::Low, _) => classes.push(OpClass::SafeOutput),
-            (_, ExposureBand::Unknown) => classes.push(OpClass::Opaque),
-            (_, ExposureBand::External) if effect.external_unknown => classes.push(OpClass::ExternalUnknown),
-            (_, ExposureBand::External | ExposureBand::Account) => classes.push(OpClass::Network),
-            _ => {}
-        }
-        if let Some(required) = effect.required_capability {
-            for part in required.split('+') {
-                classes.push(match part {
-                    "Write" => OpClass::LocalWrite,
-                    "BoundedLocalExecution" => OpClass::BoundedLocalExecution,
-                    "GitLocalWrite" => OpClass::GitLocalWrite,
-                    _ => OpClass::Opaque,
-                });
-            }
-        } else if effect.risk == RiskBand::Moderate && effect.exposure == ExposureBand::Local {
-            classes.push(OpClass::LocalWrite);
-        }
+        resource_bounds=resource_bounds.zip(assessed.complete_resource_bounds()).map(|(a,b)|a.union(b));
+        append_native_assessment_classes(effect,&mut classes);
     }
     merge_native_effects(
         pipeline.deterministic,
         pipeline.semantic,
         &classes,
         "native_command_list_evidence",
+        resource_bounds,
     )
 }
 
@@ -2436,6 +2423,7 @@ pub fn apply_native_command_evidence(
         value.risk = RiskBand::Moderate;
         value.exposure = ExposureBand::Unknown;
         value.source = "native_command_evidence_incomplete";
+        value.native_resource_bounds=None;
         pipeline_from_parts(value, pipeline.semantic.clone(), false)
     };
     if evidence.to_string().len() > 128 * 1024 {
@@ -2479,6 +2467,8 @@ pub fn apply_native_command_evidence(
         return incomplete(deterministic);
     }
     let mut classes = vec![OpClass::BoundedLocalExecution];
+    let mut resource_bounds=Some(crate::resource_effects::EffectBounds::exact(crate::resource_effects::EffectSet::NONE));
+    let mut native_selection_invalidated=false;
     for unit in &proof.commands {
         if unit.original.len() > 8192 || unit.resolved.len() > 8192 {
             return incomplete(deterministic);
@@ -2494,6 +2484,17 @@ pub fn apply_native_command_evidence(
                         .any(|part| matches!(part, "" | "." | ".."))))
         {
             return incomplete(deterministic);
+        }
+        // v1 flattens the launcher/body selection graph. Once an earlier unit
+        // can mutate resources/context, it cannot establish which later bodies
+        // a nested launcher will select. Do not reuse pre-execution snapshots.
+        if native_selection_invalidated {
+            classes.push(OpClass::Opaque);
+            resource_bounds=None;
+            // Retain collected hazardous possibilities as risk floors, but
+            // never let their old read/runner labels restore admission.
+            classes.extend(shell_ast_shadow::assess(&unit.resolved).classes);
+            continue;
         }
         if let Some(entrypoint) = parsed_unit_invocation
             .as_ref()
@@ -2511,6 +2512,8 @@ pub fn apply_native_command_evidence(
                 return incomplete(deterministic);
             }
             classes.push(OpClass::BoundedLocalExecution);
+            resource_bounds=None; // Binding bytes does not analyze their behavior.
+            native_selection_invalidated=true;
             continue;
         }
         if unit.original != unit.resolved {
@@ -2540,14 +2543,53 @@ pub fn apply_native_command_evidence(
         if ast.status != ParseStatus::Parsed {
             classes.push(OpClass::Opaque);
         }
-        classes.extend(ast.classes);
+        let proof=crate::effect_evidence::assess(&unit.resolved);
+        if proof.syntax_valid && proof.complete && ast.status==ParseStatus::Parsed {
+            let bounds=crate::resource_effects::EffectBounds::new(
+                crate::resource_effects::EffectSet::try_from(proof.lower).expect("code-owned effect bits"),
+                crate::resource_effects::EffectSet::try_from(proof.upper).expect("code-owned effect bits"),
+            ).expect("code-owned effect bounds");
+            resource_bounds=resource_bounds.map(|current|current.union(bounds));
+            append_native_assessment_classes(&assess_shell(&unit.resolved),&mut classes);
+        } else {
+            resource_bounds=None;
+            if proof.has_structural_loss() { classes.push(OpClass::Opaque); }
+            classes.extend(ast.classes);
+        }
+        native_selection_invalidated=!proof.complete || proof.upper & (crate::resource_effects::WRITE|crate::resource_effects::DESTROY)!=0;
     }
     merge_native_effects(
         deterministic,
         pipeline.semantic,
         &classes,
         "native_command_evidence",
+        resource_bounds,
     )
+}
+
+fn append_native_assessment_classes(effect:&ShadowAssessment,classes:&mut Vec<OpClass>) {
+    match (effect.risk,effect.exposure) {
+        (RiskBand::Critical,_)=>classes.push(OpClass::Destructive),
+        (RiskBand::High,_)=>classes.push(OpClass::Network),
+        (RiskBand::Low,ExposureBand::External)=>classes.push(OpClass::RemoteRead),
+        (RiskBand::Low,_)=>classes.push(OpClass::SafeOutput),
+        (_,ExposureBand::Unknown)=>classes.push(OpClass::Opaque),
+        (_,ExposureBand::External) if effect.external_unknown=>classes.push(OpClass::ExternalUnknown),
+        (_,ExposureBand::External|ExposureBand::Account)=>classes.push(OpClass::Network),
+        _=>{}
+    }
+    if let Some(required)=effect.required_capability {
+        for part in required.split('+') {
+            classes.push(match part {
+                "Write"=>OpClass::LocalWrite,
+                "BoundedLocalExecution"=>OpClass::BoundedLocalExecution,
+                "GitLocalWrite"=>OpClass::GitLocalWrite,
+                _=>OpClass::Opaque,
+            });
+        }
+    } else if effect.risk==RiskBand::Moderate && effect.exposure==ExposureBand::Local {
+        classes.push(OpClass::LocalWrite);
+    }
 }
 
 fn merge_native_effects(
@@ -2555,6 +2597,7 @@ fn merge_native_effects(
     semantic: SemanticAssessmentReceipt,
     classes: &[OpClass],
     source: &'static str,
+    resource_bounds:Option<crate::resource_effects::EffectBounds>,
 ) -> RiskPipelineAssessment {
     // Every expanded execution unit contributes to the risk/capability union.
     // Incomplete leaves cannot erase a known write, delete or network operation.
@@ -2587,6 +2630,7 @@ fn merge_native_effects(
         && (classes.contains(&OpClass::ExternalUnknown) || classes.contains(&OpClass::RemoteRead));
     deterministic.required_capability = local_effect_capability(classes);
     deterministic.source = source;
+    deterministic.native_resource_bounds=resource_bounds;
     // Unresolved expansions need more structural evidence, not a probability
     // inferred from the innocent name of their original wrapper.
     pipeline_from_parts(deterministic, semantic, false)
@@ -2710,6 +2754,7 @@ fn assessment(risk: RiskBand, exposure: ExposureBand, source: &'static str) -> S
         required_capability: None,
         semantic_request: None,
         ast_semantic_request: None,
+        native_resource_bounds:None,
     }
 }
 
@@ -3431,7 +3476,9 @@ mod tests {
         for (nested, expected) in [
             (
                 "echo x > output.txt",
-                ResolvedEffect::LocalWriteAndBoundedLocalExecution,
+                // The preceding runner may change later source selections;
+                // flat v1 evidence cannot establish that this body is fixed.
+                ResolvedEffect::DenyUncertain,
             ),
             (
                 "curl https://example.invalid",
@@ -3535,6 +3582,11 @@ mod tests {
         });
         assert_eq!(base().resolve_effect(), ResolvedEffect::DenyUncertain);
         assert_eq!(apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof)).resolve_effect(),
+            ResolvedEffect::DenyUncertain);
+        // Read-only pre-hook plus final runner remains admissible under the
+        // existing explicit execution authority; no later selection is reused.
+        let mut runner_last=proof.clone();runner_last["commands"].as_array_mut().unwrap().pop();
+        assert_eq!(apply_native_command_evidence(base(),None,"exec_command",&input,Some(&runner_last)).resolve_effect(),
             ResolvedEffect::BoundedLocalExecution);
         for hazardous in ["rm file", "git push origin main", "opaque_fixture --mutate"] {
             let mut mutated = proof.clone();
@@ -3687,6 +3739,7 @@ mod tests {
             ResolvedEffect::BoundedLocalExecution
         );
         assert_eq!(admitted.deterministic.source, "native_command_evidence");
+        assert!(admitted.complete_resource_bounds().is_none(),"a file hash is not proof of program effects");
 
         for mutation in ["files", "invocation", "commands"] {
             let mut invalid = evidence.clone();
@@ -3707,6 +3760,56 @@ mod tests {
             );
         }
         set_test_shell_ast_authority_enabled(None);
+    }
+
+    #[test]
+    fn native_manifest_bodies_use_shared_effect_contract_without_granting_execution() {
+        let input=json!({"cmd":"task test","workdir":"/workspace"});
+        let base=||assess_native_policy_rejection(None,"exec_command",&input,None);
+        let proof=|body:&str|json!({
+            "schema":"statewright/local-command-evidence/v1","tool_name":"exec_command",
+            "command":"task test","requested_cwd":"/workspace","cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation("task test"),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(),"complete":true,
+            "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}],
+            "commands":[{"original":body,"resolved":body,"cwd":".","invocation":bash_classifier::literal_invocation(body)}]
+        });
+        let write=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof("touch \"$FILE\"; cat \"$INPUT\"")));
+        assert_eq!(write.resolve_effect(),ResolvedEffect::LocalWriteAndBoundedLocalExecution);
+        assert_eq!(write.complete_resource_bounds().unwrap().upper().bits(),crate::resource_effects::READ|crate::resource_effects::WRITE);
+        let read=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof("cat \"$INPUT\"")));
+        assert_eq!(read.resolve_effect(),ResolvedEffect::BoundedLocalExecution);
+        assert_eq!(read.complete_resource_bounds().unwrap().upper().bits(),crate::resource_effects::READ);
+        let opaque=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof("widget --inspect")));
+        assert_eq!(opaque.resolve_effect(),ResolvedEffect::DenyUncertain);
+        assert!(opaque.complete_resource_bounds().is_none());
+        let destroy=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof("touch \"$FILE\"; rm fixture")));
+        assert_eq!(destroy.resolve_effect(),ResolvedEffect::DenyKnownRisk);
+        for body in ["PATH=/fixture/bin; cat fixture","unset PATH; cat fixture","X=$((a[0])); cat fixture"] {
+            let result=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&proof(body)));
+            assert_eq!(result.resolve_effect(),ResolvedEffect::DenyUncertain,"{body}");
+            assert!(result.complete_resource_bounds().is_none());
+        }
+        let mut changed=proof("touch package.json");
+        changed["commands"].as_array_mut().unwrap().push(json!({
+            "original":"cat fixture","resolved":"cat fixture","cwd":".",
+            "invocation":bash_classifier::literal_invocation("cat fixture")
+        }));
+        let stale=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&changed));
+        assert_eq!(stale.resolve_effect(),ResolvedEffect::DenyUncertain);
+        assert!(stale.complete_resource_bounds().is_none());
+        for mutation in ["stale","cwd","files"] {
+            let mut bad=proof("cat fixture");
+            match mutation {
+                "stale"=>bad["collected_at_ms"]=json!(0),
+                "cwd"=>bad["commands"][0]["cwd"]=json!("../escape"),
+                "files"=>bad["files"]=json!([]),
+                _=>unreachable!(),
+            }
+            let result=apply_native_command_evidence(base(),None,"exec_command",&input,Some(&bad));
+            assert_eq!(result.resolve_effect(),ResolvedEffect::DenyUncertain);
+            assert!(result.complete_resource_bounds().is_none());
+        }
     }
 
     #[test]

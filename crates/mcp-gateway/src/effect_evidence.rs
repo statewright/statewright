@@ -59,6 +59,13 @@ impl std::fmt::Debug for Evidence {
 }
 
 impl Evidence {
+    /// Missing utility semantics can use a legacy behavior adapter, but lost
+    /// shell/context grammar may not disappear through that fallback.
+    pub(crate) fn has_structural_loss(&self) -> bool {
+        !self.syntax_valid || self.components.iter().any(|part| {
+            !part.complete && part.reason != "leaf_effect_evidence_missing"
+        })
+    }
     /// Bounded provider metadata; literal argv and its local source digest
     /// stay outside this projection. Full evidence remains in the local IR.
     pub fn semantic_projection(&self) -> serde_json::Value {
@@ -262,8 +269,12 @@ pub(crate) fn has_argument_expansion(source: &str) -> bool {
 }
 
 fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
-    if depth > 32 || out.components.len() >= 64 {
+    if depth > 32 || out.components.len() >= 63 {
         // Keep bounds conservative without accumulating an unbounded AST list.
+        // Reserve one slot so a legacy fallback also observes the coverage loss.
+        if out.components.len() < 64 {
+            out.push(unknown(node,"effect_ast_limit_exceeded"));
+        }
         out.upper = ALL;
         out.complete = false;
         return;
@@ -376,6 +387,17 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structural_loss_is_distinct_from_missing_utility_semantics_and_survives_limits() {
+        assert!(!assess("widget --inspect").has_structural_loss());
+        for command in ["PATH=/fixture/bin; cat fixture","unset PATH; cat fixture","cat 'broken"] {
+            assert!(assess(command).has_structural_loss(),"{command}");
+        }
+        let proof=assess(&format!("{}PATH=/fixture/bin; cat fixture","cat fixture;".repeat(100)));
+        assert!(proof.has_structural_loss());assert!(!proof.complete);
+        assert!(proof.components.len()<=64);
+        assert!(proof.components.iter().any(|part|part.reason=="effect_ast_limit_exceeded"));
+    }
     #[test]
     fn invariant_ceiling_composes_expanded_data_without_fabricating_argv() {
         for command in ["cat $FLAGS", "cat $(cat fixture)", "dirname `pwd -P`", "echo $0", "md5sum *.txt"] {

@@ -520,13 +520,13 @@ pub fn semantic_effect_capability_denial_details(
         // allowed set, not just avoid explicit denials. Keep native read
         // aliases through the existing adapter rather than granting Read from
         // Write/Bash or rewriting the workflow's tool names.
-        if pipeline.deterministic.source == "shell_effect_evidence"
+        if matches!(pipeline.deterministic.source,"shell_effect_evidence"|"native_command_evidence"|"native_command_list_evidence")
             && pipeline.resolve_effect() != ResolvedEffect::ReadOnly
             && bounds.upper().bits() & READ != 0 && has_capability_allowlist
             && allowed_general_read_name(execution_session).is_none()
         {
             return Some(SemanticEffectDenial::new(
-                "Mixed resource effects require Read as well as Write in this state.",
+                "The possible Read resource effect also requires Read in this state.",
                 "workflow_capability_read_missing","Read",
             ));
         }
@@ -763,6 +763,27 @@ mod tests {
         let compound=semantic_pipeline("touch \"$FILE\"; rm fixture",None);
         assert_eq!(compound.resolve_effect(),ResolvedEffect::DenyKnownRisk);
         assert!(semantic_effect_risk_denial(&denylist_session(&[]),&compound).is_some());
+    }
+
+    #[test]
+    fn native_body_effects_preserve_read_denial_and_execution_authority() {
+        let input=json!({"cmd":"task test","workdir":"/workspace"});
+        let body="touch \"$FILE\"; cat \"$INPUT\"";
+        let proof=json!({
+            "schema":"statewright/local-command-evidence/v1","tool_name":"exec_command",
+            "command":"task test","requested_cwd":"/workspace","cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation("task test"),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(),"complete":true,
+            "files":[{"path":"Taskfile.yml","sha256":"a".repeat(64)}],
+            "commands":[{"original":body,"resolved":body,"cwd":".","invocation":bash_classifier::literal_invocation(body)}]
+        });
+        let pipeline=crate::risk_assessment::apply_native_command_evidence(
+            crate::risk_assessment::assess_native_policy_rejection(None,"exec_command",&input,None),
+            None,"exec_command",&input,Some(&proof),
+        );
+        assert_eq!(pipeline.resolve_effect(),ResolvedEffect::LocalWriteAndBoundedLocalExecution);
+        assert_eq!(semantic_effect_capability_denial_details(&denylist_session(&["Read"]),&pipeline).unwrap().basis,"workflow_capability_read_denied");
+        assert!(semantic_effect_capability_denial(&denylist_session(&["BoundedLocalExecution"]),&pipeline).is_some());
     }
 
     #[test]

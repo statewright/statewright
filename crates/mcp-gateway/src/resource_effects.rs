@@ -90,6 +90,9 @@ impl EffectBounds {
             upper: EffectSet::ALL,
         }
     }
+    pub const fn upper(self) -> EffectSet {
+        self.upper
+    }
     pub const fn union(self, other: Self) -> Self {
         Self {
             lower: self.lower.union(other.lower),

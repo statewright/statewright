@@ -380,6 +380,17 @@ impl<'a> FinalDecisionContext<'a> {
 }
 
 impl RiskPipelineAssessment {
+    /// Complete code-owned component bounds for denial/capability composition.
+    /// This cannot turn a semantic vector or an incomplete AST into evidence.
+    /// Callers must still enforce all independent execution/location policies.
+    pub fn complete_resource_bounds(&self) -> Option<crate::resource_effects::EffectBounds> {
+        let proof=self.deterministic.semantic_request.as_ref()?.component_evidence.as_ref()?;
+        if !proof.syntax_valid || !proof.complete { return None; }
+        crate::resource_effects::EffectBounds::new(
+            crate::resource_effects::EffectSet::try_from(proof.lower).ok()?,
+            crate::resource_effects::EffectSet::try_from(proof.upper).ok()?,
+        ).ok()
+    }
     /// These known effects require an explicit capability even in a normally
     /// unrestricted state. Separate classifier approval cannot supply it.
     pub fn requires_explicit_execution_capability(&self) -> bool {
@@ -1475,7 +1486,7 @@ pub fn assess_shell(command: &str) -> ShadowAssessment {
         let external = proof.components.iter().any(|part| part.location == crate::effect_evidence::Location::External);
         return assessment(RiskBand::Low, if external {ExposureBand::External}else{ExposureBand::Local}, "shell_effect_evidence");
     }
-    if proof.syntax_valid && proof.complete && proof.lower & crate::effect_evidence::WRITE != 0
+    if proof.syntax_valid && proof.complete && proof.upper & crate::effect_evidence::WRITE != 0
         && proof.upper & crate::effect_evidence::DESTROY == 0
         && classes.iter().any(|class|matches!(class,OpClass::Opaque|OpClass::Passthrough))
         && proof.components.iter().all(|part|part.location==crate::effect_evidence::Location::Local)
@@ -3262,6 +3273,10 @@ mod tests {
         );
         assert_eq!(
             assess_shell("touch output.txt"),
+            assessment_with_capability(RiskBand::Moderate, ExposureBand::Local, "shell_effect_evidence", "Write")
+        );
+        assert_eq!(
+            assess_shell("widget output.txt"),
             assessment(RiskBand::Moderate, ExposureBand::Unknown, "shell")
         );
         assert_eq!(

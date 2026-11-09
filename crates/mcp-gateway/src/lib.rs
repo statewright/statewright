@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod hooks;
 pub mod interceptors;
 pub mod invocation_evidence;
+mod utility_effects;
 pub mod protocol;
 #[cfg(feature = "metering")]
 pub(crate) mod quota;

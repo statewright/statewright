@@ -107,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "effect_evidence.rs",
             include_str!("../src/effect_evidence.rs"),
         ),
+        ("utility_effects.rs", include_str!("../src/utility_effects.rs")),
         (
             "invocation_evidence.rs",
             include_str!("../src/invocation_evidence.rs"),

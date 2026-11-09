@@ -499,6 +499,38 @@ pub fn semantic_effect_capability_denial_details(
         .get(&execution_session.current_state)
         .and_then(|state| state.allowed_tools.as_ref())
         .is_some();
+    // Legacy LocalWrite is a presentation/dispatch category, not the whole
+    // effect set. Preserve every possible effect in complete code-owned AST
+    // evidence; a write ceiling must not erase a neighboring read denial.
+    if let Some(bounds)=pipeline.complete_resource_bounds() {
+        use crate::resource_effects::{READ,WRITE,DESTROY};
+        for (bit,capability,basis) in [
+            (READ,"Read","workflow_capability_read_denied"),
+            (WRITE,"Write","workflow_capability_write_denied"),
+            (DESTROY,"Destroy","workflow_capability_destroy_denied"),
+        ] {
+            if bounds.upper().bits() & bit != 0 && explicitly_denied(capability) {
+                return Some(SemanticEffectDenial::new(
+                    format!("Possible {capability} resource effect is explicitly blocked in state '{}'.",execution_session.current_state),
+                    basis,capability,
+                ));
+            }
+        }
+        // The new mixed-effect reduction must also satisfy a restricted
+        // allowed set, not just avoid explicit denials. Keep native read
+        // aliases through the existing adapter rather than granting Read from
+        // Write/Bash or rewriting the workflow's tool names.
+        if pipeline.deterministic.source == "shell_effect_evidence"
+            && pipeline.resolve_effect() != ResolvedEffect::ReadOnly
+            && bounds.upper().bits() & READ != 0 && has_capability_allowlist
+            && allowed_general_read_name(execution_session).is_none()
+        {
+            return Some(SemanticEffectDenial::new(
+                "Mixed resource effects require Read as well as Write in this state.",
+                "workflow_capability_read_missing","Read",
+            ));
+        }
+    }
     match pipeline.resolve_effect() {
         ResolvedEffect::ReadOnly if explicitly_denied("Read") => Some(SemanticEffectDenial::new(
             format!(
@@ -706,6 +738,31 @@ mod tests {
             "classifier_policy_low_local_remote_read");
         let permissive = denylist_session_with_tolerance("moderate_local");
         assert!(semantic_effect_risk_denial_details(&permissive, &pipeline).is_none());
+    }
+
+    #[test]
+    fn invariant_effect_ceilings_still_require_write_and_preserve_risk_policy() {
+        let pipeline=semantic_pipeline("touch \"$FILE\"",None);
+        assert_eq!(pipeline.resolve_effect(),ResolvedEffect::LocalWrite);
+        assert!(semantic_effect_capability_denial(&denylist_session(&["Write"]),&pipeline).is_some());
+        assert!(semantic_effect_risk_denial(&denylist_session_with_tolerance("low_local"),&pipeline).is_some());
+        assert!(semantic_effect_risk_denial(&denylist_session_with_tolerance("moderate_local"),&pipeline).is_none());
+        assert!(semantic_effect_capability_denial(&denylist_session(&[]),&pipeline).is_none());
+        let composed=semantic_pipeline("touch \"$FILE\"; cat \"$INPUT\"",None);
+        assert_eq!(composed.resolve_effect(),ResolvedEffect::LocalWrite);
+        assert_eq!(semantic_effect_capability_denial_details(&denylist_session(&["Read"]),&composed).unwrap().basis,"workflow_capability_read_denied");
+        assert!(semantic_effect_capability_denial(&denylist_session(&[]),&composed).is_none());
+        for (allowed,denied) in [(json!(["Write"]),true),(json!(["Read","Write"]),false)] {
+            let definition:MachineDefinition=serde_json::from_value(json!({
+                "id":"effect-sets","initial":"inspect","context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "states":{"inspect":{"allowed_tools":allowed,"on":{"DONE":"done"}},"done":{"type":"final"}}
+            })).unwrap();
+            let restricted=GatewaySession::new("effect-sets".into(),definition);
+            assert_eq!(semantic_effect_capability_denial(&restricted,&composed).is_some(),denied);
+        }
+        let compound=semantic_pipeline("touch \"$FILE\"; rm fixture",None);
+        assert_eq!(compound.resolve_effect(),ResolvedEffect::DenyKnownRisk);
+        assert!(semantic_effect_risk_denial(&denylist_session(&[]),&compound).is_some());
     }
 
     #[test]

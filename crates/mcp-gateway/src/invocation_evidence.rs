@@ -31,6 +31,9 @@ impl fmt::Debug for ArgumentEvidence {
 }
 
 impl ArgumentEvidence {
+    pub(crate) fn literal(&self) -> Option<&str> {
+        self.literal_value.as_deref()
+    }
     fn capture(node: Node<'_>, source: &str) -> Self {
         let text = node.utf8_text(source.as_bytes()).unwrap_or("");
         let tilde = matches!(node.kind(), "word" | "command_name") && text.starts_with('~');

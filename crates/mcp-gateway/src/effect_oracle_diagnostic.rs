@@ -195,6 +195,7 @@ fn frozen_effect_policy_ceiling() {
         ("risk_assessment.rs", include_str!("risk_assessment.rs")),
         ("resource_effects.rs", include_str!("resource_effects.rs")),
         ("effect_evidence.rs", include_str!("effect_evidence.rs")),
+        ("utility_effects.rs", include_str!("utility_effects.rs")),
         (
             "invocation_evidence.rs",
             include_str!("invocation_evidence.rs"),

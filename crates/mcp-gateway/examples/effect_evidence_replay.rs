@@ -27,6 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "effect_evidence.rs",
             include_str!("../src/effect_evidence.rs"),
         ),
+        ("utility_effects.rs", include_str!("../src/utility_effects.rs")),
         ("cli_options.rs", include_str!("../src/cli_options.rs")),
         (
             "resource_effects.rs",

@@ -141,10 +141,17 @@ fn command_leaf(node: Node<'_>, source: &str) -> Component {
         if invocation.assignments.is_empty() && !invocation.assignments_truncated
             && !invocation.arguments_truncated
         {
-            if let Some(ceiling) = invocation.executable.as_ref()
+            let ceiling = invocation.executable.as_ref()
                 .and_then(|executable| executable.literal())
-                .and_then(crate::utility_effects::invariant_ceiling)
-            {
+                .and_then(|executable| {
+                    crate::utility_effects::invariant_ceiling(executable).or_else(|| {
+                        if !invocation.argv_complete { return None; }
+                        let arguments = invocation.arguments.iter()
+                            .map(|argument| argument.literal()).collect::<Option<Vec<_>>>()?;
+                        crate::utility_effects::literal_ceiling(executable, &arguments)
+                    })
+                });
+            if let Some(ceiling) = ceiling {
                 let mut result = component(node, "command", 0, ceiling.upper,
                     Location::Local, true, ceiling.contract);
                 if ceiling.upper & READ != 0 { result.required_capabilities.push("Read"); }
@@ -387,6 +394,28 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bounded_stream_contracts_compose_without_erasing_children_or_context() {
+        for command in ["grep -E '(one|two)' input | sed 's/old/new/g' | diff -u expected -",
+            "sed ':a;N;$!ba;s/\\n/ /g' input", "cat input | sed '1,20d'", "diff --label before -u old new"] {
+            let proof = assess(command);
+            assert!(proof.proven_read(), "{command}: {proof:?}");
+        }
+        for command in ["sort -u -t, -k1,1 input", "sort -o output input | sed 's/x/y/'"] {
+            let proof = assess(command);
+            assert!(proof.complete, "{command}: {proof:?}");
+            assert_eq!(proof.upper, READ | WRITE, "{command}");
+            assert_eq!(proof.compatibility(READ), Compatibility::Unresolved, "{command}");
+        }
+        for command in ["sort $FLAGS input", "sort --compress-program=widget input",
+            "sort -u $(widget)", "sed \"$PROGRAM\" input", "sed -f program.sed input",
+            "sed 's/x/y/e' input", "sed 's/x/y/w output' input", "diff --paginate old new",
+            "PATH=/tmp sed p input", "sed p input; widget", "grep pattern <(widget)",
+            "sed p <(rm input)", "sort -o \"$TARGET\" input", "sed 'p' >\"$TARGET\""] {
+            let proof = assess(command);
+            assert!(!proof.complete, "{command}: {proof:?}");
+        }
+    }
     #[test]
     fn structural_loss_is_distinct_from_missing_utility_semantics_and_survives_limits() {
         assert!(!assess("widget --inspect").has_structural_loss());

@@ -6,7 +6,7 @@ use statewright_engine::{MachineDefinition, TransitionDef};
 use crate::config::{
     available_workflow_names, resolve_workflow_name, workflow_aliases, workflow_enabled,
 };
-use crate::custom_tools;
+use crate::{custom_tools,bash_classifier};
 use crate::enforcement::{self, EnforcementDecision};
 use crate::events::{WorkflowLifecycleEvent, WorkflowLifecycleKind, WorkflowLifecycleStatus};
 use crate::interceptors::{self, PreCallDecision};
@@ -115,6 +115,12 @@ fn managed_delegation_policy(
     })
 }
 
+fn same_classifier_snapshot(left:&crate::session::GatewaySession,right:&crate::session::GatewaySession)->bool {
+    left.generation==right.generation && left.transition_count==right.transition_count
+        && left.current_state==right.current_state
+        && crate::approval_memory::policy(left)==crate::approval_memory::policy(right)
+}
+
 /// Core MCP gateway that dispatches messages.
 pub struct Gateway {
     pub session_manager: SessionManager,
@@ -154,6 +160,12 @@ pub struct Gateway {
     /// MCP client name captured from initialize.clientInfo for diagnostics and
     /// a user-facing routing disclosure.
     host_client_name: Option<String>,
+    classifier_environment: Option<String>,
+    classifier_audit_root: Option<std::path::PathBuf>,
+    #[cfg(test)]
+    classifier_assessment_pause: Option<(tokio::sync::oneshot::Sender<()>,tokio::sync::oneshot::Receiver<()>)>,
+    #[cfg(test)]
+    classifier_recording_pause: Option<(tokio::sync::oneshot::Sender<()>,tokio::sync::oneshot::Receiver<()>)>,
 }
 
 const HOST_MODEL_ROUTING_WARNING: &str = "This remote MCP host controls the conversation model, so Statewright cannot apply this workflow's model or thinking_level route in the current chat. Treat those fields as recommendations and tell the user once when a workflow is activated. Statewright checks calls made through this MCP connection and workflow transitions; it cannot gate tools the host offers outside this connector. statewright_run_agent starts a separate server-side execution; it does not change this conversation's model.";
@@ -290,6 +302,12 @@ impl Gateway {
             #[cfg(feature = "metering")]
             event_service: None,
             host_client_name: None,
+            classifier_environment: std::env::var("STATEWRIGHT_ENV").ok(),
+            classifier_audit_root: std::env::var_os("STATEWRIGHT_CLASSIFIER_AUDIT_DIR").map(Into::into),
+            #[cfg(test)]
+            classifier_assessment_pause: None,
+            #[cfg(test)]
+            classifier_recording_pause: None,
         }
     }
 
@@ -556,6 +574,10 @@ impl Gateway {
         state["run_session_id"] = json!(self.transport_session_id);
         state["state_epoch"] = json!(self.usage.state_epoch());
         state["capture_output"] = json!(capture_output);
+        if let Some(session) = self.session_manager.get(&self.session_id) {
+            state["approval_memory_policy"] = crate::approval_memory::policy(&session);
+            state["session_generation"] = json!(session.generation);
+        }
         if self.host_controls_model {
             state["model_routing"] = json!({
                 "status": "host_controlled",
@@ -1664,6 +1686,12 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
+        match crate::classifier_audit::AuditConfig::from_metadata(
+            initial_session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),
+            self.classifier_environment.as_deref()) {
+            Ok(_)=>{},
+            Err(reason)=>return json!({"decision":"deny","denial_stage":"classifier_audit_configuration","reason":reason}),
+        };
         let intent = initial_session
             .definition
             .states
@@ -1724,6 +1752,8 @@ impl Gateway {
             command_references,
         )
         .await;
+        #[cfg(test)]
+        if let Some((entered,resume))=self.classifier_assessment_pause.take(){let _=entered.send(());let _=resume.await;}
         let pipeline = risk_assessment::apply_native_command_evidence(
             pipeline,
             registered_tool,
@@ -1743,6 +1773,13 @@ impl Gateway {
                     ),
                 });
             }
+        };
+        if !same_classifier_snapshot(&initial_session,&session) {
+            return json!({"decision":"deny","reason":"Workflow changed while classifier evidence was assessed.","denial_stage":"classifier_context_changed"});
+        }
+        let audit_config=match crate::classifier_audit::AuditConfig::from_metadata(
+            session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+            Ok(config)=>config,Err(reason)=>return json!({"decision":"deny","reason":reason,"denial_stage":"classifier_audit_configuration"}),
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
         // including tools the state allowlist would admit — until an
@@ -1830,11 +1867,63 @@ impl Gateway {
                 // Native thread identity is supplied by the host hook and
                 // independently checked by the owning approval controller.
                 if let Some(run_id) = &self.current_run_id {
+                    if audit_config.enabled() && session.pending_approval.is_none() {
+                        use crate::classifier_audit::{AuditAction,AuditEvidenceReferences,ClassifierOutcome,EvidenceDigest,IndependentGuards};
+                        let policy=crate::approval_memory::policy(&session);
+                        let hash=|value:&serde_json::Value|EvidenceDigest::new(&crate::approval_memory::digest(value)).expect("SHA256");
+                        let guards=IndependentGuards{workflow_tool:true,interceptor:true,capability:true,
+                            scope:true,native_approval:crate::classifier_audit::NativePermissions::DeferredToHost,human_review:true};
+                        // Policy checks above clear gateway authority. Host native permissions
+                        // are still enforced downstream; this is never a native allow override.
+                        let refs=AuditEvidenceReferences{workflow:hash(&json!(session.definition)),
+                            policy:hash(&policy),invocation:hash(&pipeline.visible_json()["invocation_fingerprint"]),
+                            classifier_decision:hash(&pipeline.visible_json()),independent_guards:hash(&json!({
+                                "tool_admission":"enforce_tool_call","interceptor":"classifier_approval_policy_check",
+                                "known_required_capability":pipeline.known_required_capability(),"policy_tool":policy_name,
+                                "generation":session.generation,"transition_count":session.transition_count,
+                                "workflow_human_review":"not_pending","host_native_permissions":"deferred_to_host"})),
+                            native_context:hash(&json!([self.owner_id,self.project_id,run_id,self.transport_session_id,self.usage.state_epoch()]))};
+                        if let AuditAction::RecordBeforeProceeding(receipt)=crate::classifier_audit::evaluate(
+                            audit_config,ClassifierOutcome::DenyUncertain,guards,refs) {
+                            let Some(root)=self.classifier_audit_root.clone() else {
+                                return json!({"decision":"deny","reason":"Classifier audit requires a configured private server intake directory.","denial_stage":"classifier_audit_recording"});
+                            };
+                            let command=tool_input.get("cmd").or_else(||tool_input.get("command")).and_then(serde_json::Value::as_str);
+                            let shapes=command.and_then(bash_classifier::semantic_command_shapes).unwrap_or_default();
+                            let shape:Vec<_>=shapes.into_iter().map(|s|{
+                                let executable=match s.executable.as_str(){
+                                    "git"|"cargo"|"npm"|"node"|"sed"|"awk"|"rg"|"grep"|"find"|"cat"|"head"|"tail"|"sort"|"uniq"|"cut"|"tr"|"wc"|"curl"|"wget"|"ssh"=>s.executable.as_str(),
+                                    "python"|"python3"=>"python","sh"|"bash"|"zsh"=>"shell",_=>"other"};
+                                json!({"executable":executable,"effect":"unknown","delegates_unknown_effect":s.delegates_unknown_effect})
+                            }).collect();
+                            let tool=match tool_name {"Bash"|"bash"|"shell"|"exec_command"|"functions.exec_command"=>tool_name,_=>"other"};
+                            let case=json!({"tool_name":tool,"command_shape":shape});
+                            let saved=tokio::task::spawn_blocking(move||crate::classifier_audit_store::persist(&root,&receipt,&case)).await;
+                            let saved=match saved {Ok(Ok(reference))=>reference,_=>return json!({"decision":"deny","reason":"Classifier audit recording failed; invocation remains held.","denial_stage":"classifier_audit_recording"})};
+                            #[cfg(test)]
+                            if let Some((entered,resume))=self.classifier_recording_pause.take(){let _=entered.send(());let _=resume.await;}
+                            let current=self.session_manager.get(&self.session_id);
+                            if current.as_ref().is_none_or(|current|!same_classifier_snapshot(&session,current)
+                                || current.pending_approval.is_some()) {
+                                return json!({"decision":"deny","reason":"Workflow changed during classifier audit recording.","denial_stage":"classifier_audit_context"});
+                            }
+                            tracing::info!(event="classifier_would_block_uncertain",audit_record=%saved.file_name,
+                                audit_sha256=%saved.sha256,"Classifier audit recorded unlabelled simulation intake");
+                            return json!({"decision":"allow","state":session.current_state,"run_id":run_id,
+                                "classifier_audit":{"schema":"statewright/classifier-audit-result/v1","would_block":true,
+                                    "simulation_label":null,"replay_ready":false,"record":saved},
+                                "risk_assessment":pipeline.visible_json_for_denial(denial.basis,denial.required_authority)});
+                        }
+                    }
                     classifier_context = Some(json!({
                         "run_id": run_id,
                         "run_session_id": self.transport_session_id,
                         "state": session.current_state,
                         "state_epoch": self.usage.state_epoch(),
+                        "session_generation": session.generation,
+                        "approval_memory": crate::approval_memory::context(&session, tool_name,
+                            tool_input, command_evidence, command_references,
+                            pipeline.deterministic.source, registered_tool.is_none(),pipeline.complete_resource_bounds().is_some()),
                     }));
                 }
             }
@@ -3348,6 +3437,11 @@ impl Gateway {
                     );
                 }
 
+                if let Err(reason)=crate::classifier_audit::AuditConfig::from_metadata(
+                    definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+                    return JsonRpcResponse::success(id,serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap());
+                }
+
                 // Guard: don't overwrite a session with an active fork
                 if let Some(existing) = self.session_manager.get(&self.session_id) {
                     if existing.context.get("_fork").is_some() {
@@ -3374,6 +3468,12 @@ impl Gateway {
                 } else {
                     None
                 };
+                if let Some((_,checkpoint))=&paused {
+                    if let Err(reason)=crate::classifier_audit::AuditConfig::from_metadata(
+                        checkpoint.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+                        return JsonRpcResponse::error(id,-32600,reason);
+                    }
+                }
                 #[cfg(feature = "metering")]
                 if let Some((run_id, _)) = &paused {
                     let result = sqlx::query("UPDATE workflow_runs SET status = 'running', updated = $1 WHERE id = $2 AND status = 'paused'")
@@ -7930,6 +8030,82 @@ mod tests {
         assert_eq!(result["risk_assessment"]["separate_approval_allowed"], false);
         assert!(result["classifier_context"].is_null());
         assert!(risk_assessment::take_test_semantic_receipts().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn classifier_audit_rejects_revocation_aba_and_replacement_across_awaits() {
+        use std::os::unix::fs::PermissionsExt;
+        for scenario in ["assessment_revocation","recording_aba","recording_replacement"] {
+            let root=std::env::temp_dir().join(format!("statewright-audit-race-{}",uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).unwrap();std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
+            let definition:MachineDefinition=serde_json::from_value(json!({"id":"audit-race","initial":"work",
+                "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "meta":{"classifier_audit":{"mode":"audit"},"classifier_policy":{"risk_tolerance":"assessed_moderate_local"}},
+                "states":{"work":{},"other":{}}})).unwrap();
+            let manager=SessionManager::new();manager.create("race".into(),definition.clone());
+            let mut gateway=Gateway::new(manager.clone(),UpstreamManager::mock(vec![]),"race".into(),HashMap::new(),Some("audit-race".into()),"owner".into(),None);
+            gateway.current_run_id=Some("run".into());gateway.classifier_environment=Some("staging".into());gateway.classifier_audit_root=Some(root.clone());
+            let (entered,enter)=tokio::sync::oneshot::channel();let(resume,release)=tokio::sync::oneshot::channel();
+            if scenario=="assessment_revocation"{gateway.classifier_assessment_pause=Some((entered,release));}
+            else{gateway.classifier_recording_pause=Some((entered,release));}
+            let change=async {
+                enter.await.unwrap();
+                if scenario=="assessment_revocation" {
+                    let mut changed=manager.get("race").unwrap();
+                    changed.definition.meta.as_mut().unwrap().extra.insert("classifier_audit".into(),json!({"mode":"enforce"}));manager.restore(changed);
+                }else if scenario=="recording_aba" {
+                    let context=manager.get("race").unwrap().context;
+                    manager.update_state("race","other".into(),context.clone());manager.update_state("race","work".into(),context);
+                }else{manager.create("race".into(),definition);}
+                resume.send(()).unwrap();
+            };
+            let input=json!({"cmd":"unknown_fixture --inspect"});
+            let(result,_)=tokio::join!(gateway.adapter_pre_tool("exec_command",&input),change);
+            assert_eq!(result["decision"],"deny","{scenario}: {result}");
+            assert_eq!(result["denial_stage"],if scenario=="assessment_revocation"{"classifier_context_changed"}else{"classifier_audit_context"},"{scenario}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn classifier_audit_records_before_native_pass_and_preserves_policy_denials() {
+        use std::os::unix::fs::PermissionsExt;
+        let root=std::env::temp_dir().join(format!("statewright-gateway-audit-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (label,environment,extra,command,expected) in [
+            ("audit",Some("staging"),json!({}),"unknown_fixture --inspect","allow"),
+            ("prod",Some("production"),json!({}),"unknown_fixture --inspect","deny"),
+            ("unknown_env",None,json!({}),"unknown_fixture --inspect","deny"),
+            ("dev2",Some("dev2"),json!({}),"unknown_fixture --inspect","allow"),
+            ("write_denied",Some("staging"),json!({"disallowed_tools":["Write"]}),"unknown_fixture --inspect","deny"),
+            ("known_risk",Some("staging"),json!({}),"rm fixture","deny"),
+            ("tool_denied",Some("staging"),json!({"disallowed_tools":["Bash"]}),"unknown_fixture --inspect","deny"),
+            ("recording_failure",Some("staging"),json!({}),"unknown_fixture --inspect","deny"),
+        ] {
+            let mut state=json!({});state.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let definition:MachineDefinition=serde_json::from_value(json!({"id":"audit-fixture","initial":"work",
+                "context":{"tool_policy_mode":"denylist_heuristic_v1"},
+                "meta":{"classifier_audit":{"mode":"audit"},"classifier_policy":{"risk_tolerance":"assessed_moderate_local"}},
+                "states":{"work":state}})).unwrap();
+            let manager=SessionManager::new();manager.create("audit-fixture".into(),definition);
+            let mut gateway=Gateway::new(manager,UpstreamManager::mock(vec![]),"audit-fixture".into(),HashMap::new(),Some("audit-fixture".into()),"fixture-owner".into(),None);
+            gateway.current_run_id=Some("fixture-run".into());gateway.classifier_environment=environment.map(str::to_owned);
+            gateway.classifier_audit_root=Some(if label=="recording_failure"{root.join("absent")}else{root.clone()});
+            let before=std::fs::read_dir(&root).unwrap().count();
+            let result=gateway.adapter_pre_tool("exec_command",&json!({"cmd":command})).await;
+            assert_eq!(result["decision"],expected,"{label}: {result}");
+            let after=std::fs::read_dir(&root).unwrap().count();
+            if expected=="allow" {
+                assert_eq!(after,before+1);assert_eq!(result["classifier_audit"]["would_block"],true);
+                assert_eq!(result["classifier_audit"]["replay_ready"],false);
+                let file=result["classifier_audit"]["record"]["file_name"].as_str().unwrap();
+                let saved:serde_json::Value=serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+                assert!(saved["label"].is_null());assert!(!saved.to_string().contains("unknown_fixture"));
+            }else{assert_eq!(before,after,"{label} may not create a successful audit record");}
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

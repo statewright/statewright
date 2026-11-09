@@ -10,6 +10,12 @@ import { WebSocket, WebSocketServer } from "ws";
 import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-proxy.mjs";
 import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
+import {ApprovalMemory} from "../lib/approval-memory.mjs";
+import {manageApprovalMemory} from "../../codex/scripts/classifier-approval.mjs";
+
+const memoryContext={schema:"statewright/approval-memory-context/v1",policy_sha256:"a".repeat(64),
+  invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64),reusable:true,
+  allowed_durations:["once","2h","4h","8h","always"]};
 
 const threadId = "classifier-fixture-thread";
 const token = "classifier-fixture-token";
@@ -22,6 +28,7 @@ function approvalRequest(invocation, overrides = {}) {
     run_session_id: "session-one",
     state: "implement",
     state_epoch: 4,
+    session_generation:"generation-one",
     classifier_receipt: {
       intent_fingerprint: "intent_v1_family",
       invocation_fingerprint: `invocation_v1_${invocation}`,
@@ -54,7 +61,9 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2} = {}) {
+async function setup(t, {maxReworks = 2, memory = false} = {}) {
+  const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
+  if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
   upstream.on("connection", socket => socket.on("message", raw => {
@@ -72,7 +81,9 @@ async function setup(t, {maxReworks = 2} = {}) {
       socket.send(JSON.stringify({ id: request.id, result: {} }));
     }
   }));
-  let state = { run_id: "run-one", run_session_id: "session-one", state: "implement", state_epoch: 4 };
+  let state = { run_id: "run-one", run_session_id: "session-one", state: "implement", state_epoch: 4,
+    session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,allowed_durations:memoryContext.allowed_durations} };
   let owned = true;
   let stateHold = null;
   let ownerHold = null;
@@ -81,6 +92,7 @@ async function setup(t, {maxReworks = 2} = {}) {
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
     classifierApprovalService: {
+      ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
       ownsThread: async id => {
         if (ownerHold) {
           const pending = ownerHold;
@@ -150,6 +162,42 @@ test("classifier uncertainty reaches native approval immediately when rewrites a
   const allowed = await (await pending).json();
   assert.equal(allowed.action, "allow_once");
   assert.equal(allowed.invocation_fingerprint, "invocation_v1_immediate");
+});
+
+test("native memory selection survives reconnect, names fresh receipt, and supports owned revocation",async t=>{
+  const fixture=await setup(t,{maxReworks:0,memory:true});
+  const first=await fixture.connectAndOwn();
+  const value=approvalRequest("before-restart",{approval_memory:memoryContext});
+  const pending=fixture.post(value);
+  const modal=await until(()=>first.messages.find(m=>m.method==="mcpServer/elicitation/request"),"duration form");
+  assert.deepEqual(modal.params.requestedSchema.properties.duration.enum,memoryContext.allowed_durations);
+  first.client.send(JSON.stringify({id:modal.id,result:{action:"accept",content:{duration:"always"}}}));
+  const approved=await(await pending).json();assert.equal(approved.duration,"always");
+  first.client.close();await once(first.client,"close");
+  const second=await fixture.connectAndOwn();
+  const next=approvalRequest("after-restart",{approval_memory:memoryContext});
+  const reused=await(await fixture.post(next)).json();
+  assert.equal(reused.reason,"remembered_human_approval");assert.equal(reused.invocation_fingerprint,"invocation_v1_after-restart");
+  assert(!second.messages.some(m=>m.method==="mcpServer/elicitation/request"));
+  const options={environment:{STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT:"/synthetic/receipt"},
+    readFile:async()=>JSON.stringify({proxyUrl:fixture.endpoint.replace(/^http/,"ws"),proxyToken:token})};
+  const listed=await manageApprovalMemory({threadId,action:"list"},options);assert.equal(listed.grants.length,1);
+  await manageApprovalMemory({threadId,action:"revoke",grantId:approved.grant_id},options);
+  const again=fixture.post(next);
+  const newModal=await until(()=>second.messages.find(m=>m.method==="mcpServer/elicitation/request"),"revoked grant prompts again");
+  second.client.send(JSON.stringify({id:newModal.id,result:{action:"cancel"}}));
+  assert.equal((await(await again).json()).reason,"human_cancelled");
+});
+
+test("changed dependency evidence never reuses a native always grant",async t=>{
+  const fixture=await setup(t,{maxReworks:0,memory:true});const {client,messages}=await fixture.connectAndOwn();
+  const value=approvalRequest("original",{approval_memory:memoryContext});
+  const first=fixture.post(value);const modal=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"),"first grant");
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept",content:{duration:"8h"}}}));
+  await(await first).json();
+  const changed=approvalRequest("changed",{approval_memory:{...memoryContext,dependency_sha256:"d".repeat(64)}});
+  const next=fixture.post(changed);const second=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"&&m.id!==modal.id),"changed evidence review");
+  client.send(JSON.stringify({id:second.id,result:{action:"decline"}}));assert.equal((await(await next).json()).reason,"human_declined");
 });
 
 test("an explicitly configured legacy rewrite budget still reaches one exact native approval", async t => {

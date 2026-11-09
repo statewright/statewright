@@ -1,4 +1,7 @@
 mod approval_origin;
+mod approval_memory;
+pub mod classifier_audit;
+pub mod classifier_audit_store;
 pub mod bash_classifier;
 pub mod command_structure;
 mod cli_options;

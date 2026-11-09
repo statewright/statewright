@@ -582,7 +582,7 @@ export async function startCodexAppServerRouteProxy({
       response.end("ok\n");
       return;
     }
-    if (request.url === "/classifier-approval" && request.method === "POST"
+    if (["/classifier-approval","/classifier-approval/memory"].includes(request.url) && request.method === "POST"
         && classifierApprovalService && classifierApprovalToken) {
       if (!classifierAuthorized(request)) {
         response.writeHead(401).end();
@@ -616,6 +616,20 @@ export async function startCodexAppServerRouteProxy({
         if (owners.length !== 1) throw new Error(owners.length
           ? "Classifier approval has multiple owning native connections"
           : "Classifier approval has no owning native connection");
+        if(request.url==="/classifier-approval/memory") {
+          const memory=classifierApprovalService.approvalMemory;
+          if(!memory)throw new Error("Approval memory is unavailable");
+          let result;
+          if(value.action==="list") result={schema:"statewright/approval-memory-management/v1",grants:await memory.list()};
+          else if(value.action==="revoke") {
+            result={schema:"statewright/approval-memory-management/v1",...await memory.revoke(value.grant_id)};
+            await onHandoffStatus({schema:"statewright/classifier-approval-lifecycle/v1",
+              type:"classifier_approval_memory_revoked",threadId:value.thread_id,grant_id:value.grant_id});
+          }else throw new Error("Unsupported approval memory action");
+          request.off("aborted",abortApproval);response.off("close",closeApproval);
+          if(!response.destroyed){response.writeHead(200,{"Content-Type":"application/json"});response.end(JSON.stringify(result));}
+          return;
+        }
         const decision = await owners[0].pipeline.service(value,
           {signal: approvalController.signal});
         let result;
@@ -842,6 +856,7 @@ export async function startCodexAppServerRouteProxy({
         });
       },
       getState: readClassifierState,
+      memory: classifierApprovalService.approvalMemory ?? null,
       approvalTimeoutMs: classifierApprovalTimeoutMs,
       maxReworks: classifierMaxReworks,
       record: event => {

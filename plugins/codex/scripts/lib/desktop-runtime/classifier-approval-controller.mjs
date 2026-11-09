@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { approvalDisplayContext, interactionValue } from "./human-interaction.mjs";
-import { approvalAsk, approvalDeny, approvalNotHandled } from "./approval-pipeline.mjs";
+import { approvalAsk, approvalDeny, approvalAllow, approvalNotHandled } from "./approval-pipeline.mjs";
+import {approvalMemoryContext} from "./approval-memory.mjs";
 
 const REWORKABLE_BASES = new Set([
   "semantic_threshold_not_met",
@@ -42,6 +43,9 @@ export function classifierApprovalRequest(value) {
   const exactInvocationRetryAllowed = receipt.exact_invocation_retry_allowed === false
     ? false : null;
   const separateApprovalAllowed = receipt.separate_approval_allowed === true;
+  const memoryContext=approvalMemoryContext(value.approval_memory);
+  const sessionGeneration=printable(value.session_generation)?value.session_generation:null;
+  if(memoryContext?.reusable&&!sessionGeneration)return null;
   if (!threadId || !runId || !runSessionId || !state || stateEpoch === null
       || !intentFingerprint || !invocationFingerprint || !basis) return null;
   if (!REWORKABLE_BASES.has(basis)
@@ -52,6 +56,7 @@ export function classifierApprovalRequest(value) {
   return Object.freeze({threadId, runId, runSessionId, state, stateEpoch, intentFingerprint,
     invocationFingerprint, basis, requiredAuthority, reformulationAllowed,
     exactInvocationRetryAllowed, separateApprovalAllowed,
+    memoryContext,sessionGeneration,
     displayContext: approvalDisplayContext(value),
     reviewContext: interactionValue(receipt.review_context ?? null)});
 }
@@ -84,7 +89,10 @@ export function classifierReviewMessage(request) {
     }
   }
   if (!display?.command && !display?.details) lines.push("Request details were not supplied by this client; the scope cannot be inspected here.");
-  lines.push(`Phase: ${request.state}`, "Allow this exact invocation once?");
+  lines.push(`Phase: ${request.state}`, request.memoryContext?.reusable
+    ? "Allow this exact invocation? Choose how long to remember it while its request, source evidence and policy match."
+    : "Allow this exact invocation once?");
+  if (!request.memoryContext?.reusable) lines.push("Reusable approval is unavailable: supporting source provenance is incomplete.");
   return lines.join("\n");
 }
 
@@ -96,7 +104,7 @@ export function classifierReviewMessage(request) {
 export class ClassifierApprovalController {
   constructor({send, record = async () => {}, maxReworks = 0,
     ttlMs = 10 * 60_000, approvalTimeoutMs = 10 * 60_000,
-    now = () => Date.now(), getState = null} = {}) {
+    now = () => Date.now(), getState = null, memory = null} = {}) {
     if (typeof send !== "function") throw new Error("Classifier approval requires a native sender");
     if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
       throw new Error("Classifier rework budget must be between 0 and 10");
@@ -110,9 +118,10 @@ export class ClassifierApprovalController {
     if (getState !== null && typeof getState !== "function") {
       throw new Error("Classifier approval state reader must be a function");
     }
-    Object.assign(this, {send, record, maxReworks, ttlMs, approvalTimeoutMs, now, getState});
+    Object.assign(this, {send, record, maxReworks, ttlMs, approvalTimeoutMs, now, getState, memory});
     this.entries = new Map();
     this.requests = new Map();
+    this.closedReason=null;
   }
 
   prune(timestamp = this.now()) {
@@ -123,7 +132,7 @@ export class ClassifierApprovalController {
 
   key(request) {
     return JSON.stringify([request.threadId, request.runId, request.runSessionId,
-      request.state, request.stateEpoch, request.intentFingerprint, request.basis,
+      request.state, request.stateEpoch, request.sessionGeneration,request.intentFingerprint, request.basis,
       request.requiredAuthority, request.reformulationAllowed,
       request.exactInvocationRetryAllowed, request.separateApprovalAllowed]);
   }
@@ -137,6 +146,7 @@ export class ClassifierApprovalController {
       thread_id: request.threadId, run_id: request.runId,
       run_session_id: request.runSessionId, state: request.state,
       state_epoch: request.stateEpoch,
+      ...(request.sessionGeneration?{session_generation:request.sessionGeneration}:{}),
       intent_fingerprint: request.intentFingerprint,
       invocation_fingerprint: request.invocationFingerprint,
       basis: request.basis, required_authority: request.requiredAuthority,
@@ -153,8 +163,30 @@ export class ClassifierApprovalController {
     const request = classifierApprovalRequest(value);
     if (!request) return approvalDeny(Object.freeze({schema: "statewright/classifier-approval/v2",
       action: "deny", reason: "invalid_redacted_classifier_receipt"}));
+    if(this.closedReason)return approvalDeny(this.result(request,"deny",{reason:this.closedReason}));
     if (signal?.aborted) return approvalDeny(
       this.result(request, "deny", {reason: "approval_request_aborted"}));
+    if (this.memory && request.memoryContext?.reusable) {
+      if (!await this.current(request)) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
+      try {
+        const grant = await this.memory.lookup(request.memoryContext);
+        if (grant && request.memoryContext.allowed_durations.includes(grant.duration)) {
+          const current=await this.current(request);
+          if (signal?.aborted || !current) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
+          const valid=await this.memory.confirm(request.memoryContext,grant);
+          if(!valid||signal?.aborted||this.closedReason)return approvalDeny(this.result(request,"deny",{reason:"approval_memory_no_longer_valid"}));
+          this.emit({type:"classifier_approval_memory_reused",threadId:request.threadId,
+            run_id:request.runId,state:request.state,grant_id:grant.id,duration:grant.duration,
+            invocation_fingerprint:request.invocationFingerprint});
+          return approvalAllow(this.result(request,"allow_once",{reason:"remembered_human_approval",
+            grant_id:grant.id,duration:grant.duration,expires_at:grant.expires_at}));
+        }
+      } catch {
+        // An unavailable/corrupt store cannot grant execution. A fresh human
+        // may still approve once through the ordinary dialog.
+        this.emit({type:"classifier_approval_memory_unavailable",threadId:request.threadId,run_id:request.runId});
+      }
+    }
     const timestamp = this.now();
     this.prune(timestamp);
     const key = this.key(request);
@@ -184,7 +216,8 @@ export class ClassifierApprovalController {
     }
 
     const requestId = `statewright-classifier-approval-${randomUUID()}`;
-    const pending = {request, requestId, settled: false, presented: false, signal};
+    const durations=this.memory && request.memoryContext?.reusable ? request.memoryContext.allowed_durations : ["once"];
+    const pending = {request, requestId, settled: false, presented: false, signal, durations};
     pending.promise = new Promise(resolve => { pending.resolve = resolve; });
     entry.pending = pending;
     const container = {key, entry, pending};
@@ -200,8 +233,11 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: classifierReviewMessage(request),
-        requestedSchema: {type: "object", properties: {}},
+        message: classifierReviewMessage({...request,memoryContext:request.memoryContext
+          ?{...request.memoryContext,reusable:durations.length>1}:null}),
+        requestedSchema: {type: "object", properties: durations.length>1 ? {
+          duration:{type:"string",title:"Remember approval",enum:durations,default:"once"},
+        } : {}, ...(durations.length>1?{required:["duration"]}:{})},
       }});
       // A queued send is not proof of presentation. Observe asynchronous
       // transport failures without stalling abort/timeout processing.
@@ -248,6 +284,7 @@ export class ClassifierApprovalController {
     invocation_fingerprint: pending.request.invocationFingerprint,
     display_context: pending.request.displayContext});
     pending.resolve(this.result(pending.request, action, {reason,
+      ...(pending.grant?{grant_id:pending.grant.id,duration:pending.grant.duration,expires_at:pending.grant.expires_at}:{}),
       approval_request_id: pending.requestId, attempts: entry.attempts,
       max_reworks: this.maxReworks}));
   }
@@ -258,18 +295,52 @@ export class ClassifierApprovalController {
     const container = this.requests.get(reply.id);
     if (!container) return true;
     const action = reply.result?.action;
-    if (!reply.error && action === "accept") void this.finishAccepted(container);
+    if (!reply.error && action === "accept") void this.finishAccepted(container,reply.result?.content?.duration??"once");
     else this.finish(container, "deny", reply.error ? "native_approval_error"
       : action === "decline" ? "human_declined" : "human_cancelled");
     return true;
   }
 
-  async finishAccepted(container) {
+  async current(request) {
+    try {
+      const state=await this.getState?.(request.threadId);
+      return state && !state.is_final && !state.pending_approval && state.run_id===request.runId
+        && state.run_session_id===request.runSessionId && state.state===request.state && state.state_epoch===request.stateEpoch
+        && (!request.sessionGeneration || state.session_generation===request.sessionGeneration)
+        && (!request.memoryContext || state.approval_memory_policy?.policy_sha256===request.memoryContext.policy_sha256
+          && request.memoryContext.allowed_durations.every(d=>d==="once"||state.approval_memory_policy?.allowed_durations?.includes(d)));
+    }catch{return false;}
+  }
+
+  async finishAccepted(container,duration="once") {
+    const pending=container.pending;
+    if(pending.settled||pending.accepting)return;
+    pending.accepting=true;
+    if(!pending.durations.includes(duration)) {this.finish(container,"deny","approval_duration_invalid");return;}
     if (!this.getState) {
       this.finish(container, "deny", "approval_state_unavailable");
       return;
     }
     const request = container.pending.request;
+    if(request.memoryContext||request.sessionGeneration) {
+      if(!await this.current(request)){this.finish(container,"deny","approval_state_changed");return;}
+      if(pending.settled)return;
+      if(duration!=="once") {
+        let grant;
+        try {
+          grant=await this.memory.remember(request.memoryContext,duration);
+          if(pending.settled||!await this.current(request)) {
+            await this.memory.revoke(grant.id);
+            if(!pending.settled)this.finish(container,"deny","approval_state_changed");
+            return;
+          }
+          this.emit({type:"classifier_approval_memory_created",threadId:request.threadId,
+            run_id:request.runId,state:request.state,grant_id:grant.id,duration,expires_at:grant.expires_at});
+          pending.grant=grant;
+        } catch {this.finish(container,"deny","approval_memory_write_failed");return;}
+      }
+      this.finish(container,"allow_once","human_approved");return;
+    }
     let state;
     try {
       state = await this.getState(request.threadId);
@@ -288,6 +359,7 @@ export class ClassifierApprovalController {
   }
 
   close(reason = "provider_connection_closed") {
+    this.closedReason=reason;
     for (const container of [...this.requests.values()]) this.finish(container, "deny", reason);
   }
 }

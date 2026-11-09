@@ -1,6 +1,8 @@
 import { approvalJournal } from "./approval-journal.mjs";
 import { openExternalUrl, uploadApprovalEvidence } from "./approval-evidence.mjs";
 import { APPROVAL_ORIGIN_HEADER, validApprovalOriginProof } from "./approval-origin.mjs";
+import {ApprovalMemory} from "./approval-memory.mjs";
+import {join} from "node:path";
 
 function openEvidenceReview(url) {
   return new Promise((resolve, reject) => {
@@ -13,6 +15,8 @@ function openEvidenceReview(url) {
 export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, originProof, journalClientId = clientId,
   fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true }) {
   const journal = approvalJournal(root, journalClientId);
+  const memory = new ApprovalMemory({root:join(root,"classifier-memory"),
+    namespace:JSON.stringify([gatewayUrl,cwd,clientId,apiKey])});
   if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
   const prepared = new Set();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`,
@@ -49,6 +53,7 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   };
   return {
     ownsThread,
+    approvalMemory: memory,
     presentationEnabled,
     park: (threadId, state) => journal.save(threadId, state),
     restore: threadId => journal.load(threadId),

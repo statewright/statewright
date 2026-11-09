@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { approvalDisplayContext, interactionValue } from "./lib/desktop-runtime/human-interaction.mjs";
+import {approvalMemoryContext} from "./lib/desktop-runtime/approval-memory.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024;
 const APPROVAL_TIMEOUT_MS = 10 * 60_000;
@@ -38,6 +39,8 @@ export function redactedApprovalRequest(value) {
     state: printable(value.state) ? value.state : null,
     state_epoch: Number.isSafeInteger(value.state_epoch) && value.state_epoch >= 0
       ? value.state_epoch : null,
+    ...(printable(value.session_generation)?{session_generation:value.session_generation}:{}),
+    ...(approvalMemoryContext(value.approval_memory)?{approval_memory:approvalMemoryContext(value.approval_memory)}:{}),
     classifier_receipt: {
       intent_fingerprint: fingerprint(receipt?.intent_fingerprint, "intent_v1_"),
       invocation_fingerprint: fingerprint(receipt?.invocation_fingerprint, "invocation_v1_"),
@@ -119,6 +122,7 @@ export async function requestClassifierApproval(value, options = {}) {
     run_session_id: request.run_session_id,
     state: request.state,
     state_epoch: request.state_epoch,
+    ...(request.session_generation?{session_generation:request.session_generation}:{}),
     intent_fingerprint: request.classifier_receipt.intent_fingerprint,
     invocation_fingerprint: request.classifier_receipt.invocation_fingerprint,
     basis: request.classifier_receipt.final_denial_basis,
@@ -133,7 +137,24 @@ export async function requestClassifierApproval(value, options = {}) {
   return result;
 }
 
+export async function manageApprovalMemory({threadId, action, grantId}, options={}) {
+  if(!printable(threadId)||!["list","revoke"].includes(action)
+      || action==="revoke"&&grantId!=="all"&&!/^[a-f0-9]{64}$/.test(grantId??""))throw new Error("classifier_approval_memory_request_invalid");
+  const runtime=JSON.parse(await(options.readFile??readFile)(runtimeReceiptPath(options.environment??process.env),"utf8"));
+  const endpoint=new URL(runtime.proxyUrl);
+  if(!/^wss?:$/.test(endpoint.protocol)||!["127.0.0.1","localhost","::1"].includes(endpoint.hostname)||!printable(runtime.proxyToken,4096))throw new Error("classifier_approval_runtime_not_loopback");
+  endpoint.protocol=endpoint.protocol==="wss:"?"https:":"http:";endpoint.pathname="/classifier-approval/memory";endpoint.search="";endpoint.hash="";
+  const response=await(options.fetch??fetch)(endpoint,{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${runtime.proxyToken}`},
+    body:JSON.stringify({thread_id:threadId,action,...(action==="revoke"?{grant_id:grantId}:{})}),signal:options.signal??AbortSignal.timeout(15000)});
+  if(!response.ok)throw new Error(`classifier_approval_http_${response.status}`);
+  const result=await response.json();if(result?.schema!=="statewright/approval-memory-management/v1")throw new Error("classifier_approval_invalid_action");return result;
+}
+
 async function main() {
+  if(process.argv[2]==="--list-grants"||process.argv[2]==="--revoke-grant") {
+    const result=await manageApprovalMemory({threadId:process.argv[3],action:process.argv[2]==="--list-grants"?"list":"revoke",grantId:process.argv[4]});
+    process.stdout.write(JSON.stringify(result)+"\n");return;
+  }
   let input = "";
   for await (const chunk of process.stdin) {
     input += chunk;

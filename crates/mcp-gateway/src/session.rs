@@ -43,6 +43,10 @@ pub struct ActiveSubflow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewaySession {
     pub instance_id: String,
+    /// Immutable incarnation of this session; transitions preserve it and a
+    /// replacement session cannot masquerade as the old state after an await.
+    #[serde(default = "new_session_generation")]
+    pub generation: String,
     pub definition: MachineDefinition,
     pub current_state: String,
     pub previous_state: Option<String>,
@@ -66,6 +70,8 @@ pub struct GatewaySession {
     /// Set while a named invoked workflow owns this session's current state.
     pub subflow: Option<ActiveSubflow>,
 }
+
+fn new_session_generation() -> String { uuid::Uuid::new_v4().to_string() }
 
 impl GatewaySession {
     pub fn checkpoint(&self) -> serde_json::Value {
@@ -130,6 +136,7 @@ impl GatewaySession {
         };
         Self {
             instance_id,
+            generation: new_session_generation(),
             definition,
             current_state: initial,
             previous_state: None,

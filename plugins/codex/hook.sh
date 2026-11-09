@@ -1008,15 +1008,16 @@ case "$ENDPOINT" in
           | if ($risk | type) != "object" or $risk.separate_approval_allowed != true then empty else {
               schema: "statewright/classifier-approval-request/v2",
               tool_name: $hook.tool_name,
-              tool_input: {
-                command: (($hook.tool_input.command // $hook.tool_input.cmd // "") | tostring | .[0:8192]),
+              tool_input: (($hook.tool_input // {}) + {
                 workdir: (($hook.tool_input.workdir // $hook.tool_input.cwd // $hook.cwd // "") | tostring | .[0:1024])
-              },
+              }),
               thread_id: $thread_id,
               run_id: $run_id,
               run_session_id: $run_session_id,
               state: $state,
               state_epoch: (if ($state_epoch | test("^[0-9]+$")) then ($state_epoch | tonumber) else null end),
+              approval_memory: .classifier_context.approval_memory,
+              session_generation: .classifier_context.session_generation,
               classifier_receipt: {
                 intent_fingerprint: $risk.intent_fingerprint,
                 invocation_fingerprint: $risk.invocation_fingerprint,

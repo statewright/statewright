@@ -32,10 +32,16 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   };
   const rejectHttp = async (response, subject) => {
     if (response.status === 401 && reprovisionCredential) {
-      try { await reprovisionCredential(); }
+      let connection;
+      try { connection = await reprovisionCredential(); }
       catch (cause) {
         const error = new Error("Statewright sign-in needs renewal. Browser connection did not complete; the blocked action was not retried. " + cause.message, { cause });
         error.code = "STATEWRIGHT_CREDENTIAL_REPROVISION_REQUIRED";
+        throw error;
+      }
+      if (connection?.pending) {
+        const error = new Error(`Statewright sign-in required. Approve code ${connection.userCode} in your browser: ${connection.verificationUrl} . Approval is waiting in the background. This action has not run; after approval, restart this managed session and explicitly retry.`);
+        error.code = "STATEWRIGHT_CREDENTIAL_REPROVISION_PENDING";
         throw error;
       }
       const error = new Error("Statewright sign-in was renewed. Restart this managed session to use the verified credential, then explicitly retry. The blocked action was not retried.");

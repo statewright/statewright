@@ -234,3 +234,11 @@ only the bounded diff, spec and captured evidence; it does not repeat expensive
 model runs or full suites. Rollback reverts the owned commits and retains all
 baseline/failed/diagnostic receipts. Enabling the new contract requires validated
 provider migration; old six-score receipts remain legacy evidence.
+
+M2 preparation/M3 development probe budget:60min normal/90min contraction,
+80 normal/110 tool calls including reserved validation/review. One public-only
+component-fact comparison may use the existing pinned local Laya runtime in
+at most two batches of90 tasks, four effect/fact questions per task. No download,
+private model call or live provider enablement. Max10min per batch; terminate
+only the owned evaluation process on overrun and retain failure evidence. These
+are explored development cases, not a blind holdout or calibration acceptance.

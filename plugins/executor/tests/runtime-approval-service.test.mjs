@@ -314,13 +314,13 @@ test("renewal updates the same approval service and retries only its state read 
     f.respond({result:{structuredContent:state}});
     return {renewed:true};
   }});
-  const oldMemory=f.service.approvalMemory;
+  const oldMemoryRoot=f.service.approvalMemory.root;
   f.response({ok:false,status:401});
   assert.deepEqual(await f.service.getState(),state);
   assert.equal(f.calls.length,2);
   assert.equal(f.calls[0].headers.Authorization,"Bearer private-key");
   assert.equal(f.calls[1].headers.Authorization,"Bearer renewed-key");
-  assert.notEqual(f.service.approvalMemory.root,oldMemory.root);
+  assert.notEqual(f.service.approvalMemory.root,oldMemoryRoot);
   assert.equal(f.calls[0].headers["x-statewright-client-id"],f.calls[1].headers["x-statewright-client-id"]);
 });
 
@@ -330,4 +330,14 @@ test("failed state read after renewal is bounded and cannot loop enrollment",asy
   f.response({ok:false,status:401});
   await assert.rejects(f.service.getState(),/Approval state HTTP 401/);
   assert.equal(provisions,1);assert.equal(f.calls.length,2);
+});
+
+
+test("an already constructed approval controller cannot retain grants across credential renewal",async t=>{
+  const f=await fixture(t);const heldMemory=f.service.approvalMemory;
+  const binding={policy_sha256:"a".repeat(64),invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64)};
+  await heldMemory.remember(binding,"2h");assert.ok(await heldMemory.lookup(binding));
+  f.service.updateCredential("renewed-key");
+  assert.equal(f.service.approvalMemory,heldMemory);
+  assert.equal(await heldMemory.lookup(binding),null);
 });

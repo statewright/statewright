@@ -17,6 +17,17 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   const journal = approvalJournal(root, journalClientId);
   let memory = new ApprovalMemory({root:join(root,"classifier-memory"),
     namespace:JSON.stringify([gatewayUrl,cwd,clientId,apiKey])});
+  // Controllers retain this object. Resolve the credential scope at each call
+  // and fail closed if renewal races an asynchronous grant operation.
+  const scopedMemory = { get root() { return memory.root; } };
+  for (const method of ["lookup", "confirm", "remember", "revoke"]) {
+    scopedMemory[method] = async (...args) => {
+      const current = memory;
+      const result = await current[method](...args);
+      if (current !== memory) throw new Error("Statewright sign-in changed during approval review; retry here.");
+      return result;
+    };
+  }
   if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
   const prepared = new Set();
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}`,
@@ -76,7 +87,7 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   };
   return {
     ownsThread,
-    get approvalMemory() { return memory; },
+    approvalMemory: scopedMemory,
     updateCredential(nextKey) {
       if (typeof nextKey !== "string" || !nextKey) throw new Error("Missing renewed credential");
       apiKey = nextKey;

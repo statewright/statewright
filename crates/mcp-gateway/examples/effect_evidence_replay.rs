@@ -29,6 +29,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         ("cli_options.rs", include_str!("../src/cli_options.rs")),
         (
+            "resource_effects.rs",
+            include_str!("../src/resource_effects.rs"),
+        ),
+        (
+            "invocation_evidence.rs",
+            include_str!("../src/invocation_evidence.rs"),
+        ),
+        (
+            "command_structure.rs",
+            include_str!("../src/command_structure.rs"),
+        ),
+        (
+            "semantic_contract.rs",
+            include_str!("../src/semantic_contract.rs"),
+        ),
+        (
             "shell_redirect.rs",
             include_str!("../src/shell_redirect.rs"),
         ),

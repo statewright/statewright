@@ -3,6 +3,7 @@
 //! remain separate gates. No payload/source text is serialized by this module.
 use crate::{bash_classifier, shell_redirect};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tree_sitter::{Node, Parser};
 
 pub use crate::resource_effects::{Compatibility, ALL, DESTROY, READ, WRITE};
@@ -30,17 +31,43 @@ pub struct Component {
     pub provenance: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Evidence {
     pub schema: &'static str,
+    #[serde(skip)]
+    pub source_sha256: Option<String>,
     pub syntax_valid: bool,
     pub lower: u8,
     pub upper: u8,
     pub complete: bool,
     pub components: Vec<Component>,
+    pub invocations: Vec<crate::invocation_evidence::InvocationEvidence>,
+}
+
+impl std::fmt::Debug for Evidence {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("Evidence")
+            .field("schema", &self.schema)
+            .field("syntax_valid", &self.syntax_valid)
+            .field("lower", &self.lower)
+            .field("upper", &self.upper)
+            .field("complete", &self.complete)
+            .field("components", &self.components)
+            .field("invocations", &self.invocations)
+            .finish()
+    }
 }
 
 impl Evidence {
+    /// Bounded provider metadata; literal argv and its local source digest
+    /// stay outside this projection. Full evidence remains in the local IR.
+    pub fn semantic_projection(&self) -> serde_json::Value {
+        serde_json::json!({"schema":self.schema,"syntax_valid":self.syntax_valid,
+            "behavior_complete":self.complete,"effect_lower":self.lower,"effect_upper":self.upper,
+            "component_count":self.components.len(),"invocation_count":self.invocations.len(),
+            "complete_argv_invocations":self.invocations.iter().filter(|call|call.argv_complete).count(),
+            "missing_behavior_components":self.components.iter().filter(|part|!part.complete).count()})
+    }
     /// Effect-only subset check. Compatible never grants scope/capability or
     /// missing provenance, even when all three effects are permitted.
     pub fn compatibility(&self, allowed: u8) -> Compatibility {
@@ -127,16 +154,19 @@ fn command_leaf(node: Node<'_>, source: &str) -> Component {
 /// runtime flags or requesting model inference. Unknown coverage survives union.
 pub fn assess(source: &str) -> Evidence {
     let mut out = Evidence {
-        schema: "statewright/effect-evidence/v1",
+        schema: "statewright/effect-evidence/v2",
+        source_sha256: None,
         syntax_valid: false,
         lower: 0,
         upper: ALL,
         complete: false,
         components: Vec::new(),
+        invocations: Vec::new(),
     };
     if source.len() > 256 * 1024 {
         return out;
     }
+    out.source_sha256 = Some(format!("{:x}", Sha256::digest(source.as_bytes())));
     let mut parser = Parser::new();
     if parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -184,6 +214,7 @@ pub(crate) fn has_argument_expansion(source: &str) -> bool {
                 | "command_substitution"
                 | "process_substitution"
                 | "arithmetic_expansion"
+                | "brace_expression"
         ) {
             return true;
         }
@@ -194,13 +225,16 @@ pub(crate) fn has_argument_expansion(source: &str) -> bool {
             let Ok(word) = node.utf8_text(source.as_bytes()) else {
                 return true;
             };
+            if word.starts_with('~') || word.contains(":~") {
+                return true;
+            }
             let mut escaped = false;
             for ch in word.chars() {
                 if escaped {
                     escaped = false;
                 } else if ch == '\\' {
                     escaped = true;
-                } else if matches!(ch, '*' | '?' | '[') {
+                } else if matches!(ch, '*' | '?' | '[' | '{' | '}') {
                     return true;
                 }
             }
@@ -220,7 +254,13 @@ fn walk(node: Node<'_>, source: &str, depth: usize, out: &mut Evidence) {
         return;
     }
     match node.kind() {
-        "command" => out.push(command_leaf(node, source)),
+        "command" => {
+            out.invocations
+                .push(crate::invocation_evidence::InvocationEvidence::capture(
+                    node, source,
+                ));
+            out.push(command_leaf(node, source));
+        }
         "file_redirect" => {
             use shell_redirect::Effect;
             let effect = shell_redirect::effect(node, source.as_bytes());

@@ -812,6 +812,21 @@ pub fn matches_allowed_command(command: &str, allowed: &str) -> bool {
 
 // --- Internal helpers ---
 
+fn append_double_quoted_escape(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    current: &mut String,
+) -> Option<()> {
+    let escaped = chars.next()?;
+    match escaped {
+        '\\' | '"' | '$' | '`' => current.push(escaped),
+        '\n' => {},
+        // Within double quotes Bash retains a backslash before other bytes.
+        // Dropping it corrupts option values, paths and delegated program text.
+        _ => { current.push('\\'); current.push(escaped); },
+    }
+    Some(())
+}
+
 pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -830,7 +845,7 @@ pub(crate) fn simple_command_tokens(command: &str) -> Option<Vec<String>> {
             }
             Some('"') => match ch {
                 '"' => quote = None,
-                '\\' => current.push(chars.next()?),
+                '\\' => append_double_quoted_escape(&mut chars, &mut current)?,
                 '`' | '$' => return None,
                 _ => current.push(ch),
             },
@@ -938,8 +953,7 @@ fn redirect_aware_command_tokens(command: &str, reject_tilde: bool) -> Option<Ve
             Some('"') => match ch {
                 '"' => quote = None,
                 '\\' => {
-                    let escaped = chars.next()?;
-                    current.push(escaped);
+                    append_double_quoted_escape(&mut chars, &mut current)?;
                 }
                 '`' | '$' => return None,
                 _ => current.push(ch),

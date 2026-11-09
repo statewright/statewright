@@ -185,6 +185,10 @@ pub struct SemanticAssessmentRequest {
     pub execution_structure: Vec<crate::command_structure::ExecutionShape>,
     #[serde(skip)]
     pub local_invocation_evidence: Vec<bash_classifier::LocalInvocationEvidence>,
+    /// Captured syntax and argument-origin metadata. Literal values are omitted
+    /// by Evidence's default serialization and Debug, including provider state.
+    #[serde(skip)]
+    pub component_evidence: Option<crate::effect_evidence::Evidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell_ast_shape: Option<ShellAstSemanticShape>,
     pub read_only_hint: Option<bool>,
@@ -926,6 +930,8 @@ fn semantic_provider_state(request: &SemanticAssessmentRequest, local: bool) -> 
         "tool_family": request.tool_family, "tool_name": request.tool_name,
         "state_intent": request.state_intent, "argument_keys": request.argument_keys,
         "shell_shape": request.shell_shape,
+        "execution_structure": request.execution_structure,
+        "component_evidence": request.component_evidence.as_ref().map(crate::effect_evidence::Evidence::semantic_projection),
         "mcp_shape": request.mcp_shape,
         "read_only_hint": request.read_only_hint, "destructive_hint": request.destructive_hint,
         "open_world_hint": request.open_world_hint,
@@ -2771,6 +2777,10 @@ fn semantic_request(
                 .map(bash_classifier::local_invocation_evidence)
                 .unwrap_or_default()
         } else { Vec::new() },
+        component_evidence: if is_shell {
+            arguments.get("command").or_else(|| arguments.get("cmd")).and_then(|v| v.as_str())
+                .map(crate::effect_evidence::assess)
+        } else { None },
         shell_ast_shape: None,
         reference_context: None,
         read_only_hint: annotations.and_then(|value| value.read_only_hint),
@@ -2935,6 +2945,26 @@ mod tests {
         }
         assert!(!hosted.contains("local_invocation_evidence"));
         assert!(request.local_invocation_evidence.iter().all(|leaf| !leaf.complete));
+    }
+
+    #[test]
+    fn provider_receives_execution_and_component_metadata_without_literal_values() {
+        let args = json!({"cmd":"widget --mode observe PRIVATE_INPUT; kubectl exec PRIVATE_TARGET -- cat PRIVATE_PATH"});
+        let request = semantic_request(None,"exec_command",&args,None,true);
+        let proof = request.component_evidence.as_ref().unwrap();
+        assert!(proof.syntax_valid);
+        assert!(proof.invocations.iter().all(|call|call.argv_complete));
+        assert!(!proof.complete);
+        for local in [false,true] {
+            let state = semantic_provider_state(&request,local);
+            assert!(state["execution_structure"].is_array());
+            assert!(state["component_evidence"]["syntax_valid"].as_bool().unwrap());
+            let json = state.to_string();
+            for private in ["PRIVATE_INPUT","PRIVATE_TARGET","PRIVATE_PATH"] {
+                assert!(!json.contains(private));
+            }
+            assert!(!json.contains("literal_value"));
+        }
     }
 
     #[tokio::test]

@@ -195,6 +195,11 @@ fn frozen_effect_policy_ceiling() {
         ("risk_assessment.rs", include_str!("risk_assessment.rs")),
         ("resource_effects.rs", include_str!("resource_effects.rs")),
         ("effect_evidence.rs", include_str!("effect_evidence.rs")),
+        (
+            "invocation_evidence.rs",
+            include_str!("invocation_evidence.rs"),
+        ),
+        ("command_structure.rs", include_str!("command_structure.rs")),
         ("bash_classifier.rs", include_str!("bash_classifier.rs")),
         ("semantic_contract.rs", include_str!("semantic_contract.rs")),
         ("shell_ast_shadow.rs", include_str!("shell_ast_shadow.rs")),

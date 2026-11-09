@@ -1,12 +1,14 @@
 import { connectDesktopProfile } from "./desktop-device-connect.mjs";
+import { getGatewayCredential } from "./credential-store.mjs";
 import { canonicalGateway, resolveGatewayProfile } from "./gateway-profile.mjs";
 
 // One in-flight browser flow per resident, shared across concurrent requests.
-// A new credential requires a normal resident restart; never replay an action
-// or approval decision with a different credential/session identity.
+// Publish a verified credential to the running resident without replaying an
+// action or approval decision. The local bridge identity remains unchanged.
 export function createGatewayCredentialRecovery({ gatewayUrl, pbUrl, apiKey,
   environment = process.env, home, fetchImpl = fetch, connect = connectDesktopProfile,
-  notify = message => process.stderr.write(message + "\n") }) {
+  notify = message => process.stderr.write(message + "\n"),
+  readCredential = getGatewayCredential, onRenewed = null }) {
   let attempt;
   return async () => {
     // Only a subsequent explicit request starts a fresh code after expiry.
@@ -45,6 +47,14 @@ export function createGatewayCredentialRecovery({ gatewayUrl, pbUrl, apiKey,
             // native RPC error immediately instead of hiding it during polling.
             ready();
           } });
+        if (onRenewed) {
+          const renewedKey = await readCredential(gateway, { environment, home });
+          if (!/^sw_live_(?:[0-9a-f]{32}|[0-9A-Za-z]{64})$/.test(renewedKey ?? "")) {
+            throw new Error("Statewright could not read the verified renewed credential.");
+          }
+          await onRenewed(renewedKey);
+          apiKey = renewedKey;
+        }
       })().then(() => { current.status = "complete"; }, error => {
         current.status = error.code === "DESKTOP_CONNECT_EXPIRED" ? "expired" : "failed";
         current.error = error;
@@ -52,7 +62,7 @@ export function createGatewayCredentialRecovery({ gatewayUrl, pbUrl, apiKey,
     }
     const current = attempt;
     await current.ready;
-    if (current.status === "complete") return { restartRequired: true };
+    if (current.status === "complete") return { renewed: true };
     if (current.error) throw current.error;
     return current.presentation;
   };

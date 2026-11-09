@@ -48,8 +48,8 @@ test("TUI reprovisioning completes the real device flow with terminal notice and
     openBrowser:async url=>events.push({browser:url}),storeCredential:async(_gateway,value)=>{assert.equal(value,key)},readCredential:async()=>key,sleep:async()=>{},now:()=>0})});
   const presentation=await f.recover();
   assert.equal(presentation.pending,true);assert.equal(presentation.userCode,"ABCD-EFGH-IJKL");
-  for(let i=0;i<20;i++){await new Promise(resolve=>setImmediate(resolve));if((await f.recover()).restartRequired)break}
-  assert.equal((await f.recover()).restartRequired,true);
+  for(let i=0;i<20;i++){await new Promise(resolve=>setImmediate(resolve));if((await f.recover()).renewed)break}
+  assert.equal((await f.recover()).renewed,true);
   assert.equal(f.messages.length,1);assert.equal(events.filter(e=>e.browser).length,1);
   assert.equal(events.filter(e=>e.method==="POST").length,2);
   assert.ok(events.every(e=>!e.url||!e.url.includes("runtime-approval")));
@@ -69,19 +69,21 @@ test("native 401 error presents the code immediately while real device-token pol
     if(String(url).endsWith("/device/token")){authorized=true;return {ok:true,json:async()=>({access_token:key,token_type:"Bearer"})}}
     throw Error("unexpected request");
   };
-  const f=fixture(null,{fetchImpl,connect:options=>connectDesktopProfile({...options,fetchImpl,
+  const f=fixture(null,{fetchImpl,readCredential:async()=>key,onRenewed:async renewedKey=>service.updateCredential(renewedKey),connect:options=>connectDesktopProfile({...options,fetchImpl,
     openBrowser:async()=>{browserCalls++},storeCredential:async()=>{stored=true},readCredential:async()=>key,
     sleep:()=>new Promise(resolve=>{releasePoll=resolve}),now:()=>0})});
   const service=createRuntimeApprovalService({root,apiKey:"expired-key",gatewayUrl:gateway,clientId:"client",pbUrl:pb,
-    fetchImpl:async()=>{nativeCalls++;return {status:401,ok:false}},reprovisionCredential:f.recover});
+    fetchImpl:async(_url,options)=>{nativeCalls++;return options.headers.Authorization===`Bearer ${key}`
+      ? {status:200,ok:true,json:async()=>({result:{structuredContent:{state:"review"}}})}
+      : {status:401,ok:false}},reprovisionCredential:f.recover});
   await assert.rejects(service.getState(),error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISION_PENDING"&&error.message.includes("ABCD-EFGH-IJKL")&&error.message.includes(pb+"/device?user_code="));
   assert.equal(stored,false);assert.equal(browserCalls,1);assert.equal(nativeCalls,1);
   await assert.rejects(service.getState(),error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISION_PENDING");
   assert.equal(browserCalls,1);releasePoll();
   for(let i=0;i<20&&!stored;i++)await new Promise(resolve=>setImmediate(resolve));
   assert.equal(stored,true);
-  for(let i=0;i<20;i++){await new Promise(resolve=>setImmediate(resolve));if((await f.recover()).restartRequired)break}
-  await assert.rejects(service.getState(),error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISIONED");
+  for(let i=0;i<20;i++){await new Promise(resolve=>setImmediate(resolve));if((await f.recover()).renewed)break}
+  assert.deepEqual(await service.getState(),{state:"review"});
   assert.equal(nativeCalls,3,"only the three explicit state requests; no automatic replay");
 });
 

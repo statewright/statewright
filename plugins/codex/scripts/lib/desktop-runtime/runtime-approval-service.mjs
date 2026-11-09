@@ -15,7 +15,7 @@ function openEvidenceReview(url) {
 export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, originProof, journalClientId = clientId,
   fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true, reprovisionCredential = null }) {
   const journal = approvalJournal(root, journalClientId);
-  const memory = new ApprovalMemory({root:join(root,"classifier-memory"),
+  let memory = new ApprovalMemory({root:join(root,"classifier-memory"),
     namespace:JSON.stringify([gatewayUrl,cwd,clientId,apiKey])});
   if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
   const prepared = new Set();
@@ -40,13 +40,12 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
         throw error;
       }
       if (connection?.pending) {
-        const error = new Error(`Statewright sign-in required. Approve code ${connection.userCode} in your browser: ${connection.verificationUrl} . Approval is waiting in the background. This action has not run; after approval, restart this managed session and explicitly retry.`);
+        const error = new Error(`Statewright sign-in required. Approve code ${connection.userCode} in your browser: ${connection.verificationUrl} . Approval is waiting in the background. This action has not run; after approval, retry here.`);
         error.code = "STATEWRIGHT_CREDENTIAL_REPROVISION_PENDING";
         throw error;
       }
-      const error = new Error("Statewright sign-in was renewed. Restart this managed session to use the verified credential, then explicitly retry. The blocked action was not retried.");
-      error.code = "STATEWRIGHT_CREDENTIAL_REPROVISIONED";
-      throw error;
+      if (connection?.renewed) return true;
+      throw new Error("Statewright sign-in renewal did not complete.");
     }
     throw new Error(`${subject} HTTP ${response.status}`);
   };
@@ -61,7 +60,11 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
         run_session_id: ticket.run_session_id, ...(decision ? { decision } : {}) }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
     });
-    if (!response.ok) await rejectHttp(response, "Approval service");
+    if (!response.ok && await rejectHttp(response, "Approval service")) {
+      const error = new Error("Statewright sign-in is renewed. Retry this approval here; the decision was not sent again.");
+      error.code = "STATEWRIGHT_CREDENTIAL_REPROVISIONED";
+      throw error;
+    }
     const receipt = await response.json();
     verify(ticket, receipt);
     if (!decision && receipt.status === "pending" && !prepared.has(receipt.approval_id)) {
@@ -73,7 +76,15 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   };
   return {
     ownsThread,
-    approvalMemory: memory,
+    get approvalMemory() { return memory; },
+    updateCredential(nextKey) {
+      if (typeof nextKey !== "string" || !nextKey) throw new Error("Missing renewed credential");
+      apiKey = nextKey;
+      headers.Authorization = `Bearer ${apiKey}`;
+      prepared.clear();
+      memory = new ApprovalMemory({root:join(root,"classifier-memory"),
+        namespace:JSON.stringify([gatewayUrl,cwd,clientId,apiKey])});
+    },
     presentationEnabled,
     park: (threadId, state) => journal.save(threadId, state),
     restore: threadId => journal.load(threadId),
@@ -90,10 +101,16 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
       } else await result;
     },
     async getState() {
-      const response = await fetchImpl(endpoint, { method: "POST", headers, redirect:"error",
+      const fetchState = () => fetchImpl(endpoint, { method: "POST", headers: {...headers}, redirect:"error",
         body: JSON.stringify({ jsonrpc: "2.0", id: "statewright-approval-state", method: "tools/call",
           params: { name: "statewright_get_state", arguments: {} } }), signal: AbortSignal.timeout(15000) });
-      if (!response.ok) await rejectHttp(response, "Approval state");
+      let response = await fetchState();
+      // Only this read-only state snapshot may retry once after verified renewal.
+      // Tool calls and approval decisions never enter this retry path.
+      if (!response.ok && await rejectHttp(response, "Approval state")) {
+        response = await fetchState();
+        if (!response.ok) throw new Error(`Approval state HTTP ${response.status}`);
+      }
       const result = await response.json();
       if (!result.error && result.result?.isError && result.result.content?.length === 1
           && result.result.content[0].type === "text"

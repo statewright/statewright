@@ -150,6 +150,38 @@ with any fitted calibration artifact. Drift invalidates calibration.
 
 ## Diagnostic and evaluation sequence
 
+### Grounded semantic-fact pipeline and model qualification
+
+The Astra/max architecture review and public counterfactual canary identify the
+principal gap: syntactic decomposition is not grounded behavior knowledge. The
+required path is executable/reference evidence → deterministic effect bounds →
+qualified judgment for residual meaning → effect-set matching → independent
+authorization. Do not require the model to rediscover explicit completeness,
+known effects or missing script bodies. Do not require a legacy recognized
+operation before accepting a separately validated complete semantic fact.
+
+Utility profiles describe behavior under an executable contract; bare spelling
+alone is not proof of the resolved binary/version or absence of shell shadowing.
+The initial deterministic adapter retains the existing bare-utility trust
+posture, not a new native provenance guarantee. Full native integration must bind
+executable/tool identity, effective argv/context and referenced script/config
+content through the existing authenticated evidence collector. Fixture trust
+assumptions cannot supply runtime provenance or authority.
+
+Before calibration or further corpus sweeps, a model/task contract must pass
+elementary fact/counterfactual checks, detect missing decisive evidence, and
+preserve scalar/device agreement on bounded controls. A monotonic calibration
+cannot repair a reversed true/false ordering. The current pinned Laya checkpoint
+fails a supplied Write fact and the missing-body control; it remains unqualified.
+CPU/MPS agreement reduces one device hypothesis but does not establish the
+remaining checkpoint/runtime/task cause. No enabling is justified.
+
+Preserve the original source capability metric and add separately named effect
+compatibility and full native authorization measurements. Keep every case in its
+original denominator; attribute holds to behavior, structure, context/provenance,
+scope or explicit capability authority. Do not erase legitimate authority holds
+by silently relabeling the effect-only fixture or counting approvals as accuracy.
+
 ### M1: contract and policy ceiling
 
 Create the shared typed resource-effect contract, bounds validation and subset
@@ -242,3 +274,28 @@ at most two batches of90 tasks, four effect/fact questions per task. No download
 private model call or live provider enablement. Max10min per batch; terminate
 only the owned evaluation process on overrun and retain failure evidence. These
 are explored development cases, not a blind holdout or calibration acceptance.
+
+M2 deterministic integration slice (base `c0d49d3`): reuse complete AST reduction
+with separate utility effect-ceiling contracts, rather than exact command-string
+exceptions. An invariant Read or Read+Write ceiling can be sufficient even when
+expanded operand values are unavailable. It is not sufficient for an interpreter,
+plugin, execution-bearing option, context override or unknown executable.
+Literal executable identity and child effect coverage remain mandatory. Simple
+parameter reads are data; assignments and recursive/complex evaluation remain
+unresolved. Preserve independent risk, location and explicit capability gates.
+Validate the effective Rust resolver on the unchanged public/private corpus;
+publish per-case changes separately, never edit the frozen command list.
+Observed-only budget:60min normal/90min contraction,80/110 tool calls, no new
+model run; focused checks then one affected library suite and one bounded review.
+Reserve20% for repair, review and scoped commit. No workflow or live enablement.
+
+Discriminating local-model canary amendment: the Astra/max review identified
+that strict checkpoint loading and Noul polarity inspection do not establish
+end-to-end semantic responsiveness. Permit one new public synthetic canary:
+at most16 MPS cases plus4 CPU controls, same pinned checkpoint/harness, no
+download or private input. Pair literal true/false facts, scalar/multi-question
+forms, supplied read/destructive script bodies and a missing body. Freeze inputs
+before inference. A10min per-process limit applies; no repeated prompt tuning.
+Record score differences/device agreement as diagnostics, never as calibration
+or command-suite accuracy. If explicit facts remain near coin flips, reject
+further command calibration until the checkpoint/runtime contract is resolved.

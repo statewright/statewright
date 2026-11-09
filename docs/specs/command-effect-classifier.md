@@ -237,6 +237,38 @@ through standalone/native/managed adapters, actual human fallback, expired and
 revoked approval handling, and source/package/installed/runtime identity.
 Deployment/production promotion remains a separate authorized boundary.
 
+## Behavior facets and native body integration (base `1355ec9`)
+
+The user requests narrower Laya dimensions. Evaluate Read existing resources,
+Create, Update without erasure, Remove/erase, Delegate execution, External
+contact, Permission/ownership change and explicit Reset/discard. These are
+overlapping observations, not eight mutually exclusive classes or new learned
+heads. Code maps Create/Update/Permissions to Write and Remove/Reset to Destroy;
+delegation/location retain independent authority requirements. Do not sum raw
+facet scores as measured failure probabilities. Completeness and provenance
+remain deterministic, not model questions required for authorization.
+
+Freeze a public synthetic contrast set before one local run: identical effect
+facts represented as fields versus short behavior descriptions. Preserve each
+facet's true/false ordering, false-positive/negative outputs and token/runtime
+identity. At most24 cases, eight questions each, same checkpoint/harness, one MPS
+batch and10min maximum; no private inference/download or cutoff tuning. Success
+is useful discrimination on this diagnostic, not command accuracy/qualification.
+
+In parallel source work (one writer), feed already-validated native manifest
+bodies into the shared deterministic effect reducer. Preserve native execution
+capability, freshness, cwd/file hashes, unknown children, external-risk floors
+and full resource-capability union. Do not call a hashed but unanalyzed Node/
+test entrypoint complete effect evidence. No native collection schema, plugin
+package, feature enablement, workflow, install or deployment change is in scope.
+Collector completeness is not behavior completeness. A flattened v1 snapshot
+cannot prove later launcher selections remain valid after an earlier mutating
+or incompletely analyzed execution unit. Retain unknown effects there; recovery
+requires a versioned dependency/fixed-selection evidence contract, not another
+command exception. Shell context loss and AST limits must survive legacy fallback.
+Observed-only budget:60min normal/90min contraction,80/110 tool calls and20%
+reserve for focused/full validation, one bounded independent review and commit.
+
 ## Approval memory
 
 Approval memory is a follow-on usability feature with once,2h,4h,8h and revocable

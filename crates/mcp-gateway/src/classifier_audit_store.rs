@@ -100,6 +100,23 @@ fn invalid(message: &'static str) -> io::Error {
 /// already exist, must not be a symlink, and on Unix must disallow group/other
 /// access. Ancestors and filesystem durability are deployment responsibilities.
 /// Unsupported platforms fail rather than promise nonexistent mode semantics.
+pub fn validate_root(root: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(invalid("audit root must be an existing private directory"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(invalid("audit root must disallow group and other access"));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    Err(io::Error::new(io::ErrorKind::Unsupported,"private audit store requires Unix permissions"))
+}
+
 pub fn persist(
     root: &Path,
     receipt: &AuditReceipt,
@@ -116,22 +133,7 @@ pub fn persist(
     if case.command_shape.len() > 32 {
         return Err(invalid("simulation metadata exceeds shape bound"));
     }
-    let metadata = fs::symlink_metadata(root)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(invalid("audit root must be an existing private directory"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(invalid("audit root must disallow group and other access"));
-        }
-    }
-    #[cfg(not(unix))]
-    return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private audit store requires Unix permissions",
-    ));
+    validate_root(root)?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let envelope = serde_json::json!({

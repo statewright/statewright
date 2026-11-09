@@ -374,16 +374,19 @@ impl Gateway {
     /// before presenting an approval. Memory-only gateways retain the existing
     /// approval behavior, but cannot recover it across a process replacement.
     pub(crate) async fn persist_approval_checkpoint(&self) -> Result<(), &'static str> {
+        let session=self.session_manager.get(&self.session_id).ok_or("Workflow unavailable")?;
+        self.persist_bound_checkpoint(&session).await
+    }
+
+    /// Caller supplies the exact owned snapshot; never re-read a successor
+    /// session while writing the current run's durable record.
+    async fn persist_bound_checkpoint(&self, session: &crate::session::GatewaySession) -> Result<(), &'static str> {
         #[cfg(feature = "metering")]
         if let Some(pool) = &self.db_pool {
             let run_id = self
                 .current_run_id
                 .as_deref()
                 .ok_or("Approval has no durable run")?;
-            let session = self
-                .session_manager
-                .get(&self.session_id)
-                .ok_or("Workflow unavailable")?;
             let saved = sqlx::query(
                 "UPDATE workflow_runs SET final_state = $1, context_snapshot = $2, updated = $3 \
                  WHERE id = $4 AND owner = $5 AND session_id = $6 AND status = 'running'",
@@ -577,6 +580,9 @@ impl Gateway {
         if let Some(session) = self.session_manager.get(&self.session_id) {
             state["approval_memory_policy"] = crate::approval_memory::policy(&session);
             state["session_generation"] = json!(session.generation);
+            state["classifier_audit"] = json!({"mode":if crate::classifier_audit::AuditConfig::for_session(&session,self.classifier_environment.as_deref()).is_ok_and(|c|c.enabled()) {"audit"} else {"enforce"},
+                "revision":session.classifier_audit_revision,"overridden":session.classifier_audit_override.is_some(),
+                "toggle_available":crate::classifier_audit::AuditConfig::supports_toggle(self.classifier_environment.as_deref())});
         }
         if self.host_controls_model {
             state["model_routing"] = json!({
@@ -1156,11 +1162,19 @@ impl Gateway {
         }
     }
 
+    fn custom_tool_definitions(&self) -> Vec<ToolInfo> {
+        let mut tools=custom_tools::custom_tool_definitions();
+        if !crate::classifier_audit::AuditConfig::supports_toggle(self.classifier_environment.as_deref()) {
+            tools.retain(|tool|tool.name!="statewright_set_classifier_audit");
+        }
+        tools
+    }
+
     fn handle_tools_list(&self, id: Option<serde_json::Value>) -> JsonRpcResponse {
         // When deactivated, pass all upstream tools + workflow management tools
         if self.active_workflow.is_none() {
             let mut tools: Vec<ToolInfo> = self.upstream.all_tools().into_iter().cloned().collect();
-            tools.extend(custom_tools::custom_tool_definitions());
+            tools.extend(self.custom_tool_definitions());
             return JsonRpcResponse::success(id, json!({ "tools": tools }));
         }
 
@@ -1175,13 +1189,13 @@ impl Gateway {
 
         // If checkpoint reached, return ONLY custom tools (forces transition)
         if session.is_checkpoint() {
-            tools.extend(custom_tools::custom_tool_definitions());
+            tools.extend(self.custom_tool_definitions());
             return JsonRpcResponse::success(id, json!({ "tools": tools }));
         }
 
         // If final state, return management tools (so user can start a new workflow)
         if session.is_final() {
-            tools.extend(custom_tools::custom_tool_definitions());
+            tools.extend(self.custom_tool_definitions());
             return JsonRpcResponse::success(id, json!({ "tools": tools }));
         }
 
@@ -1241,7 +1255,7 @@ impl Gateway {
         }
 
         // Always append custom statewright tools
-        tools.extend(custom_tools::custom_tool_definitions());
+        tools.extend(self.custom_tool_definitions());
 
         // Conditionally add debug tools
         let debug = session
@@ -1686,8 +1700,8 @@ impl Gateway {
             Some(session) => session,
             None => return json!({"decision": "deny", "reason": "No active session"}),
         };
-        match crate::classifier_audit::AuditConfig::from_metadata(
-            initial_session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),
+        match crate::classifier_audit::AuditConfig::for_session(
+            &initial_session,
             self.classifier_environment.as_deref()) {
             Ok(_)=>{},
             Err(reason)=>return json!({"decision":"deny","denial_stage":"classifier_audit_configuration","reason":reason}),
@@ -1777,8 +1791,8 @@ impl Gateway {
         if !same_classifier_snapshot(&initial_session,&session) {
             return json!({"decision":"deny","reason":"Workflow changed while classifier evidence was assessed.","denial_stage":"classifier_context_changed"});
         }
-        let audit_config=match crate::classifier_audit::AuditConfig::from_metadata(
-            session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+        let audit_config=match crate::classifier_audit::AuditConfig::for_session(
+            &session,self.classifier_environment.as_deref()) {
             Ok(config)=>config,Err(reason)=>return json!({"decision":"deny","reason":reason,"denial_stage":"classifier_audit_configuration"}),
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
@@ -2928,6 +2942,48 @@ impl Gateway {
                     ),
                 }
             }
+            "statewright_set_classifier_audit" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Change { mode:crate::classifier_audit::AuditMode,run_id:String,session_generation:String,expected_revision:u64 }
+                let failure=|reason:&str|JsonRpcResponse::success(id.clone(),serde_json::to_value(crate::protocol::ToolCallResult::error(reason.to_string())).unwrap());
+                if !crate::classifier_audit::AuditConfig::supports_toggle(self.classifier_environment.as_deref()) {
+                    return failure("Classifier audit controls are available only in staging/dev environments.");
+                }
+                let change:Change=match serde_json::from_value(arguments) {Ok(change)=>change,Err(_)=>return failure("Expected mode audit/enforce, exact run_id/session_generation and expected_revision only.")};
+                let Some(session)=self.session_manager.get(&self.session_id) else {return failure("No active workflow.")};
+                if self.active_workflow.is_none() || session.is_final() || self.current_run_id.as_deref()!=Some(change.run_id.as_str()) || session.generation!=change.session_generation || session.classifier_audit_revision!=change.expected_revision {
+                    return failure("Audit toggle does not match the current active run and session generation.");
+                }
+                if change.mode==crate::classifier_audit::AuditMode::Audit {
+                    let Some(root)=self.classifier_audit_root.clone() else {return failure("Audit requires a configured private server intake directory.")};
+                    if tokio::task::spawn_blocking(move||crate::classifier_audit_store::validate_root(&root)).await.ok().and_then(Result::ok).is_none() {
+                        return failure("Audit intake directory is unavailable or not private.");
+                    }
+                }
+                let Some(installed)=self.session_manager.compare_set_classifier_audit(&session,change.mode) else {return failure("Workflow changed while audit storage was checked.")};
+                let revision=installed.classifier_audit_revision;
+                if self.persist_bound_checkpoint(&installed).await.is_err() {
+                    if let Some(rollback)=self.session_manager.rollback_classifier_audit(&installed,session.classifier_audit_override) {
+                        let _=self.persist_bound_checkpoint(&rollback).await;
+                    }
+                    return failure("Audit change could not be durably saved; rollback was limited to this run's unchanged audit decision. Re-read state.");
+                }
+                if !self.session_manager.get(&self.session_id).is_some_and(|now|same_classifier_snapshot(&installed,&now)) {
+                    if let Some(rollback)=self.session_manager.rollback_classifier_audit(&installed,session.classifier_audit_override) {
+                        let _=self.persist_bound_checkpoint(&rollback).await;
+                    }
+                    return failure("Workflow changed while audit settings were saved. Re-read state.");
+                }
+                #[cfg(feature="metering")]
+                let persistent=self.db_pool.is_some();
+                #[cfg(not(feature="metering"))]
+                let persistent=false;
+                tracing::info!(run_id=%change.run_id,revision,mode=?change.mode,"classifier_audit_mode_changed");
+                JsonRpcResponse::success(id,serde_json::to_value(crate::protocol::ToolCallResult::text(json!({"changed":true,"mode":change.mode,"revision":revision,
+                    "run_id":change.run_id,"session_generation":change.session_generation,"definition_changed":false,
+                    "persistent":persistent,"durability":if persistent {"owner_bound_database_checkpoint"}else{"process_memory_only"}}).to_string())).unwrap())
+            }
             "statewright_get_state" => {
                 if self.active_workflow.is_none() {
                     return JsonRpcResponse::success(
@@ -3469,8 +3525,8 @@ impl Gateway {
                     None
                 };
                 if let Some((_,checkpoint))=&paused {
-                    if let Err(reason)=crate::classifier_audit::AuditConfig::from_metadata(
-                        checkpoint.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+                    if let Err(reason)=crate::classifier_audit::AuditConfig::for_session(
+                        &checkpoint,self.classifier_environment.as_deref()) {
                         return JsonRpcResponse::error(id,-32600,reason);
                     }
                 }
@@ -5695,7 +5751,7 @@ mod tests {
         let resp = gw.handle_message(req).await.unwrap();
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         // Only custom tools — no upstream tools
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), gw.custom_tool_definitions().len());
         let names: Vec<String> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap().into())
@@ -8030,6 +8086,68 @@ mod tests {
         assert_eq!(result["risk_assessment"]["separate_approval_allowed"], false);
         assert!(result["classifier_context"].is_null());
         assert!(risk_assessment::take_test_semantic_receipts().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn classifier_audit_toggle_is_run_bound_checkpointable_and_nonproduction_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root=std::env::temp_dir().join(format!("statewright-audit-toggle-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let definition:MachineDefinition=serde_json::from_value(json!({"id":"audit-toggle","initial":"work",
+            "context":{"tool_policy_mode":"denylist_heuristic_v1"},"states":{"work":{},"done":{"type":"final"}}})).unwrap();
+        let manager=SessionManager::new();manager.create("toggle".into(),definition.clone());
+        let mut gateway=Gateway::new(manager.clone(),UpstreamManager::mock(vec![]),"toggle".into(),HashMap::new(),Some("audit-toggle".into()),"owner".into(),None);
+        gateway.current_run_id=Some("run".into());gateway.classifier_audit_root=Some(root.clone());
+        let generation=manager.get("toggle").unwrap().generation;
+        let request=|mode:&str,run:&str|json!({"mode":mode,"run_id":run,"session_generation":generation,"expected_revision":if mode=="enforce"{1}else{0}});
+        for environment in [None,Some("production"),Some("unknown")] {
+            gateway.classifier_environment=environment.map(String::from);
+            assert!(!gateway.custom_tool_definitions().iter().any(|t|t.name=="statewright_set_classifier_audit"));
+            let response=gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("audit","run")).await;
+            assert!(response.result.unwrap()["isError"]==true);
+            assert_eq!(manager.get("toggle").unwrap().classifier_audit_revision,0);
+        }
+        gateway.classifier_environment=Some("staging".into());
+        assert!(gateway.custom_tool_definitions().iter().any(|t|t.name=="statewright_set_classifier_audit"));
+        for bad in [request("audit","foreign"),json!({"mode":"audit","run_id":"run","session_generation":"foreign"}),
+            json!({"mode":"audit","run_id":"run","session_generation":generation,"environment":"dev"})] {
+            assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",bad).await.result.unwrap()["isError"]==true);
+        }
+        assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("audit","run")).await.result.unwrap()["isError"]!=true);
+        let active=manager.get("toggle").unwrap();
+        assert!(crate::classifier_audit::AuditConfig::for_session(&active,Some("staging")).unwrap().enabled());
+        assert_eq!(serde_json::to_value(&active.definition).unwrap(),serde_json::to_value(&definition).unwrap());
+        assert_eq!(active.transition_count,0);
+        let restored=crate::session::GatewaySession::from_checkpoint(active.checkpoint(),"toggle","work").unwrap();
+        assert_eq!(restored.classifier_audit_override,Some(crate::classifier_audit::AuditMode::Audit));
+        assert!(crate::classifier_audit::AuditConfig::for_session(&restored,Some("production")).is_err());
+        manager.restore(restored);
+        assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("enforce","run")).await.result.unwrap()["isError"]!=true);
+        let enforced=manager.get("toggle").unwrap();
+        assert!(!same_classifier_snapshot(&active,&enforced));
+        assert!(!crate::classifier_audit::AuditConfig::for_session(&enforced,Some("staging")).unwrap().enabled());
+        assert_eq!(enforced.classifier_audit_revision,2);
+        assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("enforce","run")).await.result.unwrap()["isError"]==true);
+        gateway.classifier_audit_root=None;
+        assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("audit","run")).await.result.unwrap()["isError"]==true);
+        #[cfg(feature="metering")]
+        {
+            gateway.classifier_audit_root=Some(root.clone());
+            gateway.db_pool=Some(sqlx::postgres::PgPoolOptions::new().acquire_timeout(std::time::Duration::from_millis(30))
+                .connect_lazy("postgres://fixture:fixture@127.0.0.1:1/fixture").unwrap());
+            let failed=gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",json!({"mode":"audit","run_id":"run","session_generation":generation,"expected_revision":2})).await;
+            assert!(failed.result.unwrap()["isError"]==true);
+            let after=manager.get("toggle").unwrap();
+            assert_eq!(after.classifier_audit_override,Some(crate::classifier_audit::AuditMode::Enforce));
+            assert_eq!(after.classifier_audit_revision,4);
+            gateway.db_pool=None;
+        }
+        let mut final_session=enforced;final_session.current_state="done".into();manager.restore(final_session);
+        assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("enforce","run")).await.result.unwrap()["isError"]==true);
+        manager.create("toggle".into(),definition);
+        assert!(manager.get("toggle").unwrap().classifier_audit_override.is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

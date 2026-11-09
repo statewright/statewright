@@ -37,6 +37,17 @@ pub struct AuditConfig {
 }
 
 impl AuditConfig {
+    pub fn for_session(session: &crate::session::GatewaySession, environment: Option<&str>) -> Result<Self, &'static str> {
+        let configured = Self::from_metadata(session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")), environment)?;
+        match session.classifier_audit_override {
+            None => Ok(configured),
+            Some(mode) => Self::from_metadata(Some(&serde_json::json!({"mode":mode})), environment),
+        }
+    }
+
+    pub fn supports_toggle(environment: Option<&str>) -> bool {
+        matches!(environment, Some("staging" | "dev" | "dev1" | "dev2" | "dev3"))
+    }
     pub fn from_workflow_extra(
         extra: &BTreeMap<String, serde_json::Value>,
         trusted_environment: Option<&str>,

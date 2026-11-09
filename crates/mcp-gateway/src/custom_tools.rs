@@ -324,6 +324,15 @@ pub fn custom_tool_definitions() -> Vec<ToolInfo> {
             }),
         },
         ToolInfo {
+            annotations: Some(ToolAnnotations {read_only_hint:Some(false),destructive_hint:Some(false),open_world_hint:Some(false),..Default::default()}),
+            name: "statewright_set_classifier_audit".into(),
+            description: Some("Enable or disable uncertain-classifier audit for the currently bound run, only in staging/dev. Does not change the workflow definition, phase, explicit restrictions or native permissions. Read current state first and supply its exact run_id and session_generation.".into()),
+            input_schema: json!({"type":"object","additionalProperties":false,"properties":{
+                "mode":{"type":"string","enum":["audit","enforce"]},
+                "run_id":{"type":"string"},"session_generation":{"type":"string"},"expected_revision":{"type":"integer","minimum":0}},
+                "required":["mode","run_id","session_generation","expected_revision"]}),
+        },
+        ToolInfo {
             annotations: Some(ToolAnnotations::read_only()),
             name: "statewright_get_usage".into(),
             description: Some(
@@ -552,6 +561,7 @@ pub fn is_custom_tool(name: &str) -> bool {
     matches!(
         name,
         "statewright_transition"
+            | "statewright_set_classifier_audit"
             | "statewright_get_state"
             | "statewright_get_usage"
             | "statewright_report_runtime_usage"
@@ -747,7 +757,7 @@ mod tests {
     #[test]
     fn custom_tool_definitions_has_all_tools() {
         let tools = custom_tool_definitions();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().any(|t| t.name == "statewright_transition"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_state"));
         assert!(tools.iter().any(|t| t.name == "statewright_get_usage"));
@@ -794,6 +804,8 @@ mod tests {
                         "readOnlyHint": true, "destructiveHint": false, "openWorldHint": true
                     })
                 );
+            } else if tool.name == "statewright_set_classifier_audit" {
+                assert_eq!(value["annotations"],json!({"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}));
             } else {
                 assert!(
                     value.get("annotations").is_none(),

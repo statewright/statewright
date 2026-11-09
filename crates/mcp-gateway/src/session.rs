@@ -47,6 +47,11 @@ pub struct GatewaySession {
     /// replacement session cannot masquerade as the old state after an await.
     #[serde(default = "new_session_generation")]
     pub generation: String,
+    /// Run-local operational override; never rewrites the pinned workflow.
+    #[serde(default)]
+    pub classifier_audit_override: Option<crate::classifier_audit::AuditMode>,
+    #[serde(default)]
+    pub classifier_audit_revision: u64,
     pub definition: MachineDefinition,
     pub current_state: String,
     pub previous_state: Option<String>,
@@ -137,6 +142,8 @@ impl GatewaySession {
         Self {
             instance_id,
             generation: new_session_generation(),
+            classifier_audit_override: None,
+            classifier_audit_revision: 0,
             definition,
             current_state: initial,
             previous_state: None,
@@ -215,6 +222,29 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// CAS only operational audit fields, never replace a session after an await.
+    pub fn compare_set_classifier_audit(&self, expected: &GatewaySession, mode: crate::classifier_audit::AuditMode) -> Option<GatewaySession> {
+        let mut sessions=self.sessions.write().unwrap_or_else(|p|p.into_inner());
+        let current=sessions.get_mut(&expected.instance_id)?;
+        if serde_json::to_value(&*current).ok()!=serde_json::to_value(expected).ok() {return None;}
+        current.classifier_audit_revision=current.classifier_audit_revision.checked_add(1)?;
+        current.classifier_audit_override=Some(mode);
+        Some(current.clone())
+    }
+
+    /// Undo only our failed change. Preserve concurrent reviews, context and
+    /// transitions, and refuse to touch a successor run or newer audit decision.
+    pub fn rollback_classifier_audit(&self, installed: &GatewaySession, previous: Option<crate::classifier_audit::AuditMode>) -> Option<GatewaySession> {
+        let mut sessions=self.sessions.write().unwrap_or_else(|p|p.into_inner());
+        let current=sessions.get_mut(&installed.instance_id)?;
+        if current.generation!=installed.generation || current.classifier_audit_revision!=installed.classifier_audit_revision
+            || current.classifier_audit_override!=installed.classifier_audit_override {return None;}
+        let revision=current.classifier_audit_revision.checked_add(1)?;
+        current.classifier_audit_override=previous;
+        current.classifier_audit_revision=revision;
+        Some(current.clone())
+    }
+
     pub fn restore(&self, session: GatewaySession) {
         self.sessions
             .write()
@@ -643,5 +673,29 @@ mod tests {
             },
         );
         assert!(mgr.has_pending_approval("s1"));
+    }
+
+    #[test]
+    fn audit_cas_and_failed_save_rollback_preserve_concurrent_review_and_successors() {
+        use crate::classifier_audit::AuditMode;
+        let mgr=SessionManager::new();let before=mgr.create("s1".into(),test_definition());
+        let review=PendingApproval {approval_id:"review".into(),event:"DEPLOY".into(),from_state:"testing".into(),to_state:"deploying".into(),new_context:json!({}),message:None};
+        mgr.set_pending_approval("s1",review.clone());
+        assert!(mgr.compare_set_classifier_audit(&before,AuditMode::Audit).is_none());
+        assert!(mgr.has_pending_approval("s1"));
+        let current=mgr.get("s1").unwrap();
+        let installed=mgr.compare_set_classifier_audit(&current,AuditMode::Audit).unwrap();
+        mgr.update_state("s1","testing".into(),json!({"later":"preserved"}));
+        mgr.set_pending_approval("s1",review);
+        let rollback=mgr.rollback_classifier_audit(&installed,None).unwrap();
+        assert_eq!(rollback.generation,installed.generation);
+        let after=mgr.get("s1").unwrap();
+        assert!(after.pending_approval.is_some());assert_eq!(after.context["later"],"preserved");
+        assert_eq!(after.classifier_audit_revision,2);assert!(after.classifier_audit_override.is_none());
+        let newer=mgr.compare_set_classifier_audit(&after,AuditMode::Audit).unwrap();
+        assert!(mgr.rollback_classifier_audit(&installed,None).is_none());
+        mgr.create("s1".into(),test_definition());
+        assert!(mgr.rollback_classifier_audit(&newer,None).is_none());
+        assert!(mgr.get("s1").unwrap().classifier_audit_override.is_none());
     }
 }

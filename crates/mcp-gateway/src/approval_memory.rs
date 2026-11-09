@@ -55,7 +55,8 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
     };
     json!({"schema":"statewright/approval-memory-policy/v1",
         "policy_sha256":digest(&json!({"contract":1,"definition":session.definition,
-            "context":session.context,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
+            "context":session.context,"audit_override":session.classifier_audit_override,
+            "audit_revision":session.classifier_audit_revision,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
         "allowed_durations":durations})
 }
 

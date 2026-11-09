@@ -64,6 +64,30 @@ ingestion need separate integration evidence before claiming runtime completion.
 
 ## Durable native intake store
 
+## In-flight nonproduction control
+
+The MCP tool `statewright_set_classifier_audit` is advertised only when the
+server identity is staging/dev/dev1/dev2/dev3. Read `statewright_get_state`, then
+send `mode: audit|enforce`, its exact `run_id`, `session_generation`, and
+`expected_revision` from `classifier_audit.revision`. Production/unknown reject
+direct calls as well as omitting the tool. No active run, terminal runs, foreign
+identity, stale revisions, malformed arguments and unavailable audit storage fail.
+
+This is a run-local checkpointed override, not a workflow edit or transition.
+New runs start from their pinned metadata. Mode revisions invalidate in-flight
+assessments and remembered approval policy bindings, including audit/enforce ABA.
+Database-backed reconnect restores the override through the existing owner-bound
+checkpoint. The tool explicitly reports `persistent: false` and
+`durability: process_memory_only` on non-durable local gateways; checkpoint
+serialization tests alone are not database recovery proof. Durable save failure
+conditionally rolls back only its own audit fields, preserving newer review,
+state and owner changes; callers must re-read state after an error. Explicit workflow limits,
+pending human reviews and native platform permissions still apply.
+
+Staging deployment mounts a separate private persistent audit intake; it does
+not share application/Postgres data or enable audit by default. The metadata
+default remains enforced unless selected by workflow or a bound toggle.
+
 `classifier_audit_store::persist(root, receipt, case)` commits a single versioned
 JSON envelope containing both the audit receipt and the simulation intake case.
 The trusted server provisions an existing private directory (0700 on Unix) and

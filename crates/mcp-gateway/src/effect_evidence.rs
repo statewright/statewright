@@ -5,10 +5,8 @@ use crate::{bash_classifier, shell_redirect};
 use serde::Serialize;
 use tree_sitter::{Node, Parser};
 
-pub const READ: u8 = 1;
-pub const WRITE: u8 = 2;
-pub const DESTROY: u8 = 4;
-pub const ALL: u8 = READ | WRITE | DESTROY;
+pub use crate::resource_effects::{Compatibility, ALL, DESTROY, READ, WRITE};
+use crate::resource_effects::{EffectBounds, EffectSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,28 +40,23 @@ pub struct Evidence {
     pub components: Vec<Component>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compatibility {
-    Compatible,
-    Forbidden,
-    Unresolved,
-}
-
 impl Evidence {
     /// Effect-only subset check. Compatible never grants scope/capability or
     /// missing provenance, even when all three effects are permitted.
     pub fn compatibility(&self, allowed: u8) -> Compatibility {
-        if allowed & !ALL != 0 || !self.syntax_valid {
+        if !self.syntax_valid {
             return Compatibility::Unresolved;
         }
-        if self.lower & !allowed != 0 {
-            return Compatibility::Forbidden;
-        }
-        if self.upper & !allowed == 0 {
-            Compatibility::Compatible
-        } else {
-            Compatibility::Unresolved
-        }
+        let (Ok(lower), Ok(upper), Ok(allowed)) = (
+            EffectSet::try_from(self.lower),
+            EffectSet::try_from(self.upper),
+            EffectSet::try_from(allowed),
+        ) else {
+            return Compatibility::Unresolved;
+        };
+        EffectBounds::new(lower, upper).map_or(Compatibility::Unresolved, |bounds| {
+            bounds.compatibility(allowed)
+        })
     }
     pub fn proven_read(&self) -> bool {
         self.syntax_valid && self.complete && !self.components.is_empty() && self.upper & !READ == 0

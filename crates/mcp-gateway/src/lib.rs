@@ -17,6 +17,7 @@ pub mod protocol;
 #[cfg(feature = "metering")]
 pub(crate) mod quota;
 pub mod remote;
+pub mod resource_effects;
 pub mod risk_assessment;
 pub mod semantic_contract;
 pub mod session;

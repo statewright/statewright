@@ -2818,6 +2818,10 @@ fn bounded_metadata_label(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "effect_oracle_diagnostic.rs"]
+mod effect_oracle_diagnostic;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

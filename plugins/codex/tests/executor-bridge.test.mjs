@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { formatGuardDenial, handleExecutorHook } from "../scripts/executor-hook.mjs";
+import {recordCodexHookHost} from "../scripts/lib/codex-hook-context.mjs";
 
 test("executor approval rejects missing binding, independent denial and mismatched response", async () => {
   const context = {run_id: "run", run_session_id: "session", state: "implement", state_epoch: 1};
@@ -496,12 +497,17 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     CODEX_HOME: resolve(home, "codex-home"),
     LOCAL_MODELS_RUN_DIR: host === "companion" ? localRun : "",
     STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: host === "managed-symlink" ? resolve(localRun, "runtime.json") : "",
+    ...(host === "managed-symlink" ? {STATEWRIGHT_CLIENT_ID:"swc_11111111111111111111111111111111",STATEWRIGHT_ROUTE_CONTROL_DIR:resolve(localRun,"routes")} : {}),
     STATEWRIGHT_API_KEY: "fixture-key",
     STATEWRIGHT_GATEWAY_URL: gateway.url,
     STATEWRIGHT_TELEMETRY_DIR: resolve(home, "telemetry"),
     STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY: "false",
   };
   const session_id = "native-gateway-delegation";
+  if (host === "managed-symlink") {
+    await mkdir(environment.STATEWRIGHT_ROUTE_CONTROL_DIR,{recursive:true});
+    await writeFile(resolve(environment.STATEWRIGHT_ROUTE_CONTROL_DIR,"identity.json"),JSON.stringify({version:1,host:"codex",client_id:environment.STATEWRIGHT_CLIENT_ID}));
+  }
   const state = {state_snapshot: {...loadedState.state_snapshot,
     allowed_tools: ["Read", "Bash"],
     disallowed_tools: ["Write"],
@@ -548,6 +554,29 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     const evidence = gateway.requests.at(-1).body.params.arguments.command_evidence;
     assert.equal(evidence.command, "task unit");
     assert.equal(evidence.complete, true);
+    if (host === "managed-symlink") {
+      const actual=resolve(home,"actual-native-tool-cwd");
+      await mkdir(actual);
+      await writeFile(resolve(actual,"package.json"),JSON.stringify({name:"native-cwd-fixture",private:true,scripts:{canary:"mkdir -p evidence && printf 'OK\\n'"}}));
+      await mkdir(environment.STATEWRIGHT_ROUTE_CONTROL_DIR,{recursive:true});
+      await writeFile(resolve(environment.STATEWRIGHT_ROUTE_CONTROL_DIR,"codex-root-session.json"),JSON.stringify({version:1,client_id:environment.STATEWRIGHT_CLIENT_ID,session_id}));
+      await writeFile(environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,JSON.stringify({pid:process.pid,
+        clientId:environment.STATEWRIGHT_CLIENT_ID,proxyUrl:classifierApproval.url,proxyToken:"local-runtime-token"}));
+      assert(await recordCodexHookHost({receiptPath:environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,
+        clientId:environment.STATEWRIGHT_CLIENT_ID,proxyToken:"local-runtime-token",userAgent:"codex_cli_rs/0.167.0"}));
+      const nativeInput={hook_event_name:"PreToolUse",session_id,tool_name:"Bash",cwd:actual,tool_input:{command:"npm run canary"}};
+      const normalizedCli=await invoke(process.execPath,[resolve(codexRoot,"scripts/lib/codex-hook-context.mjs")],nativeInput,environment);
+      assert.equal(normalizedCli.status,0,normalizedCli.stderr);
+      assert.equal(JSON.parse(normalizedCli.stdout).tool_input.cwd,actual,normalizedCli.stdout);
+      const native=await invoke("bash",[resolve(codexRoot,"hook.sh"),"pre-tool"],{
+        hook_event_name:"PreToolUse",session_id,tool_name:"Bash",cwd:actual,tool_input:{command:"npm run canary"},
+      },environment);
+      assert.equal(native.status,0,native.stderr);
+      const actualRequest=gateway.requests.at(-1).body.params.arguments;
+      assert.equal(actualRequest.tool_input.cwd,actual,native.stdout);
+      assert.equal(actualRequest.command_evidence.complete,true,JSON.stringify(actualRequest.command_evidence));
+      assert(actualRequest.command_evidence.files.some(file=>file.path==="package.json"));
+    }
     assert.deepEqual(
       evidence.commands.map(({original, resolved, cwd}) => ({original, resolved, cwd})),
       [{original: "git status --short", resolved: "git status --short", cwd: "."}],

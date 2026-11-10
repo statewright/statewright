@@ -337,7 +337,9 @@ test("an already constructed approval controller cannot retain grants across cre
   const f=await fixture(t);const heldMemory=f.service.approvalMemory;
   const binding={policy_sha256:"a".repeat(64),invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64)};
   await heldMemory.remember(binding,"2h");assert.ok(await heldMemory.lookup(binding));
+  assert.equal((await heldMemory.list()).length,1);
   f.service.updateCredential("renewed-key");
   assert.equal(f.service.approvalMemory,heldMemory);
   assert.equal(await heldMemory.lookup(binding),null);
+  assert.equal((await heldMemory.list()).length,0);
 });

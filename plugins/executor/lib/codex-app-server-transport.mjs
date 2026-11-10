@@ -8,6 +8,7 @@ import { routeIdentity, startCodexAppServerRouteProxy } from "./codex-app-server
 import { codexHistoryRepairMode, guardCodexResumeHistory, resolveCodexHistoryStorage } from "./codex-history-integrity.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
+import {recordCodexHookHost} from "./codex-hook-context.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 
@@ -348,6 +349,10 @@ export async function startCodexAppServerRuntime({
       onCompatibilityWarning: message => {
         stderr.write(`[statewright] ${message}\n`);
       },
+      onNativeInitialized: result => recordCodexHookHost({
+        receiptPath: environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,
+        clientId, proxyToken: classifierApprovalToken, userAgent: result?.userAgent,
+      }),
       onRouteInjected: async (receipt) => {
         await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
         stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);

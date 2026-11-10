@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { NATIVE_STATEWRIGHT_GUIDANCE } from "./lib/desktop-runtime/native-statewright-guidance.mjs";
 import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "./classifier-approval.mjs";
+import {normalizeCodexHookInput} from "./lib/codex-hook-context.mjs";
 
 import { classifierDenialDisplay, classifierReworkDisplay } from './guard-denial.mjs';
 
@@ -151,6 +152,7 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
 
     if (endpoint === "pre-tool") {
       if (isStatewrightTool(input.tool_name ?? "")) return null;
+      input = await normalizeCodexHookInput(input);
       let result = await adapterCall("pre-tool", {
         tool_name: input.tool_name ?? "",
         tool_input: input.tool_input ?? {},

@@ -37,6 +37,15 @@ statewright_resolve_node() {
 
 STATEWRIGHT_NODE_RUNTIME=$(statewright_resolve_node || true)
 
+# Normalize only from a live, owner-bound native host receipt. Old/missing host
+# context is left unchanged and cannot manufacture reusable source evidence.
+if [ "$ENDPOINT" = "pre-tool" ] && [ -n "$STATEWRIGHT_NODE_RUNTIME" ] \
+    && [ -f "${SCRIPT_DIR}/scripts/lib/codex-hook-context.mjs" ]; then
+  NORMALIZED_HOOK_INPUT=$(printf '%s' "$HOOK_INPUT" | "$STATEWRIGHT_NODE_RUNTIME" \
+    "${SCRIPT_DIR}/scripts/lib/codex-hook-context.mjs" 2>/dev/null) || NORMALIZED_HOOK_INPUT=""
+  [ -z "$NORMALIZED_HOOK_INPUT" ] || HOOK_INPUT="$NORMALIZED_HOOK_INPUT"
+fi
+
 # Executor-owned runs must use the authenticated loopback bridge before any
 # standalone bootstrap, credential lookup, cache mutation, or telemetry setup.
 if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then

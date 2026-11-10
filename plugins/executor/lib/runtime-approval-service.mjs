@@ -20,7 +20,7 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   // Controllers retain this object. Resolve the credential scope at each call
   // and fail closed if renewal races an asynchronous grant operation.
   const scopedMemory = { get root() { return memory.root; } };
-  for (const method of ["lookup", "confirm", "remember", "revoke"]) {
+  for (const method of ["lookup", "confirm", "remember", "revoke", "list"]) {
     scopedMemory[method] = async (...args) => {
       const current = memory;
       const result = await current[method](...args);

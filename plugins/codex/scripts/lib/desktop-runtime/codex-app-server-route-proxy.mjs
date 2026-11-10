@@ -545,6 +545,7 @@ export async function startCodexAppServerRouteProxy({
   onTransportError = async () => {},
   onProtocolError = async () => {},
   onCompatibilityWarning = async () => {},
+  onNativeInitialized = async () => {},
   workflowOriginStore = new WorkflowRouteOriginStore(),
   routeOwner = async () => ({}),
   compactResume = true,
@@ -1996,6 +1997,7 @@ export async function startCodexAppServerRouteProxy({
         }
         if (responseTo === "initialize" && !notification.error) {
           if (classifierOwner) classifierOwner.initialized = true;
+          await Promise.resolve().then(() => onNativeInitialized(notification.result)).catch(() => {});
           const warning = codexCompatibilityNotice(notification.result?.userAgent);
           if (warning) void Promise.resolve().then(() => onCompatibilityWarning(warning)).catch(() => {});
         }

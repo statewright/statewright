@@ -11,6 +11,7 @@ const EXECUTOR_ROOT = resolve(CODEX_ROOT, "..", "executor");
 export const EXECUTOR_CORE_FILES = [
   ["lib/human-interaction.mjs", "scripts/lib/human-interaction.mjs"],
   ["lib/command-evidence.mjs", "scripts/lib/command-evidence.mjs"],
+  ["lib/codex-hook-context.mjs", "scripts/lib/codex-hook-context.mjs"],
   ["lib/command-yaml.generated.mjs", "scripts/lib/command-yaml.generated.mjs"],
   ["lib/error-reporting.mjs", "scripts/lib/error-reporting.mjs"],
   ["lib/diagnostic-event.mjs", "scripts/lib/diagnostic-event.mjs"],

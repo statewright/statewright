@@ -33,6 +33,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
   join(EXECUTOR_ROOT, "adapter-bridge.mjs"),
   join(EXECUTOR_ROOT, "command-evidence.mjs"),
+  join(EXECUTOR_ROOT, "codex-hook-context.mjs"),
   join(EXECUTOR_ROOT, "command-reference.mjs"),
   join(EXECUTOR_ROOT, "app-server-handoff.mjs"),
   join(EXECUTOR_ROOT, "human-approval.mjs"),

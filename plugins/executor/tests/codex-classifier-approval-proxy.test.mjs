@@ -15,7 +15,7 @@ import {manageApprovalMemory} from "../../codex/scripts/classifier-approval.mjs"
 
 const memoryContext={schema:"statewright/approval-memory-context/v1",policy_sha256:"a".repeat(64),
   invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64),reusable:true,
-  allowed_durations:["once","2h","4h","8h","always"]};
+  allowed_durations:["once","2h","4h","8h","always"],approve_for:"8h"};
 
 const threadId = "classifier-fixture-thread";
 const token = "classifier-fixture-token";
@@ -83,7 +83,7 @@ async function setup(t, {maxReworks = 2, memory = false} = {}) {
   }));
   let state = { run_id: "run-one", run_session_id: "session-one", state: "implement", state_epoch: 4,
     session_generation:"generation-one",
-    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,allowed_durations:memoryContext.allowed_durations} };
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,allowed_durations:memoryContext.allowed_durations,approve_for:memoryContext.approve_for} };
   let owned = true;
   let stateHold = null;
   let ownerHold = null;
@@ -170,9 +170,10 @@ test("native memory selection survives reconnect, names fresh receipt, and suppo
   const value=approvalRequest("before-restart",{approval_memory:memoryContext});
   const pending=fixture.post(value);
   const modal=await until(()=>first.messages.find(m=>m.method==="mcpServer/elicitation/request"),"duration form");
-  assert.deepEqual(modal.params.requestedSchema.properties.duration.enum,memoryContext.allowed_durations);
-  first.client.send(JSON.stringify({id:modal.id,result:{action:"accept",content:{duration:"always"}}}));
-  const approved=await(await pending).json();assert.equal(approved.duration,"always");
+  assert.deepEqual(modal.params.requestedSchema.properties,{});
+  assert.match(modal.params.message,/8 hours/);
+  first.client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  const approved=await(await pending).json();assert.equal(approved.duration,"8h");
   first.client.close();await once(first.client,"close");
   const second=await fixture.connectAndOwn();
   const next=approvalRequest("after-restart",{approval_memory:memoryContext});
@@ -193,7 +194,7 @@ test("changed dependency evidence never reuses a native always grant",async t=>{
   const fixture=await setup(t,{maxReworks:0,memory:true});const {client,messages}=await fixture.connectAndOwn();
   const value=approvalRequest("original",{approval_memory:memoryContext});
   const first=fixture.post(value);const modal=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"),"first grant");
-  client.send(JSON.stringify({id:modal.id,result:{action:"accept",content:{duration:"8h"}}}));
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
   await(await first).json();
   const changed=approvalRequest("changed",{approval_memory:{...memoryContext,dependency_sha256:"d".repeat(64)}});
   const next=fixture.post(changed);const second=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"&&m.id!==modal.id),"changed evidence review");

@@ -22,6 +22,59 @@ const state=()=>({run_id:"run",run_session_id:"session",state:"implement",state_
 async function fixture(t){const root=await mkdtemp(join(tmpdir(),"statewright-approval-memory-"));t.after(()=>rm(root,{recursive:true,force:true}));
   let now=1000;return {root,setNow:v=>{now=v;},make:(namespace="principal/project/staging")=>new ApprovalMemory({root,namespace,now:()=>now})};}
 
+test("workflow 8h duration is disclosed and plain native allow survives reconstruction",async t=>{
+  const f=await fixture(t),sent=[],value=request();
+  value.approval_memory.approve_for="8h";
+  const current=state();current.approval_memory_policy.approve_for="8h";
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make()});
+  const first=await controller.begin(value);const modal=sent[0];
+  assert.match(modal.params.message,/8 (?:hours|h)/i);
+  assert.deepEqual(modal.params.requestedSchema.properties,{});
+  controller.handleReply({id:modal.id,result:{action:"accept"}});
+  assert.equal((await first.completion).duration,"8h");
+  controller.close();
+  const next=new ClassifierApprovalController({send:()=>assert.fail("reused grant must not prompt"),getState:async()=>current,memory:f.make()});
+  value.classifier_receipt.invocation_fingerprint="invocation_v1_repeat";
+  assert.equal((await next.begin(value)).response.reason,"remembered_human_approval");
+});
+
+test("workflow duration governs plain allow and an unconfigured workflow remains once",async t=>{
+  for(const duration of ["once","2h","4h","8h","always"]){
+    const f=await fixture(t),sent=[],value=request(),current=state();
+    if(duration!=="once"){value.approval_memory.approve_for=duration;current.approval_memory_policy.approve_for=duration;}
+    const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make()});
+    const first=await controller.begin(value);const modal=sent[0];
+    controller.handleReply({id:modal.id,result:{action:"accept"}});
+    const result=await first.completion;
+    assert.equal(result.action,"allow_once");
+    assert.equal(result.duration,duration==="once"?undefined:duration);
+    assert.equal((await f.make().list()).length,duration==="once"?0:1);
+  }
+});
+
+test("configured 8h with missing provenance is visibly once only",async t=>{
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  value.approval_memory.approve_for="8h";value.approval_memory.reusable=false;
+  current.approval_memory_policy.approve_for="8h";
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make()});
+  const first=await controller.begin(value);assert.match(sent[0].params.message,/once/);
+  assert.match(sent[0].params.message,/provenance is incomplete/);
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});
+  assert.equal((await first.completion).action,"allow_once");assert.deepEqual(await f.make().list(),[]);
+});
+
+test("invalid or conflicting duration cannot increase a native grant",async t=>{
+  assert.equal(approvalMemoryContext({...context,approve_for:"9h"}),null);
+  assert.equal(approvalMemoryContext({...context,approve_for:"always",allowed_durations:["once","8h"]}),null);
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  value.approval_memory.approve_for="8h";current.approval_memory_policy.approve_for="8h";
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make()});
+  const pending=await controller.begin(value);
+  controller.handleReply({id:sent[0].id,result:{action:"accept",content:{duration:"always"}}});
+  assert.equal((await pending.completion).reason,"approval_duration_invalid");
+  assert.deepEqual(await f.make().list(),[]);
+});
+
 test("2h/4h/8h grants persist across reconstruction, expire exactly, and separate scopes",async t=>{
   const f=await fixture(t);
   for(const [duration,hours]of [["2h",2],["4h",4],["8h",8]]){
@@ -54,13 +107,15 @@ test("tampered, malformed and permissive records cannot manufacture approval",as
 });
 test("native accepted duration creates a grant; repeat uses a fresh invocation receipt without a prompt",async t=>{
   const f=await fixture(t),sent=[],events=[];const memory=f.make();
-  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>state(),memory,record:e=>events.push(e)});
-  const first=await controller.begin(request());const modal=sent.find(v=>v.method==="mcpServer/elicitation/request");
-  assert.deepEqual(modal.params.requestedSchema.properties.duration.enum,context.allowed_durations);
-  controller.handleReply({id:modal.id,result:{action:"accept",content:{duration:"4h"}}});
+  const value=request();value.approval_memory.approve_for="4h";
+  const currentState=state();currentState.approval_memory_policy.approve_for="4h";
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>currentState,memory,record:e=>events.push(e)});
+  const first=await controller.begin(value);const modal=sent.find(v=>v.method==="mcpServer/elicitation/request");
+  assert.deepEqual(modal.params.requestedSchema.properties,{});
+  controller.handleReply({id:modal.id,result:{action:"accept"}});
   assert.equal((await first.completion).duration,"4h");controller.close();
-  const next=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>state(),memory:f.make(),record:e=>events.push(e)});
-  const current=request();current.classifier_receipt.invocation_fingerprint="invocation_v1_after-gateway-restart";
+  const next=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>currentState,memory:f.make(),record:e=>events.push(e)});
+  const current=structuredClone(value);current.classifier_receipt.invocation_fingerprint="invocation_v1_after-gateway-restart";
   const reused=await next.begin(current);
   assert.equal(reused.outcome,"allow");assert.equal(reused.response.reason,"remembered_human_approval");
   assert.equal(reused.response.invocation_fingerprint,current.classifier_receipt.invocation_fingerprint);
@@ -82,14 +137,15 @@ test("policy/owner changes and duplicate replies cannot turn an accepted dialog 
   const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make()});
   const first=await controller.begin(request());const id=sent[0].id;
   current={...current,approval_memory_policy:{...current.approval_memory_policy,policy_sha256:"d".repeat(64)}};
-  const reply={id,result:{action:"accept",content:{duration:"always"}}};controller.handleReply(reply);controller.handleReply(reply);
+  const reply={id,result:{action:"accept"}};controller.handleReply(reply);controller.handleReply(reply);
   assert.equal((await first.completion).reason,"approval_state_changed");assert.deepEqual(await f.make().list(),[]);
 });
 test("revocation or expiry during state reread is checked again at release",async t=>{
   for(const reason of ["revoke","expire"]){const f=await fixture(t),memory=f.make(),grant=await memory.remember(context,"2h");
+    const value=request();value.approval_memory.approve_for="2h";const current=state();current.approval_memory_policy.approve_for="2h";
     let read=0;const controller=new ClassifierApprovalController({send:()=>assert.fail("may not prompt on an invalidated in-flight grant"),memory,
-      getState:async()=>{if(++read===2){if(reason==="revoke")await f.make().revoke(grant.id);else f.setNow(1000+2*3600_000);}return state();}});
-    const result=await controller.begin(request());assert.equal(result.response.action,"deny");assert.equal(result.response.reason,"approval_memory_no_longer_valid");
+      getState:async()=>{if(++read===2){if(reason==="revoke")await f.make().revoke(grant.id);else f.setNow(1000+2*3600_000);}return current;}});
+    const result=await controller.begin(value);assert.equal(result.response.action,"deny");assert.equal(result.response.reason,"approval_memory_no_longer_valid");
   }
 });
 test("a crashed owner's unique lock ticket is reclaimed without deleting live tickets",async t=>{

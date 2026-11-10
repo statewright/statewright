@@ -10,10 +10,13 @@ export function approvalMemoryContext(value) {
   if (value?.schema !== "statewright/approval-memory-context/v1"
       || !["policy_sha256", "invocation_sha256", "dependency_sha256"].every(key=>hex(value[key]))
       || typeof value.reusable !== "boolean" || !Array.isArray(value.allowed_durations)
-      || !value.allowed_durations.length || value.allowed_durations.some(v=>!APPROVAL_DURATIONS.includes(v))) return null;
+      || !value.allowed_durations.length || value.allowed_durations.some(v=>!APPROVAL_DURATIONS.includes(v))
+      || (value.approve_for !== undefined && (!APPROVAL_DURATIONS.includes(value.approve_for)
+        || (value.approve_for !== "once" && !value.allowed_durations.includes(value.approve_for))))) return null;
   return {schema:value.schema, policy_sha256:value.policy_sha256,
     invocation_sha256:value.invocation_sha256, dependency_sha256:value.dependency_sha256,
-    reusable:value.reusable, allowed_durations:APPROVAL_DURATIONS.filter(v=>v==="once"||value.allowed_durations.includes(v))};
+    reusable:value.reusable, approve_for:value.approve_for ?? "once",
+    allowed_durations:APPROVAL_DURATIONS.filter(v=>v==="once"||value.allowed_durations.includes(v))};
 }
 function identity(binding) {
   if (!binding || !["policy_sha256","invocation_sha256","dependency_sha256"].every(k=>hex(binding[k]))) {

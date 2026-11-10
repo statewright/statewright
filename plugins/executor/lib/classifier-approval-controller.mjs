@@ -64,7 +64,7 @@ export function classifierApprovalRequest(value) {
 export function classifierReviewMessage(request) {
   const display = request.displayContext;
   const reasons = {
-    semantic_authorization_disabled: "The built-in checks did not prove this request's effects. No semantic model assessment ran because that fallback is disabled.",
+    semantic_authorization_disabled: "The built-in checks did not prove this request's effects. Semantic assessments cannot authorize commands in this environment, so this request needs your review.",
     incomplete_structural_evidence: "Parsing left part of this invocation unexamined; its effects have not been established.",
     semantic_vector_unavailable: "The semantic assessor returned no usable judgment for this invocation.",
     semantic_assessment_incomplete: "The semantic assessment did not complete successfully.",
@@ -89,10 +89,12 @@ export function classifierReviewMessage(request) {
     }
   }
   if (!display?.command && !display?.details) lines.push("Request details were not supplied by this client; the scope cannot be inspected here.");
-  lines.push(`Phase: ${request.state}`, request.memoryContext?.reusable
-    ? "Allow this exact invocation? Choose how long to remember it while its request, source evidence and policy match."
-    : "Allow this exact invocation once?");
-  if (!request.memoryContext?.reusable) lines.push("Reusable approval is unavailable: supporting source provenance is incomplete.");
+  const duration = request.effectiveDuration ?? "once";
+  const remember = duration === "always" ? "until revoked" : `for ${duration.replace("h", " hours")}`;
+  lines.push(`Phase: ${request.state}`, duration === "once"
+    ? "Allow this exact invocation once?"
+    : `Allow this exact invocation and remember it ${remember}, while its request, source evidence and policy match?`);
+  if (request.memoryUnavailableReason) lines.push(request.memoryUnavailableReason);
   return lines.join("\n");
 }
 
@@ -166,11 +168,11 @@ export class ClassifierApprovalController {
     if(this.closedReason)return approvalDeny(this.result(request,"deny",{reason:this.closedReason}));
     if (signal?.aborted) return approvalDeny(
       this.result(request, "deny", {reason: "approval_request_aborted"}));
-    if (this.memory && request.memoryContext?.reusable) {
+    if (this.memory && request.memoryContext?.reusable && request.memoryContext.approve_for !== "once") {
       if (!await this.current(request)) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
       try {
         const grant = await this.memory.lookup(request.memoryContext);
-        if (grant && request.memoryContext.allowed_durations.includes(grant.duration)) {
+        if (grant && grant.duration === request.memoryContext.approve_for && request.memoryContext.allowed_durations.includes(grant.duration)) {
           const current=await this.current(request);
           if (signal?.aborted || !current) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
           const valid=await this.memory.confirm(request.memoryContext,grant);
@@ -216,8 +218,13 @@ export class ClassifierApprovalController {
     }
 
     const requestId = `statewright-classifier-approval-${randomUUID()}`;
-    const durations=this.memory && request.memoryContext?.reusable ? request.memoryContext.allowed_durations : ["once"];
-    const pending = {request, requestId, settled: false, presented: false, signal, durations};
+    const configuredDuration=request.memoryContext?.approve_for ?? "once";
+    const reusable=Boolean(this.memory && request.memoryContext?.reusable);
+    const effectiveDuration=reusable ? configuredDuration : "once";
+    const memoryUnavailableReason=configuredDuration !== "once" && !reusable
+      ? (!this.memory ? "The configured reusable approval is unavailable: the approval store is unavailable."
+        : "The configured reusable approval is unavailable: supporting source provenance is incomplete.") : null;
+    const pending = {request, requestId, settled: false, presented: false, signal, effectiveDuration};
     pending.promise = new Promise(resolve => { pending.resolve = resolve; });
     entry.pending = pending;
     const container = {key, entry, pending};
@@ -233,11 +240,8 @@ export class ClassifierApprovalController {
     try {
       const sent = this.send({id: requestId, method: "mcpServer/elicitation/request", params: {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
-        message: classifierReviewMessage({...request,memoryContext:request.memoryContext
-          ?{...request.memoryContext,reusable:durations.length>1}:null}),
-        requestedSchema: {type: "object", properties: durations.length>1 ? {
-          duration:{type:"string",title:"Remember approval",enum:durations,default:"once"},
-        } : {}, ...(durations.length>1?{required:["duration"]}:{})},
+        message: classifierReviewMessage({...request,effectiveDuration,memoryUnavailableReason}),
+        requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous
       // transport failures without stalling abort/timeout processing.
@@ -295,7 +299,12 @@ export class ClassifierApprovalController {
     const container = this.requests.get(reply.id);
     if (!container) return true;
     const action = reply.result?.action;
-    if (!reply.error && action === "accept") void this.finishAccepted(container,reply.result?.content?.duration??"once");
+    if (!reply.error && action === "accept") {
+      const supplied=reply.result?.content?.duration;
+      if (supplied !== undefined && supplied !== container.pending.effectiveDuration) {
+        this.finish(container,"deny","approval_duration_invalid");
+      } else void this.finishAccepted(container,container.pending.effectiveDuration);
+    }
     else this.finish(container, "deny", reply.error ? "native_approval_error"
       : action === "decline" ? "human_declined" : "human_cancelled");
     return true;
@@ -308,6 +317,7 @@ export class ClassifierApprovalController {
         && state.run_session_id===request.runSessionId && state.state===request.state && state.state_epoch===request.stateEpoch
         && (!request.sessionGeneration || state.session_generation===request.sessionGeneration)
         && (!request.memoryContext || state.approval_memory_policy?.policy_sha256===request.memoryContext.policy_sha256
+          && (state.approval_memory_policy?.approve_for ?? "once") === request.memoryContext.approve_for
           && request.memoryContext.allowed_durations.every(d=>d==="once"||state.approval_memory_policy?.allowed_durations?.includes(d)));
     }catch{return false;}
   }
@@ -316,7 +326,7 @@ export class ClassifierApprovalController {
     const pending=container.pending;
     if(pending.settled||pending.accepting)return;
     pending.accepting=true;
-    if(!pending.durations.includes(duration)) {this.finish(container,"deny","approval_duration_invalid");return;}
+    if(duration!==pending.effectiveDuration) {this.finish(container,"deny","approval_duration_invalid");return;}
     if (!this.getState) {
       this.finish(container, "deny", "approval_state_unavailable");
       return;

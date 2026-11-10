@@ -49,7 +49,8 @@ test("human review names the requested web operation and omits internal authorit
   const message = classifierReviewMessage(parsed);
   assert.match(message,/middleware lifecycle reference/);
   assert.match(message,/example.com/);
-  assert.match(message,/No semantic model assessment ran/);
+  assert.match(message,/Semantic assessments cannot authorize commands/);
+  assert.doesNotMatch(message,/No semantic model assessment ran/);
   assert.doesNotMatch(message,/Classifier axis|Required authority|semantic_authorization_disabled|complete_structural_evidence_or_separate_approval/);
 });
 

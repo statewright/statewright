@@ -4,11 +4,14 @@ Status: source implementation; installed/native and staging acceptance pending.
 
 ## Decision
 
-Offer once, 2h, 4h, 8h and always in the existing native classifier approval
-dialog when complete supported dependency provenance permits reuse. A workflow
-may restrict durations through `meta.approval_memory.allowed_durations`. Missing
-provenance offers once, never a broader fallback. This does not decide native
-platform permissions or workflow-transition reviews.
+The workflow selects the duration with `meta.approval_memory.approve_for`:
+`once`, `2h`, `4h`, `8h`, or `always`. The default is `once`. If
+`allowed_durations` is present, the selected duration must be included. The
+existing native Allow/Deny/Cancel dialog states the effective duration, and a
+plain Allow records it without requiring a custom dialog field. Incomplete
+dependency provenance or an unavailable approval store limits the prompt to once
+and explains why. This does not decide native platform permissions or
+workflow-transition reviews.
 
 Keep grants in a private local versioned HMAC-authenticated store, bound to the
 service/project/client credential namespace, full workflow policy, invocation and

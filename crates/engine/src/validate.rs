@@ -6,6 +6,47 @@ use std::collections::{BTreeSet, VecDeque};
 pub fn validate_definition(definition: &MachineDefinition) -> Result<(), ValidationError> {
     let mut errors = Vec::new();
 
+    if let Some(memory) = definition
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.extra.get("approval_memory"))
+    {
+        const DURATIONS: [&str; 5] = ["once", "2h", "4h", "8h", "always"];
+        if !memory.is_object() {
+            errors.push("meta.approval_memory must be an object".into());
+        } else {
+            let allowed = memory.get("allowed_durations");
+            if let Some(value) = allowed {
+                if !value.as_array().is_some_and(|items| {
+                    !items.is_empty()
+                        && items.iter().all(|item| {
+                            item.as_str()
+                                .is_some_and(|duration| DURATIONS.contains(&duration))
+                        })
+                }) {
+                    errors.push("meta.approval_memory.allowed_durations must be a non-empty list of supported durations".into());
+                }
+            }
+            if let Some(value) = memory.get("approve_for") {
+                if !value.as_str().is_some_and(|duration| {
+                    DURATIONS.contains(&duration)
+                        && (duration == "once"
+                            || allowed.is_none()
+                            || allowed
+                                .and_then(|value| value.as_array())
+                                .is_some_and(|items| {
+                                    items.iter().any(|item| item.as_str() == Some(duration))
+                                }))
+                }) {
+                    errors.push(
+                        "meta.approval_memory.approve_for must be a supported allowed duration"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+
     // 1. Initial state must exist in states
     if !definition.states.contains_key(&definition.initial) {
         errors.push(format!(
@@ -248,6 +289,30 @@ mod tests {
     #[test]
     fn accepts_valid_machine() {
         assert!(validate_definition(&valid_machine()).is_ok());
+    }
+
+    #[test]
+    fn validates_approval_memory_duration() {
+        for (memory, valid) in [
+            (json!({"approve_for":"8h"}), true),
+            (
+                json!({"approve_for":"8h","allowed_durations":["once","8h"]}),
+                true,
+            ),
+            (
+                json!({"approve_for":"always","allowed_durations":["once","8h"]}),
+                false,
+            ),
+            (json!({"approve_for":"9h"}), false),
+            (json!({"approve_for":null}), false),
+            (json!({"allowed_durations":[]}), false),
+            (json!("8h"), false),
+        ] {
+            let mut value = serde_json::to_value(valid_machine()).unwrap();
+            value["meta"] = json!({"approval_memory":memory});
+            let definition: MachineDefinition = serde_json::from_value(value).unwrap();
+            assert_eq!(validate_definition(&definition).is_ok(), valid);
+        }
     }
 
     #[test]

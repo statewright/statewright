@@ -53,11 +53,16 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
             })
             .unwrap_or_else(|| vec!["once"]),
     };
+    let approve_for = configured
+        .and_then(|value| value.get("approve_for"))
+        .and_then(Value::as_str)
+        .filter(|value| DURATIONS.contains(value) && durations.contains(value))
+        .unwrap_or("once");
     json!({"schema":"statewright/approval-memory-policy/v1",
         "policy_sha256":digest(&json!({"contract":1,"definition":session.definition,
             "context":session.context,"audit_override":session.classifier_audit_override,
             "audit_revision":session.classifier_audit_revision,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
-        "allowed_durations":durations})
+        "allowed_durations":durations,"approve_for":approve_for})
 }
 
 fn dependency_value(value: &Value) -> Value {
@@ -95,7 +100,7 @@ pub(crate) fn context(
             ))
             || crate::tool_intent::is_native_web_run(tool_name));
     json!({"schema":"statewright/approval-memory-context/v1",
-        "policy_sha256":policy["policy_sha256"],"allowed_durations":policy["allowed_durations"],
+        "policy_sha256":policy["policy_sha256"],"allowed_durations":policy["allowed_durations"],"approve_for":policy["approve_for"],
         "invocation_sha256":digest(&json!([tool_name,input])),
         "dependency_sha256":digest(&dependency_value(&json!([command_evidence,references]))),
         "reusable":reusable,
@@ -112,6 +117,31 @@ mod tests {
             "id":"memory-fixture","initial":"work","states":{"work":{}}}))
             .unwrap(),
         )
+    }
+    #[test]
+    fn policy_propagates_workflow_approval_duration() {
+        let mut session = session();
+        assert_eq!(policy(&session)["approve_for"], "once");
+        session.definition = serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work",
+            "meta":{"approval_memory":{"approve_for":"8h","allowed_durations":["once","8h"]}},
+            "states":{"work":{}}
+        }))
+        .unwrap();
+        assert_eq!(policy(&session)["approve_for"], "8h");
+        assert_eq!(
+            context(
+                &session,
+                "exec_command",
+                &json!({"cmd":"test"}),
+                None,
+                None,
+                "native_command_evidence",
+                true,
+                true
+            )["approve_for"],
+            "8h"
+        );
     }
     #[test]
     fn memory_identity_survives_collection_time_but_invalidates_changes() {

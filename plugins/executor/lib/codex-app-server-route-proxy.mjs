@@ -14,7 +14,7 @@ import { ApprovalOutcome, ApprovalPipeline, approvalDeny, approvalError,
   approvalNotHandled } from "./approval-pipeline.mjs";
 import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
-import { nativeWorkflowEntryPrompt, nativeApprovalResultPrompt } from "./native-statewright-guidance.mjs";
+import { nativeWorkflowEntryPrompt, nativeApprovalResultPrompt, codexCompatibilityNotice } from "./native-statewright-guidance.mjs";
 import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
 
 const WORKFLOW_APPROVAL_PRIORITY = 100;
@@ -544,6 +544,7 @@ export async function startCodexAppServerRouteProxy({
   onConnection = async () => {},
   onTransportError = async () => {},
   onProtocolError = async () => {},
+  onCompatibilityWarning = async () => {},
   workflowOriginStore = new WorkflowRouteOriginStore(),
   routeOwner = async () => ({}),
   compactResume = true,
@@ -1993,8 +1994,10 @@ export async function startCodexAppServerRouteProxy({
           await forwardWhenOpen(downstream, payload);
           return;
         }
-        if (responseTo === "initialize" && !notification.error && classifierOwner) {
-          classifierOwner.initialized = true;
+        if (responseTo === "initialize" && !notification.error) {
+          if (classifierOwner) classifierOwner.initialized = true;
+          const warning = codexCompatibilityNotice(notification.result?.userAgent);
+          if (warning) void Promise.resolve().then(() => onCompatibilityWarning(warning)).catch(() => {});
         }
         const manualSettings = responseKey === null ? null : pendingManualSettings.get(responseKey);
         if (manualSettings) {

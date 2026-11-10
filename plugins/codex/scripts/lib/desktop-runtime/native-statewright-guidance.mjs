@@ -1,4 +1,13 @@
 // Agent guidance only: no tool remapping, workflow activation or permission change.
+export function codexCompatibilityNotice(userAgent) {
+  if (typeof userAgent !== "string" || userAgent.length > 1024) return null;
+  const match = userAgent.match(/(?:^|\s)codex[a-z_-]*\/(\d+)\.(\d+)\.(\d+)(?:[-+][\w.-]+)?(?:\s|$)/i);
+  if (!match) return null;
+  const [major, minor] = match.slice(1).map(Number);
+  if (major > 0 || minor >= 167) return null;
+  return `Statewright may not work properly with Codex ${match.slice(1).join(".")}. Update Codex to 0.167.0 or newer, and keep it up to date.`;
+}
+
 export const NATIVE_STATEWRIGHT_GUIDANCE = "Statewright connector selection for terminal and Desktop: use only the advertised local/native MCP server named statewright for this conversation (mcp__statewright__statewright_* or mcp__plugin_statewright_statewright__statewright_*; the UI may display statewright.statewright_*). Do not use codex_apps.statewright_ai.*, mcp__codex_apps__statewright_*, or the web/marketplace Statewright connector here, even for workflow listing or status. The web connector is a separate session, not a fallback for native workflow state, model routing, permissions or approvals. If the local tool is absent, fails, or requires login, report that exact local failure and park dependent workflow actions; use only supported local discovery/recovery. Never substitute the web connector, infer live state from saved files, or run MCP tool names as shell commands. This guidance does not activate a workflow or authorize login, retry, approval or policy bypass.";
 
 export function nativeWorkflowEntryPrompt(state) {

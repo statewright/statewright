@@ -345,6 +345,9 @@ export async function startCodexAppServerRuntime({
       onHandoffStatus: async (event) => {
         await telemetry("app_server_handoff_status", {client_id: clientId, ...event});
       },
+      onCompatibilityWarning: message => {
+        stderr.write(`[statewright] ${message}\n`);
+      },
       onRouteInjected: async (receipt) => {
         await telemetry("app_server_route_injected", { client_id: clientId, ...receipt });
         stderr.write(`[statewright] injected next-turn route ${receipt.effectiveModel}${receipt.effectiveEffort ? ` (${receipt.effectiveEffort})` : ""}.\n`);

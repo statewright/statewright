@@ -40,9 +40,9 @@ test('distinct evidence failures have distinct explanations without guessed comm
 test('missing semantic scores remain unavailable, never fabricated zero probabilities', () => {
   const message = display({...receipt, final_denial_basis:'semantic_threshold_not_met',
     semantic_status:'Assessed', semantic_vector:{may_write:0.86, destructive:null, read_only:NaN}});
-  assert.match(message, /S1 classification \(uncalibrated estimates\): write 86%/);
+  assert.match(message, /S1 classification: write 86%/);
   assert.doesNotMatch(message, /read-only 0%|destructive 0%/);
-  assert.match(message, /uncalibrated/);
+  assert.doesNotMatch(message, /uncalibrated|estimates/);
 });
 
 test('rework is not a promised or already pending native approval and forbids unchanged replay', () => {

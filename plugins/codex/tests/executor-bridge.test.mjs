@@ -58,7 +58,7 @@ test("formats classifier denials for display without discarding machine evidence
   assert.doesNotMatch(denial.display, /semantic_threshold_not_met/);
   assert.match(denial.display, /S1 was uncertain/);
   assert.match(denial.display, /Rework attempt 1\/2/);
-  assert.match(denial.display, /S1 classification \(uncalibrated estimates\): write 86%, external 56%/);
+  assert.match(denial.display, /S1 classification: write 86%, external 56%/);
   assert.doesNotMatch(denial.display, /0\.86|internal scoring/);
   assert.match(denial.machine, /"may_write":0\.86/);
   assert.match(denial.machine, /"action":"rework"/);
@@ -605,7 +605,7 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     assert.match(classifierOutput.permissionDecisionReason, /^Statewright blocked this request/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /semantic_threshold_not_met/);
     assert.match(classifierOutput.permissionDecisionReason, /S1 was uncertain/);
-    assert.match(classifierOutput.permissionDecisionReason, /S1 classification \(uncalibrated estimates\): read-only 4%, write 96%, reversible 92%, destructive 1%, irreversible 1%, external 1%/);
+    assert.match(classifierOutput.permissionDecisionReason, /S1 classification: read-only 4%, write 96%, reversible 92%, destructive 1%, irreversible 1%, external 1%/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /will be sent|heredoc|inline interpreter/);
     assert.match(classifierOutput.permissionDecisionReason, /Rework attempt 1\/2/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /basis=|p\(read=|private-(command|input)-sentinel/);

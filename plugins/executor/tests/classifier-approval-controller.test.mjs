@@ -60,7 +60,7 @@ test("approval displays S1 predictions without treating them as authority", () =
       destructive:0.3231,irreversible:0.5274,external_or_account_effect:0.4766,unknown:"not displayed"},
   }));
   const message = classifierReviewMessage(parsed);
-  assert.match(message,/S1 classification \(uncalibrated estimates\): read-only 53%, write 55%, reversible 47%, destructive 32%, irreversible 53%, external 48%/);
+  assert.match(message,/S1 classification: read-only 53%, write 55%, reversible 47%, destructive 32%, irreversible 53%, external 48%/);
   assert.match(message,/Allow this exact invocation once/);
   assert.doesNotMatch(message,/not displayed/);
   const unavailable = classifierReviewMessage(classifierApprovalRequest(request({}, {

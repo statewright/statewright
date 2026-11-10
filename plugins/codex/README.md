@@ -6,6 +6,11 @@ Start with the [Codex guide](https://docs.statewright.ai/plugins/codex) or
 [ChatGPT Desktop guide](https://docs.statewright.ai/plugins/codex-desktop).
 The sections below are the detailed integration reference.
 
+Keep Codex up to date. Older versions may prevent Statewright from working
+properly, including command evidence and reusable approvals. Use Codex 0.167.0
+or newer; the managed App Server prints a compatibility notice when an older
+version identifies itself. Restart your Codex session after upgrading.
+
 ## Read-only tool equivalents
 
 Workflow names such as `Read`, `Grep`, and `Glob` are capabilities, not a promise

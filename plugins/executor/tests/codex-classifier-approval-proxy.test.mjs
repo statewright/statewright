@@ -63,7 +63,7 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 * 60_000} = {}) {
+async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 * 60_000, userAgent = null} = {}) {
   const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
   if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -79,6 +79,8 @@ async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 
       const turn = { id: "classifier-active-turn", status: "inProgress", items: [] };
       socket.send(JSON.stringify({ id: request.id, result: { turn } }));
       socket.send(JSON.stringify({ method: "turn/started", params: { threadId, turn } }));
+    } else if (request.method === "initialize") {
+      socket.send(JSON.stringify({id: request.id, result: {userAgent}}));
     } else if (request.id !== undefined) {
       socket.send(JSON.stringify({ id: request.id, result: {} }));
     }
@@ -89,11 +91,13 @@ async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 
   let owned = true;
   let stateHold = null;
   let ownerHold = null;
+  const warnings = [];
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
     classifierApprovalTimeoutMs: approvalTimeoutMs,
+    onCompatibilityWarning: message => warnings.push(message),
     classifierApprovalService: {
       ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
       ownsThread: async id => {
@@ -144,7 +148,7 @@ async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 
     for (const socket of upstream.clients) socket.terminate();
     await new Promise(resolve => upstream.close(resolve));
   });
-  return { connectAndOwn, endpoint, post,
+  return { connectAndOwn, endpoint, post, warnings,
     setState(value) { state = structuredClone(value); },
     setOwned(value) { owned = value; },
     holdStateRead() {
@@ -154,6 +158,15 @@ async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 
       return ownerHold = hold();
     } };
 }
+
+test("native initialization warns older Codex clients without blocking their connection", async t => {
+  for (const [version, expected] of [["0.160.0", 1], ["0.167.0", 0], ["1.0.0", 0]]) {
+    const fixture = await setup(t, {userAgent: `codex_cli_rs/${version} (test platform)`});
+    await fixture.connectAndOwn();
+    assert.equal(fixture.warnings.length, expected);
+    if (expected) assert.match(fixture.warnings[0], /Statewright may not work properly.*Update Codex/);
+  }
+});
 
 test("classifier uncertainty reaches native approval immediately when rewrites are disabled", async t => {
   const fixture = await setup(t, {maxReworks: 0});
@@ -300,7 +313,7 @@ test("executor hook and bridge share the native controller budget and exact appr
       }
       const pending = invoke();
       const modal = await until(() => messages.find(item => item.method === "mcpServer/elicitation/request"), "executor native form");
-      assert.match(modal.params.message, /S1 classification \(uncalibrated estimates\): read-only 53%, write 55%, destructive 32%, external 48%/);
+      assert.match(modal.params.message, /S1 classification: read-only 53%, write 55%, destructive 32%, external 48%/);
       client.send(JSON.stringify({id: modal.id, result: {action}}));
       const result = await pending;
       assert.equal(result.hookSpecificOutput.permissionDecision, action === "accept" ? undefined : "deny");

@@ -23,7 +23,7 @@ export function s1ClassificationDisplay(receipt) {
   if (!vector) return `S1 classification: ${status ? status.toLowerCase() : "unavailable"}; no predictions available.`;
   const scores = S1_FIELDS.filter(([key]) => Object.hasOwn(vector, key))
     .map(([key, label]) => `${label} ${Math.round(vector[key] * 100)}%`);
-  return `S1 classification (uncalibrated estimates${status === "ShadowOnly" ? ", evaluation only" : ""}): ${scores.join(", ")}.`;
+  return `S1 classification: ${scores.join(", ")}.${status === "ShadowOnly" ? " Evaluation only." : ""}`;
 }
 
 export function interactionText(value, maximum = 4096) {

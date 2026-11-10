@@ -144,6 +144,10 @@ async function main() {
   const nativeDestination = codexNativeDestinationInvocation(options.host, options.args);
   const environment = nativeDestination ? nativeDestinationEnvironment() : await resolvedGatewayEnvironment();
   reporter.setEnvironment(environment);
+  if (options.host === "codex" && !nativeDestination) {
+    const {warnCodexCompatibility} = await import("./lib/native-statewright-guidance.mjs");
+    await warnCodexCompatibility(options.realBin, {environment});
+  }
   if (!nativeDestination && await managedClientEnabled(options.host)) {
     try {
       environment.STATEWRIGHT_API_KEY = await resolveTuiGatewayApiKey(environment, {

@@ -1,8 +1,24 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { NATIVE_STATEWRIGHT_GUIDANCE, nativeWorkflowEntryPrompt, nativeApprovalResultPrompt } from "../lib/native-statewright-guidance.mjs";
+import { NATIVE_STATEWRIGHT_GUIDANCE, nativeWorkflowEntryPrompt, nativeApprovalResultPrompt, warnCodexCompatibility } from "../lib/native-statewright-guidance.mjs";
 import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
+
+test("older Codex notice reaches foreground output and version-check failure does not block startup", async () => {
+  const messages = [];
+  const output = {write: message => messages.push(message)};
+  await warnCodexCompatibility(process.execPath, {output,
+    probe: async (_command, args, options) => {
+      assert.equal(args.at(-1), "--version");
+      assert.equal(options.timeout, 2000);
+      return {stdout: "codex-cli 0.160.0\n"};
+    }});
+  assert.match(messages.join(""), /Statewright may not work properly.*Update Codex to 0.167.0/);
+  messages.length = 0;
+  await warnCodexCompatibility(process.execPath, {output, probe: async () => ({stdout: "codex-cli 0.167.0"})});
+  await warnCodexCompatibility(process.execPath, {output, probe: async () => {throw new Error("unavailable");}});
+  assert.equal(messages.length, 0);
+});
 
 test("native connector guidance identifies exact native tools and forbids silent web/file fallback", () => {
   const text = NATIVE_STATEWRIGHT_GUIDANCE;

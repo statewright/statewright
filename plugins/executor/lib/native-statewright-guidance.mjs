@@ -1,4 +1,20 @@
 // Agent guidance only: no tool remapping, workflow activation or permission change.
+import {execFile} from "node:child_process";
+import {promisify} from "node:util";
+import {resolveWindowsLaunch} from "./windows-command-resolution.mjs";
+
+export async function warnCodexCompatibility(command, {environment = process.env, output = process.stderr,
+  probe = promisify(execFile)} = {}) {
+  try {
+    const launch = await resolveWindowsLaunch(command);
+    const {stdout} = await probe(launch.command, [...launch.prefixArgs, "--version"], {
+      env: environment, encoding: "utf8", timeout: 2000, maxBuffer: 8192, windowsHide: true, shell: launch.shell,
+    });
+    const warning = codexCompatibilityNotice(String(stdout).trim().replace(/^codex-cli\s+/, "codex/"));
+    if (warning) output.write(`[statewright] ${warning}\n`);
+  } catch { /* A version notice must never prevent the native client starting. */ }
+}
+
 export function codexCompatibilityNotice(userAgent) {
   if (typeof userAgent !== "string" || userAgent.length > 1024) return null;
   const match = userAgent.match(/(?:^|\s)codex[a-z_-]*\/(\d+)\.(\d+)\.(\d+)(?:[-+][\w.-]+)?(?:\s|$)/i);

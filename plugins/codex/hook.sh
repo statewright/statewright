@@ -323,6 +323,68 @@ fetch_local_state() {
   fi
 }
 
+# A load can commit before its PostToolUse acknowledgement reaches the hook.
+# For an exact managed owner, an absent cache is not proof of an inactive run.
+# Reconcile from the existing authenticated bridge; never load a workflow or
+# borrow an unbound/direct gateway session to manufacture activation.
+reconcile_managed_activation() {
+  local registration fetched kind state temporary run_id run_session_id epoch
+  if [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ] && is_valid_cached_state "$(cat "$CACHE_FILE")"; then return 0; fi
+  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 0
+  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 1
+  [[ "$STATEWRIGHT_MANAGED_MCP_URL" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+/?$ ]] || return 1
+  registration="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}/codex-root-session.json"
+  [ -n "${STATEWRIGHT_ROUTE_CONTROL_DIR:-}" ] && [ -f "$registration" ] && managed_root_is_owned || return 1
+  fetched=$(fetch_local_state)
+  kind=$(printf '%s' "$fetched" | jq -r '.kind // "unavailable"' 2>/dev/null || true)
+  if [ "$kind" = "inactive" ]; then
+    [ ! -f "$ACTIVE_FILE" ] || restore_local_route_and_clear || return 1
+    return 0
+  fi
+  [ "$kind" = "active" ] || return 1
+  state=$(printf '%s' "$fetched" | jq -c '.state' 2>/dev/null || true)
+  if [ "$(printf '%s' "$state" | jq -r '.is_final // false')" = "true" ]; then
+    [ ! -f "$ACTIVE_FILE" ] || restore_local_route_and_clear "$state" || return 1
+    return 0
+  fi
+  printf '%s' "$state" | jq -e '
+    .is_final == false and (.workflow | type == "string" and length > 0)
+    and (.run_id | type == "string" and length > 0)
+    and (.run_session_id | type == "string" and length > 0)
+    and (.session_generation | type == "string" and length > 0)
+    and (.state_epoch | type == "number" and . > 0 and . == floor)
+  ' >/dev/null 2>&1 || return 1
+  mkdir -p "$PROJECT_DIR" || return 1
+  temporary=$(mktemp -d "$PROJECT_DIR/.reconcile.XXXXXX") || return 1
+  run_id=$(printf '%s' "$state" | jq -r '.run_id')
+  run_session_id=$(printf '%s' "$state" | jq -r '.run_session_id')
+  epoch=$(printf '%s' "$state" | jq -r '.state_epoch')
+  if ! (umask 077
+    printf '%s\n' "$state" > "$temporary/state" &&
+    printf '%s\n' "$run_id" > "$temporary/run" &&
+    printf '%s\n' "$run_session_id" > "$temporary/session" &&
+    printf '%s\n' "$epoch" > "$temporary/epoch" &&
+    jq -cn --arg client_id "$CLIENT_ID" --arg thread_id "$HOOK_SESSION" \
+      --arg run_id "$run_id" --arg run_session_id "$run_session_id" \
+      '{version:1,client_id:$client_id,thread_id:$thread_id,run_id:$run_id,run_session_id:$run_session_id}' > "$temporary/active"
+  ) || [ ! -f "$registration" ] || ! managed_root_is_owned || ! state_matches_local_binding "$state"; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  # Publish the activation marker last. Interrupted publication remains held
+  # until the same live owner and run can be reconciled on the next attempt.
+  if ! { mv "$temporary/state" "$CACHE_FILE" &&
+    mv "$temporary/run" "$PROJECT_DIR/.run_id" &&
+    mv "$temporary/session" "$PROJECT_DIR/.run_session_id" &&
+    mv "$temporary/epoch" "$PROJECT_DIR/.state_epoch" &&
+    mv "$temporary/active" "$ACTIVE_FILE"; }; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  rm -f "$GATEWAY_UNAVAILABLE_FILE"
+  rmdir "$temporary"
+}
+
 statewright_tools_label() {
   local state_json="$1"
   local policy_mode allowed disallowed has_capabilities intent
@@ -766,7 +828,12 @@ case "$ENDPOINT" in
       fi
     fi
 
-    # --- No local .active: dormant (no cross-session leak from gateway) ---
+    if ! reconcile_managed_activation; then
+      jq -n '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:"Statewright could not verify this owned native workflow through its managed bridge. Ordinary tools remain held; local Statewright discovery and recovery tools are available."}}'
+      exit 0
+    fi
+
+    # Unmanaged clients remain dormant without an explicit local activation.
     if [ ! -f "$ACTIVE_FILE" ]; then
       HINT_FILE="$PROJECT_DIR/.session_hinted"
       if [ ! -f "$HINT_FILE" ]; then
@@ -863,7 +930,14 @@ case "$ENDPOINT" in
     ;;
 
   pre-tool)
-    # --- No active workflow: allow everything (dormant) ---
+    TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
+    # Keep native control/discovery usable when state reconciliation fails.
+    if is_local_statewright_tool "$TOOL_NAME"; then exit 0; fi
+    if ! reconcile_managed_activation; then
+      jq -n '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:"Statewright could not verify this owned native workflow through its managed bridge. This invocation is held until native state is reconciled."}}'
+      exit 0
+    fi
+    # --- Authoritatively inactive managed workflow, or dormant unmanaged hook ---
     if [ ! -f "$ACTIVE_FILE" ]; then
       exit 0
     fi
@@ -1563,6 +1637,7 @@ case "$ENDPOINT" in
 
   stop)
     [ "${STATEWRIGHT_STOP_CONTINUATION:-1}" = "0" ] && exit 0
+    reconcile_managed_activation || exit 0
     [ -f "$ACTIVE_FILE" ] || exit 0
     # Never revive a stale cached continuation when the authoritative gateway
     # is unavailable.  PreToolUse remains fail-closed until it recovers.

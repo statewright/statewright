@@ -412,6 +412,14 @@ named-script provenance remains once-only. Each reuse still checks current
 ownership, state and independent policy; it never overrides a known-risk denial
 or resumes a terminal workflow. TUI and Desktop keep separate scoped stores.
 
+Managed TUI hooks recover missing local enforcement state from the authenticated
+bridge for the registered thread. A missed load-completion hook or a lost cache
+cannot establish that no workflow is running. Recovery preserves existing run
+bindings and still applies the current phase's permissions. If the bridge or
+owner cannot be verified, ordinary tools stay held while native Statewright
+discovery and recovery remain available. Unmanaged dormant hooks do not adopt
+workflows from a gateway.
+
 The local host services approval requests through a serial, explicit-priority
 chain of responsibility. Only an unsupported (`NotHandled`) request may pass to
 the next handler; deny, ask, allow, and error are terminal, and required-handler

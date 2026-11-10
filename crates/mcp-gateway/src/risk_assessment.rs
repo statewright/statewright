@@ -108,7 +108,8 @@ pub struct SemanticShadowConfig {
     pub authoritative_enabled: bool,
     /// Experimental scores may be recorded, but cannot loosen or tighten policy.
     pub evaluation_only: bool,
-    /// Only loopback Laya may receive local command-reference excerpts.
+    /// Only loopback or explicitly authenticated private-cluster Laya receives
+    /// local command-reference excerpts. Hosted providers remain excluded.
     pub local_provider: bool,
     pub queue_capacity: usize,
 }
@@ -138,9 +139,11 @@ impl SemanticShadowConfig {
     ) -> Self {
         let assessment_environment = environment == Some("staging")
             || (provider_kind.map(str::trim) == Some("laya_local")
-                && matches!(environment, Some("dev" | "dev1" | "dev2" | "dev3")));
+                && matches!(environment, Some("dev" | "dev1" | "dev2" | "dev3")))
+            || (provider_kind.map(str::trim) == Some("laya_cluster")
+                && matches!(environment, Some("dev1" | "dev2" | "dev3")));
         let telemetry_enabled = assessment_environment && shadow_enabled_for(shadow_enabled);
-        let local_provider = provider_kind.map(str::trim) == Some("laya_local");
+        let local_provider = matches!(provider_kind.map(str::trim), Some("laya_local" | "laya_cluster"));
         // Local authorization requires BOTH explicit assessment and fallthrough
         // opt-ins in a trusted nonproduction environment. Never enable it in
         // production/unknown environments or by merely selecting the provider.
@@ -745,6 +748,7 @@ struct SemanticProviderConfig {
     endpoint: String,
     model: String,
     bearer_token: Option<String>,
+    cluster_ca_pem: Option<Vec<u8>>,
     timeout: std::time::Duration,
 }
 
@@ -753,10 +757,33 @@ enum SemanticProviderKind {
     OpenAiCompatible,
     TypeSafeSystemOne,
     LayaLocal,
+    LayaCluster,
+}
+
+const LAYA_CLUSTER_ENDPOINT: &str =
+    "https://laya.statewright-inference.svc.cluster.local:8443/v1/systemone";
+
+impl SemanticProviderKind {
+    fn is_private_laya(self) -> bool {
+        matches!(self, Self::LayaLocal | Self::LayaCluster)
+    }
 }
 
 impl SemanticProviderConfig {
     fn from_env() -> Option<Self> {
+        if std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND").ok().as_deref() == Some("laya_cluster") {
+            // Separate transport contract; never widen the loopback provider or
+            // inherit hosted tokens. These paths are read-only Secret mounts.
+            let token = Self::read_cluster_secret("/run/statewright/laya/token", 64)?;
+            let ca = Self::read_cluster_secret("/run/statewright/laya/ca.crt", 65_536)?;
+            return Self::from_cluster_values(
+                std::env::var("STATEWRIGHT_ENV").ok().as_deref(),
+                std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_URL").ok().as_deref(),
+                std::env::var("STATEWRIGHT_SEMANTIC_RISK_MODEL").ok().as_deref(),
+                std::str::from_utf8(&token).ok()?, &ca,
+                std::env::var("STATEWRIGHT_SEMANTIC_RISK_TIMEOUT_MS").ok().as_deref(),
+            );
+        }
         Self::from_values(
             std::env::var("STATEWRIGHT_SEMANTIC_RISK_PROVIDER_KIND")
                 .ok()
@@ -775,6 +802,32 @@ impl SemanticProviderConfig {
                 .ok()
                 .as_deref(),
         )
+    }
+
+    fn read_cluster_secret(path: &str, limit: u64) -> Option<Vec<u8>> {
+        use std::io::Read;
+        let mut value = Vec::new();
+        std::fs::File::open(path).ok()?.take(limit + 1).read_to_end(&mut value).ok()?;
+        (value.len() as u64 <= limit).then_some(value)
+    }
+
+    fn from_cluster_values(
+        environment: Option<&str>, endpoint: Option<&str>, model: Option<&str>,
+        token: &str, ca: &[u8], timeout_ms: Option<&str>,
+    ) -> Option<Self> {
+        if !matches!(environment, Some("staging" | "dev1" | "dev2" | "dev3"))
+            || endpoint != Some(LAYA_CLUSTER_ENDPOINT) || model != Some("typed-decisions")
+            || token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit())
+            || ca.len() > 65_536 || reqwest::Certificate::from_pem(ca).is_err()
+        {
+            return None;
+        }
+        let timeout = timeout_ms.and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (50..=1_500).contains(value)).unwrap_or(1_250);
+        Some(Self { kind: SemanticProviderKind::LayaCluster,
+            endpoint: LAYA_CLUSTER_ENDPOINT.to_owned(), model: "typed-decisions".to_owned(),
+            bearer_token: Some(token.to_owned()), cluster_ca_pem: Some(ca.to_vec()),
+            timeout: std::time::Duration::from_millis(timeout) })
     }
 
     fn from_values(
@@ -832,7 +885,7 @@ impl SemanticProviderConfig {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned);
         let bearer_token = match kind {
-            SemanticProviderKind::OpenAiCompatible | SemanticProviderKind::LayaLocal => {
+            SemanticProviderKind::OpenAiCompatible | SemanticProviderKind::LayaLocal | SemanticProviderKind::LayaCluster => {
                 provider_token
             }
             SemanticProviderKind::TypeSafeSystemOne => provider_token.or_else(|| {
@@ -849,6 +902,7 @@ impl SemanticProviderConfig {
             endpoint: endpoint.trim_end_matches('/').to_owned(),
             model,
             bearer_token,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_millis(timeout_ms),
         })
     }
@@ -985,7 +1039,7 @@ async fn assess_with_provider(
     provider: &SemanticProviderConfig,
     request: &SemanticAssessmentRequest,
 ) -> Result<SemanticRiskVector, SemanticAssessorStatus> {
-    let request_shape=semantic_provider_state(request, provider.kind == SemanticProviderKind::LayaLocal);
+    let request_shape=semantic_provider_state(request, provider.kind.is_private_laya());
     let (url, body) = match provider.kind {
         SemanticProviderKind::OpenAiCompatible => (
             format!("{}/chat/completions", provider.endpoint),
@@ -999,7 +1053,7 @@ async fn assess_with_provider(
                 ]
             }),
         ),
-        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal => (
+        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal | SemanticProviderKind::LayaCluster => (
             provider.endpoint.clone(),
             serde_json::json!({
                 "state": request_shape,
@@ -1010,18 +1064,32 @@ async fn assess_with_provider(
     };
     // A loopback-only provider must not redirect its state to a remote host.
     let local_client;
-    let client = if provider.kind == SemanticProviderKind::LayaLocal {
-        local_client = reqwest::Client::builder()
+    let client = if provider.kind.is_private_laya() {
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .no_proxy()
-            .timeout(provider.timeout)
-            .build()
+            .timeout(provider.timeout);
+        if provider.kind == SemanticProviderKind::LayaCluster {
+            if provider.endpoint != LAYA_CLUSTER_ENDPOINT || provider.bearer_token.is_none() {
+                return Err(SemanticAssessorStatus::Unavailable);
+            }
+            let ca = reqwest::Certificate::from_pem(provider.cluster_ca_pem.as_deref()
+                .ok_or(SemanticAssessorStatus::Unavailable)?)
+                .map_err(|_| SemanticAssessorStatus::Unavailable)?;
+            builder = builder.tls_built_in_root_certs(false).add_root_certificate(ca);
+        }
+        local_client = builder.build()
             .map_err(|_| SemanticAssessorStatus::Unavailable)?;
         &local_client
     } else {
         client
     };
     let mut call = client.post(url).json(&body);
+    if provider.kind == SemanticProviderKind::LayaCluster {
+        // The service's own complete request budget is <=1s, inside the HTTP
+        // client's transport margin and well inside the native helper budget.
+        call = call.header("x-statewright-timeout-ms", provider.timeout.as_millis().min(1_000).to_string());
+    }
     if let Some(token) = &provider.bearer_token {
         call = call.bearer_auth(token);
     }
@@ -1057,7 +1125,7 @@ async fn assess_with_provider(
             serde_json::from_str(content.trim().trim_matches('`').trim_start_matches("json"))
                 .map_err(|_| SemanticAssessorStatus::Malformed)?
         }
-        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal => {
+        SemanticProviderKind::TypeSafeSystemOne | SemanticProviderKind::LayaLocal | SemanticProviderKind::LayaCluster => {
             let envelope: TypeSafeProviderResponse =
                 serde_json::from_slice(&body).map_err(|_| SemanticAssessorStatus::Malformed)?;
             let answers = envelope.answers;
@@ -1111,6 +1179,11 @@ fn spawn_semantic_worker(
             .build()
             .expect("semantic provider HTTP client must build");
         while let Some(job) = receiver.recv().await {
+            if job.response.as_ref().is_some_and(|response| response.is_closed()) {
+                // The caller is gone; stale queued work must not delay a live
+                // foreground assessment or consume shared GPU capacity.
+                continue;
+            }
             let receipt = match assess_with_provider(&client, &provider, &job.request).await {
                 Ok(vector) => SemanticAssessmentReceipt {
                     tool: job.request.tool_name.clone(),
@@ -3109,7 +3182,7 @@ mod tests {
         let timeout = std::time::Duration::from_secs(1);
         let config = SemanticShadowConfig { enabled: true, authoritative_enabled: false, evaluation_only: true, local_provider: true, queue_capacity: 8 };
         let runtime = start_shared_semantic_shadow_runtime(&config, SemanticProviderConfig {
-            kind: SemanticProviderKind::LayaLocal, endpoint, model: "fixture".into(), bearer_token: None, timeout,
+            kind: SemanticProviderKind::LayaLocal, endpoint, model: "fixture".into(), bearer_token: None, cluster_ca_pem: None, timeout,
         });
         let known = assess_native_ordered_with_runtime(None, "exec_command", &json!({"cmd":"printf 'hello'"}),
             None, None, None, &config, Some(&runtime), timeout).await;
@@ -3161,7 +3234,7 @@ mod tests {
         let config=SemanticShadowConfig {enabled:true,authoritative_enabled:false,evaluation_only:true,local_provider:true,queue_capacity:8};
         let timeout=std::time::Duration::from_secs(1);
         let runtime=start_shared_semantic_shadow_runtime(&config,SemanticProviderConfig {
-            kind:SemanticProviderKind::LayaLocal,endpoint,model:"fixture".into(),bearer_token:None,timeout,
+            kind:SemanticProviderKind::LayaLocal,endpoint,model:"fixture".into(),bearer_token:None,cluster_ca_pem:None,timeout,
         });
         let input=serde_json::json!({"cmd":"unknown_widget get -v"});
         let envelope=serde_json::json!({
@@ -3201,7 +3274,7 @@ mod tests {
         let mut request = semantic_request(None, "Bash", &serde_json::json!({"command":"widget get"}), None, true);
         request.reference_context = Some(serde_json::json!([{"status":"available","excerpt":"HELP_REFERENCE_SENTINEL"}]));
         let mut provider = SemanticProviderConfig {kind: SemanticProviderKind::LayaLocal,
-            endpoint, model:"fixture".into(), bearer_token:None, timeout:std::time::Duration::from_secs(1)};
+            endpoint, model:"fixture".into(), bearer_token:None, cluster_ca_pem:None, timeout:std::time::Duration::from_secs(1)};
         let client=reqwest::Client::new();
         let _ = assess_with_provider(&client, &provider, &request).await;
         provider.kind=SemanticProviderKind::TypeSafeSystemOne;
@@ -4248,7 +4321,7 @@ mod tests {
         let timeout=std::time::Duration::from_secs(1);
         let config=SemanticShadowConfig {enabled:true,authoritative_enabled:true,evaluation_only:false,local_provider:false,queue_capacity:8};
         let mut provider=SemanticProviderConfig {kind:SemanticProviderKind::TypeSafeSystemOne,
-            endpoint,model:"fixture".into(),bearer_token:None,timeout};
+            endpoint,model:"fixture".into(),bearer_token:None,cluster_ca_pem:None,timeout};
         let runtime=start_shared_semantic_shadow_runtime(&config,provider.clone());
         let proven=assess_pipeline_visible_with_runtime(None,"web.run",&json!({"search_query":[{"q":"public-search-value"}]}),None,true,&config,Some(&runtime),timeout).await;
         assert_eq!(proven.resolve_effect(),ResolvedEffect::ReadOnly);
@@ -4997,6 +5070,102 @@ mod tests {
     }
 
     #[test]
+    fn laya_cluster_requires_exact_nonproduction_transport_and_explicit_secrets() {
+        // Public throwaway test certificate only; its private key was discarded.
+        let ca = include_bytes!("fixtures/laya-service-cert.pem");
+        let token = "a".repeat(64);
+        for env in ["staging", "dev1", "dev2", "dev3"] {
+            let config = SemanticProviderConfig::from_cluster_values(Some(env),
+                Some(LAYA_CLUSTER_ENDPOINT), Some("typed-decisions"), &token, ca, None).unwrap();
+            assert_eq!(config.kind, SemanticProviderKind::LayaCluster);
+            assert_eq!(config.timeout, std::time::Duration::from_millis(1_250));
+            assert_eq!(config.bearer_token.as_deref(), Some(token.as_str()));
+            reqwest::Client::builder().tls_built_in_root_certs(false)
+                .add_root_certificate(reqwest::Certificate::from_pem(
+                    config.cluster_ca_pem.as_deref().unwrap()).unwrap()).build().unwrap();
+        }
+        for env in [None, Some("production"), Some("prod"), Some("dev")] {
+            assert!(SemanticProviderConfig::from_cluster_values(env,
+                Some(LAYA_CLUSTER_ENDPOINT), Some("typed-decisions"), &token, ca, None).is_none());
+        }
+        for endpoint in ["http://laya.statewright-inference.svc.cluster.local:8443/v1/systemone",
+            "https://laya.statewright-inference.svc.cluster.local.evil:8443/v1/systemone",
+            "https://user@laya.statewright-inference.svc.cluster.local:8443/v1/systemone",
+            "https://laya.statewright-inference.svc.cluster.local:8443/v1/systemone?target=elsewhere",
+            "https://127.0.0.1:8443/v1/systemone"] {
+            assert!(SemanticProviderConfig::from_cluster_values(Some("staging"),
+                Some(endpoint), Some("typed-decisions"), &token, ca, None).is_none());
+        }
+        assert!(SemanticProviderConfig::from_cluster_values(Some("staging"),
+            Some(LAYA_CLUSTER_ENDPOINT), Some("other-model"), &token, ca, None).is_none());
+        assert!(SemanticProviderConfig::from_cluster_values(Some("staging"),
+            Some(LAYA_CLUSTER_ENDPOINT), Some("typed-decisions"), "", ca, None).is_none());
+        assert!(SemanticProviderConfig::from_cluster_values(Some("staging"),
+            Some(LAYA_CLUSTER_ENDPOINT), Some("typed-decisions"), &token, b"invalid", None).is_none());
+        // A hosted token argument cannot implicitly configure cluster trust.
+        assert!(SemanticProviderConfig::from_values(Some("laya_cluster"),
+            Some(LAYA_CLUSTER_ENDPOINT), Some("typed-decisions"), None,
+            Some("ambient-hosted-token"), None).is_none());
+    }
+
+    #[test]
+    fn laya_cluster_keeps_nonproduction_dual_opt_in_authority_boundary() {
+        for env in ["staging", "dev1", "dev2", "dev3"] {
+            for (assessment, fallthrough, expected) in [
+                (None, None, false), (Some("true"), None, false),
+                (None, Some("true"), false), (Some("true"), Some("true"), true)] {
+                let config = SemanticShadowConfig::from_provider_values(Some(env),
+                    assessment, fallthrough, None, Some("laya_cluster"));
+                assert_eq!(config.authoritative_enabled, expected);
+                assert!(config.local_provider);
+            }
+        }
+        for env in [None, Some("production"), Some("prod"), Some("dev")] {
+            let config = SemanticShadowConfig::from_provider_values(env,
+                Some("true"), Some("true"), None, Some("laya_cluster"));
+            assert!(!config.enabled);
+            assert!(!config.authoritative_enabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_worker_skips_abandoned_queued_assessment() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = count.clone();
+        let app = axum::Router::new().route("/", axum::routing::post(move || {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { axum::Json(json!({"answers": {
+                "read_only":{"type":"noul","noul":0.99}, "may_write":{"type":"noul","noul":0.01},
+                "reversible":{"type":"noul","noul":0.99}, "destructive":{"type":"noul","noul":0.01},
+                "irreversible":{"type":"noul","noul":0.01}, "external_or_account_effect":{"type":"noul","noul":0.01}
+            }})) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (jobs, receiver) = mpsc::channel(2);
+        let (receipts, mut observed_receipts) = mpsc::channel(2);
+        let request = semantic_request(None, "opaque", &json!({}), None, false);
+        let (abandoned, gone) = tokio::sync::oneshot::channel();
+        drop(gone);
+        jobs.send(SemanticAssessmentJob {request: request.clone(), response: Some(abandoned)}).await.unwrap();
+        let (live, result) = tokio::sync::oneshot::channel();
+        jobs.send(SemanticAssessmentJob {request, response: Some(live)}).await.unwrap();
+        drop(jobs);
+        let worker = spawn_semantic_worker(receiver, receipts, SemanticProviderConfig {
+            kind: SemanticProviderKind::LayaLocal, endpoint, model: "fixture".into(),
+            bearer_token: None, cluster_ca_pem: None, timeout: std::time::Duration::from_secs(1),
+        });
+        let receipt = tokio::time::timeout(std::time::Duration::from_secs(2), result).await.unwrap().unwrap();
+        assert_eq!(receipt.status, SemanticAssessorStatus::Assessed);
+        worker.await.unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(observed_receipts.recv().await.unwrap().status, SemanticAssessorStatus::Assessed);
+        assert!(observed_receipts.recv().await.is_none());
+        server.abort();
+    }
+
+    #[test]
     fn laya_local_requires_explicit_loopback_configuration_without_hosted_credentials() {
         let config = |endpoint, model| {
             SemanticProviderConfig::from_values(
@@ -5226,6 +5395,7 @@ mod tests {
             endpoint: format!("{base}/slow"),
             model: "test".into(),
             bearer_token: None,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_millis(30),
         };
         // The supplied client's timeout is deliberately absent: the replacement
@@ -5274,6 +5444,7 @@ mod tests {
             endpoint,
             model: "test".into(),
             bearer_token: None,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_secs(1),
         };
         let (receipt_sender, _receipt_receiver) = mpsc::channel(1);
@@ -5350,6 +5521,7 @@ mod tests {
             endpoint,
             model: "jev-latest".into(),
             bearer_token: Some("test-token".into()),
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_secs(1),
         };
         let tool: ToolInfo = serde_json::from_value(json!({
@@ -5425,6 +5597,7 @@ mod tests {
             endpoint,
             model: "test".into(),
             bearer_token: None,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_millis(20),
         };
         let client = reqwest::Client::builder()
@@ -5505,6 +5678,7 @@ mod tests {
             endpoint,
             model: "test".into(),
             bearer_token: None,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_secs(1),
         };
         let runtime = start_semantic_shadow_runtime(&enabled, receipt_sender, provider);
@@ -7016,6 +7190,7 @@ mod tests {
             endpoint,
             model: "test".into(),
             bearer_token: None,
+            cluster_ca_pem: None,
             timeout: std::time::Duration::from_secs(1),
         };
 

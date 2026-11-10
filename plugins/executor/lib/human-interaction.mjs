@@ -1,5 +1,31 @@
 import { randomUUID } from "node:crypto";
 
+const S1_FIELDS = [["read_only", "read-only"], ["may_write", "write"],
+  ["reversible", "reversible"], ["destructive", "destructive"],
+  ["irreversible", "irreversible"], ["external_or_account_effect", "external"]];
+const S1_STATUSES = new Set(["Disabled", "Queued", "Unavailable", "Timeout", "Malformed", "QueueFull", "Assessed", "ShadowOnly", "NotRequired"]);
+
+// This is presentation data only: do not infer authority from a model score.
+export function s1Classification(receipt) {
+  const status = S1_STATUSES.has(receipt?.semantic_status) ? receipt.semantic_status : null;
+  const raw = receipt?.semantic_vector;
+  const vector = {};
+  if ((status === "Assessed" || status === "ShadowOnly") && raw && typeof raw === "object" && !Array.isArray(raw)) {
+    for (const [key] of S1_FIELDS) {
+      if (typeof raw[key] === "number" && Number.isFinite(raw[key]) && raw[key] >= 0 && raw[key] <= 1) vector[key] = raw[key];
+    }
+  }
+  return {semantic_status: status, semantic_vector: Object.keys(vector).length ? vector : null};
+}
+
+export function s1ClassificationDisplay(receipt) {
+  const {semantic_status: status, semantic_vector: vector} = s1Classification(receipt);
+  if (!vector) return `S1 classification: ${status ? status.toLowerCase() : "unavailable"}; no predictions available.`;
+  const scores = S1_FIELDS.filter(([key]) => Object.hasOwn(vector, key))
+    .map(([key, label]) => `${label} ${Math.round(vector[key] * 100)}%`);
+  return `S1 classification (uncalibrated estimates${status === "ShadowOnly" ? ", evaluation only" : ""}): ${scores.join(", ")}.`;
+}
+
 export function interactionText(value, maximum = 4096) {
   if (typeof value !== "string") return null;
   const masked = value

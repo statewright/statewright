@@ -32,6 +32,8 @@ function approvalRequest(invocation, overrides = {}) {
     classifier_receipt: {
       intent_fingerprint: "intent_v1_family",
       invocation_fingerprint: `invocation_v1_${invocation}`,
+      semantic_status: "Assessed",
+      semantic_vector: {read_only: 0.53, may_write: 0.55, destructive: 0.32, external_or_account_effect: 0.48},
       final_denial_basis: "semantic_authorization_disabled",
       required_authority: "complete_structural_evidence_or_separate_approval",
       reformulation_allowed: true,
@@ -259,6 +261,7 @@ test("executor hook and bridge share the native controller budget and exact appr
       }
       const pending = invoke();
       const modal = await until(() => messages.find(item => item.method === "mcpServer/elicitation/request"), "executor native form");
+      assert.match(modal.params.message, /S1 classification \(uncalibrated estimates\): read-only 53%, write 55%, destructive 32%, external 48%/);
       client.send(JSON.stringify({id: modal.id, result: {action}}));
       const result = await pending;
       assert.equal(result.hookSpecificOutput.permissionDecision, action === "accept" ? undefined : "deny");

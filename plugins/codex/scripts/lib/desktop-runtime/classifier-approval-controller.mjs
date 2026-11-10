@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { approvalDisplayContext, interactionValue } from "./human-interaction.mjs";
+import { approvalDisplayContext, interactionValue, s1Classification, s1ClassificationDisplay } from "./human-interaction.mjs";
 import { approvalAsk, approvalDeny, approvalAllow, approvalNotHandled } from "./approval-pipeline.mjs";
 import {approvalMemoryContext} from "./approval-memory.mjs";
 
@@ -58,7 +58,7 @@ export function classifierApprovalRequest(value) {
     exactInvocationRetryAllowed, separateApprovalAllowed,
     memoryContext,sessionGeneration,
     displayContext: approvalDisplayContext(value),
-    reviewContext: interactionValue(receipt.review_context ?? null)});
+    reviewContext: interactionValue(receipt.review_context ?? null), s1: s1Classification(receipt)});
 }
 
 export function classifierReviewMessage(request) {
@@ -79,6 +79,7 @@ export function classifierReviewMessage(request) {
   }
   if (display?.cwd) lines.push(`Working directory: ${display.cwd}`);
   lines.push("", `Why review: ${reasons[request.basis] ?? "The request has an unresolved effect."}`);
+  lines.push(s1ClassificationDisplay(request.s1));
   const structure = request.reviewContext?.execution_structure;
   if (Array.isArray(structure)) {
     for (const node of structure.slice(0, 4)) {

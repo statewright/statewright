@@ -54,11 +54,11 @@ test("formats classifier denials for display without discarding machine evidence
     },
   });
 
-  assert.match(denial.display, /^Statewright guard: denied/);
-  assert.match(denial.display, /semantic_threshold_not_met/);
-  assert.match(denial.display, /configured effect thresholds/);
+  assert.match(denial.display, /^Statewright blocked this request/);
+  assert.doesNotMatch(denial.display, /semantic_threshold_not_met/);
+  assert.match(denial.display, /S1 was uncertain/);
   assert.match(denial.display, /Rework attempt 1\/2/);
-  assert.match(denial.display, /System One signals \(uncalibrated\): read-only unknown, write 86%, destructive unknown, external 56%/);
+  assert.match(denial.display, /S1 classification \(uncalibrated estimates\): write 86%, external 56%/);
   assert.doesNotMatch(denial.display, /0\.86|internal scoring/);
   assert.match(denial.machine, /"may_write":0\.86/);
   assert.match(denial.machine, /"action":"rework"/);
@@ -602,10 +602,10 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     const classifierOutput = JSON.parse(classifierDenied.stdout).hookSpecificOutput;
     assert.equal(classifierOutput.permissionDecision, "deny",
       "classifier rework must remain a PreToolUse denial, not an unsupported ask");
-    assert.match(classifierOutput.permissionDecisionReason, /^Statewright guard: denied/);
-    assert.match(classifierOutput.permissionDecisionReason, /semantic_threshold_not_met/);
-    assert.match(classifierOutput.permissionDecisionReason, /configured effect thresholds/);
-    assert.match(classifierOutput.permissionDecisionReason, /System One signals \(uncalibrated\): read-only 4%, write 96%, destructive 1%, external 1%/);
+    assert.match(classifierOutput.permissionDecisionReason, /^Statewright blocked this request/);
+    assert.doesNotMatch(classifierOutput.permissionDecisionReason, /semantic_threshold_not_met/);
+    assert.match(classifierOutput.permissionDecisionReason, /S1 was uncertain/);
+    assert.match(classifierOutput.permissionDecisionReason, /S1 classification \(uncalibrated estimates\): read-only 4%, write 96%, reversible 92%, destructive 1%, irreversible 1%, external 1%/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /will be sent|heredoc|inline interpreter/);
     assert.match(classifierOutput.permissionDecisionReason, /Rework attempt 1\/2/);
     assert.doesNotMatch(classifierOutput.permissionDecisionReason, /basis=|p\(read=|private-(command|input)-sentinel/);
@@ -658,7 +658,9 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     assert.notEqual(approvedOutput.permissionDecision, "ask");
     assert.match(approvedOutput.additionalContext, /Human approval granted/);
     assert.equal(classifierApproval.requests.length, 3);
-    assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-(command|input)-sentinel/);
+    assert.equal(classifierApproval.requests[2].display_context.command, "private-input-sentinel");
+    assert.equal(classifierApproval.requests[2].classifier_receipt.semantic_vector.may_write, 0.96);
+    assert.doesNotMatch(JSON.stringify(classifierApproval.requests), /private-command-sentinel/);
 
     for (const tool_name of ["policy_denied", "capability_denied",
       "classifier_denied_eligibility_missing", "classifier_denied_eligibility_null",

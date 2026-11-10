@@ -54,6 +54,22 @@ test("human review names the requested web operation and omits internal authorit
   assert.doesNotMatch(message,/Classifier axis|Required authority|semantic_authorization_disabled|complete_structural_evidence_or_separate_approval/);
 });
 
+test("approval displays S1 predictions without treating them as authority", () => {
+  const parsed = classifierApprovalRequest(request({tool_name:"Bash",tool_input:{command:"npm run canary"}}, {
+    semantic_status:"Assessed", semantic_vector:{read_only:0.5273,may_write:0.5462,reversible:0.4704,
+      destructive:0.3231,irreversible:0.5274,external_or_account_effect:0.4766,unknown:"not displayed"},
+  }));
+  const message = classifierReviewMessage(parsed);
+  assert.match(message,/S1 classification \(uncalibrated estimates\): read-only 53%, write 55%, reversible 47%, destructive 32%, irreversible 53%, external 48%/);
+  assert.match(message,/Allow this exact invocation once/);
+  assert.doesNotMatch(message,/not displayed/);
+  const unavailable = classifierReviewMessage(classifierApprovalRequest(request({}, {
+    semantic_status:"Timeout",semantic_vector:{read_only:0.99},
+  })));
+  assert.match(unavailable,/S1 classification: timeout; no predictions available/);
+  assert.doesNotMatch(unavailable,/99%/);
+});
+
 test("default uncertainty handling immediately holds for a native human decision", async () => {
   const sent = [];
   const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});

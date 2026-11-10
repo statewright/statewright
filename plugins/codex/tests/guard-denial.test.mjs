@@ -15,23 +15,23 @@ const display = risk => formatGuardDenial({risk_assessment: risk}).display;
 
 test('disabled semantic authorization explains structural uncertainty, not a model verdict', () => {
   const message = display(receipt);
-  assert.match(message, /semantic_authorization_disabled/);
-  assert.match(message, /structural classifier did not establish an allowed effect/i);
-  assert.match(message, /semantic authorization is disabled/i);
-  assert.match(message, /Moderate.*Unknown.*shell_ast/);
-  assert.match(message, /not a model judgment/i);
+  assert.doesNotMatch(message, /semantic_authorization_disabled/);
+  assert.match(message, /could not verify the command/i);
+  assert.match(message, /S1 is not enabled to authorize/i);
+  assert.match(message, /risk: moderate; scope: unknown/i);
+  assert.match(message, /S1 classification: disabled; no predictions available/i);
   assert.doesNotMatch(message, /could not prove a safe local effect|heredoc|inline interpreter/);
 });
 
 test('distinct evidence failures have distinct explanations without guessed command shapes', () => {
   for (const [basis, explanation] of [
-    ['incomplete_structural_evidence', /structural evidence is incomplete/i],
-    ['semantic_vector_unavailable', /no usable semantic assessment vector/i],
-    ['semantic_assessment_incomplete', /semantic assessment did not complete/i],
-    ['semantic_threshold_not_met', /assessment did not meet the configured effect thresholds/i],
+    ['incomplete_structural_evidence', /could not verify every part/i],
+    ['semantic_vector_unavailable', /did not return usable predictions/i],
+    ['semantic_assessment_incomplete', /could not finish assessing/i],
+    ['semantic_threshold_not_met', /S1 was uncertain/i],
   ]) {
     const message = display({...receipt, final_denial_basis:basis});
-    assert.match(message, new RegExp(basis));
+    assert.doesNotMatch(message, new RegExp(basis));
     assert.match(message, explanation);
     assert.doesNotMatch(message, /heredoc|inline interpreter/);
   }
@@ -40,7 +40,8 @@ test('distinct evidence failures have distinct explanations without guessed comm
 test('missing semantic scores remain unavailable, never fabricated zero probabilities', () => {
   const message = display({...receipt, final_denial_basis:'semantic_threshold_not_met',
     semantic_status:'Assessed', semantic_vector:{may_write:0.86, destructive:null, read_only:NaN}});
-  assert.match(message, /read-only unknown, write 86%, destructive unknown, external unknown/);
+  assert.match(message, /S1 classification \(uncalibrated estimates\): write 86%/);
+  assert.doesNotMatch(message, /read-only 0%|destructive 0%/);
   assert.match(message, /uncalibrated/);
 });
 
@@ -49,7 +50,7 @@ test('rework is not a promised or already pending native approval and forbids un
   const message = formatGuardDenial(result).display;
   assert.match(message, /Rework attempt 2\/2/);
   assert.match(message, /No approval has been granted/);
-  assert.match(message, /connected.*runtime/);
+  assert.match(message, /approval dialog is available/);
   assert.match(message, /Do not replay the unchanged invocation/);
   assert.doesNotMatch(message, /will be sent|must be sent/);
 });
@@ -59,7 +60,7 @@ test('capability and policy denials do not advertise classifier approval or refo
     const message = display({...receipt, final_denial_basis:basis,
       required_authority:'Write', reformulation_allowed:false, separate_approval_allowed:false});
     assert.match(message, /Write/);
-    assert.match(message, /not offered by this receipt/);
+    assert.match(message, /does not offer S1 approval/);
     assert.doesNotMatch(message, /supply.*evidence|heredoc|inline interpreter/);
   }
 });
@@ -76,30 +77,30 @@ test('unrecognized, malformed and private labels are not reflected into the diag
   assert.deepEqual(original,before);
 });
 
-test('actual gateway source and account labels survive the payload-safe display boundary', () => {
+test('account scope is readable and internal source labels remain in the machine receipt', () => {
   for (const source of ['shell','native_write','native_read','native_tool_discovery','native_web_read',
     'mcp_selector','mcp_name','mcp_unknown','mcp_opaque_payload','mcp_annotation',
     'native_command_evidence','native_command_evidence_incomplete']) {
-    const message = display({...receipt, deterministic_source:source, deterministic_exposure:'Account'});
-    assert.match(message, /Moderate \/ Account/);
-    assert.ok(message.includes(`source ${source}.`));
+    const result = formatGuardDenial({risk_assessment:{...receipt, deterministic_source:source, deterministic_exposure:'Account'}});
+    assert.match(result.display, /risk: moderate; scope: account/);
+    assert.match(result.machine, new RegExp(source));
   }
   assert.match(display({...receipt, final_denial_basis:'workflow_capability_read_denied',
-    required_authority:'Read', separate_approval_allowed:false}), /\[workflow_capability_read_denied\]/);
+    required_authority:'Read', separate_approval_allowed:false}), /does not grant Read/);
 });
 
 test('missing approval eligibility is unknown rather than asserted ineligible or allowed', () => {
   const message = display({...receipt, separate_approval_allowed:undefined});
-  assert.match(message, /eligibility is not confirmed/);
-  assert.doesNotMatch(message, /Separate approval is eligible|not offered by this receipt/);
+  assert.match(message, /approval is available has not been confirmed/);
+  assert.doesNotMatch(message, /A human can review this request|does not offer S1 approval/);
 });
 
 test('independent workflow denial and native delivery failure retain distinct context', () => {
   const message = formatGuardDenial({risk_assessment:{...receipt,
     final_denial_basis:'workflow_approval_policy', separate_approval_allowed:false},
     classifier_approval:{action:'unavailable', reason:'classifier_approval_runtime_unavailable'}}).display;
-  assert.match(message, /independent workflow approval policy/i);
-  assert.match(message, /classifier approval cannot override/i);
+  assert.match(message, /workflow does not permit/i);
+  assert.match(message, /S1 approval cannot override/i);
   assert.match(message, /Native approval was not presented/);
   assert.match(message, /classifier_approval_runtime_unavailable/);
   assert.doesNotMatch(message, /will be sent|must be sent|heredoc/);

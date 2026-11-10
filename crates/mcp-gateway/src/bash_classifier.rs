@@ -68,6 +68,9 @@ pub struct SemanticCommandShape {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LocalInvocationEvidence {
     pub index: usize,
+    /// Literal CLI basename for the private local assessor only. No path,
+    /// operand, environment value or inline source is included.
+    pub executable: Option<String>,
     pub effect: &'static str,
     pub options: Vec<&'static str>,
     pub complete: bool,
@@ -96,7 +99,11 @@ pub fn local_invocation_evidence(command: &str) -> Vec<LocalInvocationEvidence> 
                 }
             }).collect()
         }).unwrap_or_default();
-        LocalInvocationEvidence { index, effect, options, complete: false }
+        let executable = invocation.as_ref().and_then(|invocation| {
+            let name = invocation.executable.rsplit('/').next()?;
+            semantic_label(name).then(|| name.to_owned())
+        });
+        LocalInvocationEvidence { index, executable, effect, options, complete: false }
     }).collect()
 }
 

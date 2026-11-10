@@ -13,8 +13,8 @@ const MAX_INPUT_BYTES = 32 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 
 // A human review may outlive fetch/Undici's implicit five-minute headers
-// timeout. The native controller owns approval expiry; this transport must not
-// abandon its pending dialog merely because it has not received headers yet.
+// timeout. Native human approval has no elapsed-time deadline; this transport
+// must not abandon its pending dialog because it has not received headers yet.
 function approvalTransport(endpoint, options) {
   return new Promise((resolve, reject) => {
     const send = endpoint.protocol === "https:" ? httpsRequest : httpRequest;

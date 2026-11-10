@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
@@ -14,6 +14,7 @@ import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { startDesktopBridgePool } from "./desktop-bridge-pool.mjs";
 import { runDesktopMultichatRuntime } from "./desktop-multichat-runtime.mjs";
 import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
+import { ApprovalMemory } from "./approval-memory.mjs";
 import { LocalTelemetryService } from "./local-telemetry-agent.mjs";
 import { projectDesktopUsage } from "./desktop-native-usage.mjs";
 export { connectDesktopProfile } from "./desktop-device-connect.mjs";
@@ -39,7 +40,7 @@ export async function startProfileDesktopMcpBridge({ state, environment = proces
   let pool;
   try { pool = await startDesktopBridgePool({ profileClientId: state.client_id, legacyBridge: bridge, createBridge }); }
   catch (error) { await bridge.close(); throw error; }
-  return { url: bridge.url, token: bridge.token, poolUrl: pool.url, poolToken: pool.token,
+  return { url: bridge.url, token: bridge.token, approvalMemoryScope: bridge.approvalMemoryScope, poolUrl: pool.url, poolToken: pool.token,
     close: async () => { try { await pool.close(); } finally { await bridge.close(); } } };
 }
 
@@ -52,6 +53,7 @@ const PARENT_MANAGED_IDENTITY_ENV = [
   "STATEWRIGHT_MANAGED_MCP_SESSION_ID", "STATEWRIGHT_MANAGED_MCP_TOKEN",
   "STATEWRIGHT_MANAGED_TELEMETRY_OWNER", "STATEWRIGHT_ADAPTER_URL", "STATEWRIGHT_ADAPTER_TOKEN",
   "STATEWRIGHT_DESKTOP_MCP_URL", "STATEWRIGHT_DESKTOP_MCP_TOKEN",
+  "STATEWRIGHT_DESKTOP_APPROVAL_MEMORY_SCOPE",
   "STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL", "STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN",
   "CODEX_SESSION_ID", "CODEX_THREAD_ID", "LOCAL_MODELS_RUN_DIR",
   "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
@@ -84,6 +86,11 @@ export async function startDesktopMcpBridge({ environment, clientId, home = home
     ...(nativeUsage ? {nativeUsage, projectUsage: projectDesktopUsage} : {}),
   });
   await bridge.start();
+  // Stable across loopback/process restarts; changes with principal, gateway
+  // or lane. The broker receives no gateway credential.
+  bridge.approvalMemoryScope = createHash("sha256").update(JSON.stringify([
+    "desktop-human-approval-v1", gatewayEndpoint(environment.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai"), clientId, apiKey,
+  ])).digest("hex");
   return bridge;
 }
 
@@ -165,7 +172,9 @@ function inheritedDesktopMcpBridge(environment) {
   const token = nonEmpty(environment.STATEWRIGHT_DESKTOP_MCP_TOKEN);
   if (!url && !token) return null;
   if (!url || !token) throw new Error("Statewright Desktop MCP bridge identity is incomplete.");
-  return { url, token, close: async () => {} };
+  const scope = environment.STATEWRIGHT_DESKTOP_APPROVAL_MEMORY_SCOPE;
+  if (scope !== undefined && !/^[a-f0-9]{64}$/.test(scope)) throw new Error("Invalid Desktop approval scope.");
+  return { url, token, ...(scope ? {approvalMemoryScope: scope} : {}), close: async () => {} };
 }
 
 function nonEmpty(value) {
@@ -278,6 +287,10 @@ export async function runDesktopAppServerBroker({
   let manifestIdentity = null;
   try {
     const classifierApprovalService = {
+      ...(bridge.approvalMemoryScope ? {approvalMemory: new ApprovalMemory({
+        root: join(dirname(plan.controlDir), "classifier-memory"),
+        namespace: JSON.stringify([plan.clientId, bridge.approvalMemoryScope]),
+      })} : {}),
       ownsThread: async threadId => (await readCodexRootSession(plan.controlDir, plan.clientId))?.sessionId === threadId,
       getState: () => desktopClassifierState({ bridge, clientId: plan.clientId }),
     };

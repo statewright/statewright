@@ -32,6 +32,7 @@ async function fixture(t) {
     legacyBridge: { clientId: PROFILE, url: "http://127.0.0.1:18000", token: "legacy-fixture", close() {} },
     createBridge: async clientId => {
       const bridge = { clientId, url: `http://127.0.0.1:${18001 + bridges.length}`,
+        approvalMemoryScope: String(bridges.length + 1).padStart(64, "0"),
         token: `fixture-child-${bridges.length}`, close() {} };
       bridges.push(bridge);
       return bridge;
@@ -175,6 +176,9 @@ test("pool broker resumes two different projects with isolated workflow identiti
       join(f.home, ".statewright", "codex-desktop-app-server", clientId, "routes"));
     assert.equal(await options.classifierApprovalService.ownsThread(threadId), true);
     assert.equal(await options.classifierApprovalService.ownsThread(index ? A : B), false);
+    assert.equal(typeof options.classifierApprovalService.approvalMemory.lookup, "function");
+    assert.equal(typeof options.classifierApprovalService.approvalMemory.remember, "function");
+    assert.equal(typeof options.classifierApprovalService.approvalMemory.revoke, "function");
     assert.equal(await options.workflowService.ownsThread(threadId), true);
     assert.equal(await options.workflowService.ownsThread(index ? A : B), false);
     assert.deepEqual(await options.routeOwner(threadId), {client_id: clientId, root_session_id: threadId});
@@ -184,6 +188,7 @@ test("pool broker resumes two different projects with isolated workflow identiti
   }
   assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR)).size, 2);
   assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN)).size, 2);
+  assert.equal(new Set(active.map(runtime => runtime.options.classifierApprovalService.approvalMemory.root)).size, 2);
   await broker.close();
   assert.deepEqual(await f.leases(), []);
   assert.ok(f.runtimes.every(runtime => runtime.closed));
@@ -243,6 +248,7 @@ test("restart preserves historical and newly-created chat bindings and bridge id
   assert.equal(before.get(A).key, `thread:${A}`);
   assert.match(before.get(NEW).key, /^new:/);
   const firstClientIds = f.runtimes.filter(runtime => runtime.options.classifierApprovalService).map(runtime => runtime.options.clientId);
+  const firstMemoryRoots = f.runtimes.filter(runtime => runtime.options.classifierApprovalService).map(runtime => runtime.options.classifierApprovalService.approvalMemory.root);
   await first.close();
   assert.deepEqual(await f.leases(), []);
   const runtimeCount = f.runtimes.length;
@@ -253,6 +259,7 @@ test("restart preserves historical and newly-created chat bindings and bridge id
   }
   const secondClientIds = f.runtimes.slice(runtimeCount).filter(runtime => runtime.options.classifierApprovalService).map(runtime => runtime.options.clientId);
   assert.deepEqual(secondClientIds, firstClientIds);
+  assert.deepEqual(f.runtimes.slice(runtimeCount).filter(runtime => runtime.options.classifierApprovalService).map(runtime => runtime.options.classifierApprovalService.approvalMemory.root), firstMemoryRoots);
   assert.equal(f.bridges.length, 3); // Discovery plus two persistent chat lanes.
   await second.close();
   assert.deepEqual(await f.leases(), []);

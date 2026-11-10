@@ -81,6 +81,27 @@ test("default uncertainty handling immediately holds for a native human decision
   assert.equal((await decision.completion).reason, "human_declined");
 });
 
+test("human approval remains pending beyond ten minutes and eight hours until answered", async t => {
+  t.mock.timers.enable({apis: ["setTimeout", "Date"], now: 1_000});
+  const sent = [];
+  const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});
+  const decision = await controller.begin(request());
+  let settled = false;
+  void decision.completion.then(() => { settled = true; });
+  const modal = sent.find(value => value.method === "mcpServer/elicitation/request");
+  for (const elapsed of [600_001, 8 * 3600_000, 24 * 3600_000]) {
+    t.mock.timers.tick(elapsed);
+    controller.prune();
+    await Promise.resolve();
+    assert.equal(settled, false, "elapsed time must not answer a human approval");
+    assert.equal(controller.requests.has(modal.id), true);
+    assert(!sent.some(value => value.method === "serverRequest/resolved"));
+  }
+  controller.handleReply({id: modal.id, result: {action: "accept"}});
+  assert.equal((await decision.completion).action, "allow_once");
+  assert.equal(sent.filter(value => value.method === "mcpServer/elicitation/request").length, 1);
+});
+
 test("external uncertainty explains the review and keeps the exact invocation bound", async () => {
   const sent = [];
   const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});

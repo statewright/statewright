@@ -106,7 +106,7 @@ export function classifierReviewMessage(request) {
  */
 export class ClassifierApprovalController {
   constructor({send, record = async () => {}, maxReworks = 0,
-    ttlMs = 10 * 60_000, approvalTimeoutMs = 10 * 60_000,
+    ttlMs = 10 * 60_000,
     now = () => Date.now(), getState = null, memory = null} = {}) {
     if (typeof send !== "function") throw new Error("Classifier approval requires a native sender");
     if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
@@ -115,13 +115,10 @@ export class ClassifierApprovalController {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000) {
       throw new Error("Classifier rework TTL must be at least one second");
     }
-    if (!Number.isSafeInteger(approvalTimeoutMs) || approvalTimeoutMs < 10) {
-      throw new Error("Classifier approval timeout must be at least ten milliseconds");
-    }
     if (getState !== null && typeof getState !== "function") {
       throw new Error("Classifier approval state reader must be a function");
     }
-    Object.assign(this, {send, record, maxReworks, ttlMs, approvalTimeoutMs, now, getState, memory});
+    Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory});
     this.entries = new Map();
     this.requests = new Map();
     this.closedReason=null;
@@ -234,9 +231,8 @@ export class ClassifierApprovalController {
     this.requests.set(requestId, container);
     pending.abort = () => this.finish(container, "deny", "approval_request_aborted");
     signal?.addEventListener("abort", pending.abort, {once: true});
-    pending.timer = setTimeout(() => this.finish(container, "deny", "native_approval_timeout"),
-      this.approvalTimeoutMs);
-    pending.timer.unref?.();
+    // Human response time is unbounded. Rework retention and remembered-grant
+    // lifetimes must never expire an unresolved native approval request.
     this.emit({type: "classifier_human_approval_requested", threadId: request.threadId,
       run_id: request.runId, state: request.state, basis: request.basis,
       attempts: entry.attempts, max_reworks: this.maxReworks});
@@ -247,7 +243,7 @@ export class ClassifierApprovalController {
         requestedSchema: {type: "object", properties: {}},
       }});
       // A queued send is not proof of presentation. Observe asynchronous
-      // transport failures without stalling abort/timeout processing.
+      // transport failures without stalling explicit cancellation processing.
       void Promise.resolve(sent).then(() => {
         pending.presented = true;
         if (pending.settled) this.dismiss(pending);
@@ -270,7 +266,6 @@ export class ClassifierApprovalController {
     const {key, entry, pending} = container;
     if (pending.settled) return;
     pending.settled = true;
-    clearTimeout(pending.timer);
     pending.signal?.removeEventListener("abort", pending.abort);
     this.requests.delete(pending.requestId);
     entry.pending = null;

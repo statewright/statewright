@@ -63,7 +63,7 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 * 60_000, userAgent = null} = {}) {
+async function setup(t, {maxReworks = 2, memory = false, userAgent = null} = {}) {
   const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
   if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -96,7 +96,6 @@ async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
-    classifierApprovalTimeoutMs: approvalTimeoutMs,
     onCompatibilityWarning: message => warnings.push(message),
     classifierApprovalService: {
       ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
@@ -206,15 +205,22 @@ test("approval helper preserves a quiet native review and reuses the resulting 8
   assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
 });
 
-test("approval helper receives authoritative native expiry rather than inventing a transport timeout", async t => {
-  const fixture = await setup(t, {maxReworks: 0, approvalTimeoutMs: 40});
-  const {messages} = await fixture.connectAndOwn();
-  const result = await requestClassifierApproval(approvalRequest("native-expiry"), {
+test("approval helper waits for a real native decision without an approval deadline", async t => {
+  const fixture = await setup(t, {maxReworks: 0});
+  const {messages, client} = await fixture.connectAndOwn();
+  let settled = false;
+  const pending = requestClassifierApproval(approvalRequest("native-wait"), {
     environment: {STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/synthetic/owner.json"},
     readFile: async () => JSON.stringify({proxyUrl: fixture.endpoint.replace(/^http/, "ws"), proxyToken: token}),
-  });
+  }).finally(() => { settled = true; });
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"), "native review");
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(settled, false);
+  assert(!messages.some(message => message.method === "serverRequest/resolved"));
+  client.send(JSON.stringify({id: modal.id, result: {action: "decline"}}));
+  const result = await pending;
   assert.equal(result.action, "deny");
-  assert.equal(result.reason, "native_approval_timeout");
+  assert.equal(result.reason, "human_declined");
   assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
 });
 

@@ -396,12 +396,21 @@ only when the gateway receipt explicitly permits separate approval. Workflow
 capability, classifier-policy, interceptor, and known-risk denials are never
 eligible for this fallback. The companion must own the exact thread and return
 the matching thread, run, state, intent, invocation, denial basis, authority,
-and retry-policy identities. One acceptance releases only the waiting
-invocation after a fresh authoritative run/state check. Exact retries,
-concurrent requests, stale or changed-state replies, dismissal,
-timeout, disconnect, an unavailable companion, or an unsupported client stay
-denied. This path does not resume a terminal workflow or replace a
-workflow-transition approval.
+and retry-policy identities. Acceptance releases the waiting invocation after
+a fresh authoritative run/state check. Native human review has no automatic
+deadline: elapsed time and quiet output never dismiss it or count as a decision.
+An explicit cancellation, disconnect, unavailable companion, unsupported client,
+or stale/changed-state reply leaves the invocation denied.
+
+Workflow metadata selects `approve_for`: `once`, `2h`, `4h`, `8h`, or `always`.
+The native Allow/Deny/Cancel form displays that duration; it needs no custom
+duration selector. A reusable human grant matches the exact request, working
+directory, current policy and observed dependency fingerprints. Its lifetime
+starts at acceptance, not when the prompt opens. Unknown effects can require
+human review without making that decision intrinsically once-only. Incomplete
+named-script provenance remains once-only. Each reuse still checks current
+ownership, state and independent policy; it never overrides a known-risk denial
+or resumes a terminal workflow. TUI and Desktop keep separate scoped stores.
 
 The local host services approval requests through a serial, explicit-priority
 chain of responsibility. Only an unsupported (`NotHandled`) request may pass to

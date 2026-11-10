@@ -341,6 +341,7 @@ try {
       STATEWRIGHT_NODE_BIN: state.node_executable,
       STATEWRIGHT_DESKTOP_MCP_URL: bridge.url,
       STATEWRIGHT_DESKTOP_MCP_TOKEN: bridge.token,
+      STATEWRIGHT_DESKTOP_APPROVAL_MEMORY_SCOPE: bridge.approvalMemoryScope,
       STATEWRIGHT_DESKTOP_BRIDGE_POOL_URL: bridge.poolUrl,
       STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN: bridge.poolToken,
     },

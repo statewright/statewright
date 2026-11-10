@@ -118,12 +118,27 @@ test("Desktop bridge owns gateway authentication outside the App Server sandbox"
         gatewayUrl: "https://example.test/custom/mcp",
         apiKey: "desktop-api-key",
         clientId: "swc_0123456789abcdef0123456789abcdef",
+        humanInteractionUrl: null,
       });
       return { start: async () => { started += 1; } };
     },
   });
   assert.equal(started, 1);
   assert.ok(bridge);
+  assert.match(bridge.approvalMemoryScope, /^[a-f0-9]{64}$/);
+});
+
+test("Desktop approval scope survives process restart but changes with credential gateway or lane", async () => {
+  const scope = async (key="fixture-key", gateway="https://stage.example", clientId="lane-one") => {
+    const bridge = await startDesktopMcpBridge({environment: {STATEWRIGHT_API_KEY:key, STATEWRIGHT_GATEWAY_URL:gateway},
+      clientId, bridgeFactory: () => ({start: async () => {}})});
+    return bridge.approvalMemoryScope;
+  };
+  const original = await scope();
+  assert.equal(await scope(), original);
+  assert.notEqual(await scope("renewed-key"), original);
+  assert.notEqual(await scope("fixture-key", "https://other.example"), original);
+  assert.notEqual(await scope("fixture-key", "https://stage.example", "lane-two"), original);
 });
 
 test("Desktop canonical MCP profile delivers live usage to the gateway API base", async t => {

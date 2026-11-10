@@ -78,6 +78,41 @@ fn dependency_value(value: &Value) -> Value {
     }
 }
 
+fn exact_native_shell_request(tool_name: &str, input: &Value, source: &str) -> bool {
+    use crate::tool_intent::{native_tool_family, NativeToolFamily};
+    // This binding represents a human decision about unknown effects, not a
+    // claim that those effects were proved. Incomplete runner/source collection
+    // remains ineligible: a stable argv must not hide a changing named script.
+    if native_tool_family(tool_name) != Some(NativeToolFamily::Command)
+        || source != "shell_ast"
+        || input.get("environment_id").is_some_and(|v| !v.is_null())
+    {
+        return false;
+    }
+    let Some(cwd) = input.get("workdir").or_else(|| input.get("cwd")).and_then(Value::as_str) else {
+        return false;
+    };
+    let bytes = cwd.as_bytes();
+    let absolute = cwd.starts_with('/') || cwd.starts_with("\\\\")
+        || (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'));
+    if !absolute || cwd.chars().any(char::is_control) { return false; }
+    let Some(command) = input.get("cmd").or_else(|| input.get("command")).and_then(Value::as_str) else {
+        return false;
+    };
+    if command.trim().is_empty() { return false; }
+    let parsed = crate::shell_ast_shadow::assess(command);
+    if parsed.status != crate::shell_ast_shadow::ParseStatus::Parsed || parsed.executable_nodes == 0 {
+        return false;
+    }
+    // Reuse the collector's runner grammar instead of allowing missing source
+    // evidence to turn a named script into an exact-request-only grant.
+    crate::shell_ast_shadow::literal_command_units(command).is_some_and(|units| units.iter().all(|unit| {
+        crate::bash_classifier::literal_invocation(unit).is_some_and(|invocation|
+            !crate::risk_assessment::native_source_runner(&invocation))
+    }))
+}
+
 pub(crate) fn context(
     session: &GatewaySession,
     tool_name: &str,
@@ -92,19 +127,21 @@ pub(crate) fn context(
     // A named runner with uncollected or unvalidated source must never become
     // an everlasting grant just because its argv is unchanged. Native web
     // requests carry their complete declarative action data in the invocation.
+    let exact_shell = exact_native_shell_request(tool_name, input, source);
     let reusable = native
         && ((validated_complete_bounds
             && matches!(
                 source,
                 "native_command_evidence" | "native_command_list_evidence" | "shell_ast"
             ))
-            || crate::tool_intent::is_native_web_run(tool_name));
+            || exact_shell || crate::tool_intent::is_native_web_run(tool_name));
     json!({"schema":"statewright/approval-memory-context/v1",
         "policy_sha256":policy["policy_sha256"],"allowed_durations":policy["allowed_durations"],"approve_for":policy["approve_for"],
         "invocation_sha256":digest(&json!([tool_name,input])),
         "dependency_sha256":digest(&dependency_value(&json!([command_evidence,references]))),
         "reusable":reusable,
-        "reason":if reusable {"bound_native_evidence"}else{"reusable_dependency_provenance_unavailable"}})
+        "reason":if reusable && exact_shell {"exact_native_request_with_observed_dependencies"}
+            else if reusable {"bound_native_evidence"}else{"reusable_dependency_provenance_unavailable"}})
 }
 
 #[cfg(test)]
@@ -151,9 +188,33 @@ mod tests {
         let context_for = |source, native, complete| context(
             &session, "exec_command", &input, None, None, source, native, complete);
         assert_eq!(context_for("shell_ast", true, true)["reusable"], true);
-        assert_eq!(context_for("shell_ast", true, false)["reusable"], false);
+        assert_eq!(context_for("shell_ast", true, false)["reusable"], true);
         assert_eq!(context_for("shell_ast", false, true)["reusable"], false);
         assert_eq!(context_for("native_command_evidence_incomplete", true, true)["reusable"], false);
+    }
+    #[test]
+    fn human_memory_can_bind_unknown_effects_but_not_missing_request_or_source_identity() {
+        let session = session();
+        let check = |tool, input: Value, source, native| context(
+            &session, tool, &input, None, None, source, native, false)["reusable"].clone();
+        for cwd in ["/workspace", "C:\\workspace", "\\\\host\\share"] {
+            assert_eq!(check("exec_command", json!({"cmd":"getconf ARG_MAX","workdir":cwd}), "shell_ast", true), true);
+        }
+        for input in [json!({"cmd":"getconf ARG_MAX"}),
+            json!({"cmd":"getconf ARG_MAX","workdir":"relative"}),
+            json!({"cmd":"getconf ARG_MAX","workdir":"/workspace","environment_id":"foreign"}),
+            json!({"cmd":"echo '","workdir":"/workspace"}),
+            json!({"cmd":"npm run canary","workdir":"/workspace"}),
+            json!({"cmd":"task test","workdir":"/workspace"}),
+            json!({"cmd":"getconf ARG_MAX && npm run canary","workdir":"/workspace"}),
+            json!({"cmd":"","workdir":"/workspace"})] {
+            assert_eq!(check("exec_command",input,"shell_ast",true), false);
+        }
+        let input = json!({"command":"getconf ARG_MAX","cwd":"/workspace"});
+        assert_eq!(check("Bash",input.clone(),"shell_ast",true), true);
+        assert_eq!(check("Bash",input.clone(),"shell_ast",false), false);
+        assert_eq!(check("mcp_foreign",input.clone(),"shell_ast",true), false);
+        assert_eq!(check("Bash",input,"native_command_evidence_incomplete",true), false);
     }
     #[test]
     fn memory_identity_survives_collection_time_but_invalidates_changes() {

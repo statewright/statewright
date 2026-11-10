@@ -2502,6 +2502,30 @@ fn apply_command_list_evidence(
 /// current local bytes by the managed hook, not from model-authored tool input.
 /// As with GitLocalWrite, the local account/plugin is trusted, not attested
 /// against malicious same-user tampering. Never expose these bytes to System One.
+pub(crate) fn native_source_runner(invocation: &bash_classifier::LiteralInvocation) -> bool {
+    match (invocation.executable.as_str(), invocation.args.as_slice()) {
+        ("task", [target]) => !target.starts_with('-'),
+        ("task", [flag, directory, target]) if matches!(flag.as_str(), "-d" | "--dir") => {
+            !directory.is_empty() && !target.starts_with('-')
+        }
+        ("task", [flag, target]) if flag.starts_with("--dir=") => {
+            flag.len() > "--dir=".len() && !target.starts_with('-')
+        }
+        ("npm" | "pnpm", [op]) => op == "test",
+        ("npm" | "pnpm", [op, name]) => op == "run" && !name.starts_with('-'),
+        ("npm" | "pnpm", [op, separator, forwarded @ ..]) if op == "test" => {
+            separator == "--" && forwarded.len() <= 64
+        }
+        ("npm" | "pnpm", [op, name, separator, forwarded @ ..]) => {
+            op == "run" && !name.starts_with('-') && separator == "--" && forwarded.len() <= 64
+        }
+        ("npx", [runner, op, ..]) => runner == "vitest" && op == "run",
+        ("vitest", [op, ..]) => op == "run",
+        ("node", _) => bash_classifier::bounded_node_repository_entrypoint(&invocation).is_some(),
+        _ => false,
+    }
+}
+
 pub fn apply_native_command_evidence(
     pipeline: RiskPipelineAssessment,
     registered_tool: Option<&ToolInfo>,
@@ -2534,27 +2558,7 @@ pub fn apply_native_command_evidence(
     let Some(invocation) = bash_classifier::literal_invocation(command) else {
         return pipeline;
     };
-    let supported_root = match (invocation.executable.as_str(), invocation.args.as_slice()) {
-        ("task", [target]) => !target.starts_with('-'),
-        ("task", [flag, directory, target]) if matches!(flag.as_str(), "-d" | "--dir") => {
-            !directory.is_empty() && !target.starts_with('-')
-        }
-        ("task", [flag, target]) if flag.starts_with("--dir=") => {
-            flag.len() > "--dir=".len() && !target.starts_with('-')
-        }
-        ("npm" | "pnpm", [op]) => op == "test",
-        ("npm" | "pnpm", [op, name]) => op == "run" && !name.starts_with('-'),
-        ("npm" | "pnpm", [op, separator, forwarded @ ..]) if op == "test" => {
-            separator == "--" && forwarded.len() <= 64
-        }
-        ("npm" | "pnpm", [op, name, separator, forwarded @ ..]) => {
-            op == "run" && !name.starts_with('-') && separator == "--" && forwarded.len() <= 64
-        }
-        ("npx", [runner, op, ..]) => runner == "vitest" && op == "run",
-        ("vitest", [op, ..]) => op == "run",
-        ("node", _) => bash_classifier::bounded_node_repository_entrypoint(&invocation).is_some(),
-        _ => false,
-    };
+    let supported_root = native_source_runner(&invocation);
     if !supported_root {
         return pipeline;
     }
@@ -3144,6 +3148,19 @@ mod tests {
     }
 
     #[test]
+    fn private_assessor_keeps_cli_identity_when_public_shape_is_unknown() {
+        let args = json!({"cmd":"/private/bin/getconf ARG_MAX"});
+        let legacy = semantic_request(None, "exec_command", &args, None, true);
+        let request = shell_ast_semantic_request(&legacy, &shell_ast_shadow::assess(args["cmd"].as_str().unwrap()), ShellAstMode::Authority);
+        let local = semantic_provider_state(&request, true);
+        assert_eq!(local["local_invocation_evidence"][0]["executable"], "getconf");
+        assert_eq!(local["local_invocation_evidence"][0]["complete"], false);
+        assert!(!local.to_string().contains("/private/bin"));
+        assert!(!local.to_string().contains("ARG_MAX"));
+        assert!(semantic_provider_state(&request, false).get("local_invocation_evidence").is_none());
+    }
+
+    #[test]
     fn provider_receives_execution_and_component_metadata_without_literal_values() {
         let args = json!({"cmd":"widget --mode observe PRIVATE_INPUT; kubectl exec PRIVATE_TARGET -- cat PRIVATE_PATH"});
         let request = semantic_request(None,"exec_command",&args,None,true);
@@ -3239,6 +3256,31 @@ mod tests {
         assert_eq!(unknown.resolve_effect(), ResolvedEffect::DenyUncertain);
         assert_eq!(seen.lock().unwrap().len(), prior_calls + 1);
         server.abort();
+    }
+
+    #[test]
+    fn unknown_native_effects_stay_held_but_can_bind_an_explicit_eight_hour_human_decision() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let input = json!({"cmd":"getconf ARG_MAX","workdir":"/workspace"});
+        let pipeline = assess_native_policy_rejection(None, "exec_command", &input, None);
+        set_test_shell_ast_authority_enabled(None);
+        assert_eq!(pipeline.deterministic.source, "shell_ast");
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyUncertain);
+        assert!(pipeline.complete_resource_bounds().is_none());
+        let session = crate::session::GatewaySession::new("fixture".into(), serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work","states":{"work":{}},
+            "meta":{"approval_memory":{"approve_for":"8h","allowed_durations":["once","8h"]}}
+        })).unwrap());
+        let binding = |value: &serde_json::Value, references: Option<&serde_json::Value>| {
+            crate::approval_memory::context(&session, "exec_command", value, None, references,
+                pipeline.deterministic.source, true, pipeline.complete_resource_bounds().is_some())
+        };
+        let original = binding(&input, None);
+        assert_eq!(original["reusable"], true);
+        assert_eq!(original["approve_for"], "8h");
+        assert_eq!(original["reason"], "exact_native_request_with_observed_dependencies");
+        assert_ne!(original["invocation_sha256"], binding(&json!({"cmd":"getconf ARG_MAX","workdir":"/other"}), None)["invocation_sha256"]);
+        assert_ne!(original["dependency_sha256"], binding(&input, Some(&json!({"changed":"reference"})))["dependency_sha256"]);
     }
 
     #[test]

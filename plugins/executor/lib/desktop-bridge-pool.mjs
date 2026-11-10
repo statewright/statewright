@@ -35,7 +35,11 @@ function bridgeDescriptor(bridge, clientId) {
       || !bridge.token || /[\r\n]/.test(bridge.token) || typeof bridge.close !== "function") {
     throw new Error("Invalid desktop bridge.");
   }
-  return { clientId, url: loopbackUrl(bridge.url), token: bridge.token };
+  if (bridge.approvalMemoryScope !== undefined && !/^[a-f0-9]{64}$/.test(bridge.approvalMemoryScope)) {
+    throw new Error("Invalid desktop approval scope.");
+  }
+  return { clientId, url: loopbackUrl(bridge.url), token: bridge.token,
+    ...(bridge.approvalMemoryScope ? {approvalMemoryScope: bridge.approvalMemoryScope} : {}) };
 }
 
 function readBody(request) {
@@ -178,10 +182,12 @@ export async function requestDesktopLaneBridge({ url, token, key }) {
     const descriptor = await response.json();
     if (!descriptor || typeof descriptor.clientId !== "string" || !descriptor.clientId
         || typeof descriptor.token !== "string" || !descriptor.token || /[\r\n]/.test(descriptor.token)
-        || Object.keys(descriptor).sort().join(",") !== "clientId,token,url") {
+        || !["clientId,token,url", "approvalMemoryScope,clientId,token,url"].includes(Object.keys(descriptor).sort().join(","))
+        || descriptor.approvalMemoryScope !== undefined && !/^[a-f0-9]{64}$/.test(descriptor.approvalMemoryScope)) {
       throw new Error("Invalid response.");
     }
-    return { clientId: descriptor.clientId, url: loopbackUrl(descriptor.url), token: descriptor.token };
+    return { clientId: descriptor.clientId, url: loopbackUrl(descriptor.url), token: descriptor.token,
+      ...(descriptor.approvalMemoryScope ? {approvalMemoryScope: descriptor.approvalMemoryScope} : {}) };
   } catch (error) {
     if (error.code === "DESKTOP_LANE_LIMIT") throw error;
     throw new Error("Desktop lane bridge unavailable.");

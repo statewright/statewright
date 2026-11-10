@@ -1,7 +1,7 @@
 {
   "name": "statewright",
-  "version": "0.3.9+codex.20261110173600",
-  "description": "State machine workflow enforcement \u2014 controls which tools your agent can use in each phase.",
+  "version": "0.3.9+codex.20261110185738",
+  "description": "State machine workflow enforcement — controls which tools your agent can use in each phase.",
   "author": {
     "name": "statewright.ai",
     "url": "https://statewright.ai"
@@ -20,7 +20,7 @@
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "statewright",
-    "shortDescription": "State machine guardrails \u2014 per-state tool enforcement for coding workflows.",
+    "shortDescription": "State machine guardrails — per-state tool enforcement for coding workflows.",
     "longDescription": "Statewright enforces state-machine workflows for Codex: each phase exposes only the permitted tools, injects the active state context, and steers autonomous work through completion.",
     "developerName": "Statewright",
     "category": "Developer Tools",

@@ -1758,23 +1758,17 @@ impl Gateway {
                 ),
             });
         }
-        let pipeline = risk_assessment::assess_native_pipeline_visible_with_references(
+        let pipeline = risk_assessment::assess_native_pipeline_visible_with_evidence(
             registered_tool,
             tool_name,
             tool_input,
             intent,
+            command_evidence,
             command_references,
         )
         .await;
         #[cfg(test)]
         if let Some((entered,resume))=self.classifier_assessment_pause.take(){let _=entered.send(());let _=resume.await;}
-        let pipeline = risk_assessment::apply_native_command_evidence(
-            pipeline,
-            registered_tool,
-            tool_name,
-            tool_input,
-            command_evidence,
-        );
         let session = match self.session_manager.get(&self.session_id) {
             Some(session) => session,
             None => {

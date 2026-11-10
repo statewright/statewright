@@ -134,8 +134,10 @@ impl SemanticShadowConfig {
         capacity: Option<&str>,
         provider_kind: Option<&str>,
     ) -> Self {
-        let telemetry_enabled =
-            matches!(environment, Some("staging")) && shadow_enabled_for(shadow_enabled);
+        let assessment_environment = environment == Some("staging")
+            || (provider_kind.map(str::trim) == Some("laya_local")
+                && matches!(environment, Some("dev" | "dev1" | "dev2" | "dev3")));
+        let telemetry_enabled = assessment_environment && shadow_enabled_for(shadow_enabled);
         // New checkpoint families need held-out validation and provenance before
         // their scores may authorize commands. Existing hosted opt-ins do not
         // silently confer that authority on an experimental local replacement.
@@ -2013,6 +2015,57 @@ pub async fn assess_native_pipeline_visible_with_references(
     .await
 }
 
+/// Native pre-tool assessment applies locally collected evidence before deciding
+/// whether semantic fallback is needed. Proven effects and known risk do not
+/// spend a model call; unresolved effects retain the ordinary human fallback.
+pub async fn assess_native_pipeline_visible_with_evidence(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    evidence: Option<&serde_json::Value>,
+    references: Option<&serde_json::Value>,
+) -> RiskPipelineAssessment {
+    let config = SemanticShadowConfig::from_env();
+    let provider = SemanticProviderConfig::from_env();
+    let runtime = if config.enabled && provider.is_some() && tokio::runtime::Handle::try_current().is_ok() {
+        Some(SEMANTIC_SHADOW_RUNTIME.get_or_init(|| {
+            start_shared_semantic_shadow_runtime(&config, provider.clone().expect("provider checked"))
+        }))
+    } else { None };
+    let timeout = provider.map(|provider| provider.timeout).unwrap_or_default();
+    assess_native_ordered_with_runtime(tool, tool_name, arguments, state_intent, evidence,
+        references, &config, runtime, timeout).await
+}
+
+async fn assess_native_ordered_with_runtime(
+    tool: Option<&ToolInfo>,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    state_intent: Option<&str>,
+    evidence: Option<&serde_json::Value>,
+    references: Option<&serde_json::Value>,
+    config: &SemanticShadowConfig,
+    runtime: Option<&SemanticShadowRuntime>,
+    timeout: std::time::Duration,
+) -> RiskPipelineAssessment {
+    let initial = assess_native_policy_rejection(tool, tool_name, arguments, state_intent);
+    let mut proven = apply_native_command_evidence(initial, tool, tool_name, arguments, evidence);
+    if proven.resolve_effect() != ResolvedEffect::DenyUncertain {
+        emit_shadow(tool_name, &proven.deterministic);
+        if let Some(request) = proven.deterministic.semantic_request.as_ref() {
+            proven.semantic = semantic_receipt(request, SemanticAssessorStatus::NotRequired);
+        }
+        return proven;
+    }
+    let assessment = assess_pipeline_visible_with_runtime_and_references(
+        tool, tool_name, arguments, state_intent, true, config, runtime, timeout, references,
+    ).await;
+    let can_authorize = config.authoritative_enabled && !config.evaluation_only
+        && (evidence.is_none() || proven.complete_resource_bounds().is_some());
+    pipeline_from_parts(proven.deterministic, assessment.semantic, can_authorize)
+}
+
 fn validated_command_references(
     tool_name: &str,
     arguments: &serde_json::Value,
@@ -3021,6 +3074,65 @@ mod tests {
             }
             assert!(!json.contains("literal_value"));
         }
+    }
+
+    #[tokio::test]
+    async fn ordered_native_pipeline_skips_model_for_deterministic_pass_and_evaluates_unknown() {
+        use axum::{routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().route("/", post({
+            let seen = seen.clone();
+            move |Json(body): Json<serde_json::Value>| {
+                let seen = seen.clone();
+                async move {
+                    seen.lock().unwrap().push(body);
+                    Json(json!({"answers":{
+                        "read_only":{"type":"noul","noul":0.99},"may_write":{"type":"noul","noul":0.01},
+                        "reversible":{"type":"noul","noul":0.99},"destructive":{"type":"noul","noul":0.01},
+                        "irreversible":{"type":"noul","noul":0.01},"external_or_account_effect":{"type":"noul","noul":0.01}
+                    }}))
+                }
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let timeout = std::time::Duration::from_secs(1);
+        let config = SemanticShadowConfig { enabled: true, authoritative_enabled: false, evaluation_only: true, queue_capacity: 8 };
+        let runtime = start_shared_semantic_shadow_runtime(&config, SemanticProviderConfig {
+            kind: SemanticProviderKind::LayaLocal, endpoint, model: "fixture".into(), bearer_token: None, timeout,
+        });
+        let known = assess_native_ordered_with_runtime(None, "exec_command", &json!({"cmd":"printf 'hello'"}),
+            None, None, None, &config, Some(&runtime), timeout).await;
+        assert_eq!(known.resolve_effect(), ResolvedEffect::ReadOnly);
+        assert_eq!(known.semantic.status, SemanticAssessorStatus::NotRequired);
+        assert!(seen.lock().unwrap().is_empty());
+        let command = "npm run canary";
+        let body = "printf 'hello'";
+        let input = json!({"cmd":command,"workdir":"/workspace"});
+        let evidence = json!({
+            "schema":"statewright/local-command-evidence/v1","tool_name":"exec_command",
+            "command":command,"requested_cwd":"/workspace","cwd":"/workspace",
+            "invocation":bash_classifier::literal_invocation(command).unwrap(),
+            "collected_at_ms":chrono::Utc::now().timestamp_millis(),"complete":true,
+            "files":[{"path":"package.json","sha256":"a".repeat(64)}],
+            "commands":[{"original":body,"resolved":body,"cwd":".",
+                "invocation":bash_classifier::literal_invocation(body)}],
+        });
+        let expanded = assess_native_ordered_with_runtime(None, "exec_command", &input,
+            None, Some(&evidence), None, &config, Some(&runtime), timeout).await;
+        // The package runner can create bounded local artifacts even when its
+        // supplied body only prints; reducing it must retain that runner floor.
+        assert_eq!(expanded.resolve_effect(), ResolvedEffect::BoundedLocalExecution);
+        assert_eq!(expanded.semantic.status, SemanticAssessorStatus::NotRequired);
+        assert!(seen.lock().unwrap().is_empty(), "a complete native body must be reduced before model dispatch");
+        let unknown = assess_native_ordered_with_runtime(None, "exec_command", &json!({"cmd":"unfamiliar-tool inspect"}),
+            None, None, None, &config, Some(&runtime), timeout).await;
+        assert_eq!(unknown.semantic.status, SemanticAssessorStatus::ShadowOnly);
+        assert_eq!(unknown.resolve_effect(), ResolvedEffect::DenyUncertain);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        server.abort();
     }
 
     #[tokio::test]
@@ -4907,6 +5019,26 @@ mod tests {
             assert!(config(endpoint, Some("typed-decisions")).is_none());
         }
         assert!(config(Some("http://127.0.0.1:8000/v1/systemone"), None).is_none());
+    }
+
+    #[test]
+    fn local_laya_assessment_enabled_for_nonproduction_envs_only() {
+        for env in ["staging", "dev", "dev1", "dev2", "dev3", "production", "preview", ""] {
+            for enabled in [None, Some("false"), Some("true")] {
+                let config = SemanticShadowConfig::from_provider_values(
+                    Some(env), enabled, Some("true"), None, Some("laya_local"),
+                );
+                assert_eq!(config.enabled,
+                    matches!(env, "staging" | "dev" | "dev1" | "dev2" | "dev3")
+                        && enabled == Some("true"), "environment {env}");
+                assert!(!config.authoritative_enabled);
+                assert!(config.evaluation_only);
+            }
+        }
+        let hosted_dev = SemanticShadowConfig::from_provider_values(
+            Some("dev"), Some("true"), Some("false"), None, Some("typesafe_system_one"),
+        );
+        assert!(!hosted_dev.enabled);
     }
 
     #[test]

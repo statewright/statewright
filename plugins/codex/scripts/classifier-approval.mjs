@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +10,36 @@ import { approvalDisplayContext, interactionValue, s1Classification } from "./li
 import {approvalMemoryContext} from "./lib/desktop-runtime/approval-memory.mjs";
 
 const MAX_INPUT_BYTES = 32 * 1024;
-const APPROVAL_TIMEOUT_MS = 10 * 60_000;
+const MAX_RESPONSE_BYTES = 64 * 1024;
+
+// A human review may outlive fetch/Undici's implicit five-minute headers
+// timeout. The native controller owns approval expiry; this transport must not
+// abandon its pending dialog merely because it has not received headers yet.
+function approvalTransport(endpoint, options) {
+  return new Promise((resolve, reject) => {
+    const send = endpoint.protocol === "https:" ? httpsRequest : httpRequest;
+    const request = send(endpoint, {...options, agent: false}, response => {
+      const chunks = [];
+      let size = 0;
+      response.on("data", chunk => {
+        size += chunk.length;
+        if (size > MAX_RESPONSE_BYTES) {
+          response.destroy(new Error("classifier_approval_response_too_large"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.once("error", reject);
+      response.once("end", () => {
+        const status = response.statusCode;
+        resolve({ok: status >= 200 && status < 300, status,
+          json: async () => JSON.parse(Buffer.concat(chunks).toString("utf8"))});
+      });
+    });
+    request.once("error", reject);
+    request.end(options.body);
+  });
+}
 const APPROVABLE_BASES = new Set([
   "semantic_threshold_not_met",
   "incomplete_structural_evidence",
@@ -103,11 +134,11 @@ export async function requestClassifierApproval(value, options = {}) {
   endpoint.pathname = "/classifier-approval";
   endpoint.search = "";
   endpoint.hash = "";
-  const response = await (options.fetch ?? fetch)(endpoint, {
+  const response = await (options.fetch ?? approvalTransport)(endpoint, {
     method: "POST",
     headers: {"Content-Type": "application/json", Authorization: `Bearer ${runtime.proxyToken}`},
     body: JSON.stringify(request),
-    signal: options.signal ?? AbortSignal.timeout(APPROVAL_TIMEOUT_MS),
+    ...(options.signal ? {signal: options.signal} : {}),
   });
   const result = await response.json().catch(() => null);
   if (!response.ok || !result || typeof result !== "object") {
@@ -182,6 +213,10 @@ export function classifierApprovalFailureReason(error) {
   if (["ENOENT", "EACCES", "EPERM"].includes(error?.code)) {
     return "classifier_approval_runtime_receipt_unreadable";
   }
+  if (["ECONNREFUSED", "ECONNRESET", "EPIPE", "ENOTFOUND", "ETIMEDOUT"].includes(error?.code)) {
+    return "classifier_approval_transport_" + error.code.toLowerCase();
+  }
+  if (error?.cause?.code === "UND_ERR_HEADERS_TIMEOUT") return "classifier_approval_transport_headers_timeout";
   // Do not expose filesystem paths, runtime tokens, or response bodies.
   return "classifier_approval_helper_error";
 }

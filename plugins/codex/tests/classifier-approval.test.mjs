@@ -5,7 +5,9 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redactedApprovalRequest, requestClassifierApproval } from "../scripts/classifier-approval.mjs";
+import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "../scripts/classifier-approval.mjs";
+import { createServer } from "node:http";
+import { once } from "node:events";
 
 const input = {
   thread_id: "thread-one",
@@ -25,6 +27,29 @@ const input = {
     arguments: {secret: true},
   },
 };
+
+test("approval transport reports connection failures without exposing endpoint or secret text", () => {
+  const error = Object.assign(new Error("private endpoint and token"), {code: "ECONNREFUSED"});
+  assert.equal(classifierApprovalFailureReason(error), "classifier_approval_transport_econnrefused");
+  assert.equal(classifierApprovalFailureReason(new TypeError("fetch failed", {cause: {code: "UND_ERR_HEADERS_TIMEOUT"}})), "classifier_approval_transport_headers_timeout");
+});
+
+test("approval transport rejects an oversized response and never follows redirects", async t => {
+  let escaped = false;
+  const server = createServer((request, response) => {
+    if (request.url === "/elsewhere") {escaped = true; response.end("{}"); return;}
+    if (request.headers.authorization === "Bearer oversize") response.end("x".repeat(70 * 1024));
+    else {response.writeHead(302, {Location: "/elsewhere"}); response.end("{}");}
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const options = key => ({environment: {LOCAL_MODELS_RUN_DIR: "/synthetic"},
+    readFile: async () => JSON.stringify({proxyUrl: `ws://127.0.0.1:${server.address().port}`, proxyToken: key})});
+  await assert.rejects(requestClassifierApproval(input, options("oversize")), /response_too_large/);
+  await assert.rejects(requestClassifierApproval(input, options("redirect")), /http_302/);
+  assert.equal(escaped, false);
+});
 
 test('external uncertainty carries the command and directory through both helper passes',()=>{
   const request=redactedApprovalRequest({...input,

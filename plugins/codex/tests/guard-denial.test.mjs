@@ -101,7 +101,8 @@ test('independent workflow denial and native delivery failure retain distinct co
     classifier_approval:{action:'unavailable', reason:'classifier_approval_runtime_unavailable'}}).display;
   assert.match(message, /workflow does not permit/i);
   assert.match(message, /S1 approval cannot override/i);
-  assert.match(message, /Native approval was not presented/);
+  assert.match(message, /Native approval could not be completed/);
+  assert.doesNotMatch(message, /was not presented/);
   assert.match(message, /classifier_approval_runtime_unavailable/);
   assert.doesNotMatch(message, /will be sent|must be sent|heredoc/);
 });

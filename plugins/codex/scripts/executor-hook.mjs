@@ -67,7 +67,7 @@ export function formatGuardDenial(result) {
   const approval = result?.classifier_approval;
   if (!delegationDenied) display += classifierReworkDisplay(rework);
   if (approval?.action === "unavailable") {
-    display += ` Native approval was not presented: ${approval.reason}. A matching connected native owner and a gateway-bound approval receipt are required; do not retry this denied invocation or switch clients.`;
+    display += ` Native approval could not be completed: ${approval.reason}. The invocation remains denied; do not retry it or switch clients.`;
   } else if (approval?.action === "deny") {
     display += ` Native approval outcome: ${approval.reason}. The invocation remains denied.`;
   }

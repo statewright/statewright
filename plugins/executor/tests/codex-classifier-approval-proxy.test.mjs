@@ -11,7 +11,7 @@ import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-pro
 import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
 import {ApprovalMemory} from "../lib/approval-memory.mjs";
-import {manageApprovalMemory} from "../../codex/scripts/classifier-approval.mjs";
+import {manageApprovalMemory, requestClassifierApproval} from "../../codex/scripts/classifier-approval.mjs";
 
 const memoryContext={schema:"statewright/approval-memory-context/v1",policy_sha256:"a".repeat(64),
   invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64),reusable:true,
@@ -63,7 +63,7 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2, memory = false} = {}) {
+async function setup(t, {maxReworks = 2, memory = false, approvalTimeoutMs = 10 * 60_000} = {}) {
   const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
   if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -93,6 +93,7 @@ async function setup(t, {maxReworks = 2, memory = false} = {}) {
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
+    classifierApprovalTimeoutMs: approvalTimeoutMs,
     classifierApprovalService: {
       ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
       ownsThread: async id => {
@@ -164,6 +165,44 @@ test("classifier uncertainty reaches native approval immediately when rewrites a
   const allowed = await (await pending).json();
   assert.equal(allowed.action, "allow_once");
   assert.equal(allowed.invocation_fingerprint, "invocation_v1_immediate");
+});
+
+const waitSoakMs = Number(process.env.STATEWRIGHT_APPROVAL_WAIT_SOAK_MS ?? 80);
+test("approval helper preserves a quiet native review and reuses the resulting 8h grant", {timeout: waitSoakMs + 30_000}, async t => {
+  assert(Number.isSafeInteger(waitSoakMs) && waitSoakMs >= 0 && waitSoakMs <= 330_000);
+  const fixture = await setup(t, {maxReworks: 0, memory: true});
+  const {client, messages} = await fixture.connectAndOwn();
+  const value = approvalRequest("quiet-human", {approval_memory: memoryContext});
+  const options = {environment: {STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/synthetic/owner.json"},
+    readFile: async () => JSON.stringify({proxyUrl: fixture.endpoint.replace(/^http/, "ws"), proxyToken: token})};
+  let settled = false;
+  const pending = requestClassifierApproval(value, options).finally(() => { settled = true; });
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"), "quiet review form");
+  assert.match(modal.params.message, /8 hours/);
+  assert.match(modal.params.message, /S1 classification.*read-only 53%, write 55%/);
+  await new Promise(resolve => setTimeout(resolve, waitSoakMs));
+  assert.equal(settled, false, "quiet human review must remain pending until the native outcome");
+  assert(!messages.some(message => message.method === "serverRequest/resolved"));
+  client.send(JSON.stringify({id: modal.id, result: {action: "accept"}}));
+  const approved = await pending;
+  assert.equal(approved.action, "allow_once");
+  assert.equal(approved.duration, "8h");
+  const reused = await requestClassifierApproval(value, options);
+  assert.equal(reused.reason, "remembered_human_approval");
+  assert.equal(reused.duration, "8h");
+  assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
+});
+
+test("approval helper receives authoritative native expiry rather than inventing a transport timeout", async t => {
+  const fixture = await setup(t, {maxReworks: 0, approvalTimeoutMs: 40});
+  const {messages} = await fixture.connectAndOwn();
+  const result = await requestClassifierApproval(approvalRequest("native-expiry"), {
+    environment: {STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: "/synthetic/owner.json"},
+    readFile: async () => JSON.stringify({proxyUrl: fixture.endpoint.replace(/^http/, "ws"), proxyToken: token}),
+  });
+  assert.equal(result.action, "deny");
+  assert.equal(result.reason, "native_approval_timeout");
+  assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
 });
 
 test("native memory selection survives reconnect, names fresh receipt, and supports owned revocation",async t=>{

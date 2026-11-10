@@ -15,6 +15,7 @@ import { resolveApiKey } from "./remote-client.mjs";
 import { resolveGatewayProfile } from "./gateway-profile.mjs";
 import { createTelemetryWriter } from "./telemetry.mjs";
 import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
+import { createGatewayCredentialRecovery } from "./gateway-credential-recovery.mjs";
 import { approvalOriginProof } from "./approval-origin.mjs";
 import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
 
@@ -27,6 +28,8 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "approval-pipeline.mjs"),
   join(EXECUTOR_ROOT, "approval-origin.mjs"),
   join(EXECUTOR_ROOT, "managed-mcp-bridge.mjs"),
+  join(EXECUTOR_ROOT, "gateway-credential-recovery.mjs"),
+  join(EXECUTOR_ROOT, "desktop-device-connect.mjs"),
   join(EXECUTOR_ROOT, "classifier-approval-controller.mjs"),
   join(EXECUTOR_ROOT, "adapter-bridge.mjs"),
   join(EXECUTOR_ROOT, "command-evidence.mjs"),
@@ -291,8 +294,21 @@ async function main() {
   await mkdir(controlDir, { recursive: true, mode: 0o700 });
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
   const bridge = await createManagedMcpBridge({ environment: process.env, clientId, home });
+  let telemetry = await telemetryWriter(process.env);
   const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
       apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
+      reprovisionCredential: createGatewayCredentialRecovery({ apiKey: bridge.apiKey,
+        gatewayUrl: bridge.gatewayUrl, pbUrl: process.env.STATEWRIGHT_PB_URL,
+        environment: process.env, home,
+        onRenewed: async nextKey => {
+          // The child uses the stable local bridge token, so no app-server or
+          // TUI restart is needed. Rotate credential-scoped approval memory.
+          const nextTelemetry = await telemetryWriter({...process.env, STATEWRIGHT_API_KEY: nextKey});
+          bridge.apiKey = nextKey;
+          approvalService.updateCredential(nextKey);
+          process.env.STATEWRIGHT_API_KEY = nextKey;
+          telemetry = nextTelemetry;
+        } }),
       originProof: bridge.originProof,
       pbUrl: process.env.STATEWRIGHT_PB_URL ?? "https://statewright.ai",
       presentationEnabled: process.env.STATEWRIGHT_NATIVE_APPROVALS !== "0",
@@ -344,7 +360,7 @@ async function main() {
       ? ({ threadId }) => bindManagedSessionLabel({ host: "codex", sessionId: threadId, label: terminalLabel, cwd, home })
       : undefined,
     onIdle: stop,
-    telemetry: await telemetryWriter(process.env),
+    telemetry: (...args) => telemetry(...args),
     reporter,
   });
   await writeManifest(manifestPath, {

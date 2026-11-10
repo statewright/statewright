@@ -291,3 +291,53 @@ test("service composes the original wait signal with its HTTP timeout", async t 
   assert.equal(captured.reason, reason);
   await cancelled;
 });
+
+for (const operation of ["read", "resolve"]) test(`${operation} starts credential recovery on 401 without replaying the blocked request`, async t => {
+  let provisions=0;
+  const f=await fixture(t,{reprovisionCredential:async()=>{provisions++;return {renewed:true}}});
+  f.response({ok:false,status:401});
+  const call=operation==="getState"?f.service.getState():operation==="read"?f.service.read(ticket):f.service.resolve(ticket,"approved");
+  await assert.rejects(call,error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISIONED");
+  assert.equal(provisions,1);assert.equal(f.calls.length,1);
+});
+test("authorization denial and outage do not reprovision; cancelled provisioning stays blocked",async t=>{
+  let provisions=0;const f=await fixture(t,{reprovisionCredential:async()=>{provisions++;throw Error("user denied")}});
+  for(const status of [403,500]){f.response({ok:false,status});await assert.rejects(f.service.getState(),new RegExp("HTTP "+status))}
+  assert.equal(provisions,0);f.response({ok:false,status:401});await assert.rejects(f.service.getState(),error=>error.code==="STATEWRIGHT_CREDENTIAL_REPROVISION_REQUIRED");
+  assert.equal(provisions,1);assert.equal(f.calls.length,3);
+});
+
+
+test("renewal updates the same approval service and retries only its state read once",async t=>{
+  let f;f=await fixture(t,{reprovisionCredential:async()=>{
+    f.service.updateCredential("renewed-key");
+    f.respond({result:{structuredContent:state}});
+    return {renewed:true};
+  }});
+  const oldMemoryRoot=f.service.approvalMemory.root;
+  f.response({ok:false,status:401});
+  assert.deepEqual(await f.service.getState(),state);
+  assert.equal(f.calls.length,2);
+  assert.equal(f.calls[0].headers.Authorization,"Bearer private-key");
+  assert.equal(f.calls[1].headers.Authorization,"Bearer renewed-key");
+  assert.notEqual(f.service.approvalMemory.root,oldMemoryRoot);
+  assert.equal(f.calls[0].headers["x-statewright-client-id"],f.calls[1].headers["x-statewright-client-id"]);
+});
+
+test("failed state read after renewal is bounded and cannot loop enrollment",async t=>{
+  let provisions=0;
+  const f=await fixture(t,{reprovisionCredential:async()=>{provisions++;return {renewed:true}}});
+  f.response({ok:false,status:401});
+  await assert.rejects(f.service.getState(),/Approval state HTTP 401/);
+  assert.equal(provisions,1);assert.equal(f.calls.length,2);
+});
+
+
+test("an already constructed approval controller cannot retain grants across credential renewal",async t=>{
+  const f=await fixture(t);const heldMemory=f.service.approvalMemory;
+  const binding={policy_sha256:"a".repeat(64),invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64)};
+  await heldMemory.remember(binding,"2h");assert.ok(await heldMemory.lookup(binding));
+  f.service.updateCredential("renewed-key");
+  assert.equal(f.service.approvalMemory,heldMemory);
+  assert.equal(await heldMemory.lookup(binding),null);
+});

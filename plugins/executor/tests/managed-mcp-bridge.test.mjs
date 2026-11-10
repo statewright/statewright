@@ -192,3 +192,16 @@ test("reconnected bridge rotates capability without reviving the retired owner's
     assert.equal(count, 1);
   } finally { await current.close(); }
 });
+
+
+test("renewal replaces the upstream credential while the live bridge, client and native proof stay stable",async t=>{
+  const calls=[];const proof="a".repeat(64);
+  const bridge=await new ManagedMcpBridge({gatewayUrl:"https://gateway.example/mcp",apiKey:"expired-key",clientId:"owner",token:"native-token",originProof:proof,
+    fetch:async (url,init)=>{calls.push({url,...init});return Response.json({jsonrpc:"2.0",id:1,result:{ok:true}})}}).start();
+  t.after(()=>bridge.close());const url=bridge.url;
+  const send=()=>fetch(`${url}/mcp`,{method:"POST",headers:{Authorization:"Bearer native-token"},body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/list"})});
+  await send();bridge.apiKey="renewed-key";await send();
+  assert.equal(bridge.url,url);assert.equal(calls.length,2);
+  assert.deepEqual(calls.map(c=>c.headers.Authorization),["Bearer expired-key","Bearer renewed-key"]);
+  assert.ok(calls.every(c=>c.headers["X-Statewright-Client-Id"]==="owner"&&c.headers["x-statewright-approval-origin"]===proof));
+});

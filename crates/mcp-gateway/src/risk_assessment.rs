@@ -108,6 +108,8 @@ pub struct SemanticShadowConfig {
     pub authoritative_enabled: bool,
     /// Experimental scores may be recorded, but cannot loosen or tighten policy.
     pub evaluation_only: bool,
+    /// Only loopback Laya may receive local command-reference excerpts.
+    pub local_provider: bool,
     pub queue_capacity: usize,
 }
 
@@ -138,11 +140,15 @@ impl SemanticShadowConfig {
             || (provider_kind.map(str::trim) == Some("laya_local")
                 && matches!(environment, Some("dev" | "dev1" | "dev2" | "dev3")));
         let telemetry_enabled = assessment_environment && shadow_enabled_for(shadow_enabled);
-        // New checkpoint families need held-out validation and provenance before
-        // their scores may authorize commands. Existing hosted opt-ins do not
-        // silently confer that authority on an experimental local replacement.
-        let authoritative_enabled = provider_kind.map(str::trim) != Some("laya_local")
-            && shadow_enabled_for(fallthrough_enabled);
+        let local_provider = provider_kind.map(str::trim) == Some("laya_local");
+        // Local authorization requires BOTH explicit assessment and fallthrough
+        // opt-ins in a trusted nonproduction environment. Never enable it in
+        // production/unknown environments or by merely selecting the provider.
+        let authoritative_enabled = if local_provider {
+            telemetry_enabled && shadow_enabled_for(fallthrough_enabled)
+        } else {
+            shadow_enabled_for(fallthrough_enabled)
+        };
         let enabled = telemetry_enabled || authoritative_enabled;
         let queue_capacity = capacity
             .and_then(|value| value.parse::<usize>().ok())
@@ -151,7 +157,8 @@ impl SemanticShadowConfig {
         Self {
             enabled,
             authoritative_enabled,
-            evaluation_only: provider_kind.map(str::trim) == Some("laya_local"),
+            evaluation_only: local_provider && !authoritative_enabled,
+            local_provider,
             queue_capacity,
         }
     }
@@ -2153,8 +2160,9 @@ async fn assess_pipeline_visible_with_runtime_and_references(
         trusted_native_adapter,
     );
     // Local documentation can contain arbitrary/private bytes. Only the
-    // explicitly local evaluation provider receives validated reference data.
-    if config.evaluation_only && trusted_native_adapter && tool.is_none() {
+    // explicitly local provider receives validated reference data, whether it
+    // is assessing in shadow mode or explicitly enabled for authorization.
+    if config.local_provider && trusted_native_adapter && tool.is_none() {
         let reference = validated_command_references(tool_name, arguments, references);
         if let Some(request) = &mut deterministic.semantic_request { request.reference_context = reference.clone(); }
         if let Some(request) = &mut deterministic.ast_semantic_request { request.reference_context = reference; }
@@ -3099,7 +3107,7 @@ mod tests {
         let endpoint = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let timeout = std::time::Duration::from_secs(1);
-        let config = SemanticShadowConfig { enabled: true, authoritative_enabled: false, evaluation_only: true, queue_capacity: 8 };
+        let config = SemanticShadowConfig { enabled: true, authoritative_enabled: false, evaluation_only: true, local_provider: true, queue_capacity: 8 };
         let runtime = start_shared_semantic_shadow_runtime(&config, SemanticProviderConfig {
             kind: SemanticProviderKind::LayaLocal, endpoint, model: "fixture".into(), bearer_token: None, timeout,
         });
@@ -3150,7 +3158,7 @@ mod tests {
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint=format!("http://{}/",listener.local_addr().unwrap());
         let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
-        let config=SemanticShadowConfig {enabled:true,authoritative_enabled:false,evaluation_only:true,queue_capacity:8};
+        let config=SemanticShadowConfig {enabled:true,authoritative_enabled:false,evaluation_only:true,local_provider:true,queue_capacity:8};
         let timeout=std::time::Duration::from_secs(1);
         let runtime=start_shared_semantic_shadow_runtime(&config,SemanticProviderConfig {
             kind:SemanticProviderKind::LayaLocal,endpoint,model:"fixture".into(),bearer_token:None,timeout,
@@ -4238,7 +4246,7 @@ mod tests {
         let endpoint=format!("http://{}/",listener.local_addr().unwrap());
         let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
         let timeout=std::time::Duration::from_secs(1);
-        let config=SemanticShadowConfig {enabled:true,authoritative_enabled:true,evaluation_only:false,queue_capacity:8};
+        let config=SemanticShadowConfig {enabled:true,authoritative_enabled:true,evaluation_only:false,local_provider:false,queue_capacity:8};
         let mut provider=SemanticProviderConfig {kind:SemanticProviderKind::TypeSafeSystemOne,
             endpoint,model:"fixture".into(),bearer_token:None,timeout};
         let runtime=start_shared_semantic_shadow_runtime(&config,provider.clone());
@@ -5026,7 +5034,7 @@ mod tests {
         for env in ["staging", "dev", "dev1", "dev2", "dev3", "production", "preview", ""] {
             for enabled in [None, Some("false"), Some("true")] {
                 let config = SemanticShadowConfig::from_provider_values(
-                    Some(env), enabled, Some("true"), None, Some("laya_local"),
+                    Some(env), enabled, Some("false"), None, Some("laya_local"),
                 );
                 assert_eq!(config.enabled,
                     matches!(env, "staging" | "dev" | "dev1" | "dev2" | "dev3")
@@ -5042,21 +5050,27 @@ mod tests {
     }
 
     #[test]
-    fn laya_local_is_shadow_only_even_with_existing_hosted_authorization_opt_in() {
-        for environment in [None, Some("production"), Some("staging")] {
-            for shadow in [None, Some("true")] {
+    fn laya_local_authorization_requires_nonproduction_and_both_opt_ins() {
+        for environment in [None, Some("production"), Some("preview"), Some("staging"), Some("dev"), Some("dev1"), Some("dev2"), Some("dev3")] {
+            for shadow in [None, Some("false"), Some("true")] {
+              for fallthrough in [None, Some("false"), Some("true")] {
                 let config = SemanticShadowConfig::from_provider_values(
                     environment,
                     shadow,
-                    Some("true"),
+                    fallthrough,
                     Some("1"),
                     Some("laya_local"),
                 );
-                assert!(!config.authoritative_enabled);
+                let enabled = matches!(environment, Some("staging" | "dev" | "dev1" | "dev2" | "dev3"))
+                    && shadow == Some("true");
+                assert_eq!(config.authoritative_enabled, enabled && fallthrough == Some("true"));
+                assert_eq!(config.evaluation_only, !config.authoritative_enabled);
+                assert!(config.local_provider);
                 assert_eq!(
                     config.enabled,
-                    environment == Some("staging") && shadow == Some("true")
+                    enabled
                 );
+              }
             }
         }
         let hosted = SemanticShadowConfig::from_provider_values(
@@ -5074,7 +5088,7 @@ mod tests {
         let config = SemanticShadowConfig::from_provider_values(
             Some("staging"),
             Some("true"),
-            Some("true"),
+            Some("false"),
             None,
             Some("laya_local"),
         );
@@ -5115,6 +5129,51 @@ mod tests {
             assert!(!rebuilt.semantic_failsafe_escalated);
             assert_eq!(rebuilt.resolve_effect(), ResolvedEffect::DenyUncertain);
         }
+    }
+
+    #[test]
+    fn opted_in_laya_uses_existing_confidence_and_evidence_guards() {
+        let config = SemanticShadowConfig::from_provider_values(
+            Some("staging"), Some("true"), Some("true"), None, Some("laya_local"),
+        );
+        let receipt = |read_only, may_write, reversible, destructive| SemanticAssessmentReceipt {
+            tool: "exec_command".into(), status: SemanticAssessorStatus::Assessed,
+            state_intent: None,
+            vector: Some(SemanticRiskVector {
+                read_only: Probability::new(read_only).unwrap(),
+                may_write: Probability::new(may_write).unwrap(),
+                reversible: Probability::new(reversible).unwrap(),
+                destructive: Probability::new(destructive).unwrap(),
+                irreversible: Probability::new(0.01).unwrap(),
+                external_or_account_effect: Probability::new(0.01).unwrap(),
+            }),
+        };
+        let pipeline = |command, semantic| pipeline_from_config(
+            assess_invocation(None, "exec_command", &json!({"cmd":command}), None),
+            semantic, &config,
+        );
+        let confident = receipt(0.99, 0.01, 0.99, 0.01);
+        assert_eq!(pipeline("systemctl status statewright", confident.clone()).resolve_effect_with_basis(),
+            (ResolvedEffect::ReadOnly, "semantic_read_only"));
+        assert_eq!(pipeline("systemctl status statewright", receipt(0.37, 0.21, 0.41, 0.13)).resolve_effect(),
+            ResolvedEffect::DenyUncertain);
+        assert_eq!(pipeline("unknown_program", confident.clone()).resolve_effect(), ResolvedEffect::DenyUncertain);
+        assert_eq!(pipeline("rm -rf /", confident.clone()).resolve_effect(), ResolvedEffect::DenyKnownRisk);
+        let request = semantic_request(None, "exec_command", &json!({"cmd":"systemctl status statewright"}), None, true);
+        for status in [SemanticAssessorStatus::Timeout, SemanticAssessorStatus::Unavailable,
+            SemanticAssessorStatus::Malformed, SemanticAssessorStatus::QueueFull] {
+            assert_eq!(pipeline("systemctl status statewright", semantic_receipt(&request, status)).resolve_effect(),
+                ResolvedEffect::DenyUncertain);
+        }
+        let shadow = SemanticShadowConfig::from_provider_values(
+            Some("staging"), Some("true"), Some("false"), None, Some("laya_local"),
+        );
+        let held = pipeline_from_config(
+            assess_invocation(None, "exec_command", &json!({"cmd":"systemctl status statewright"}), None),
+            confident, &shadow,
+        );
+        assert_eq!(held.semantic.status, SemanticAssessorStatus::ShadowOnly);
+        assert_eq!(held.resolve_effect(), ResolvedEffect::DenyUncertain);
     }
 
     #[tokio::test]

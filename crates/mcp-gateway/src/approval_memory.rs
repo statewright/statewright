@@ -96,7 +96,7 @@ pub(crate) fn context(
         && ((validated_complete_bounds
             && matches!(
                 source,
-                "native_command_evidence" | "native_command_list_evidence"
+                "native_command_evidence" | "native_command_list_evidence" | "shell_ast"
             ))
             || crate::tool_intent::is_native_web_run(tool_name));
     json!({"schema":"statewright/approval-memory-context/v1",
@@ -142,6 +142,18 @@ mod tests {
             )["approve_for"],
             "8h"
         );
+    }
+
+    #[test]
+    fn complete_native_shell_effects_can_bind_a_reusable_approval() {
+        let session = session();
+        let input = json!({"cmd":"example --inspect","workdir":"/workspace"});
+        let context_for = |source, native, complete| context(
+            &session, "exec_command", &input, None, None, source, native, complete);
+        assert_eq!(context_for("shell_ast", true, true)["reusable"], true);
+        assert_eq!(context_for("shell_ast", true, false)["reusable"], false);
+        assert_eq!(context_for("shell_ast", false, true)["reusable"], false);
+        assert_eq!(context_for("native_command_evidence_incomplete", true, true)["reusable"], false);
     }
     #[test]
     fn memory_identity_survives_collection_time_but_invalidates_changes() {

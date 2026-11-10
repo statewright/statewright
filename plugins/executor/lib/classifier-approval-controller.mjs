@@ -65,7 +65,7 @@ export function classifierReviewMessage(request) {
   const display = request.displayContext;
   const reasons = {
     semantic_authorization_disabled: "The built-in checks did not prove this request's effects. Semantic assessments cannot authorize commands in this environment, so this request needs your review.",
-    incomplete_structural_evidence: "Parsing left part of this invocation unexamined; its effects have not been established.",
+    incomplete_structural_evidence: "The command's structure or the effects of a referenced script could not be fully verified. Review the command and its dependencies before allowing it.",
     semantic_vector_unavailable: "The semantic assessor returned no usable judgment for this invocation.",
     semantic_assessment_incomplete: "The semantic assessment did not complete successfully.",
     semantic_threshold_not_met: "The semantic assessment did not establish a sufficiently safe effect for this invocation.",
@@ -221,9 +221,11 @@ export class ClassifierApprovalController {
     const configuredDuration=request.memoryContext?.approve_for ?? "once";
     const reusable=Boolean(this.memory && request.memoryContext?.reusable);
     const effectiveDuration=reusable ? configuredDuration : "once";
-    const memoryUnavailableReason=configuredDuration !== "once" && !reusable
-      ? (!this.memory ? "The configured reusable approval is unavailable: the approval store is unavailable."
-        : "The configured reusable approval is unavailable: supporting source provenance is incomplete.") : null;
+    const memoryUnavailableReason = !request.memoryContext
+      ? "The request did not include a valid approval-memory policy and binding; only a one-time approval is available."
+      : configuredDuration !== "once" && !reusable
+        ? (!this.memory ? "The configured reusable approval is unavailable: the approval store is unavailable."
+          : "The configured reusable approval is unavailable: supporting source provenance is incomplete.") : null;
     const pending = {request, requestId, settled: false, presented: false, signal, effectiveDuration};
     pending.promise = new Promise(resolve => { pending.resolve = resolve; });
     entry.pending = pending;

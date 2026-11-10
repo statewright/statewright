@@ -63,6 +63,18 @@ test("configured 8h with missing provenance is visibly once only",async t=>{
   assert.equal((await first.completion).action,"allow_once");assert.deepEqual(await f.make().list(),[]);
 });
 
+test("missing approval-memory context is explained before a once-only decision",async t=>{
+  const f=await fixture(t),sent=[],value=request();
+  delete value.approval_memory;
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>state(),memory:f.make()});
+  const pending=await controller.begin(value);
+  assert.match(sent[0].params.message,/did not include a valid approval-memory policy and binding/);
+  assert.match(sent[0].params.message,/one-time approval/);
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});
+  assert.equal((await pending.completion).action,"allow_once");
+  assert.deepEqual(await f.make().list(),[]);
+});
+
 test("invalid or conflicting duration cannot increase a native grant",async t=>{
   assert.equal(approvalMemoryContext({...context,approve_for:"9h"}),null);
   assert.equal(approvalMemoryContext({...context,approve_for:"always",allowed_durations:["once","8h"]}),null);

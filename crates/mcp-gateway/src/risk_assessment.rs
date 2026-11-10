@@ -534,6 +534,12 @@ impl RiskPipelineAssessment {
                 (effect, basis)
             }
             RiskBand::Moderate if self.deterministic.exposure == ExposureBand::Unknown => {
+                if self.deterministic.source == "native_command_evidence_incomplete"
+                    || (matches!(self.deterministic.source, "native_command_evidence" | "native_command_list_evidence")
+                        && self.complete_resource_bounds().is_none())
+                {
+                    return (DenyUncertain, "incomplete_structural_evidence");
+                }
                 if !self.semantic_authorization_enabled {
                     return (DenyUncertain, "semantic_authorization_disabled");
                 }
@@ -3208,12 +3214,55 @@ mod tests {
         assert_eq!(expanded.resolve_effect(), ResolvedEffect::BoundedLocalExecution);
         assert_eq!(expanded.semantic.status, SemanticAssessorStatus::NotRequired);
         assert!(seen.lock().unwrap().is_empty(), "a complete native body must be reduced before model dispatch");
+        let actual_body = "printf 'STATEWRIGHT_8H_CANARY_OK\\n'";
+        let mut actual_evidence = evidence.clone();
+        actual_evidence["commands"][0]["original"] = json!(actual_body);
+        actual_evidence["commands"][0]["resolved"] = json!(actual_body);
+        actual_evidence["commands"][0]["invocation"] = json!(bash_classifier::literal_invocation(actual_body));
+        let actual = assess_native_ordered_with_runtime(None, "exec_command", &input,
+            None, Some(&actual_evidence), None, &config, Some(&runtime), timeout).await;
+        assert_eq!(actual.resolve_effect(), ResolvedEffect::BoundedLocalExecution,
+            "the actual package script must reduce like the simple printf fixture: {actual:?}");
+        let mut bash_evidence = actual_evidence.clone();
+        bash_evidence["tool_name"] = json!("Bash");
+        let bash_actual = assess_native_ordered_with_runtime(None, "Bash", &input,
+            None, Some(&bash_evidence), None, &config, Some(&runtime), timeout).await;
+        assert_eq!(bash_actual.resolve_effect(), ResolvedEffect::BoundedLocalExecution);
+        actual_evidence["commands"][0]["invocation"] = serde_json::Value::Null;
+        let incomplete = assess_native_ordered_with_runtime(None, "exec_command", &input,
+            None, Some(&actual_evidence), None, &config, Some(&runtime), timeout).await;
+        assert_eq!(incomplete.resolve_effect_with_basis(), (ResolvedEffect::DenyUncertain, "incomplete_structural_evidence"));
+        let prior_calls = seen.lock().unwrap().len();
         let unknown = assess_native_ordered_with_runtime(None, "exec_command", &json!({"cmd":"unfamiliar-tool inspect"}),
             None, None, None, &config, Some(&runtime), timeout).await;
         assert_eq!(unknown.semantic.status, SemanticAssessorStatus::ShadowOnly);
         assert_eq!(unknown.resolve_effect(), ResolvedEffect::DenyUncertain);
-        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(seen.lock().unwrap().len(), prior_calls + 1);
         server.abort();
+    }
+
+    #[test]
+    fn native_external_read_and_local_write_are_uncertain_with_complete_effect_bounds() {
+        set_test_shell_ast_authority_enabled(Some(true));
+        let input = json!({"cmd":"kubectl get pods && mkdir results","workdir":"/workspace"});
+        let pipeline = assess_native_policy_rejection(None, "exec_command", &input, None);
+        set_test_shell_ast_authority_enabled(None);
+        assert_eq!(pipeline.deterministic.source, "shell_ast");
+        assert_eq!(pipeline.resolve_effect(), ResolvedEffect::DenyUncertain);
+        assert!(pipeline.complete_resource_bounds().is_some());
+        let session = crate::session::GatewaySession::new("fixture".into(), serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work","states":{"work":{}},
+            "meta":{"approval_memory":{"approve_for":"8h","allowed_durations":["once","8h"]}}
+        })).unwrap());
+        let binding = |value: &serde_json::Value, references: Option<&serde_json::Value>| {
+            crate::approval_memory::context(&session, "exec_command", value, None, references,
+                pipeline.deterministic.source, true, pipeline.complete_resource_bounds().is_some())
+        };
+        let original = binding(&input, None);
+        assert_eq!(original["reusable"], true);
+        assert_eq!(original["approve_for"], "8h");
+        assert_ne!(original["invocation_sha256"], binding(&json!({"cmd":"kubectl get pods && mkdir other","workdir":"/workspace"}), None)["invocation_sha256"]);
+        assert_ne!(original["dependency_sha256"], binding(&input, Some(&json!({"changed":"reference"})))["dependency_sha256"]);
     }
 
     #[tokio::test]

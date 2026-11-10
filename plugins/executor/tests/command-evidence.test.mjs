@@ -67,6 +67,22 @@ test("literal launcher parser rejects shell execution and malformed quoting", ()
   }
 });
 
+test("package evidence preserves literal single-quoted backslashes", async t => {
+  const root = await fixture(t);
+  const body = "printf 'STATEWRIGHT_8H_CANARY_OK\\n'";
+  await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { canary: body } }));
+  const proof = await inspect(root, "npm run canary");
+  assert.equal(proof.complete, true, proof.reason);
+  assert.deepEqual(proof.commands[0].invocation, {
+    executable: "printf", args: ["STATEWRIGHT_8H_CANARY_OK\\n"], environment_names: [], wrappers: [],
+  });
+  assert.deepEqual(literalCommandList("printf 'ok\\n' && git status --short"),
+    ["printf 'ok\\n'", "git status --short"]);
+  for (const command of ["printf \\;id", 'printf "a\\nb"', "printf foo\\ bar"]) {
+    assert.equal(literalArgv(command), null, command);
+  }
+});
+
 test("command-list collection retains every branch and never executes a leaf", async t => {
   const root = await fixture(t);
   await mkdir(join(root, "scripts"));

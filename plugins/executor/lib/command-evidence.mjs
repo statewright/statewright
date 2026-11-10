@@ -17,9 +17,12 @@ const fail = reason => { throw new Error(reason); };
 // Only literal launcher argv is expanded. The gateway's AST still owns shell
 // effect classification; this parser never executes or rewrites shell syntax.
 export function literalArgv(command) {
-  if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00\\$`;&|<>()]/.test(command)) return null;
+  if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00$`;&|<>()]/.test(command)) return null;
   let quote = null;
   for (const char of command) {
+    // A backslash inside single quotes is literal shell data. Everywhere
+    // else it may escape syntax and must remain outside this simple parser.
+    if (char === "\\" && quote !== "'") return null;
     if (quote) { if (char === quote) quote = null; }
     else if (char === "'" || char === '"') quote = char;
     else if ("*?[]{}~".includes(char)) return null;
@@ -99,11 +102,12 @@ const shellLiteral = value => /^[a-zA-Z0-9_./=-]+$/.test(value) ? value : `'${va
 // Candidate boundaries only, not shell authority. Rust independently parses
 // the full original AST and requires exactly these leaves, in this order.
 export function literalCommandList(command) {
-  if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00\\$`<>()]/.test(command)) return null;
+  if (typeof command !== "string" || command.length > 8192 || /[\n\r\x00$`<>()]/.test(command)) return null;
   let quote = null, start = 0;
   const units = [];
   for (let index = 0; index < command.length; index++) {
     const char = command[index];
+    if (char === "\\" && quote !== "'") return null;
     if (quote) { if (char === quote) quote = null; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
     if (char !== ";" && char !== "&" && char !== "|") continue;

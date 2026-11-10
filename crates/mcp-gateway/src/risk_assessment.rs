@@ -3244,7 +3244,7 @@ mod tests {
     #[test]
     fn native_external_read_and_local_write_are_uncertain_with_complete_effect_bounds() {
         set_test_shell_ast_authority_enabled(Some(true));
-        let input = json!({"cmd":"kubectl get pods && mkdir results","workdir":"/workspace"});
+        let input = json!({"cmd":"kubectl --kubeconfig /Users/ben/.kube/galactica -n statewright-dev get pods && mkdir -p /Volumes/sidecar/build-tmp/statewright-8h-canary-20261109/reuse-check","workdir":"/workspace"});
         let pipeline = assess_native_policy_rejection(None, "exec_command", &input, None);
         set_test_shell_ast_authority_enabled(None);
         assert_eq!(pipeline.deterministic.source, "shell_ast");

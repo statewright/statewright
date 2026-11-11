@@ -1144,7 +1144,10 @@ case "$ENDPOINT" in
       fi
       APPROVAL_ACTION=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.action // empty' 2>/dev/null || true)
       if [ "$APPROVAL_ACTION" = "allow_once" ]; then
-        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"[statewright] Human approval granted for this exact invocation once."}}'
+        APPROVAL_DISPLAY=$(printf '%s' "$APPROVAL_RESULT" \
+          | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/guard-denial.mjs" --approval 2>/dev/null) || APPROVAL_DISPLAY=""
+        jq -n --arg message "[statewright] ${APPROVAL_DISPLAY:-Human approval cleared this exact invocation.}" \
+          '{hookSpecificOutput:{hookEventName:"PreToolUse",additionalContext:$message}}'
         exit 0
       fi
       if [ "$UNMANAGED_DELEGATION" = "true" ]; then
@@ -1165,9 +1168,9 @@ case "$ENDPOINT" in
         ADAPTER_DISPLAY="$ADAPTER_REASON"
       fi
       if [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "rework" ]; then
-        REWORK_ATTEMPTS=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.attempts // 0' 2>/dev/null || echo 0)
-        REWORK_MAX=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.max_reworks // 2' 2>/dev/null || echo 2)
-        ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Rework attempt ${REWORK_ATTEMPTS}/${REWORK_MAX}. No approval has been granted; reaching the budget does not itself submit or approve this invocation."
+        REWORK_DISPLAY=$(printf '%s' "$APPROVAL_RESULT" \
+          | "$STATEWRIGHT_NODE_RUNTIME" "${SCRIPT_DIR}/scripts/guard-denial.mjs" --rework 2>/dev/null) || REWORK_DISPLAY=""
+        ADAPTER_DISPLAY="${ADAPTER_DISPLAY}${REWORK_DISPLAY:- No approval has been granted. Use an independently permitted operation that still answers the task.}"
       elif [ "$UNMANAGED_DELEGATION" != "true" ] && [ "$APPROVAL_ACTION" = "deny" ]; then
         APPROVAL_REASON=$(printf '%s' "$APPROVAL_RESULT" | jq -r '.reason // empty' 2>/dev/null || true)
         case "$APPROVAL_REASON" in

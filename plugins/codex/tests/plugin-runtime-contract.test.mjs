@@ -85,6 +85,7 @@ test("plugin MCP transport launches from the installed plugin root", async () =>
     "STATEWRIGHT_ADAPTER_TOKEN",
     "STATEWRIGHT_MANAGED_MCP_URL",
     "STATEWRIGHT_MANAGED_MCP_TOKEN",
+    "STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT",
   ]);
   assert.equal(server.env, undefined);
   assert.ok(

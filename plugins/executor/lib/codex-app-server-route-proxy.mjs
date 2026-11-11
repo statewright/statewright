@@ -535,6 +535,7 @@ export async function startCodexAppServerRouteProxy({
   classifierApprovalService = approvalService,
   classifierApprovalToken = null,
   classifierMaxReworks = 0,
+  classifierDeferFirst = false,
   peekPendingRoute = async () => null,
   onRouteInjected = async () => {},
   onRouteConfirmed = async () => {},
@@ -583,7 +584,7 @@ export async function startCodexAppServerRouteProxy({
       response.end("ok\n");
       return;
     }
-    if (["/classifier-approval","/classifier-approval/memory"].includes(request.url) && request.method === "POST"
+    if (["/classifier-approval","/classifier-approval/memory","/classifier-approval/review"].includes(request.url) && request.method === "POST"
         && classifierApprovalService && classifierApprovalToken) {
       if (!classifierAuthorized(request)) {
         response.writeHead(401).end();
@@ -608,15 +609,34 @@ export async function startCodexAppServerRouteProxy({
           }
         }
         const value = JSON.parse(body);
+        const explicitReview = request.url === "/classifier-approval/review";
+        if (explicitReview && (!classifierDeferFirst || !/^[a-f0-9-]{36}$/.test(value?.ticket ?? ""))) {
+          throw new Error("Invalid classifier review ticket");
+        }
         const owners = [];
         for (const candidate of classifierOwners) {
           if (!candidate.initialized) continue;
-          if (!candidate.threads.has(value?.thread_id)) continue;
-          if (await classifierApprovalService.ownsThread?.(value.thread_id)) owners.push(candidate);
+          const threadId = explicitReview
+            ? candidate.controller.deferredEntry(value.ticket)?.request.threadId : value?.thread_id;
+          if (!candidate.threads.has(threadId)) continue;
+          if (await classifierApprovalService.ownsThread?.(threadId)) owners.push(candidate);
         }
         if (owners.length !== 1) throw new Error(owners.length
           ? "Classifier approval has multiple owning native connections"
           : "Classifier approval has no owning native connection");
+        if (explicitReview) {
+          const result = await owners[0].controller.reviewDeferred(value.ticket, {signal:approvalController.signal});
+          request.off("aborted",abortApproval);response.off("close",closeApproval);
+          if (!response.destroyed) {
+            response.writeHead(200, {"Content-Type":"application/json"});
+            response.end(JSON.stringify({
+              schema:"statewright/classifier-review/v1",
+              action:result?.action === "allow_once" ? "approved" : "denied",
+              reason:result?.reason ?? "classifier_review_ticket_unavailable",
+            }));
+          }
+          return;
+        }
         if(request.url==="/classifier-approval/memory") {
           const memory=classifierApprovalService.approvalMemory;
           if(!memory)throw new Error("Approval memory is unavailable");
@@ -859,6 +879,7 @@ export async function startCodexAppServerRouteProxy({
       getState: readClassifierState,
       memory: classifierApprovalService.approvalMemory ?? null,
       maxReworks: classifierMaxReworks,
+      deferFirst: classifierDeferFirst,
       record: event => {
         if (event.approval_request_id) humanInteractions.resolve(event.approval_request_id, {
           action:event.type === "classifier_human_approval_granted" ? "allow_once" : "deny",

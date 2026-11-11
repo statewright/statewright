@@ -63,7 +63,7 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2, memory = false, userAgent = null} = {}) {
+async function setup(t, {maxReworks = 2, memory = false, userAgent = null, deferFirst = false} = {}) {
   const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
   if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -96,6 +96,7 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null} = {})
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
+    classifierDeferFirst: deferFirst,
     onCompatibilityWarning: message => warnings.push(message),
     classifierApprovalService: {
       ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
@@ -136,8 +137,8 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null} = {})
     return { client, messages };
   }
   const endpoint = `${proxy.url.replace(/^ws/, "http")}/classifier-approval`;
-  async function post(body, headers = {}) {
-    return fetch(endpoint, { method: "POST", headers: {
+  async function post(body, headers = {}, suffix = "") {
+    return fetch(endpoint + suffix, { method: "POST", headers: {
       "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...headers,
     }, body: JSON.stringify(body) });
   }
@@ -177,6 +178,53 @@ test("classifier uncertainty reaches native approval immediately when rewrites a
   const allowed = await (await pending).json();
   assert.equal(allowed.action, "allow_once");
   assert.equal(allowed.invocation_fingerprint, "invocation_v1_immediate");
+});
+
+test("explicit native review presents the held invocation and only then permits its matching use", async t => {
+  const fixture = await setup(t, {maxReworks:0, deferFirst:true});
+  const {client, messages} = await fixture.connectAndOwn();
+  const value = approvalRequest("held", {approval_memory:memoryContext,
+    tool_name:"Bash", tool_input:{command:"getconf CHILD_MAX",cwd:"/fixture"}});
+  const held = await (await fixture.post(value)).json();
+  assert.equal(held.action, "rework");
+  assert.match(held.review_ticket, /^[a-f0-9-]{36}$/);
+  assert.equal((await (await fixture.post(value)).json()).reason, "exact_invocation_already_observed");
+  assert(!messages.some(message => message.method === "mcpServer/elicitation/request"));
+  assert.equal((await fixture.post({ticket:held.review_ticket}, {Authorization:"Bearer wrong"}, "/review")).status, 401);
+  const review = fixture.post({ticket:held.review_ticket}, {}, "/review");
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"), "review of the original invocation");
+  assert.match(modal.params.message, /getconf CHILD_MAX/);
+  assert.equal((await fixture.post({ticket:held.review_ticket}, {}, "/review")).status, 400);
+  client.send(JSON.stringify({id:modal.id, result:{action:"accept"}}));
+  assert.equal((await (await review).json()).action, "approved");
+  const permitted = await (await fixture.post(value)).json();
+  assert.equal(permitted.reason, "deferred_human_approval");
+  assert.equal((await (await fixture.post(value)).json()).action, "rework");
+  assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
+});
+
+test("explicit native review preserves eight-hour memory and rejects a ticket after state drift", async t => {
+  const fixture = await setup(t, {maxReworks:0, deferFirst:true, memory:true});
+  const {client, messages} = await fixture.connectAndOwn();
+  const value = approvalRequest("sticky", {approval_memory:memoryContext});
+  const {review_ticket:ticket} = await (await fixture.post(value)).json();
+  const review = fixture.post({ticket}, {}, "/review");
+  const modal = await until(() => messages.find(message => message.method === "mcpServer/elicitation/request"), "timed review");
+  assert.match(modal.params.message, /8 hours/);
+  client.send(JSON.stringify({id:modal.id, result:{action:"accept"}}));
+  assert.equal((await (await review).json()).action, "approved");
+  const reused = await (await fixture.post(value)).json();
+  assert.equal(reused.reason, "remembered_human_approval");
+  assert.equal(reused.duration, "8h");
+
+  const changed = approvalRequest("changed", {approval_memory:{
+    ...memoryContext, dependency_sha256:"d".repeat(64)}});
+  const held = await (await fixture.post(changed)).json();
+  assert.equal(held.action, "rework");
+  fixture.setState({state_epoch:5});
+  const denied = await (await fixture.post({ticket:held.review_ticket}, {}, "/review")).json();
+  assert.equal(denied.reason, "approval_state_changed");
+  assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
 });
 
 const waitSoakMs = Number(process.env.STATEWRIGHT_APPROVAL_WAIT_SOAK_MS ?? 80);

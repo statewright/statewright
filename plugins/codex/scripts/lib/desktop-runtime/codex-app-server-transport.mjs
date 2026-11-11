@@ -335,6 +335,7 @@ export async function startCodexAppServerRuntime({
         return result;
       },
       workflowOriginStore,
+      classifierDeferFirst: Boolean(environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT),
       onNativeUsage,
       routeOwner,
       requiredMcpToolSuffix,

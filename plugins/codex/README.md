@@ -420,6 +420,15 @@ owner cannot be verified, ordinary tools stay held while native Statewright
 discovery and recovery remain available. Unmanaged dormant hooks do not adopt
 workflows from a gateway.
 
+Managed Codex can hold an eligible uncertain invocation and return a review
+ticket when its invocation and dependency evidence can be checked again. Try a
+narrower permitted operation first. If it cannot answer the task, call the
+local `statewright_request_classifier_review` tool with the ticket. The native
+dialog reviews the original invocation. After approval, submit the exact same
+tool request and working directory so the current workflow policy and source
+evidence can be checked before execution. The ticket expires if the owner or
+workflow binding changes. A workflow policy denial cannot issue a review ticket.
+
 The local host services approval requests through a serial, explicit-priority
 chain of responsibility. Only an unsupported (`NotHandled`) request may pass to
 the next handler; deny, ask, allow, and error are terminal, and required-handler

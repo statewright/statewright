@@ -3,7 +3,7 @@ import { NATIVE_STATEWRIGHT_GUIDANCE } from "./lib/desktop-runtime/native-statew
 import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "./classifier-approval.mjs";
 import {normalizeCodexHookInput} from "./lib/codex-hook-context.mjs";
 
-import { classifierDenialDisplay, classifierReworkDisplay } from './guard-denial.mjs';
+import { classifierApprovalDisplay, classifierDenialDisplay, classifierReworkDisplay } from './guard-denial.mjs';
 
 const TIMEOUT_MS = 5_000;
 
@@ -181,7 +181,7 @@ export async function handleExecutorHook(endpoint, input, options = {}) {
             // Do not emit permissionDecision=allow: native platform approval
             // and other plugins' guards remain independent requirements.
             return { hookSpecificOutput: { hookEventName: "PreToolUse",
-              additionalContext: `[statewright] Human approved this exact invocation once. Native platform permissions still apply. Classifier approval receipt: ${JSON.stringify(approval)}`,
+              additionalContext: `[statewright] ${classifierApprovalDisplay(approval)} Native platform permissions still apply. Classifier approval receipt: ${JSON.stringify(approval)}`,
             } };
           }
           result = { ...result, classifier_approval: approval,

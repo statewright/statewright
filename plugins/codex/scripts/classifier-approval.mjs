@@ -117,10 +117,7 @@ function runtimeReceiptPath(environment) {
   throw new Error("classifier_approval_runtime_unavailable");
 }
 
-export async function requestClassifierApproval(value, options = {}) {
-  const request = redactedApprovalRequest(value);
-  if (!request) return {schema: "statewright/classifier-approval/v2",
-    action: "deny", reason: "invalid_redacted_classifier_receipt"};
+async function approvalPost(path, body, options) {
   const environment = options.environment ?? process.env;
   const runtime = JSON.parse(await (options.readFile ?? readFile)(runtimeReceiptPath(environment), "utf8"));
   if (!printable(runtime.proxyUrl, 4096) || !printable(runtime.proxyToken, 4096)) {
@@ -131,19 +128,27 @@ export async function requestClassifierApproval(value, options = {}) {
     throw new Error("classifier_approval_runtime_not_loopback");
   }
   endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
-  endpoint.pathname = "/classifier-approval";
+  endpoint.pathname = path;
   endpoint.search = "";
   endpoint.hash = "";
   const response = await (options.fetch ?? approvalTransport)(endpoint, {
     method: "POST",
     headers: {"Content-Type": "application/json", Authorization: `Bearer ${runtime.proxyToken}`},
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
     ...(options.signal ? {signal: options.signal} : {}),
   });
   const result = await response.json().catch(() => null);
   if (!response.ok || !result || typeof result !== "object") {
     throw new Error(`classifier_approval_http_${response.status}`);
   }
+  return result;
+}
+
+export async function requestClassifierApproval(value, options = {}) {
+  const request = redactedApprovalRequest(value);
+  if (!request) return {schema: "statewright/classifier-approval/v2",
+    action: "deny", reason: "invalid_redacted_classifier_receipt"};
+  const result = await approvalPost("/classifier-approval", request, options);
   if (!["rework", "allow_once", "deny"].includes(result.action)) {
     throw new Error("classifier_approval_invalid_action");
   }
@@ -167,6 +172,29 @@ export async function requestClassifierApproval(value, options = {}) {
     throw new Error("classifier_approval_identity_mismatch");
   }
   return result;
+}
+
+async function reviewMcpRequest(value) {
+  const ticket = value.params?.arguments?.ticket;
+  let message;
+  let isError = false;
+  try {
+    if (typeof ticket !== "string" || !/^[a-f0-9-]{36}$/.test(ticket)) {
+      throw new Error("classifier_approval_invalid_review_ticket");
+    }
+    const result = await approvalPost("/classifier-approval/review", {ticket}, {});
+    if (result.schema !== "statewright/classifier-review/v1" || !["approved","denied"].includes(result.action)) {
+      throw new Error("classifier_approval_invalid_action");
+    }
+    isError = result.action !== "approved";
+    message = isError
+      ? "Native review did not authorize the original invocation. Do not replay it."
+      : "Native review approved the original invocation. Submit that exact tool request with the same arguments and working directory. Statewright will verify the current policy and binding before execution.";
+  } catch (error) {
+    isError = true;
+    message = `Native review could not be confirmed (${classifierApprovalFailureReason(error)}). Do not replay the original invocation.`;
+  }
+  return {jsonrpc:"2.0", id:value.id, result:{isError, content:[{type:"text",text:message}]}};
 }
 
 export async function manageApprovalMemory({threadId, action, grantId}, options={}) {
@@ -193,6 +221,10 @@ async function main() {
     if (Buffer.byteLength(input) > MAX_INPUT_BYTES) throw new Error("classifier_approval_input_too_large");
   }
   const value = JSON.parse(input);
+  if (process.argv[2] === "--review-mcp") {
+    process.stdout.write(`${JSON.stringify(await reviewMcpRequest(value))}\n`);
+    return;
+  }
   process.stdout.write(`${JSON.stringify(await requestClassifierApproval(value))}\n`);
 }
 

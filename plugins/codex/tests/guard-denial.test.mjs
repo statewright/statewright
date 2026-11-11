@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { formatGuardDenial } from '../scripts/executor-hook.mjs';
+import { classifierApprovalDisplay } from '../scripts/guard-denial.mjs';
 
 const receipt = {
   final_denial_basis: 'semantic_authorization_disabled',
@@ -50,9 +51,29 @@ test('rework is not a promised or already pending native approval and forbids un
   const message = formatGuardDenial(result).display;
   assert.match(message, /Rework attempt 2\/2/);
   assert.match(message, /No approval has been granted/);
+  assert.match(message, /Before asking the user, try a materially narrower, independently permitted operation/);
   assert.match(message, /approval dialog is available/);
   assert.match(message, /Do not replay the unchanged invocation/);
   assert.doesNotMatch(message, /will be sent|must be sent/);
+});
+
+test('missing external capability offers an authorized alternative without suggesting replay', () => {
+  const result = {reason:'Classifier approval cannot grant a missing external capability.',
+    risk_assessment:{...receipt, final_denial_basis:'workflow_approval_policy',
+      deterministic_exposure:'External', separate_approval_allowed:false, reformulation_allowed:false}};
+  const message = formatGuardDenial(result).display;
+  assert.match(message, /lacks the capability to review it/);
+  assert.match(message, /existing local receipt/);
+  assert.match(message, /authorized phase/);
+  assert.match(message, /Do not replay the unchanged invocation/);
+  assert.doesNotMatch(message, /A human can review this request/);
+});
+
+test('approval feedback distinguishes a new eight-hour grant, its reuse, and a one-time decision', () => {
+  const grant = {grant_id:'fixture-grant', duration:'8h'};
+  assert.match(classifierApprovalDisplay({...grant, reason:'human_approved'}), /remember it for 8 hours/);
+  assert.match(classifierApprovalDisplay({...grant, reason:'remembered_human_approval'}), /Reused human approval.*8 hours/);
+  assert.match(classifierApprovalDisplay({reason:'human_approved'}), /once/);
 });
 
 test('capability and policy denials do not advertise classifier approval or reformulation', () => {

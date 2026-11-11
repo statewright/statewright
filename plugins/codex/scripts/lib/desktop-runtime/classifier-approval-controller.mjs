@@ -107,7 +107,7 @@ export function classifierReviewMessage(request) {
 export class ClassifierApprovalController {
   constructor({send, record = async () => {}, maxReworks = 0,
     ttlMs = 10 * 60_000,
-    now = () => Date.now(), getState = null, memory = null} = {}) {
+    now = () => Date.now(), getState = null, memory = null, deferFirst = false} = {}) {
     if (typeof send !== "function") throw new Error("Classifier approval requires a native sender");
     if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
       throw new Error("Classifier rework budget must be between 0 and 10");
@@ -118,7 +118,7 @@ export class ClassifierApprovalController {
     if (getState !== null && typeof getState !== "function") {
       throw new Error("Classifier approval state reader must be a function");
     }
-    Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory});
+    Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory, deferFirst});
     this.entries = new Map();
     this.requests = new Map();
     this.closedReason=null;
@@ -126,7 +126,7 @@ export class ClassifierApprovalController {
 
   prune(timestamp = this.now()) {
     for (const [key, entry] of this.entries) {
-      if (timestamp - entry.updatedAt >= this.ttlMs && !entry.pending) this.entries.delete(key);
+      if (timestamp - entry.updatedAt >= this.ttlMs && !entry.pending && !entry.reviewing) this.entries.delete(key);
     }
   }
 
@@ -139,6 +139,32 @@ export class ClassifierApprovalController {
 
   emit(event) {
     void Promise.resolve().then(() => this.record(event)).catch(() => {});
+  }
+
+  deferredEntry(ticket) {
+    this.prune();
+    for (const [key, entry] of this.entries) {
+      if (entry.deferred?.ticket === ticket) return {key, entry, request: entry.deferred.request};
+    }
+    return null;
+  }
+
+  async reviewDeferred(ticket, {signal} = {}) {
+    const deferred = this.deferredEntry(ticket);
+    if (!deferred || this.closedReason || signal?.aborted) return null;
+    const {key, entry, request} = deferred;
+    if (entry.pending || entry.reviewing || entry.denied) return null;
+    entry.deferred = null;
+    entry.reviewing = true;
+    try {
+      if (!await this.current(request) || this.closedReason || signal?.aborted) {
+        return this.result(request, "deny", {reason:"approval_state_changed"});
+      }
+      const decision = this.present(request, key, entry, {signal, deferred:true});
+      return await decision.completion;
+    } finally {
+      entry.reviewing = false;
+    }
   }
 
   result(request, action, details = {}) {
@@ -196,8 +222,23 @@ export class ClassifierApprovalController {
       return approvalDeny(this.result(request, "deny", {reason: "approval_previously_denied",
         prior_reason: entry.denialReason}));
     }
-    if (entry.pending) {
+    if (entry.pending || entry.reviewing) {
       return approvalDeny(this.result(request, "deny", {reason: "approval_already_pending"}));
+    }
+    if (entry.permit?.invocationFingerprint === request.invocationFingerprint) {
+      const permit = entry.permit;
+      entry.permit = null;
+      entry.reviewing = true;
+      try {
+        if (JSON.stringify(permit.memoryContext) !== JSON.stringify(request.memoryContext)
+            || !await this.current(request) || signal?.aborted || this.closedReason) {
+          return approvalDeny(this.result(request, "deny", {reason:"approval_state_changed"}));
+        }
+        this.entries.delete(key);
+        return approvalAllow(this.result(request, "allow_once", {reason:"deferred_human_approval"}));
+      } finally {
+        entry.reviewing = false;
+      }
     }
     if (entry.seenInvocations.has(request.invocationFingerprint)) {
       return approvalDeny(this.result(request, "deny", {reason: "exact_invocation_already_observed",
@@ -207,6 +248,13 @@ export class ClassifierApprovalController {
     entry.attempts += 1;
     entry.updatedAt = timestamp;
     this.entries.set(key, entry);
+    if (this.deferFirst && entry.attempts === 1 && request.sessionGeneration && request.memoryContext?.reusable) {
+      const ticket = randomUUID();
+      entry.deferred = {ticket, request};
+      this.emit({type:"classifier_rework_requested", threadId:request.threadId, run_id:request.runId,
+        state:request.state, basis:request.basis, attempts:1, max_reworks:1});
+      return approvalDeny(this.result(request, "rework", {attempts:1, max_reworks:1, review_ticket:ticket}));
+    }
     if (entry.attempts <= this.maxReworks) {
       this.emit({type: "classifier_rework_requested", threadId: request.threadId,
         run_id: request.runId, state: request.state, basis: request.basis,
@@ -215,6 +263,11 @@ export class ClassifierApprovalController {
         max_reworks: this.maxReworks}));
     }
 
+    entry.deferred = null;
+    return this.present(request, key, entry, {signal});
+  }
+
+  present(request, key, entry, {signal, deferred = false}) {
     const requestId = `statewright-classifier-approval-${randomUUID()}`;
     const configuredDuration=request.memoryContext?.approve_for ?? "once";
     const reusable=Boolean(this.memory && request.memoryContext?.reusable);
@@ -224,7 +277,7 @@ export class ClassifierApprovalController {
       : configuredDuration !== "once" && !reusable
         ? (!this.memory ? "The configured reusable approval is unavailable: the approval store is unavailable."
           : "The configured reusable approval is unavailable: supporting source provenance is incomplete.") : null;
-    const pending = {request, requestId, settled: false, presented: false, signal, effectiveDuration};
+    const pending = {request, requestId, settled: false, presented: false, signal, effectiveDuration, deferred};
     pending.promise = new Promise(resolve => { pending.resolve = resolve; });
     entry.pending = pending;
     const container = {key, entry, pending};
@@ -270,7 +323,10 @@ export class ClassifierApprovalController {
     this.requests.delete(pending.requestId);
     entry.pending = null;
     entry.updatedAt = this.now();
-    if (action === "allow_once") this.entries.delete(key);
+    if (action === "allow_once") {
+      if (pending.deferred && !pending.grant) entry.permit = pending.request;
+      else this.entries.delete(key);
+    }
     else {
       entry.denied = true;
       entry.denialReason = reason;
@@ -369,5 +425,6 @@ export class ClassifierApprovalController {
   close(reason = "provider_connection_closed") {
     this.closedReason=reason;
     for (const container of [...this.requests.values()]) this.finish(container, "deny", reason);
+    this.entries.clear();
   }
 }

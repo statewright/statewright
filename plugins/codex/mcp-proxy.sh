@@ -114,6 +114,14 @@ run_codex_local_tool() {
   local line="$1" tool_name
   tool_name=$(printf '%s' "$line" | jq -r '.params.name // empty' 2>/dev/null)
   case "$tool_name" in
+    statewright_request_classifier_review)
+      if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT:-}" ]; then
+        printf '%s' "$line" | "$PROXY_NODE_BIN" "${SCRIPT_DIR}/scripts/classifier-approval.mjs" --review-mcp
+      else
+        printf '%s' "$line" | jq -c '{jsonrpc:"2.0",id:.id,result:{isError:true,content:[{type:"text",text:"Classifier review requires the owning managed Codex session."}]}}'
+      fi
+      return 0
+      ;;
     statewright_search_docs|statewright_search_references|statewright_connect)
       env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN \
         -u STATEWRIGHT_ADAPTER_URL -u STATEWRIGHT_ADAPTER_TOKEN "$0" <<<"$line"
@@ -155,7 +163,16 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
       printf '{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"statewright","version":"0.1.0"}},"id":%s}\n' "$(printf '%s' "$line" | jq -c '.id')"
     else
       response=$(normalize_transport_response "$line" "$response" --managed)
-      [ "$method" = "tools/list" ] && response=$(stable_tool_catalog_response "$(printf '%s' "$line" | jq -c '.id')" "$response")
+      if [ "$method" = "tools/list" ]; then
+        response=$(stable_tool_catalog_response "$(printf '%s' "$line" | jq -c '.id')" "$response")
+        if [ -n "${STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT:-}" ]; then
+          response=$(printf '%s' "$response" | jq -c '.result.tools += [{
+            name:"statewright_request_classifier_review",
+            description:"Ask the human to review the original classifier-held invocation using its rework ticket. Does not execute the invocation. Use when a permitted alternative cannot answer the task.",
+            inputSchema:{type:"object",additionalProperties:false,properties:{ticket:{type:"string"}},required:["ticket"]}
+          }]')
+        fi
+      fi
       [ "$method" = "tools/call" ] && response=$(summarize_transition_response "$tool_name" "$response")
       printf '%s\n' "$response"
     fi

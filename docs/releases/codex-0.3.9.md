@@ -24,6 +24,9 @@ TUI/Desktop acceptance.
   checkpoint after a gateway restart. Preserve acknowledged manual model and
   effort choices when handing off between runs.
 - Retain the Windows path-identity and owned-process shutdown fixes from 0.3.8.
+- Bootstrap missing credential helpers for Git-based terminal/Desktop installs
+  from the matching published release with source/tag and SHA256 verification.
+  Publish standalone helper assets, including Intel macOS, alongside release ZIPs.
 - Mask recognizable credential fields, cookie/auth headers and shell-quoted
   credential arguments before writing human-review records. Command targets,
   decisions and classifier predictions remain available for audit.

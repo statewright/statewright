@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { canonicalGateway, PRODUCTION_GATEWAY } from "./gateway-profile.mjs";
+import { bootstrapCredentialHelper } from "./credential-helper-bootstrap.mjs";
 
 const MAX_RESPONSE_BYTES = 32 * 1024;
 
@@ -47,14 +48,18 @@ export function credentialProcessEnvironment(environment = process.env, platform
   return { ...environment, HOME: accountHome };
 }
 
-export function invokeCredentialHelper(request, {
+export async function invokeCredentialHelper(request, {
   environment = process.env,
   home = homedir(),
   platform = process.platform,
   spawnProcess = spawn,
 } = {}) {
+  let helper = credentialHelperPath(environment, home, platform);
+  if (!environment.STATEWRIGHT_CREDENTIAL_HELPER?.trim() && !existsSync(helper) && spawnProcess === spawn) {
+    try { helper = await bootstrapCredentialHelper({ home, platform }); }
+    catch (error) { throw new CredentialStoreError(error.message, error.code); }
+  }
   return new Promise((resolve, reject) => {
-    const helper = credentialHelperPath(environment, home, platform);
     const child = spawnProcess(helper, [], {
       env: credentialProcessEnvironment(environment, platform),
       stdio: ["pipe", "pipe", "pipe"],

@@ -66,6 +66,14 @@ by canonical gateway URL, so production, staging, and development credentials
 remain independent. It never asks you to paste the key into a Codex or ChatGPT
 conversation.
 
+Git-based plugin installs retrieve a missing native credential helper from the
+matching published Statewright release on first use. The adapter verifies its
+release/source metadata and SHA256 before installing it in a per-user cache;
+later uses verify the cached binary and can work offline. Existing packaged or
+global helpers retain precedence. Supported helpers cover Apple Silicon and Intel
+macOS, Linux x64 and Windows x64. An unavailable release, unsupported architecture
+or failed verification stops connection rather than storing credentials in plaintext.
+
 The old `~/.statewright/api_key` file is consulted only for the exact production
 gateway and copied into the OS credential store. It is preserved for rollback
 and is never used for another gateway. Headless Linux installations without an

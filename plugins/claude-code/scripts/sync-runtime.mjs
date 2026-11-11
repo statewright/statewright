@@ -54,6 +54,7 @@ export const RUNTIME_FILES = [
   "executor/lib/mcp-recovery.mjs",
   "executor/lib/tool-annotations.mjs",
   "executor/lib/credential-store.mjs",
+  "executor/lib/credential-helper-bootstrap.mjs",
   "executor/lib/gateway-profile.mjs",
   "executor/lib/remote-client.mjs",
   "executor/lib/windows-command-resolution.mjs",

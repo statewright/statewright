@@ -35,6 +35,10 @@ status to open the sidebar, then **Connect**. Finish Statewright sign-in and
 Claude's native permission prompts. Claude owns OAuth credentials and refresh;
 a Statewright API key file is not required.
 
+The shared managed-client credential adapter can also retrieve a missing native
+helper from the matching published Claude plugin release, verifying source/tag,
+SHA256 and cached bytes. This does not replace Claude's native OAuth handling.
+
 The connection and permission to control a conversation are separate.
 An existing login can restore without another browser visit. Workflow-control
 consent is scoped to the live session; reloading or closing it clears that grant.

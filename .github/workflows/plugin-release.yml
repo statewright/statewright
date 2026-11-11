@@ -26,6 +26,10 @@ jobs:
             target: aarch64-apple-darwin
             asset: statewright-credentials-darwin-arm64
             source: target/aarch64-apple-darwin/release/statewright-credentials
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: statewright-credentials-darwin-x64
+            source: target/x86_64-apple-darwin/release/statewright-credentials
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             asset: statewright-credentials-windows-x64.exe
@@ -179,7 +183,13 @@ jobs:
           path: ${{ steps.plugin.outputs.directory }}/bin
           merge-multiple: true
       - name: Mark Unix credential helpers executable
-        run: chmod 0755 "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-linux-x64" "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-darwin-arm64"
+        run: chmod 0755 "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-linux-x64" "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-darwin-arm64" "${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-darwin-x64"
+      - name: Bind helper checksums to the exact release source
+        env:
+          DIRECTORY: ${{ steps.plugin.outputs.directory }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: node scripts/package-credential-helpers.mjs "$DIRECTORY" "$TAG" "$SOURCE_SHA"
       - name: Install Task
         run: |
           go install github.com/go-task/task/v3/cmd/task@v3.39.2
@@ -221,12 +231,18 @@ jobs:
       - name: Attest release candidate provenance
         uses: actions/attest@v4
         with:
-          subject-path: ${{ steps.plugin.outputs.archive }}
+          subject-path: |
+            ${{ steps.plugin.outputs.archive }}
+            ${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-*
+            ${{ steps.plugin.outputs.directory }}/bin/credential-helper-release.json
       - name: Upload release candidate
         uses: actions/upload-artifact@v4
         with:
           name: plugin-release-candidate
-          path: ${{ steps.plugin.outputs.archive }}
+          path: |
+            ${{ steps.plugin.outputs.archive }}
+            ${{ steps.plugin.outputs.directory }}/bin/statewright-credentials-*
+            ${{ steps.plugin.outputs.directory }}/bin/credential-helper-release.json
           if-no-files-found: error
           retention-days: 1
 
@@ -310,9 +326,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: plugin-release-candidate
+      - name: Verify standalone helpers before publication
+        env:
+          DIRECTORY: ${{ needs.package.outputs.directory }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ needs.package.outputs.source_sha }}
+        run: node scripts/package-credential-helpers.mjs "$DIRECTORY" "$TAG" "$SOURCE_SHA" --check
       - name: Publish plugin release
         uses: softprops/action-gh-release@v2
         with:
           name: "${{ needs.package.outputs.release_name }}"
           body_path: "${{ needs.package.outputs.notes_path }}"
-          files: "${{ needs.package.outputs.archive }}"
+          fail_on_unmatched_files: true
+          files: |
+            ${{ needs.package.outputs.archive }}
+            plugins/*/bin/statewright-credentials-*
+            plugins/*/bin/credential-helper-release.json

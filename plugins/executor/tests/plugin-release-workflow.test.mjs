@@ -9,8 +9,42 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
+import {packageCredentialHelpers,HELPER_ASSETS} from '../../../scripts/package-credential-helpers.mjs';
+import {mkdirSync} from 'node:fs';
 
 const root = resolve(import.meta.dirname, "../../..");
+
+test('both native release paths publish source-bound helpers and use a native Intel test runner',async()=>{
+ const workflow=parseYaml(await readFile(resolve(root,'.github/workflows/plugin-release.yml'),'utf8'));
+ const entries=workflow.jobs['credential-helper'].strategy.matrix.include;
+ assert.deepEqual(entries.map(e=>e.asset).sort(),[...HELPER_ASSETS].sort());
+ assert.equal(entries.find(e=>e.asset==='statewright-credentials-darwin-x64').os,'macos-15-intel');
+ const steps=workflow.jobs.package.steps;
+ assert.ok(steps.find(s=>s.name==='Bind helper checksums to the exact release source').run.includes('scripts/package-credential-helpers.mjs'));
+ const upload=steps.find(s=>s.name==='Upload release candidate').with.path;
+ assert.match(upload,/bin\/statewright-credentials-\*/);assert.match(upload,/bin\/credential-helper-release\.json/);
+ const attestation=steps.find(s=>s.name==='Attest release candidate provenance').with['subject-path'];
+ assert.match(attestation,/bin\/credential-helper-release\.json/);
+ const publish=workflow.jobs.publish.steps.find(s=>s.name==='Publish plugin release').with.files;
+ assert.match(publish,/plugins\/\*\/bin\/statewright-credentials-\*/);
+ assert.match(publish,/plugins\/\*\/bin\/credential-helper-release\.json/);
+ assert.equal(workflow.jobs.publish.steps.find(s=>s.name==='Publish plugin release').with.fail_on_unmatched_files,true);
+ assert.match(workflow.jobs.publish.steps.find(s=>s.name==='Verify standalone helpers before publication').run,/--check$/);
+ const directory=mkdtempSync(join(tmpdir(),'helper-package-'));
+ try{
+  mkdirSync(join(directory,'bin'));for(const asset of HELPER_ASSETS)writeFileSync(join(directory,'bin',asset),'fixture-'+asset);
+  for(const plugin of ['codex','claude']){
+   const m=await packageCredentialHelpers({directory,tag:plugin+'-v0.3.9',sourceSha:'a'.repeat(40)});
+   assert.equal(m.source_sha,'a'.repeat(40));assert.equal(m.tag,plugin+'-v0.3.9');
+   for(const name of HELPER_ASSETS)assert.equal(m.assets[name].sha256,createHash('sha256').update(readFileSync(join(directory,'bin',name))).digest('hex'));
+   await packageCredentialHelpers({directory,tag:plugin+'-v0.3.9',sourceSha:'a'.repeat(40),check:true});
+   await assert.rejects(packageCredentialHelpers({directory,tag:plugin+'-v0.3.9',sourceSha:'b'.repeat(40),check:true}));
+  }
+  await assert.rejects(packageCredentialHelpers({directory,tag:'codex-v0.3.9-r1',sourceSha:'a'.repeat(40)}));
+  rmSync(join(directory,'bin',HELPER_ASSETS[0]));
+  await assert.rejects(packageCredentialHelpers({directory,tag:'codex-v0.3.9',sourceSha:'a'.repeat(40)}));
+ }finally{rmSync(directory,{recursive:true,force:true});}
+});
 const require = createRequire(import.meta.url);
 const { REQUIRED_WORKFLOWS, requirePluginCanaries } = require(
   resolve(root, ".github/scripts/require-plugin-canaries.cjs"),

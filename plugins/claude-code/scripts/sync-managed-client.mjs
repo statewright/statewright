@@ -24,6 +24,7 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/mcp-recovery.mjs", "executor/lib/mcp-recovery.mjs"],
   ["lib/tool-annotations.mjs", "executor/lib/tool-annotations.mjs"],
   ["lib/credential-store.mjs", "executor/lib/credential-store.mjs"],
+  ["lib/credential-helper-bootstrap.mjs", "executor/lib/credential-helper-bootstrap.mjs"],
   ["lib/gateway-profile.mjs", "executor/lib/gateway-profile.mjs"],
   ["lib/remote-client.mjs", "executor/lib/remote-client.mjs"],
   ["lib/windows-command-resolution.mjs", "executor/lib/windows-command-resolution.mjs"],

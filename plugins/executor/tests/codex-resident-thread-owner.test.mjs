@@ -331,7 +331,7 @@ test("corrupt root is not treated as an unclaimed root", async t => {
   assert.equal(await readFile(join(f.controlDir, "codex-root-session.json"), "utf8"), "corrupt");
 });
 
-for (const background of [false, true]) test(`${background ? "background helper" : "failed start persistence"} does not displace a pending classifier prompt`, async t => {
+for (const background of [false, true]) test(`${background ? "background helper" : "failed start persistence"} does not displace a pending classifier prompt`, {timeout: 5000}, async t => {
   const f = await fixture(t, {classifier: true});
   await f.reply(f.send("initialize"));
   await f.attach("thread/start", null, "prior");
@@ -340,8 +340,9 @@ for (const background of [false, true]) test(`${background ? "background helper"
     classifier_receipt: {intent_fingerprint: "intent_v1_family", invocation_fingerprint: `invocation_v1_${invocation}`,
       final_denial_basis: "semantic_authorization_disabled", required_authority: "complete_structural_evidence_or_separate_approval",
       reformulation_allowed: true, exact_invocation_retry_allowed: false, separate_approval_allowed: true}});
-  for (const i of ["one", "two"]) assert.equal((await (await f.approval(request(i))).json()).action, "rework");
-  const pending = f.approval(request("three"));
+  // The default controller presents review immediately. Await it concurrently
+  // with the fixture's native reply rather than expecting obsolete reworks.
+  const pending = f.approval(request("one"));
   await until(() => f.replies.some(r => r.method === "mcpServer/elicitation/request"));
   const modal = f.replies.find(r => r.method === "mcpServer/elicitation/request");
   if (background) {

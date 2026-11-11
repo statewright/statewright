@@ -116,7 +116,7 @@ test("local release gate checks every generated runtime before executing canarie
   }
 });
 
-test("Codex release tags require exact patch versions while Claude revision tags remain supported", async () => {
+test("plugin release tags require exact semantic versions without revision suffixes", async () => {
   const workflow = parseYaml(await readFile(resolve(root, ".github/workflows/plugin-release.yml"), "utf8"));
   const script = workflow.jobs.package.steps.find(step => step.name === "Resolve plugin").run;
   const directory = mkdtempSync(join(tmpdir(), "statewright-release-tag-"));
@@ -134,7 +134,9 @@ test("Codex release tags require exact patch versions while Claude revision tags
     assert.match(resolveTag("codex-v0.3.6"), /(?:^|\n)version=0\.3\.6(?:\n|$)/);
     assert.throws(() => resolveTag("codex-v0.3.6-r1"));
     assert.throws(() => resolveTag("codex-v0.3.6.1"));
-    assert.match(resolveTag("claude-v0.3.4-r1"), /(?:^|\n)version=0\.3\.4(?:\n|$)/);
+    assert.match(resolveTag("claude-v0.3.9"), /(?:^|\n)version=0\.3\.9(?:\n|$)/);
+    assert.throws(() => resolveTag("claude-v0.3.9-r1"));
+    assert.throws(() => resolveTag("claude-v0.3.9.1"));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

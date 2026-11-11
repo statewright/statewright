@@ -140,7 +140,12 @@ jobs:
               echo "notes_path=docs/releases/codex-$version.md" >> "$GITHUB_OUTPUT"
               ;;
             claude-v*)
-              raw=${TAG#claude-v}; version=${raw%%-r*}
+              raw=${TAG#claude-v}
+              [[ "$raw" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+                echo "Claude release tags must use an exact patch version (claude-vX.Y.Z)." >&2
+                exit 1
+              }
+              version=$raw
               echo 'plugin=claude' >> "$GITHUB_OUTPUT"
               echo 'directory=plugins/claude-code' >> "$GITHUB_OUTPUT"
               echo "archive=statewright-claude-code-$version.zip" >> "$GITHUB_OUTPUT"

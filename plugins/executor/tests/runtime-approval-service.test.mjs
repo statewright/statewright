@@ -53,6 +53,26 @@ test("private origin proof is transport metadata and proof-bearing requests refu
   }
 });
 
+test("route successor evidence binds both exact runs, origin proof and current root ownership", async t => {
+  let owned=true;
+  const f=await fixture(t,{originProof:"a".repeat(64),ownsThread:async()=>owned});
+  const previous={thread_id:"thread1",root_session_id:"thread1",client_id:"client1",run_id:"prior",run_session_id:"prior-session"};
+  const current={...previous,run_id:"next",run_session_id:"next-session"};
+  f.respond({schema:"statewright/route-successor/v1",verified:true,
+    previous:Object.fromEntries(Object.entries(previous).reverse()),current});
+  assert.equal(await f.service.verifyRouteSuccessor(previous,current),true);
+  assert.equal(f.calls[0].url,"https://gateway.invalid/api/runtime-route-successor");
+  assert.equal(f.calls[0].headers["x-statewright-approval-origin"],"a".repeat(64));
+  assert.deepEqual(f.calls[0].body,{previous,current});
+  assert.equal(f.calls[0].redirect,"error");
+  f.respond({schema:"statewright/route-successor/v1",verified:true,previous,current:{...current,run_id:"other"}});
+  assert.equal(await f.service.verifyRouteSuccessor(previous,current),false);
+  owned=false;
+  const calls=f.calls.length;
+  assert.equal(await f.service.verifyRouteSuccessor(previous,current),false);
+  assert.equal(f.calls.length,calls);
+});
+
 for (const decision of ["approved", "rejected"]) test(`private ${decision} request has exactly the permitted fields`, async t => {
   const f = await fixture(t);
   f.respond({ ...receipt, status: decision });

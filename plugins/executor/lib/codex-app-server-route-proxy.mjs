@@ -1254,6 +1254,13 @@ export async function startCodexAppServerRouteProxy({
       const observed = captureWorkflowOrigin({method: "turn/start", params: {threadId}}, nativeSelectionFor(threadId));
       const successor = await workflowOriginStore.captureSuccessor(binding, observed, {
         previousBinding: capture.record.binding,
+        verifySessionRenewal: async (previous, current) => {
+          await checkOwner();
+          if (!routeStateService.verifyRouteSuccessor) return false;
+          const verified = await routeStateService.verifyRouteSuccessor(previous, current);
+          await checkOwner();
+          return verified === true;
+        },
         isCurrent: async () => {
           await checkOwner();
           const state = await routeStateService.getState(threadId);

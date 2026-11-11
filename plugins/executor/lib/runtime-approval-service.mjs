@@ -3,6 +3,7 @@ import { openExternalUrl, uploadApprovalEvidence } from "./approval-evidence.mjs
 import { APPROVAL_ORIGIN_HEADER, validApprovalOriginProof } from "./approval-origin.mjs";
 import {ApprovalMemory} from "./approval-memory.mjs";
 import {join} from "node:path";
+import {sameWorkflowRouteBinding} from "./workflow-route-origin.mjs";
 
 function openEvidenceReview(url) {
   return new Promise((resolve, reject) => {
@@ -88,6 +89,20 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
   return {
     ownsThread,
     approvalMemory: scopedMemory,
+    async verifyRouteSuccessor(previous, current) {
+      if (current.client_id !== clientId || previous.client_id !== clientId
+          || !ownsThread || !await ownsThread(current.thread_id)) return false;
+      const response = await fetchImpl(new URL("/api/runtime-route-successor", endpoint).href, {
+        method:"POST",headers:{...headers},redirect:"error",
+        body:JSON.stringify({previous,current}),signal:AbortSignal.timeout(15000),
+      });
+      if (!response.ok) return false;
+      const result = await response.json();
+      return result.schema === "statewright/route-successor/v1" && result.verified === true
+        && sameWorkflowRouteBinding(result.previous, previous)
+        && sameWorkflowRouteBinding(result.current, current)
+        && await ownsThread(current.thread_id);
+    },
     updateCredential(nextKey) {
       if (typeof nextKey !== "string" || !nextKey) throw new Error("Missing renewed credential");
       apiKey = nextKey;

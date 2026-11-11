@@ -420,6 +420,13 @@ owner cannot be verified, ordinary tools stay held while native Statewright
 discovery and recovery remain available. Unmanaged dormant hooks do not adopt
 workflows from a gateway.
 
+If credentials renew between workflows, the managed host can verify continuity
+using the same private native-origin proof recorded in both authoritative runs.
+The previous run must be terminal and the current run must belong to the same
+account and native client. After verification, the successor retains the
+original route settings and acknowledged manual choices. An unavailable or
+unverifiable predecessor retains its provenance and the turn stays held.
+
 Managed Codex can hold an eligible uncertain invocation and return a review
 ticket when its invocation and dependency evidence can be checked again. Try a
 narrower permitted operation first. If it cannot answer the task, call the

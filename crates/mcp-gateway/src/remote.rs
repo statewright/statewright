@@ -31,6 +31,9 @@ mod native;
 #[path = "native_approval.rs"]
 mod native_approval;
 
+#[path = "native_route_successor.rs"]
+mod native_route_successor;
+
 /// Shared state for the remote MCP transport server.
 pub struct RemoteState {
     native_approvals: Mutex<native_approval::Broker>,
@@ -1228,6 +1231,7 @@ pub fn build_router(state: Arc<RemoteState>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/api/runtime-usage", post(handle_native_usage))
         .route("/api/runtime-approval", post(handle_runtime_approval))
+        .route("/api/runtime-route-successor", post(native_route_successor::handle))
         .route("/api/approval-callback", post(handle_approval_callback))
         .with_state(state)
 }

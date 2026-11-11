@@ -60,7 +60,7 @@ export class ManagedMcpBridge {
   async start() {
     this.server = createServer(async (request, response) => {
       try {
-        if (request.method !== "POST" || !["/mcp", ...(this.nativeUsage ? ["/native-usage"] : []),
+        if (request.method !== "POST" || !["/mcp", "/route-successor", ...(this.nativeUsage ? ["/native-usage"] : []),
             ...(this.humanInteractionUrl ? ["/human-interactions"] : [])].includes(request.url)) {
           response.writeHead(404).end();
           return;
@@ -77,6 +77,18 @@ export class ManagedMcpBridge {
           return;
         }
         const body = await readBody(request);
+        if (request.url === "/route-successor") {
+          if (!this.originProof) { response.writeHead(403).end(); return; }
+          const upstream = await this.fetch(new URL("/api/runtime-route-successor", this.gatewayUrl), {
+            method:"POST",redirect:"error",headers:{"Content-Type":"application/json",
+              Authorization:`Bearer ${this.apiKey}`,"X-Statewright-Client-Id":this.clientId,
+              [APPROVAL_ORIGIN_HEADER]:this.originProof},body,
+            signal:AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
+          });
+          response.writeHead(upstream.status,{"Content-Type":"application/json"});
+          response.end(Buffer.from(await upstream.arrayBuffer()));
+          return;
+        }
         if (request.url === "/human-interactions") {
           const upstream = await this.fetch(this.humanInteractionUrl, {method:"POST", redirect:"error",
             headers:{"Content-Type":"application/json", Authorization:`Bearer ${this.apiKey}`},

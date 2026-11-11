@@ -51,6 +51,29 @@ test("managed MCP bridge forwards one immutable client identity", async () => {
   }
 });
 
+test("successor continuity uses only the owned gateway and private native-origin proof", async t => {
+  const calls=[];
+  const bridge=await new ManagedMcpBridge({gatewayUrl:"https://gateway.invalid/mcp",
+    apiKey:"fixture-key",clientId:"client",token:"fixture-bridge",originProof:"a".repeat(64),
+    fetch:async(url,options)=>{
+      calls.push({url:String(url),options});
+      return Response.json({schema:"statewright/route-successor/v1",verified:true});
+    }}).start();
+  t.after(()=>bridge.close());
+  const request=(headers={})=>fetch(bridge.url+"/route-successor",{method:"POST",
+    headers:{Authorization:"Bearer fixture-bridge","Content-Type":"application/json",...headers},
+    body:JSON.stringify({previous:{run_id:"old"},current:{run_id:"new"}})});
+  assert.equal((await request({"X-Statewright-Client-Id":"foreign"})).status,403);
+  assert.equal((await request({Authorization:"Bearer foreign"})).status,401);
+  assert.equal(calls.length,0);
+  assert.equal((await request()).status,200);
+  assert.equal(calls[0].url,"https://gateway.invalid/api/runtime-route-successor");
+  assert.equal(calls[0].options.headers["X-Statewright-Client-Id"],"client");
+  assert.equal(calls[0].options.headers["x-statewright-approval-origin"],"a".repeat(64));
+  assert.equal(calls[0].options.redirect,"error");
+  assert(!calls[0].options.body.includes("a".repeat(64)));
+});
+
 test('human interaction relay keeps the configured destination, native owner token and client boundary',async t=>{
   const calls=[];
   const bridge=await new ManagedMcpBridge({gatewayUrl:'https://gateway.invalid/mcp',apiKey:'server-key',

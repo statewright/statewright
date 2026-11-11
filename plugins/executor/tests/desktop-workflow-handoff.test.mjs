@@ -18,7 +18,7 @@ async function until(check) {
   }
   assert.fail("workflow did not hand off to a new native turn");
 }
-async function fixture(t, {nativeSettings = false, workflowOriginStore, initialState = null, initialSettings = {}, missingProvider = null, providerError = null} = {}) {
+async function fixture(t, {nativeSettings = false, workflowOriginStore, verifyRouteSuccessor, initialState = null, initialSettings = {}, missingProvider = null, providerError = null} = {}) {
   const server = new WebSocketServer({port: 0, host: "127.0.0.1"});
   let proxy, client;
   t.after(async () => {
@@ -92,7 +92,7 @@ async function fixture(t, {nativeSettings = false, workflowOriginStore, initialS
   });
   proxy = await startCodexAppServerRouteProxy({upstreamUrl: `ws://127.0.0.1:${server.address().port}`,
     workflowOriginStore,
-    workflowService: {ownsThread: async id => {
+    workflowService: {verifyRouteSuccessor, ownsThread: async id => {
       if (heldOwner && sequence > 1) {ownerEntered = true; await heldOwner;}
       return id === threadId;
     }, getState: async () => {
@@ -133,20 +133,27 @@ async function fixture(t, {nativeSettings = false, workflowOriginStore, initialS
     finish: () => {active = false; socket.send(JSON.stringify({method: "turn/completed", params: {threadId, turn: {id: turnId, status: "completed"}}}));}};
 }
 
-for (const end of ["terminal", "deactivate"])
+for (const end of ["terminal", "deactivate", "renewed-terminal", "renewed-deactivate"])
 test(`native turn accepts a verified successor and restores the carried origin on ${end}`, async t => {
   const store = new WorkflowRouteOriginStore();
-  const old = {thread_id: threadId, root_session_id: threadId, client_id: "handoff-client", run_id: "old-run", run_session_id: "handoff-session"};
+  const old = {thread_id: threadId, root_session_id: threadId, client_id: "handoff-client", run_id: "old-run",
+    run_session_id: end.startsWith("renewed") ? "old-credential-session" : "handoff-session"};
   const original = {model: "openai-codex/gpt-6-astra", effort: "high", service_tier: "priority", provider: "openai"};
   await store.capture(old, original);
   await store.confirmRoute(old, {model: "openai-codex/gpt-5.6-terra", effort: "medium", service_tier: "priority"});
   const next = stateFor("intake", 1, "openai-codex/gpt-5.6-terra", "medium");
   const f = await fixture(t, {workflowOriginStore: store, initialState: next,
+    verifyRouteSuccessor: async(previous,current)=>{
+      assert.deepEqual(previous,old);
+      assert.equal(current.run_id,next.run_id);
+      assert.equal(current.run_session_id,next.run_session_id);
+      return true;
+    },
     initialSettings: {model: "gpt-5.6-terra", effort: "medium"}});
   assert.equal((await store.binding(threadId)).run_id, next.run_id);
   assert.deepEqual((await store.inspect(threadId)).origin, original);
   assert.equal(f.calls.filter(r => r.method === "turn/start").length, 1, "no nested-lease deadlock or extra inference");
-  if (end === "terminal") f.setState({...next, state: "complete", is_final: true});
+  if (end.endsWith("terminal")) f.setState({...next, state: "complete", is_final: true});
   else {
     f.setState(null);
     f.completeTool("statewright_deactivate", {deactivated: true});

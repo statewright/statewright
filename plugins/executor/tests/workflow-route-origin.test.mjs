@@ -100,6 +100,66 @@ test("successor capture rejects foreign bindings, stale authority, missing setti
   }
 });
 
+test("credential renewal carries the baseline only after verified continuity and preserves manual axes", async () => {
+  const store = new WorkflowRouteOriginStore();
+  const baseline = {...origin, effort:null, service_tier:"default"};
+  const routed = {model:"workflow-model",effort:"low",service_tier:"priority"};
+  await store.capture(binding, baseline);
+  await store.confirmRoute(binding, routed);
+  const manual = {model:"manual-model",effort:"xhigh"};
+  await store.relinquish(binding.thread_id, ["model","effort"], manual);
+  const next = {...binding,run_id:"renewed-run",run_session_id:"renewed-session"};
+  const observed = {...routed,...manual};
+  assert.equal((await store.captureSuccessor(next, observed,
+    {previousBinding:binding,isCurrent:async()=>true})).status, "session_renewal_unverified");
+  const result = await store.captureSuccessor(next, observed, {
+    previousBinding:binding,isCurrent:async()=>true,
+    verifySessionRenewal:async(previous,current)=>{
+      assert.deepEqual(previous,binding); assert.deepEqual(current,next); return true;
+    },
+  });
+  assert.equal(result.status,"captured");
+  assert.equal(result.record.session_renewed,true);
+  assert.equal(result.record.origin.model,manual.model);
+  assert.equal(result.record.origin.effort,manual.effort);
+  assert.equal(result.record.origin.service_tier,"default");
+  assert.deepEqual(result.record.predecessor.binding,binding);
+});
+
+test("verified session renewal still rejects stale state and concurrent provenance changes", async () => {
+  for (const changed of ["state","manual","foreign-client","proof-error"]) {
+    const store=new WorkflowRouteOriginStore();
+    await store.capture(binding,origin);
+    const routed={model:"workflow-model",effort:"low",service_tier:"priority"};
+    await store.confirmRoute(binding,routed);
+    const next={...binding,run_id:"renewed-run",run_session_id:"renewed-session",
+      ...(changed==="foreign-client"?{client_id:"other"}:{})};
+    const result=await store.captureSuccessor(next,routed,{previousBinding:binding,
+      isCurrent:async()=>changed!=="state",verifySessionRenewal:async()=>{
+        if(changed==="proof-error")throw new Error("unavailable");
+        if(changed==="manual")await store.relinquish(binding.thread_id,["effort"],{effort:"high"});
+        return true;
+      }});
+    assert.notEqual(result.status,"captured",changed);
+    assert.deepEqual((await store.inspect(binding.thread_id)).binding,binding);
+  }
+});
+
+test("session renewal retains exact default effort and restores it after the successor", async () => {
+  const store=new WorkflowRouteOriginStore();
+  const baseline={...origin,effort:null};
+  const routed={model:"workflow-model",effort:"medium",service_tier:"priority"};
+  await store.capture(binding,baseline);
+  await store.confirmRoute(binding,routed);
+  const next={...binding,run_id:"next",run_session_id:"new-key-session"};
+  assert.equal((await store.captureSuccessor(next,routed,{previousBinding:binding,
+    verifySessionRenewal:async()=>true,isCurrent:async()=>true})).status,"captured");
+  const restored=await store.prepareRestore(next,routed);
+  assert.equal(restored.status,"ready");
+  assert.equal(Object.hasOwn(restored.route,"effort"),true);
+  assert.equal(restored.route.effort,null);
+});
+
 test("captured origins survive store reconstruction and clear only after confirmed restoration", async () => {
   const root = await mkdtemp(join(tmpdir(), "statewright-route-origin-"));
   try {

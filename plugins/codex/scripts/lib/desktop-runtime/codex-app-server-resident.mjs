@@ -320,6 +320,7 @@ async function main() {
     // two independently identified sources cannot double-count usage.
     ownsThread: approvalService.ownsThread,
     getState: () => approvalService.getState(),
+    verifyRouteSuccessor: (previous, current) => approvalService.verifyRouteSuccessor(previous, current),
     peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
   });
   let runtime = null;

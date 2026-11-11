@@ -213,21 +213,29 @@ export class WorkflowRouteOriginStore {
   // A verified new run may supersede a run whose teardown was missed. Carry
   // its still-owned baseline forward instead of capturing our routed model
   // as the new original. This does not claim that the predecessor completed.
-  async captureSuccessor(binding, current, {previousBinding, isCurrent} = {}) {
+  async captureSuccessor(binding, current, {previousBinding, isCurrent, verifySessionRenewal} = {}) {
     const record = await this.#load(previousBinding?.thread_id);
     if (!record || !sameWorkflowRouteBinding(record.binding, previousBinding)
         || !validBinding(binding) || binding.run_id === previousBinding.run_id
-        || ["thread_id", "client_id", "root_session_id", "run_session_id"].some(key => !binding[key] || binding[key] !== previousBinding[key])) {
+        || ["thread_id", "client_id", "root_session_id"].some(key => !binding[key] || binding[key] !== previousBinding[key])) {
       return {status: "binding_mismatch"};
     }
     const snapshot = JSON.stringify(record);
+    const sessionRenewed = binding.run_session_id !== previousBinding.run_session_id;
+    if (sessionRenewed) {
+      try {
+        if (typeof verifySessionRenewal !== "function"
+            || !await verifySessionRenewal(previousBinding, binding)) return {status:"session_renewal_unverified"};
+      } catch { return {status:"session_renewal_unverified"}; }
+    }
     const observed = normalizeOrigin(current);
     if (!observed) return {status: "current_model_unknown"};
     if (AXES.some(axis => Object.hasOwn(record.routed ?? record.origin, axis) && !Object.hasOwn(observed, axis))) {
       return {status: "current_settings_unknown"};
     }
     const matches = target => target && AXES.every(axis => !Object.hasOwn(target, axis) || sameAxis(observed, target, axis));
-    const stillOwned = matches(record.routed) || record.status === "captured" && matches(record.origin)
+    const acknowledgedRoute = record.routed ? {...record.routed, ...record.manual} : null;
+    const stillOwned = matches(acknowledgedRoute) || record.status === "captured" && matches(record.origin)
       || record.status === "restore_pending" && (matches(record.restore_attempt?.requested)
         || ownedPartialRestore(record, observed, record.restore_attempt));
     const baseline = {...observed};
@@ -251,6 +259,7 @@ export class WorkflowRouteOriginStore {
       manual: {}, routed: normalizeRoute(observed), restore_attempt: null,
       status: "active", captured_at: timestamp, updated_at: timestamp,
       predecessor, capture_reason: "authoritative_successor",
+      ...(sessionRenewed ? {session_renewed:true} : {}),
     };
     await this.#write(next);
     return {status: "captured", record: structuredClone(next)};

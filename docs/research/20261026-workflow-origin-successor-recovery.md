@@ -91,7 +91,7 @@ Installation, loaded identity, and live behavior must be reported separately.
 
 Repair commit: `86189cb27b615314d3fb1aba217c91154ef02564`.
 The existing `installManagedClientShim` installed the exact package into
-`/Users/ben/.statewright/lanes/staging/installer-home/.statewright/runtime/codex/0.3.5+codex.20261026213425`.
+`/Users/tester/.statewright/lanes/staging/installer-home/.statewright/runtime/codex/0.3.5+codex.20261026213425`.
 Source-package and installed SHA256 pairs were independently computed and equal:
 
 - proxy: `06a118cd557cf0cab29063764dbdfc17abede89af7ae651fa0cb022f7e3f56c9`

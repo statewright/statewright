@@ -6,6 +6,8 @@ import {createInterface} from 'node:readline';
 import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
+import {homedir} from 'node:os';
+import {createRequire} from 'node:module';
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const sensitive=/(?:api[_. -]?key|access[_. -]?key|secret|password|passwd|passphrase|authorization|bearer|credential|private[_. -]?key|client[_. -]?secret|refresh[_. -]?token|access[_. -]?token|id[_. -]?token|session[_. -]?token|token=|--token\b|--key\b|--password\b|--pass\b|--auth\b|gopass|keychain|security\s+find|printenv|\.env\b|\.ssh\b|\.aws\b|\.npmrc\b|\.netrc\b|\.pypirc\b|\.pem\b|\.key\b|BEGIN [A-Z ]*PRIVATE KEY|(?:^|\s)(?:login|auth)(?:\s|$))/i;
 
@@ -27,7 +29,7 @@ export function sanitize(command) {
   const changes=[];
   let result=command.trim();
   const replace=(pattern,value,reason)=>{if(pattern.test(result)){result=result.replace(pattern,value);changes.push(reason);}};
-  replace(/\/Users\/ben\b/g,'/fixture/home','home_path');
+  replace(/\/(?:Users|home)\/[^/\s"']+/g,'/fixture/home','home_path');
   replace(/\/Volumes\/sidecar\b/g,'/fixture/sidecar','sidecar_path');
   replace(/https?:\/\/[^\s"'<>]+/g,'https://fixture.invalid/resource','url_target');
   replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,'user@fixture.invalid','email_identity');
@@ -93,11 +95,11 @@ export function orchestrationEventCommands(event,parse) {
   return orchestrationCommands(payload.type==='custom_tool_call'?payload.input:payload.arguments,parse);
 }
 
-async function loadParser() {
-  for(const path of ['/Users/ben/dev/auldwyrm/site/node_modules/acorn/dist/acorn.mjs','/Users/ben/dev/polyhedron/node_modules/acorn/dist/acorn.mjs']) {
-    try{const bytes=await readFile(path),module=await import(pathToFileURL(path).href);return {parse:module.parse,identity:{name:'acorn',version:module.version,sha256:sha(bytes)}};}catch(error){if(error.code!=='ENOENT')throw error;}
-  }
-  throw new Error('Existing local Acorn parser required; no dependency installation or eval fallback');
+export async function loadParser() {
+  const require=createRequire(new URL('../../plugins/executor/package.json',import.meta.url));
+  const path=require.resolve('acorn');
+  const bytes=await readFile(path),module=await import(pathToFileURL(path).href);
+  return {parse:module.parse,identity:{name:'acorn',version:module.version,sha256:sha(bytes)}};
 }
 
 async function jsonlFiles(root,limit=4000) {
@@ -134,13 +136,13 @@ export async function mineHistory(output) {
     rows.push({id,command:clean.command,kind,source_id:sourceId,line,redactions:clean.redactions,evidence_loss:clean.evidence_loss,label_status:'unclassified_private_sanitized'});
     counts.accepted_by_source[kind]=(counts.accepted_by_source[kind]??0)+1;
   };
-  const history='/Users/ben/.zsh_history',historyInfo=await stat(history);
+  const history=join(homedir(),'.zsh_history'),historyInfo=await stat(history);
   assert(historyInfo.size<=1024*1024,'history exceeds bounded read');
   for(const row of zshCommands(await readFile(history,'utf8')).reverse())accept(row.command,'zsh',sha(history),row.line);
   for(const [kind,root]of [
-    ['codex_jsonl','/Users/ben/.codex/sessions'],
-    ['codex_jsonl','/Users/ben/.statewright/lanes/staging/codex-homes/0.3.5+codex.20261018180000/sessions'],
-    ['claude_jsonl','/Users/ben/.claude/projects'],
+    ['codex_jsonl',join(homedir(),'.codex/sessions')],
+    ['codex_jsonl',join(process.env.CODEX_HOME||join(homedir(),'.codex'),'sessions')],
+    ['claude_jsonl',join(homedir(),'.claude/projects')],
   ]) {
     let resolved;try{resolved=await realpath(root);}catch{continue;}
     if(seenRoots.has(resolved))continue;seenRoots.add(resolved);

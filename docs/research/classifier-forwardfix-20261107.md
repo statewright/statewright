@@ -8,7 +8,7 @@ back exactly; gateway/plugin changes are isolated source preparation.
 The exact stored `agentic-engineering-v2` definition was read before editing.
 Its prior definition is saved alongside this receipt as
 `agentic-engineering-v2-before-20261107.json`. Source was reconciled into
-`/Users/ben/dev/auldwyrm/workflows/agentic-engineering-v2.json`, replacing that
+`<workflow-source>/workflows/agentic-engineering-v2.json`, replacing that
 file's stale candidate with the current stored definition plus owned changes.
 
 Ordinary engineering phases omit the finite tool allowlist. Design presence

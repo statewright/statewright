@@ -1,7 +1,7 @@
 # In-flight audit and staging dogfood
 
 2026-11-09; source base a882bfe27b076f3fa673c16fed769387ad30a459.
-Ben accepted the 41.6% frozen projection for staging dogfood and authorized the
+The staging owner accepted the 41.6% frozen projection for staging dogfood and authorized the
 staging/dev in-flight MCP control. No production release, S1 enablement or workflow
 activation is part of this delivery. Native get_state: no active workflow;
 execution remains shelved while repairing the classifier.
@@ -41,8 +41,8 @@ in a separate candidate-bound receipt. No earlier pass substitutes for final byt
 
 Live staging preimage observed: application e9624a4, gateway43289e9 on both surfaces,
 server e9624a4-43289e9. Gateway43289e9 is an ancestor of source candidate a882bfe.
-Use controller /Volumes/sidecar/.agent-worktrees/auldwyrm-human-events-stage-20261107,
-base77bf85d, Auldwyrm runtime e9624a4901ec5d42046fbc5fb58728016688d738. Do not use
+The private controller receipt records controller base77bf85d and application
+runtime e9624a4901ec5d42046fbc5fb58728016688d738. Do not use
 canonical main's obsolete staging pins. Namespace remains statewright-dev.
 
 Rollback: full-tree controller and source preimages in the receipt, not gateway-only

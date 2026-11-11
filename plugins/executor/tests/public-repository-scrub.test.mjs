@@ -1,45 +1,29 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-
-const APPROVED_PHONE_HOME_HOSTS = new Set([
-  "glitch.enhasa.cloud",
-  "umami.enhasa.cloud",
-]);
+import {publicSourceViolations,scanTrackedPublicSources} from '../../../scripts/public-source-hygiene.mjs';
 
 test("tracked public sources contain no private model-infrastructure references", () => {
-  const paths = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
-    .split("\0")
-    .filter(Boolean);
-  const forbiddenTerms = [
-    ["ni", "nfer"].join(""),
-    ["30", "90"].join(""),
-    ["olla", "ma-casa"].join(""),
-    ["wey", "oun"].join(""),
-    ["cor", "tana"].join(""),
-    ["andu", "ril"].join(""),
-    ["ae", "rith"].join(""),
-    ["/Users/", "ben"].join(""),
-    ["auld", "wyrm"].join(""),
-  ];
-  const violations = [];
-  for (const path of paths) {
-    let contents;
-    try {
-      contents = readFileSync(path);
-    } catch {
-      continue;
-    }
-    if (contents.includes(0)) continue;
-    const text = contents.toString("utf8");
-    for (const term of forbiddenTerms) {
-      if (text.toLowerCase().includes(term)) violations.push(`${path}: forbidden term ${term}`);
-    }
-    for (const match of text.matchAll(/\b([a-z0-9.-]+\.enhasa\.cloud)\b/gi)) {
-      const host = match[1].toLowerCase();
-      if (!APPROVED_PHONE_HOME_HOSTS.has(host)) violations.push(`${path}: private host ${host}`);
-    }
-  }
-  assert.deepEqual(violations, []);
+  // This tracked Gitlink is an inert fork-test fixture, absent from plugin
+  // packaging. Pin its reviewed identity; a new or changed Gitlink fails closed.
+  assert.deepEqual(scanTrackedPublicSources(process.cwd(),{reviewedGitlinks:{
+    'self-hosted/fixtures/fork-test':'d746ba3d43ac6142439b265da72255c1314d86de',
+  }}), []);
+});
+
+test('privacy guard detects mixed-case paths, filenames and binary payloads',()=>{
+ const term=['/Users/','ben'].join('');
+ for(const value of [term,term.toLowerCase(),term.toUpperCase()]){
+  assert(publicSourceViolations('fixture',value).length);
+  assert(publicSourceViolations(value,'safe').length);
+  assert(publicSourceViolations('fixture',Buffer.concat([Buffer.from([0]),Buffer.from(value)])).length);
+ }
+ assert(publicSourceViolations('fixture',['https://INTERNAL','enhasa','cloud'].join('.')).length);
+ assert.deepEqual(publicSourceViolations('fixture','https://glitch.enhasa.cloud https://umami.enhasa.cloud /Users/tester/project'),[]);
+});
+
+test('privacy guard fails closed on unreadable, conflicted or unreviewed Git objects',()=>{
+ const entry='100644 '+ 'a'.repeat(40)+' 0\tfixture';
+ assert.throws(()=>scanTrackedPublicSources('.',{entries:[entry],read:()=>{throw Error('unreadable');}}),/unreadable/);
+ for(const mode of ['160000','040000'])assert.throws(()=>scanTrackedPublicSources('.',{entries:[entry.replace('100644',mode)],read:()=>Buffer.alloc(0)}),/Unreviewed/);
+ assert.throws(()=>scanTrackedPublicSources('.',{entries:[entry.replace(' 0\t',' 1\t')],read:()=>Buffer.alloc(0)}),/Unreviewed/);
 });

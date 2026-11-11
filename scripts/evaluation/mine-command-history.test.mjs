@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {sanitize,zshCommands,eventCommands,orchestrationCommands,orchestrationEventCommands} from './mine-command-history.mjs';
-import {parse} from '/Users/ben/dev/auldwyrm/site/node_modules/acorn/dist/acorn.mjs';
+import {sanitize,zshCommands,eventCommands,orchestrationCommands,orchestrationEventCommands,loadParser} from './mine-command-history.mjs';
+const {parse}=await loadParser();
 test('credentials and opaque values are excluded, not copied into redacted output',()=>{
   for(const command of ['API_KEY=example-value tool','FOO=unknown tool','curl -H "Authorization: Bearer sample" https://example.com','tool --token sample','gopass show foo','cat ~/.ssh/id_rsa','curl https://example.com/?key=sample','tool abcdefghijklmnopqrstuvwxyz0123456789','tool abcdefghij/klmnopqrstuvwxyz0123456789','cat .env','tool login 1234','mysql -u name -psample','curl -u sample https://example.com','tool postgresql://name:sample@example.com/db'])assert(sanitize(command).skip,command);
 });
@@ -9,10 +9,10 @@ test('cookie/header/config and wrapper assignments are excluded before persisten
   for(const command of ['curl --cookie session=SYNTHETIC https://example.com','curl -b session=SYNTHETIC https://example.com','curl -bsession=SYNTHETIC https://example.com','curl -H "X-Custom: SYNTHETIC" https://example.com','curl --header "X-Custom: SYNTHETIC" https://example.com','curl -K localconfig https://example.com','env FOO=SYNTHETIC tool','sudo env FOO=SYNTHETIC tool'])assert(sanitize(command).skip,command);
 });
 test('safe paths are sanitized without changing shell composition',()=>{
-  assert.deepEqual(sanitize('cat /Users/ben/dev/example/file && rm /Volumes/sidecar/tmp/a'),{command:'cat /fixture/home/dev/example/file && rm /fixture/sidecar/tmp/a',redactions:['home_path','sidecar_path'],evidence_loss:true});
+  assert.deepEqual(sanitize('cat /Users/dev/dev/example/file && rm /Volumes/sidecar/tmp/a'),{command:'cat /fixture/home/dev/example/file && rm /fixture/sidecar/tmp/a',redactions:['home_path','sidecar_path'],evidence_loss:true});
   assert(sanitize('cat one\nrm two').skip);
-  assert(sanitize('kubectl --kubeconfig=/Users/ben/.kube/galactica get pods').command);
-  assert(sanitize('cat /Users/ben/.kube/config').skip);
+  assert(sanitize('kubectl --kubeconfig=/Users/dev/.kube/cluster get pods').command);
+  assert(sanitize('cat /Users/dev/.kube/config').skip);
 });
 test('extended zsh records preserve multiline boundaries for exclusion',()=>{
   const rows=zshCommands(': 1:0;cat file\n: 2:0;echo line\\\ncontinuation\n: 3:0;pwd\n');

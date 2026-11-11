@@ -16,7 +16,7 @@ and handoff were reserved before any installation work, which is outside this cu
 
 ## Observed evidence versus inference
 
-`death-rebirth:7.1` / `%8`, shell PID 6672, cwd `/Users/ben/dev/oathshaper`.
+`death-rebirth:7.1` / `%8`, shell PID 6672, cwd `/Users/tester/dev/oathshaper`.
 Native App Server PID 30109 has thread
 `01a155f0-eebd-7cd1-9be5-af1120b55d37` open. Its original rollout is
 `~/.codex/sessions/2026/10/19/rollout-2026-10-19T16-53-35-01a155f0-eebd-7cd1-9be5-af1120b55d37.jsonl`.

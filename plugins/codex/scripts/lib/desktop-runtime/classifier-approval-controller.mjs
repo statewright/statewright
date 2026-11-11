@@ -203,7 +203,7 @@ export class ClassifierApprovalController {
           if(!valid||signal?.aborted||this.closedReason)return approvalDeny(this.result(request,"deny",{reason:"approval_memory_no_longer_valid"}));
           this.emit({type:"classifier_approval_memory_reused",threadId:request.threadId,
             run_id:request.runId,state:request.state,grant_id:grant.id,duration:grant.duration,
-            invocation_fingerprint:request.invocationFingerprint});
+            expires_at:grant.expires_at, invocation_fingerprint:request.invocationFingerprint});
           return approvalAllow(this.result(request,"allow_once",{reason:"remembered_human_approval",
             grant_id:grant.id,duration:grant.duration,expires_at:grant.expires_at}));
         }
@@ -294,7 +294,7 @@ export class ClassifierApprovalController {
         threadId: request.threadId, turnId: null, serverName: "statewright", mode: "form",
         message: classifierReviewMessage({...request,effectiveDuration,memoryUnavailableReason}),
         requestedSchema: {type: "object", properties: {}},
-      }});
+      }}, {runId:request.runId});
       // A queued send is not proof of presentation. Observe asynchronous
       // transport failures without stalling explicit cancellation processing.
       void Promise.resolve(sent).then(() => {
@@ -340,6 +340,8 @@ export class ClassifierApprovalController {
     state: pending.request.state, basis: pending.request.basis, reason,
     approval_request_id: pending.requestId,
     invocation_fingerprint: pending.request.invocationFingerprint,
+    ...(pending.grant ? {grant_id:pending.grant.id,duration:pending.grant.duration,
+      expires_at:pending.grant.expires_at} : {}),
     display_context: pending.request.displayContext});
     pending.resolve(this.result(pending.request, action, {reason,
       ...(pending.grant?{grant_id:pending.grant.id,duration:pending.grant.duration,expires_at:pending.grant.expires_at}:{}),

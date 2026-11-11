@@ -867,8 +867,8 @@ export async function startCodexAppServerRouteProxy({
       return state;
     };
     const classifierController = classifierApprovalService ? new ClassifierApprovalController({
-      send: value => {
-        humanInteractions.request(value);
+      send: (value, context) => {
+        humanInteractions.request(value, context);
         if (downstream.readyState !== WebSocket.OPEN) {
           throw new Error("Native Desktop connection is unavailable");
         }
@@ -881,10 +881,9 @@ export async function startCodexAppServerRouteProxy({
       maxReworks: classifierMaxReworks,
       deferFirst: classifierDeferFirst,
       record: event => {
-        if (event.approval_request_id) humanInteractions.resolve(event.approval_request_id, {
-          action:event.type === "classifier_human_approval_granted" ? "allow_once" : "deny",
-          reason:event.reason, invocation_fingerprint:event.invocation_fingerprint});
-        return onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1", ...event});
+        humanInteractions.recordClassifierApproval(event);
+        return onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1",
+          ...event, thread_id:event.threadId});
       },
     }) : null;
     classifierOwner = classifierController ? {

@@ -83,13 +83,14 @@ export class HumanInteractionRecorder {
     const event = {schema:"statewright/human-interaction/v1", ...fields};
     void Promise.resolve().then(() => this.record(event)).catch(() => {});
   }
-  request(message) {
+  request(message, {runId} = {}) {
     if (message?.id === undefined || typeof message.method !== "string"
         || !/(?:\/requestApproval|\/requestUserInput|elicitation\/request)$/.test(message.method)) return;
     const key = JSON.stringify([typeof message.id, message.id]);
     if (this.pending.has(key)) return;
     const item = {interaction_id:randomUUID(), request_id:String(message.id),
       thread_id:message.params?.threadId ?? message.params?.thread_id ?? null, method:message.method,
+      ...(runId ? {run_id:runId} : {}),
       dialog:interactionValue(message.params), native_item_id:message.params?.itemId ?? null};
     this.pending.set(key, item);
     this.emit({...item, stage:"requested"});
@@ -115,6 +116,24 @@ export class HumanInteractionRecorder {
     this.pending.delete(key);
     this.completed.delete(key);
     if (item) this.emit({...item, stage:"resolved", result:interactionValue(result)});
+  }
+  recordClassifierApproval(event) {
+    const grant = event.grant_id ? {
+      grant_id:event.grant_id, duration:event.duration, expires_at:event.expires_at,
+    } : {};
+    if (event.type === "classifier_approval_memory_reused") {
+      this.emit({stage:"approval_reused", method:"statewright/classifierApproval",
+        interaction_id:event.grant_id, request_id:event.invocation_fingerprint,
+        thread_id:event.threadId, run_id:event.run_id,
+        result:{action:"reuse", ...grant, invocation_fingerprint:event.invocation_fingerprint}});
+    } else if (event.approval_request_id) {
+      const granted = event.type === "classifier_human_approval_granted";
+      this.resolve(event.approval_request_id, {
+        action:granted ? "allow_once" : "deny",
+        ...(granted ? {approval_scope:event.grant_id ? "remembered" : "once"} : {}),
+        ...grant, reason:event.reason, invocation_fingerprint:event.invocation_fingerprint,
+      });
+    }
   }
   observeExecution(notification) {
     if (notification?.method !== "item/completed") return;

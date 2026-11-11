@@ -92,12 +92,14 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
   let stateHold = null;
   let ownerHold = null;
   const warnings = [];
+  const statuses = [];
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
     classifierMaxReworks: maxReworks,
     classifierDeferFirst: deferFirst,
     onCompatibilityWarning: message => warnings.push(message),
+    onHandoffStatus: event => statuses.push(event),
     classifierApprovalService: {
       ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
       ownsThread: async id => {
@@ -148,7 +150,7 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
     for (const socket of upstream.clients) socket.terminate();
     await new Promise(resolve => upstream.close(resolve));
   });
-  return { connectAndOwn, endpoint, post, warnings,
+  return { connectAndOwn, endpoint, post, warnings, statuses,
     setState(value) { state = structuredClone(value); },
     setOwned(value) { owned = value; },
     holdStateRead() {
@@ -216,6 +218,20 @@ test("explicit native review preserves eight-hour memory and rejects a ticket af
   const reused = await (await fixture.post(value)).json();
   assert.equal(reused.reason, "remembered_human_approval");
   assert.equal(reused.duration, "8h");
+
+  const reusedEvent = await until(() => fixture.statuses.find(event => event.stage === "approval_reused"), "reuse audit event");
+  const requested = fixture.statuses.find(event => event.stage === "requested");
+  const resolved = fixture.statuses.find(event => event.stage === "resolved");
+  assert.equal(requested.run_id, value.run_id);
+  assert.equal(resolved.run_id, value.run_id);
+  assert.equal(resolved.interaction_id, requested.interaction_id);
+  assert.equal(resolved.result.approval_scope, "remembered");
+  assert.equal(resolved.result.duration, "8h");
+  assert.equal(reusedEvent.result.grant_id, resolved.result.grant_id);
+  assert.equal(reusedEvent.result.expires_at, resolved.result.expires_at);
+  assert.equal(reusedEvent.run_id, value.run_id);
+  assert(fixture.statuses.some(event => event.type === "classifier_approval_memory_reused" &&
+    event.thread_id === threadId));
 
   const changed = approvalRequest("changed", {approval_memory:{
     ...memoryContext, dependency_sha256:"d".repeat(64)}});

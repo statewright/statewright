@@ -494,6 +494,45 @@ impl Gateway {
         self.recover_pending_approval(run_id, approval_id).await
     }
 
+    /// Recover one existing native run after process replacement. The private
+    /// origin capability, exact transport and unique running checkpoint bind it.
+    async fn recover_native_run(&mut self, run_id: &str) -> Result<(), &'static str> {
+        if self.current_run_id.is_some() || self.active_workflow.is_some() {
+            return Err("Another workflow owns this transport");
+        }
+        let proof = self.request_approval_origin_hash.clone().ok_or("Native origin proof required")?;
+        #[cfg(feature = "metering")]
+        {
+            let pool = self.db_pool.as_ref().ok_or("Native recovery requires durable storage")?;
+            let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, serde_json::Value)>(
+                "SELECT id, workflow_name, project_id, final_state, context_snapshot FROM workflow_runs
+                 WHERE owner=$1 AND session_id=$2 AND status='running' LIMIT 2"
+            ).bind(&self.owner_id).bind(&self.transport_session_id).fetch_all(pool).await
+                .map_err(|_| "Native checkpoint lookup failed")?;
+            if rows.len() != 1 || rows[0].0 != run_id {
+                return Err("No unique owned native checkpoint");
+            }
+            let (_, workflow, project, current, checkpoint) = rows.into_iter().next().unwrap();
+            let current = current.ok_or("Native checkpoint state missing")?;
+            let restored = crate::session::GatewaySession::from_checkpoint(checkpoint, &self.session_id, &current)
+                .map_err(|_| "Native checkpoint is invalid")?;
+            if restored.approval_origin_hash.as_deref() != Some(proof.as_str()) || restored.is_final()
+                || statewright_engine::validate_definition(&restored.definition).is_err() {
+                return Err("Native checkpoint origin or definition mismatch");
+            }
+            self.session_manager.restore(restored);
+            self.active_workflow = Some(workflow);
+            self.project_id = project;
+            self.current_run_id = Some(run_id.to_owned());
+            Ok(())
+        }
+        #[cfg(not(feature = "metering"))]
+        {
+            let _ = (proof, run_id);
+            Err("Native recovery requires durable storage")
+        }
+    }
+
     pub(crate) fn apply_approval_receipt(
         &mut self,
         run_id: &str,
@@ -2980,6 +3019,13 @@ impl Gateway {
             }
             "statewright_get_state" => {
                 if self.active_workflow.is_none() {
+                    if let Some(run) = arguments.get("recover_run_id").and_then(|v| v.as_str()) {
+                        if let Err(reason) = self.recover_native_run(run).await {
+                            return JsonRpcResponse::error(id, -32600, reason);
+                        }
+                    }
+                }
+                if self.active_workflow.is_none() {
                     return JsonRpcResponse::success(
                         id,
                         serde_json::to_value(crate::protocol::ToolCallResult::error(
@@ -4405,6 +4451,20 @@ mod tests {
             String::new(),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn native_recovery_cannot_replace_a_live_run_or_proceed_without_origin_and_storage() {
+        let mut gateway = test_gateway();
+        assert_eq!(gateway.recover_native_run("requested").await.unwrap_err(),
+            "Another workflow owns this transport");
+        gateway.active_workflow = None;
+        assert_eq!(gateway.recover_native_run("requested").await.unwrap_err(), "Native origin proof required");
+        gateway.set_request_approval_origin(Some(&"a".repeat(64)));
+        assert_eq!(gateway.recover_native_run("requested").await.unwrap_err(),
+            "Native recovery requires durable storage");
+        assert!(gateway.active_workflow.is_none());
+        assert!(gateway.current_run_id.is_none());
     }
 
     #[tokio::test]

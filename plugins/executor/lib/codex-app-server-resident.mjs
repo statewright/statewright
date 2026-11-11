@@ -212,9 +212,23 @@ async function createManagedMcpBridge({ environment, clientId, home }) {
     apiKey: await resolveApiKey(environment),
     clientId,
     originProof: await approvalOriginProof({home, clientId, gatewayUrl}),
+    recoveryRun: () => readBoundRecoveryRun(home, clientId),
   });
   await bridge.start();
   return bridge;
+}
+
+async function readBoundRecoveryRun(home, clientId, threadId = null) {
+  try {
+    const root = await readCodexRootSession(residentControlDir(home, clientId), clientId);
+    if (!root || threadId && root.sessionId !== threadId) return null;
+    const directory = join(home, ".statewright", "sessions", clientId.replace(/^swc_/, "").slice(0,16));
+    const active = JSON.parse(await readFile(join(directory, ".active"), "utf8"));
+    const cached = JSON.parse(await readFile(join(directory, ".state_cache"), "utf8"));
+    return active.version === 1 && active.client_id === clientId && active.thread_id === root.sessionId
+      && active.run_id === cached.run_id && active.run_session_id === cached.run_session_id
+      && typeof cached.run_id === "string" && cached.is_final === false ? cached.run_id : null;
+  } catch { return null; }
 }
 
 export async function codexResidentHistoryArgs({ home, cwd, environment, args = [] }) {
@@ -297,6 +311,7 @@ async function main() {
   const bridge = await createManagedMcpBridge({ environment: process.env, clientId, home });
   let telemetry = await telemetryWriter(process.env);
   const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
+      recoveryRun: threadId => readBoundRecoveryRun(home, clientId, threadId),
       apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
       reprovisionCredential: createGatewayCredentialRecovery({ apiKey: bridge.apiKey,
         gatewayUrl: bridge.gatewayUrl, pbUrl: process.env.STATEWRIGHT_PB_URL,
@@ -319,7 +334,7 @@ async function main() {
     // TUI retains its existing OTLP ingestion. Native receipts stay local so
     // two independently identified sources cannot double-count usage.
     ownsThread: approvalService.ownsThread,
-    getState: () => approvalService.getState(),
+    getState: threadId => approvalService.getState(threadId),
     verifyRouteSuccessor: (previous, current) => approvalService.verifyRouteSuccessor(previous, current),
     peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(controlDir, clientId, threadId, turnId),
   });

@@ -74,6 +74,26 @@ test("successor continuity uses only the owned gateway and private native-origin
   assert(!calls[0].options.body.includes("a".repeat(64)));
 });
 
+test("managed state recovery uses only the host-bound run hint and private proof", async t => {
+  const calls=[];
+  let bound="owned-run";
+  const bridge=await new ManagedMcpBridge({gatewayUrl:"https://gateway.invalid/mcp",
+    apiKey:"fixture",clientId:"client",token:"bridge",originProof:"a".repeat(64),
+    recoveryRun:async()=>bound,fetch:async(_url,options)=>{
+      calls.push(JSON.parse(options.body.toString()));
+      return Response.json({jsonrpc:"2.0",id:1,result:{}});
+    }}).start();
+  t.after(()=>bridge.close());
+  const send=()=>fetch(bridge.url+"/mcp",{method:"POST",headers:{Authorization:"Bearer bridge"},
+    body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",
+      params:{name:"statewright_get_state",arguments:{recover_run_id:"foreign"}}})});
+  assert.equal((await send()).status,200);
+  assert.deepEqual(calls[0].params.arguments,{recover_run_id:"owned-run"});
+  bound=null;
+  assert.equal((await send()).status,200);
+  assert.deepEqual(calls[1].params.arguments,{});
+});
+
 test('human interaction relay keeps the configured destination, native owner token and client boundary',async t=>{
   const calls=[];
   const bridge=await new ManagedMcpBridge({gatewayUrl:'https://gateway.invalid/mcp',apiKey:'server-key',

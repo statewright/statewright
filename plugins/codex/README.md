@@ -426,6 +426,10 @@ The previous run must be terminal and the current run must belong to the same
 account and native client. After verification, the successor retains the
 original route settings and acknowledged manual choices. An unavailable or
 unverifiable predecessor retains its provenance and the turn stays held.
+After a gateway process replacement, the managed TUI can recover the exact
+locally bound running checkpoint using that private proof. The server requires
+a unique running record for the authenticated owner and transport session.
+Recovery preserves the workflow state and pending human decision.
 
 Managed Codex can hold an eligible uncertain invocation and return a review
 ticket when its invocation and dependency evidence can be checked again. Try a

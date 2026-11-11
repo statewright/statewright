@@ -73,6 +73,19 @@ test("route successor evidence binds both exact runs, origin proof and current r
   assert.equal(f.calls.length,calls);
 });
 
+test("state read sends an exact recovery hint only from an owned native binding", async t => {
+  let owned=true;
+  const f=await fixture(t,{ownsThread:async()=>owned,recoveryRun:async thread=>{
+    assert.equal(thread,"thread1");return "bound-run";
+  }});
+  f.respond({result:{structuredContent:state}});
+  await f.service.getState("thread1");
+  assert.deepEqual(f.calls[0].body.params.arguments,{recover_run_id:"bound-run"});
+  owned=false;
+  await f.service.getState("thread1");
+  assert.deepEqual(f.calls[1].body.params.arguments,{});
+});
+
 for (const decision of ["approved", "rejected"]) test(`private ${decision} request has exactly the permitted fields`, async t => {
   const f = await fixture(t);
   f.respond({ ...receipt, status: decision });

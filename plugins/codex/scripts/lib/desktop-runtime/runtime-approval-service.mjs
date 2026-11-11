@@ -14,7 +14,8 @@ function openEvidenceReview(url) {
 }
 
 export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, cwd, clientId, originProof, journalClientId = clientId,
-  fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true, reprovisionCredential = null }) {
+  fetchImpl = fetch, openReview = openEvidenceReview, ownsThread, presentationEnabled = true, reprovisionCredential = null,
+  recoveryRun = null }) {
   const journal = approvalJournal(root, journalClientId);
   let memory = new ApprovalMemory({root:join(root,"classifier-memory"),
     namespace:JSON.stringify([gatewayUrl,cwd,clientId,apiKey])});
@@ -126,10 +127,13 @@ export function createRuntimeApprovalService({ root, apiKey, gatewayUrl, pbUrl, 
         });
       } else await result;
     },
-    async getState() {
+    async getState(threadId) {
+      const recovered = recoveryRun && threadId && await ownsThread?.(threadId)
+        ? await recoveryRun(threadId) : null;
       const fetchState = () => fetchImpl(endpoint, { method: "POST", headers: {...headers}, redirect:"error",
         body: JSON.stringify({ jsonrpc: "2.0", id: "statewright-approval-state", method: "tools/call",
-          params: { name: "statewright_get_state", arguments: {} } }), signal: AbortSignal.timeout(15000) });
+          params: { name: "statewright_get_state",
+            arguments: recovered ? {recover_run_id:recovered} : {} } }), signal: AbortSignal.timeout(15000) });
       let response = await fetchState();
       // Only this read-only state snapshot may retry once after verified renewal.
       // Tool calls and approval decisions never enter this retry path.

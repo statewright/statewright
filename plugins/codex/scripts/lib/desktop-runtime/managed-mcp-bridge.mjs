@@ -41,7 +41,7 @@ async function readBody(request) {
 }
 
 export class ManagedMcpBridge {
-  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage, humanInteractionUrl = null }) {
+  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage, humanInteractionUrl = null, recoveryRun = null }) {
     if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
     if (nativeUsage && typeof projectUsage !== "function") throw new Error("Native usage requires a payload projector");
     this.gatewayUrl = canonicalGateway(gatewayUrl);
@@ -55,6 +55,7 @@ export class ManagedMcpBridge {
     this.nativeUsage = nativeUsage;
     this.projectUsage = projectUsage;
     this.humanInteractionUrl = humanInteractionUrl;
+    this.recoveryRun = recoveryRun;
   }
 
   async start() {
@@ -76,7 +77,18 @@ export class ManagedMcpBridge {
           response.writeHead(403).end();
           return;
         }
-        const body = await readBody(request);
+        let body = await readBody(request);
+        if (request.url === "/mcp" && this.originProof && this.recoveryRun) {
+          const rpc = JSON.parse(body.toString("utf8"));
+          if (rpc.method === "tools/call" && rpc.params?.name === "statewright_get_state") {
+            const args = {...rpc.params.arguments};
+            delete args.recover_run_id;
+            const run = await this.recoveryRun();
+            if (run) args.recover_run_id = run;
+            rpc.params.arguments = args;
+            body = Buffer.from(JSON.stringify(rpc));
+          }
+        }
         if (request.url === "/route-successor") {
           if (!this.originProof) { response.writeHead(403).end(); return; }
           const upstream = await this.fetch(new URL("/api/runtime-route-successor", this.gatewayUrl), {

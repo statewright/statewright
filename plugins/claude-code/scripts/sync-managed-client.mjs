@@ -16,6 +16,7 @@ export const MANAGED_CLIENT_FILES = [
   ["lib/git-closeout.mjs", "executor/lib/git-closeout.mjs"],
   ["lib/managed-client-supervisor.mjs", "executor/lib/managed-client-supervisor.mjs"],
   ["lib/approval-evidence.mjs", "executor/lib/approval-evidence.mjs"],
+  ["lib/approval-origin.mjs", "executor/lib/approval-origin.mjs"],
   ["lib/model-ladder.mjs", "executor/lib/model-ladder.mjs"],
   ["lib/codex-history-integrity.mjs", "executor/lib/codex-history-integrity.mjs"],
   ["lib/managed-client-identity.mjs", "executor/lib/managed-client-identity.mjs"],

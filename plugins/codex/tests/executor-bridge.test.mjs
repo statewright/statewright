@@ -685,7 +685,7 @@ test(`native Codex hook delegates denylist policy to the authoritative gateway (
     const approvedOutput = JSON.parse(classifierApproved.stdout).hookSpecificOutput;
     assert.equal(approvedOutput.permissionDecision, undefined);
     assert.notEqual(approvedOutput.permissionDecision, "ask");
-    assert.match(approvedOutput.additionalContext, /Human approval granted/);
+    assert.match(approvedOutput.additionalContext, /Human approved this exact invocation once/);
     assert.equal(classifierApproval.requests.length, 3);
     assert.equal(classifierApproval.requests[2].display_context.command, "private-input-sentinel");
     assert.equal(classifierApproval.requests[2].classifier_receipt.semantic_vector.may_write, 0.96);

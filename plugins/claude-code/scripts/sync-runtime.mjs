@@ -45,6 +45,7 @@ export const RUNTIME_FILES = [
   "hooks/diagnostic-event.mjs",
   "executor/lib/git-closeout.mjs",
   "executor/lib/approval-evidence.mjs",
+  "executor/lib/approval-origin.mjs",
   "executor/lib/managed-client-supervisor.mjs",
   "executor/lib/model-ladder.mjs",
   "executor/lib/codex-history-integrity.mjs",

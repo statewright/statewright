@@ -3,7 +3,7 @@ import test from 'node:test';
 import {mkdtemp, readFile, readdir, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {HumanInteractionRecorder, approvalDisplayContext} from '../lib/human-interaction.mjs';
+import {HumanInteractionRecorder, approvalDisplayContext, interactionValue, interactionText} from '../lib/human-interaction.mjs';
 import {createTelemetryWriter, humanInteractionOutbox} from '../lib/telemetry.mjs';
 
 test('web approval displays the actual query and target through repeated helper projection', () => {
@@ -34,6 +34,47 @@ test('dialog command stays recognizable while credentials are masked', () => {
   assert.match(display.command,/tool/);
 });
 
+test('credential aliases and curl authentication are masked before local persistence',()=>{
+  const fields=['token','client_secret','clientSecret','ID_TOKEN','session-token','cookie','set-cookie','proxyAuthorization','private_key','STATEWRIGHT_API_KEY'];
+  const result=interactionValue({action:'accept',content:Object.fromEntries(fields.map((key,index)=>[key,'sensitive-marker-'+index]))});
+  assert.doesNotMatch(JSON.stringify(result),/sensitive-marker/);assert.equal(result.action,'accept');
+  for(const command of [
+    'curl -u user:sensitive-marker https://example.invalid/path',
+    'curl -uuser:sensitive-marker https://example.invalid/path',
+    'curl --user=user:sensitive-marker https://example.invalid/path',
+    'curl --proxy-user "user:sensitive-marker" https://example.invalid/path',
+    "curl -u 'user:sensitive-marker with spaces' https://example.invalid/path",
+    'curl -fsSu user:sensitive-marker https://example.invalid/path',
+    "curl -u 'user:sensitive-marker/curl' https://example.invalid/path",
+    "bash -lc 'curl -u user:sensitive-marker https://example.invalid/path'",
+
+    'curl -u user:prefix\\ sensitive-marker https://example.invalid/path',
+    'curl -b "session=sensitive-marker" https://example.invalid/path',
+    'curl -H "X-API-Key: sensitive-marker" https://example.invalid/path',
+
+    'curl -u user:sensitive-marker --proxy-user proxy:sensitive-marker https://example.invalid/path',
+    'curl -H "X-Feature: one;two" -u user:sensitive-marker https://example.invalid/path',
+    'curl -u "user:sensitive-marker\\\"suffix" https://example.invalid/path',
+
+  ]){
+    const cleaned=interactionText(command);
+    assert.doesNotMatch(cleaned,/sensitive-marker/);assert.match(cleaned,/curl/);assert.match(cleaned,/https:\/\/example.invalid\/path/);
+  }
+});
+
+test('serialized token results retain nonsecret action and classification fields',()=>{
+  const result=JSON.parse(interactionText(JSON.stringify({id_token:'sensitive-marker',proxyAuthorization:'sensitive-marker',passphrase:'sensitive-marker',fooToken:'sensitive-marker',action:'accept',read_only:0.99,total_tokens:17})));
+  assert.doesNotMatch(JSON.stringify(result),/sensitive-marker/);assert.equal(result.id_token,'[redacted]');assert.equal(result.action,'accept');
+  assert.equal(result.read_only,0.99);assert.equal(result.total_tokens,17);
+});
+
+test('serialized commands and escaped generic credential arguments retain target context',()=>{
+  const result=JSON.parse(interactionText(JSON.stringify({command:'curl -u "user:sensitive-marker" https://example.invalid/path',action:'accept'})));
+  assert.doesNotMatch(result.command,/sensitive-marker/);assert.match(result.command,/example.invalid\/path/);assert.equal(result.action,'accept');
+  assert.doesNotMatch(interactionText('tool --token prefix\\ sensitive-marker --target public'),/sensitive-marker/);
+  assert.equal(interactionText('curl -o output.txt https://example.invalid/path'),'curl -o output.txt https://example.invalid/path');
+});
+
 test('human requests, answers, cancellation and disconnect retain correlation without treating a reply as authority',async()=>{
   const events=[];const recorder=new HumanInteractionRecorder(event=>events.push(event));
   const request={id:7,method:'item/tool/requestUserInput',params:{threadId:'thread',questions:[{question:'Which target?',options:['staging','production']}]}};
@@ -56,7 +97,9 @@ test('human interaction outbox survives failure and reconstruction; only acknowl
   globalThis.fetch=async()=>new Response('{}',{status:503});
   const fields={schema:'statewright/human-interaction/v1',interaction_id:'interaction',
     thread_id:'thread',request_id:'request',method:'mcpServer/elicitation/request',stage:'requested',
-    dialog:{message:'Allow?',command:'git diff -- file',content:{api_key:'private-value'}}};
+    dialog:{message:'Allow?',command:'git diff -- file',content:{api_key:'private-value',
+      id_token:'private-value',clientSecret:'private-value',cookie:'private-value',
+      authentication_command:'curl -u user:private-value https://example.invalid/path'}}};
   await createTelemetryWriter(path,{endpoint:'https://staging.invalid/api/gateway/telemetry/events',apiKey:'fixture'} )('app_server_handoff_status',fields);
   assert.equal((await readdir(outbox)).length,1);
   const delivered=[];

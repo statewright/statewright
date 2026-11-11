@@ -24,6 +24,9 @@ TUI/Desktop acceptance.
   checkpoint after a gateway restart. Preserve acknowledged manual model and
   effort choices when handing off between runs.
 - Retain the Windows path-identity and owned-process shutdown fixes from 0.3.8.
+- Mask recognizable credential fields, cookie/auth headers and shell-quoted
+  credential arguments before writing human-review records. Command targets,
+  decisions and classifier predictions remain available for audit.
 
 Local semantic authorization is restricted to explicitly configured staging/dev
 environments. Production remains evaluation-only; enabling a provider alone

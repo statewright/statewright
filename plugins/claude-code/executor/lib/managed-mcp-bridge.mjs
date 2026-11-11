@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { annotateToolsListResponse } from "./tool-annotations.mjs";
 import { canonicalGateway } from "./gateway-profile.mjs";
 import { normalizeMcpHttpResponse } from "./mcp-recovery.mjs";
+import { APPROVAL_ORIGIN_HEADER, validApprovalOriginProof } from "./approval-origin.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -40,23 +41,28 @@ async function readBody(request) {
 }
 
 export class ManagedMcpBridge {
-  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), fetch = globalThis.fetch, nativeUsage = null, projectUsage }) {
+  constructor({ gatewayUrl, apiKey, clientId, token = randomUUID(), originProof, fetch = globalThis.fetch, nativeUsage = null, projectUsage, humanInteractionUrl = null, recoveryRun = null }) {
+    if (originProof !== undefined && !validApprovalOriginProof(originProof)) throw new Error("Invalid private approval origin proof");
     if (nativeUsage && typeof projectUsage !== "function") throw new Error("Native usage requires a payload projector");
     this.gatewayUrl = canonicalGateway(gatewayUrl);
     this.apiKey = apiKey;
     this.clientId = clientId;
     this.token = token;
+    this.originProof = originProof;
     this.fetch = fetch;
     this.server = null;
     this.url = null;
     this.nativeUsage = nativeUsage;
     this.projectUsage = projectUsage;
+    this.humanInteractionUrl = humanInteractionUrl;
+    this.recoveryRun = recoveryRun;
   }
 
   async start() {
     this.server = createServer(async (request, response) => {
       try {
-        if (request.method !== "POST" || !["/mcp", ...(this.nativeUsage ? ["/native-usage"] : [])].includes(request.url)) {
+        if (request.method !== "POST" || !["/mcp", "/route-successor", ...(this.nativeUsage ? ["/native-usage"] : []),
+            ...(this.humanInteractionUrl ? ["/human-interactions"] : [])].includes(request.url)) {
           response.writeHead(404).end();
           return;
         }
@@ -71,7 +77,38 @@ export class ManagedMcpBridge {
           response.writeHead(403).end();
           return;
         }
-        const body = await readBody(request);
+        let body = await readBody(request);
+        if (request.url === "/mcp" && this.originProof && this.recoveryRun) {
+          const rpc = JSON.parse(body.toString("utf8"));
+          if (rpc.method === "tools/call" && rpc.params?.name === "statewright_get_state") {
+            const args = {...rpc.params.arguments};
+            delete args.recover_run_id;
+            const run = await this.recoveryRun();
+            if (run) args.recover_run_id = run;
+            rpc.params.arguments = args;
+            body = Buffer.from(JSON.stringify(rpc));
+          }
+        }
+        if (request.url === "/route-successor") {
+          if (!this.originProof) { response.writeHead(403).end(); return; }
+          const upstream = await this.fetch(new URL("/api/runtime-route-successor", this.gatewayUrl), {
+            method:"POST",redirect:"error",headers:{"Content-Type":"application/json",
+              Authorization:`Bearer ${this.apiKey}`,"X-Statewright-Client-Id":this.clientId,
+              [APPROVAL_ORIGIN_HEADER]:this.originProof},body,
+            signal:AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS),
+          });
+          response.writeHead(upstream.status,{"Content-Type":"application/json"});
+          response.end(Buffer.from(await upstream.arrayBuffer()));
+          return;
+        }
+        if (request.url === "/human-interactions") {
+          const upstream = await this.fetch(this.humanInteractionUrl, {method:"POST", redirect:"error",
+            headers:{"Content-Type":"application/json", Authorization:`Bearer ${this.apiKey}`},
+            body, signal:AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS)});
+          response.writeHead(upstream.status, {"Content-Type":"application/json"});
+          response.end(Buffer.from(await upstream.arrayBuffer()));
+          return;
+        }
         if (request.url === "/native-usage") {
           let event;
           try { event = this.projectUsage(JSON.parse(body.toString("utf8"))); }
@@ -85,12 +122,14 @@ export class ManagedMcpBridge {
           "Content-Type": request.headers["content-type"] ?? "application/json",
           Authorization: `Bearer ${this.apiKey}`,
           "X-Statewright-Client-Id": this.clientId,
+          ...(this.originProof ? {[APPROVAL_ORIGIN_HEADER]:this.originProof} : {}),
         };
         for (const name of ["accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]) {
           if (request.headers[name]) forwardedHeaders[name] = request.headers[name];
         }
         const upstream = await this.fetch(this.gatewayUrl, {
           method: "POST",
+          redirect: "error",
           headers: forwardedHeaders,
           body,
           signal: AbortSignal.timeout(timeoutForManagedMcpRequest(body)),

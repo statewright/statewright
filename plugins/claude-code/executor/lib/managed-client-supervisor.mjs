@@ -669,7 +669,7 @@ async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.4" : "0.3.5", environment }) }) {
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.4" : "0.3.9", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const launch = await resolveWindowsLaunch(command);
   const launchCommand = launch.command;
@@ -712,6 +712,8 @@ export async function runManagedClient({ host, command, args, environment = proc
       });
     }
     const config = host === "codex" ? await managedClientConfig(home) : {};
+    const effectiveCodexHistoryMode = host === "codex"
+      ? codexHistoryRepairMode({ environment, config }) : null;
     const preflightCodexHistory = async (launchArgs) => {
       const sessionId = host === "codex" ? resumedSessionId("codex", launchArgs) : null;
       if (!sessionId) return { status: "not_applicable" };
@@ -721,7 +723,7 @@ export async function runManagedClient({ host, command, args, environment = proc
         args: launchArgs,
         environment,
         sessionId,
-        mode: codexHistoryRepairMode({ environment, config }),
+        mode: effectiveCodexHistoryMode,
       });
       if (historyResult?.status === "repaired") {
         if (historyResult.repairKind === "stale_rollout_pointer") process.stderr.write(`[statewright] backed up the Codex state database and restored this thread's canonical rollout pointer.\n`);
@@ -765,6 +767,8 @@ export async function runManagedClient({ host, command, args, environment = proc
           // not filter discovery to the checkout that launched the picker.
           threadListCwd: null,
           terminalLabel,
+          historyArgs: args,
+          historyMode: effectiveCodexHistoryMode,
         });
         const residentRoutes = residentControlDir(home, routedClientId);
         // The resident binds only after a successful native start/resume/fork.

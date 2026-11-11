@@ -19,7 +19,7 @@ test("plugin capability registry covers every released transport with honest evi
   for (const [plugin, capability] of Object.entries(registry.plugins)) {
     assert.deepEqual(
       capability.production_transport.operating_systems,
-      plugin === "claude" ? [] : ["ubuntu-24.04", "macos-14"],
+      plugin === "claude" ? [] : ["ubuntu-24.04", "macos-15"],
       `${plugin} production transport matrix`,
     );
     assert.equal(capability.auth.mode, plugin === "claude" ? "oauth" : "api_key", `${plugin} auth mode`);

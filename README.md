@@ -4,9 +4,11 @@
 
 Your workflows, in the harness you choose. Statewright defines tools, checks, and transitions for each phase of agent work. Use it with Claude Code, Codex, Cursor, OpenCode, Pi, or OMX, or connect a custom MCP host. Tool enforcement and model routing depend on the integration. [Full docs →](https://docs.statewright.ai)
 
-> **0.3.4 release candidate:** Claude gains a native Arbiter, Desktop sidebar and compact results. Codex adds browser onboarding and managed Desktop continuity. [Claude notes](docs/releases/claude-0.3.4.md) · [Codex notes](docs/releases/codex-0.3.4.md). Not yet published.
+> **Plugin releases:** [Claude 0.3.7](https://github.com/statewright/statewright/releases/tag/claude-v0.3.7) and [Codex 0.3.7](https://github.com/statewright/statewright/releases/tag/codex-v0.3.7). See the [Claude notes](docs/releases/claude-0.3.7.md) and [Codex notes](docs/releases/codex-0.3.7.md). Changes on a development branch are not necessarily included in those packages.
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
+
+> **Next candidate: 0.3.9.** [Codex notes](docs/releases/codex-0.3.9.md) · [Claude notes](docs/releases/claude-0.3.9.md). Unpublished; release gates remain pending.
 
 ## The problem
 
@@ -69,6 +71,10 @@ Desktop guides: [Claude Code → Local](https://docs.statewright.ai/plugins/clau
 uses the ordinary Claude app; [ChatGPT with Codex](https://docs.statewright.ai/plugins/codex-desktop)
 uses the macOS **ChatGPT + Statewright** launcher. Ordinary cloud chats are a
 separate integration and cannot enforce model routing.
+
+For ChatGPT web and other remote MCP hosts, see the
+[web workflow guide](docs/web-workflow-execution.md). Web guidance and visible
+transition receipts do not provide the native plugins' hooks or model routing.
 
 Start with **agentic-engineering** (alias **engineering**) for a fix, small
 feature, refactor or investigation. This illustrative sequence shows the normal
@@ -141,7 +147,7 @@ The TUI (`crates/tui`, binary: `statewright`) is a ratatui terminal interface th
 
 States can specify a `model`; `meta.default_model` applies where no state
 override is present. This is optional: the default engineering starter retains
-your selected model. The native Claude 0.3.4 plugin routes subsequent
+your selected model. The native Claude 0.3.7 plugin routes subsequent
 main-conversation requests without restarting the app. Codex's managed App
 Server adapter routes turns. Pi and OpenCode switch live, Cursor's executor
 resumes the same chat, and OMX applies its route at startup. Requested settings
@@ -265,7 +271,7 @@ Point your agent at the [JSON schema](https://statewright.ai/workflow-schema.jso
 
 ## Supported agents
 
-Enforcement and model routing depend on the host. Claude 0.3.4 is a native
+Enforcement and model routing depend on the host. Claude 0.3.7 is a native
 plugin; it needs no shim. Codex uses a managed App Server adapter. Neither
 changes a model midway through a response. The separate
 [`statewright-exec`](plugins/executor/) transport supports executor-owned
@@ -273,8 +279,8 @@ delivery and other hosts; it is not Claude's consumer Desktop integration.
 
 | Agent | Release line | Executor integration | Tool enforcement | Route boundary |
 |-------|--------------|----------------------|------------------|----------------|
-| [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.4 candidate | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
-| [Codex](plugins/codex/) | 0.3.4 candidate | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
+| [Claude Code / Desktop Code](plugins/claude-code/) | 0.3.7 | Native mod + OAuth | Native pre-permission check* | Main-conversation request |
+| [Codex](plugins/codex/) | 0.3.7 | App-server hooks + shared executor bridge | Intercepted native paths | App Server turn |
 | [Oh My Codex](plugins/omx/) | 0.1.x | Native hooks + executor MCP bridge | Hard | Startup |
 | [Pi](plugins/pi/) | 0.3.0 | Native extension + executor MCP bridge | Hard* | Live |
 | [OpenCode](plugins/opencode/) | 0.3.0 | Native plugin + executor MCP bridge | Hard | Live |
@@ -346,8 +352,8 @@ The engine (`crates/engine`) and agent layer (`crates/agent`) are Apache 2.0, em
 
 [docs.statewright.ai](https://docs.statewright.ai) — install guide, workflow authoring, [schema reference](https://docs.statewright.ai/workflows/schema-reference), [MCP tool reference](https://docs.statewright.ai/tools/reference), [agent-generated workflows](https://docs.statewright.ai/tools/agent-generated-workflows), and [isolated delivery](https://docs.statewright.ai/features/isolated-delivery/).
 
-Optional plugin diagnostics follow your Statewright account telemetry choice,
-with local opt-outs. Reports exclude prompts, code, commands and credentials.
+Limited plugin error diagnostics run automatically and do not depend on the
+website session-recording choice. Reports exclude prompts, code, commands and credentials.
 See [telemetry and privacy](docs/guides/optional-telemetry.md).
 
 ## Contributing

@@ -82,9 +82,10 @@ try {
   assert.equal(frames.filter((value) => value.method === "turn/started").length, 0, "a parked request must never start a native turn");
   assert.equal(decisions, 0);
   assert.equal(nativeTurnStarts, 0);
-  console.log(JSON.stringify({ schema: "statewright/windows-managed-app-server-canary/v1", outcome: "pass", binary: command, checked: ["real-native-initialize", "server-notifications", "native-form-frame", "journal-retained-on-cancel", "turn-blocked-before-inference"], native_inference_turns: nativeTurnStarts, approval_decisions: decisions }));
 } finally {
   socket?.terminate();
   await runtime?.close();
   await rm(home, { recursive: true, force: true });
 }
+// No pass receipt until the owned process and disposable home are cleaned up.
+console.log(JSON.stringify({ schema: "statewright/windows-managed-app-server-canary/v1", outcome: "pass", binary: command, checked: ["real-native-initialize", "server-notifications", "native-form-frame", "journal-retained-on-cancel", "turn-blocked-before-inference", "owned-process-cleanup"], native_inference_turns: nativeTurnStarts, approval_decisions: decisions }));

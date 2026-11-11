@@ -3,7 +3,7 @@
 Candidate notes. This document does not establish publication or installed
 TUI/Desktop acceptance.
 
-## Fixes prepared for validation
+## Changes
 
 - Preserve command effects across shell composition and require explicit
   repository-execution authority for build/test commands.
@@ -13,11 +13,27 @@ TUI/Desktop acceptance.
 - Recover failed waiting-for-review notifications and handle late native
   transport acknowledgments without accepting stale decisions.
 - Align managed-client and native diagnostic version reporting with the package.
+- Remember accepted classifier reviews for the workflow's configured duration
+  (`once`, `2h`, `4h`, `8h`, or `always`). Reuse requires the same command,
+  dependencies, owner and policy; a remembered decision does not override a
+  separate workflow or host approval. The native dialog still uses
+  Allow / Deny / Cancel.
+- Record native human-review requests, decisions and remembered-grant reuse in
+  server-side telemetry, with command context and classifier predictions.
+- Verify route ownership across credential renewal and recover the exact bound
+  checkpoint after a gateway restart. Preserve acknowledged manual model and
+  effort choices when handing off between runs.
+- Retain the Windows path-identity and owned-process shutdown fixes from 0.3.8.
 
-The local judgment adapter is evaluation-only and disabled unless explicitly
-configured. It cannot grant execution authority. No model weights are bundled.
+Local semantic authorization is restricted to explicitly configured staging/dev
+environments. Production remains evaluation-only; enabling a provider alone
+grants no execution authority. Uncertain, failed or ambiguous assessments require
+native human review. No model weights are bundled.
 
-Staging must verify the exact installed package, native approve/deny/cancel and
-waiting notifications before these changes are described as delivered. See the
+The earlier staging canary verified eight-hour grant reuse and server telemetry.
+This release preparation also reconciles the public 0.3.8 fixes, so those earlier
+receipts do not establish acceptance of the complete new artifact. Exact-source
+CI, packaged clean-install checks and fresh staging acceptance remain required.
+Desktop and Windows UI acceptance must be recorded separately. See the
 [repair evidence](../research/classifier-hitl-local-model-20261105.md) for source
 checks and outstanding acceptance gates.

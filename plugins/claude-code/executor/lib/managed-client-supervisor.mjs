@@ -277,15 +277,25 @@ export async function terminateWindowsProcessTree(child, {
   try {
     taskkill = spawnImpl("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
       env: windowsProcessTreeEnvironment(environment),
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
     });
   } catch (error) {
     return { status: "spawn_error", errorCode: error?.code ?? "unknown" };
   }
+  // taskkill receives only an owned PID and a credential-free environment.
+  // Retain a bounded, closed-vocabulary reason; never expose its raw output.
+  let diagnostic = "";
+  taskkill.stderr?.on("data", chunk => { diagnostic = (diagnostic + String(chunk)).slice(0, 2048); });
+  const failureReason = () => {
+    if (/access is denied/i.test(diagnostic)) return "access_denied";
+    if (/no running instance/i.test(diagnostic)) return "no_running_instance";
+    if (/not found/i.test(diagnostic)) return "process_not_found";
+    return "unrecognized";
+  };
   const completion = new Promise((resolveCompletion) => {
     taskkill.once?.("error", (error) => resolveCompletion({ status: "spawn_error", errorCode: error?.code ?? "unknown" }));
-    taskkill.once?.("close", (code, signal) => resolveCompletion({ status: code === 0 ? "success" : "nonzero", code, signal }));
+    taskkill.once?.("close", (code, signal) => resolveCompletion({ status: code === 0 ? "success" : "nonzero", code, signal, ...(code === 0 ? {} : { reason: failureReason() }) }));
   });
   if (await waitForChildExit(completion, timeoutMs)) return completion;
   try { taskkill.kill?.(); } catch { /* cleanup process already exited */ }
@@ -669,7 +679,7 @@ async function nextApprovalRequest(controlDir, consumed, retryAfter, now = Date.
   return null;
 }
 
-export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.4" : "0.3.9", environment }) }) {
+export async function runManagedClient({ host, command, args, environment = process.env, cwd = process.cwd(), home = homedir(), pollMs = 100, bridgeFactory = (options) => new ManagedMcpBridge(options), historyGuard = guardCodexResumeHistory, approvalPreparer = prepareManagedApproval, approvalOpener = openExternalUrl, reporter = createErrorReporter({ plugin: host === "claude" ? "claude-code" : "codex", version: host === "claude" ? "0.3.9" : "0.3.9", environment }) }) {
   if (!["codex", "claude"].includes(host)) throw new Error(`Unsupported managed client host '${host}'.`);
   const launch = await resolveWindowsLaunch(command);
   const launchCommand = launch.command;

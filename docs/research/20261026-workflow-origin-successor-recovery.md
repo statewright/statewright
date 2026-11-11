@@ -1,5 +1,8 @@
 # Same-session workflow-origin successor recovery
 
+Public evidence note: local account paths are pseudonymized. Original observations
+and exact private paths are retained in the private release receipts.
+
 ## Observed incident
 
 On 2026-10-26, `death-rebirth:2.1` resumed thread

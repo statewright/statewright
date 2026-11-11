@@ -1,5 +1,14 @@
 # Statewright for Codex 0.3.5
 
+## Withdrawn revision
+
+The `codex-v0.3.5-r1` publication was withdrawn because its package still
+reported version 0.3.5. The original 0.3.5 release and the withdrawn revision's
+tag remain intact. The revision's changes are documented under the distinct
+[0.3.6 patch release](codex-0.3.6.md).
+
+## Original 0.3.5 release
+
 This maintenance release fixes the first-send failure after resuming or forking
 a conversation in the managed Codex TUI.
 

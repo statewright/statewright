@@ -28,12 +28,34 @@ function childStopped(child) {
   return child.exitCode !== null || child.signalCode !== null;
 }
 
-async function stopOwnedAppServer(child, closed, graceMs) {
+export async function stopOwnedAppServer(child, closed, graceMs, {
+  platform = process.platform,
+  cleanupProcessTree = async ownedChild => {
+    const { terminateWindowsProcessTree } = await import("./managed-client-supervisor.mjs");
+    return terminateWindowsProcessTree(ownedChild);
+  },
+} = {}) {
   const signal = async name => {
-    if (process.platform === "win32") {
-      const { terminateWindowsProcessTree } = await import("./managed-client-supervisor.mjs");
-      const result = await terminateWindowsProcessTree(child);
-      if (result.status !== "success" && !childStopped(child)) throw new Error("Owned App Server process-tree cleanup failed");
+    if (platform === "win32") {
+      const result = await cleanupProcessTree(child);
+      if (result.status !== "success" && !childStopped(child)) {
+        // taskkill can observe an already-exited PID before Node emits close.
+        // Its "not found" result is only a hint: require the owned child's
+        // close event (including its stdio pipes) within the existing grace.
+        const alreadyGone = result.status === "nonzero" &&
+          (result.reason === "no_running_instance" || result.reason === "process_not_found");
+        if (alreadyGone && await Promise.race([closed.then(() => true), delay(graceMs).then(() => false)])) return;
+        // Preserve the helper's bounded result, not command output, environment,
+        // or native protocol payloads. A generic error hid distinct failures.
+        throw new Error(`Owned App Server process-tree cleanup failed (${JSON.stringify({
+          status: result.status,
+          code: result.code ?? null,
+          signal: result.signal ?? null,
+          errorCode: result.errorCode ?? null,
+          reason: result.reason ?? null,
+          closedAfterKill: result.closedAfterKill ?? null,
+        })})`);
+      }
       return;
     }
     try { process.kill(-child.pid, name); }

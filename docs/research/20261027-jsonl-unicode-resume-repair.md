@@ -1,5 +1,8 @@
 # Codex resume: Unicode JSONL framing repair
 
+Public evidence note: local account paths are pseudonymized. Original observations
+and exact private paths are retained in the private release receipts.
+
 ## Contract and evidence
 
 Scope: shared Codex history integrity reader, its focused tests, synchronized

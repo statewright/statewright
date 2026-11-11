@@ -67,15 +67,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "Claude command: $((Get-Command claude).Source)"
       - name: Run managed-client bootstrap canary
+        id: bootstrap
         timeout-minutes: 3
         run: node plugins/executor/tests/windows-managed-client-canary.mjs
       - name: Run managed-client route canary
+        id: route
         timeout-minutes: 3
         run: node plugins/executor/tests/windows-managed-client-route-canary.mjs
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build onboarding credential helper
+        run: cargo build --locked -p statewright-credentials
       - name: Prove secretless browser onboarding
+        id: onboarding
         timeout-minutes: 2
         env:
           STATEWRIGHT_API_KEY: ""
+          STATEWRIGHT_CREDENTIAL_HELPER: ${{ github.workspace }}/target/debug/statewright-credentials.exe
         run: node plugins/executor/tests/windows-plugin-browser-onboarding-canary.mjs
       - name: Run managed Codex App Server approval protocol canary
         timeout-minutes: 3
@@ -83,11 +90,18 @@ jobs:
           $cmd = Get-Command codex.cmd -ErrorAction SilentlyContinue
           if (-not $cmd) { $cmd = Get-Command codex }
           $env:CODEX_BIN = $cmd.Source
-          node plugins/executor/tests/windows-managed-app-server-canary.mjs
+          # Exercise intermittent process-tree shutdown, retaining the first
+          # failure rather than allowing a later successful iteration to mask it.
+          foreach ($attempt in 1..5) {
+            Write-Host "Owned App Server lifecycle $attempt/5"
+            node plugins/executor/tests/windows-managed-app-server-canary.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Run managed ownership race canary
         timeout-minutes: 2
         run: node --test plugins/executor/tests/managed-ownership-races.test.mjs
       - name: Run authenticated production gateway canary
+        id: production
         if: github.event_name != 'pull_request'
         env:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
@@ -104,6 +118,7 @@ jobs:
           STATEWRIGHT_CANARY_ANTHROPIC_API_KEY: ${{ secrets.STATEWRIGHT_CANARY_ANTHROPIC_API_KEY }}
         run: node plugins/executor/tests/windows-cli-auth-canary.mjs
       - name: Submit Codex adoption telemetry event
+        id: codex_telemetry
         if: github.event_name != 'pull_request'
         env:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
@@ -113,6 +128,7 @@ jobs:
           $codexVersion = node -p "require('./plugins/capabilities.json').plugins.codex.version"
           node plugins/executor/tests/plugin-adoption-telemetry-canary.mjs codex $codexVersion
       - name: Submit Claude adoption telemetry event
+        id: claude_telemetry
         if: github.event_name != 'pull_request'
         env:
           STATEWRIGHT_API_KEY: ${{ secrets.STATEWRIGHT_PLUGIN_CANARY_API_KEY }}
@@ -121,6 +137,22 @@ jobs:
         run: |
           $claudeVersion = node -p "require('./plugins/capabilities.json').plugins.claude.version"
           node plugins/executor/tests/plugin-adoption-telemetry-canary.mjs claude $claudeVersion
+      - name: Record required step outcomes
+        if: github.event_name == 'push'
+        env:
+          CANARY_WORKFLOW: windows-plugin-canary.yml
+          CANARY_JOB_NAME: Codex and Claude managed-client bootstrap
+          CANARY_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          CANARY_STEPS: ${{ toJSON(steps) }}
+        run: node .github/scripts/canary-step-receipt.cjs
+      - name: Upload required step receipt
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-steps-windows-attempt-${{ github.run_attempt }}
+          path: canary-steps.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Record verification boundary
         if: always()
         env:

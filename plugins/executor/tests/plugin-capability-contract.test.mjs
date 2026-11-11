@@ -65,6 +65,10 @@ test("capability versions match package and runtime identities", async () => {
     pi: await json("plugins/pi/package.json"),
   };
   manifests.codex.version = manifests.codex.version.split("+")[0];
+  assert.equal(manifests.claude.version, (await json("plugins/claude-code/package.json")).version,
+    "Claude package identity must match its native plugin manifest");
+  assert.equal(manifests.claude.version, (await json("plugins/claude-code/.claude-plugin/plugin.json")).version,
+    "Claude marketplace and native manifests must match");
 
   for (const plugin of expectedPlugins) {
     assert.equal(registry.plugins[plugin].version, manifests[plugin].version, `${plugin} manifest version`);

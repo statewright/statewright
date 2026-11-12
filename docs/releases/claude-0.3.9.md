@@ -1,19 +1,29 @@
 # Statewright for Claude Code 0.3.9
 
-Unpublished release candidate. Claude's native Arbiter, sidebar and main-conversation
-routing remain the supported consumer integration.
+Release candidate; not yet published.
 
-This candidate synchronizes the shared managed-client runtime, retaining the
-Windows cleanup diagnostics and owned-process shutdown handling shipped in 0.3.8.
-It also carries the shared checkpoint ownership and history-integrity repairs.
-Native Claude and Codex runtime copies are checked against their shared source
-before packaging.
+## Changes
 
-The shared credential adapter now bootstraps a missing helper from the matching
-published release with source/tag and SHA256 verification. Both release packages
-publish standalone helpers, including Intel macOS; native Claude OAuth is unchanged.
+- **More reliable recovery.** Shared runtime improvements protect workflow
+  checkpoints and conversation history during reconnects and credential renewal.
+- **Simpler helper setup.** Where the shared credential adapter is used, a missing
+  native helper can be downloaded from the matching published release with source
+  and SHA256 verification. Helpers cover Apple Silicon and Intel macOS, Linux x64
+  and Windows x64.
+- **Windows reliability fixes.** Path handling, cleanup diagnostics and shutdown
+  of owned processes retain the fixes included in 0.3.8.
 
-The Codex native approval dialog and its eight-hour canary are not Claude UI
-acceptance. Claude's native integration and the packaged release need their own
-exact-source CI and installed-host validation before publication. Production
-local semantic authorization is not enabled by this release.
+## Using Statewright
+
+Use the Arbiter and sidebar in Claude Code or **Claude Desktop → Code → Local**.
+Claude continues to manage its native OAuth sign-in; no separate Statewright
+launcher is required. This integration does not run in ordinary Desktop Chat or
+Cowork.
+
+Update with `claude plugin update statewright@statewright`, then reload the
+conversation with `/reload-plugins`. If you previously installed manual hooks,
+follow the [migration guide](../../plugins/claude-code/README.md#upgrade-from-manual-hooks)
+before starting a workflow.
+
+Codex-specific approval dialogs are not added to Claude by this release. Local
+model-based command authorization is not enabled for production.

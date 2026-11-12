@@ -1,48 +1,36 @@
 # Statewright for Codex 0.3.9
 
-Candidate notes. This document does not establish publication or installed
-TUI/Desktop acceptance.
+Release candidate; not yet published.
 
 ## Changes
 
-- Preserve command effects across shell composition and require explicit
-  repository-execution authority for build/test commands.
-- Send eligible exhausted classifier reworks to the owning native approval
-  controller. Missing ownership or unsupported presentation remains a visible
-  denial; no workflow restriction is overridden by classifier approval.
-- Recover failed waiting-for-review notifications and handle late native
-  transport acknowledgments without accepting stale decisions.
-- Present workflow review when an older native Codex goal is already complete.
-  Approved ordinary turns preserve that goal and recheck its identity through
-  routing; workflow review cannot reactivate it through a native goal-set request.
-- Align managed-client and native diagnostic version reporting with the package.
-- Remember accepted classifier reviews for the workflow's configured duration
-  (`once`, `2h`, `4h`, `8h`, or `always`). Reuse requires the same command,
-  dependencies, owner and policy; a remembered decision does not override a
-  separate workflow or host approval. The native dialog still uses
-  Allow / Deny / Cancel.
-- Record native human-review requests, decisions and remembered-grant reuse in
-  server-side telemetry, with command context and classifier predictions.
-- Verify route ownership across credential renewal and recover the exact bound
-  checkpoint after a gateway restart. Preserve acknowledged manual model and
-  effort choices when handing off between runs.
-- Retain the Windows path-identity and owned-process shutdown fixes from 0.3.8.
-- Bootstrap missing credential helpers for Git-based terminal/Desktop installs
-  from the matching published release with source/tag and SHA256 verification.
-  Publish standalone helper assets, including Intel macOS, alongside release ZIPs.
-- Mask recognizable credential fields, cookie/auth headers and shell-quoted
-  credential arguments before writing human-review records. Command targets,
-  decisions and classifier predictions remain available for audit.
+- **Fewer repeated approval prompts.** Workflows can remember an approved command
+  once, for 2, 4 or 8 hours, or indefinitely. The workflow chooses the duration;
+  the dialog remains Allow / Deny / Cancel. Reuse requires matching command,
+  dependencies, owner and policy. Separate host and workflow approvals still apply.
+- **Clearer command review.** Approval prompts include the command and available
+  classifier predictions. Eligible uncertain commands can reach native human
+  review after the agent's permitted rework attempt.
+- **More reliable review handoffs.** Workflow review can continue when an earlier
+  Codex goal is already complete, without reopening that goal. Waiting-for-review
+  notifications and reconnect handling have also been improved.
+- **Better session recovery.** Credential renewal and gateway restart recovery
+  preserve the owning workflow checkpoint. Acknowledged manual model and effort
+  choices are preserved across handoffs.
+- **Simpler credential setup.** Git-based installs can download a missing native
+  credential helper from the matching published release, with source and SHA256
+  verification. Helpers cover Apple Silicon and Intel macOS, Linux x64 and Windows
+  x64; credentials use the operating system's credential store.
+- **More useful review history.** Server-side records include review requests,
+  decisions and remembered approvals, with command context and classifier
+  predictions. Recognizable credentials and authentication headers are masked.
 
-Local semantic authorization is restricted to explicitly configured staging/dev
-environments. Production remains evaluation-only; enabling a provider alone
-grants no execution authority. Uncertain, failed or ambiguous assessments require
-native human review. No model weights are bundled.
+## Compatibility
 
-The earlier staging canary verified eight-hour grant reuse and server telemetry.
-This release preparation also reconciles the public 0.3.8 fixes, so those earlier
-receipts do not establish acceptance of the complete new artifact. Exact-source
-CI, packaged clean-install checks and fresh staging acceptance remain required.
-Desktop and Windows UI acceptance must be recorded separately. See the
-[repair evidence](../research/classifier-hitl-local-model-20261105.md) for source
-checks and outstanding acceptance gates.
+Keep Codex up to date and restart the session after updating the plugin.
+Windows path handling and process cleanup fixes from 0.3.8 are included.
+
+Local model-based command authorization remains limited to explicitly configured
+staging and development environments. It is not enabled for production by this
+release. ChatGPT web keeps its selected model and does not gain native hook
+enforcement from the terminal/Desktop plugin.

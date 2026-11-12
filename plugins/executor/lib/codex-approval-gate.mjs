@@ -73,7 +73,7 @@ export class CodexApprovalGate {
     return state;
   }
 
-  async park(threadId, snapshot, { turnId = null, autoContinue = false, retainCheckpoint = false } = {}) {
+  async park(threadId, snapshot, { turnId = null, autoContinue = false, retainCheckpoint = false, requestMethod = null } = {}) {
     const existing = this.pending.get(threadId);
     if (existing && !existing.abort.signal.aborted) return existing.promise;
     const entry = { abort: new AbortController(), epoch: this.epochs.get(threadId) ?? 0, snapshot, turnId };
@@ -81,6 +81,22 @@ export class CodexApprovalGate {
       entry.abort.signal.throwIfAborted();
       if (this.closed || (this.epochs.get(threadId) ?? 0) !== entry.epoch) {
         throw new Error("Approval continuation superseded by user activity");
+      }
+    };
+    const checkGoal = async () => {
+      check();
+      if (!entry.completedGoal) return;
+      await this.assertOwner(threadId);
+      const current = (await this.rpc("thread/goal/get", { threadId })).goal;
+      await this.assertOwner(threadId);
+      check();
+      // A completed goal is historical metadata, not something this workflow
+      // approval may reactivate. Recheck its identity through routing awaits.
+      const keys = ["objective", "createdAt", "threadId", "goalId", "id"];
+      if (current?.status !== "complete" || keys.some(key =>
+        Object.hasOwn(current, key) !== Object.hasOwn(entry.completedGoal, key)
+        || current[key] !== entry.completedGoal[key])) {
+        throw new Error("Native goal changed during approval");
       }
     };
     this.pending.set(threadId, entry);
@@ -102,6 +118,15 @@ export class CodexApprovalGate {
         }
         entry.goal = paused;
       } else if (goal?.status === "paused") entry.goal = goal;
+      else if (goal?.status === "complete") {
+        if (requestMethod === "thread/goal/set") throw new Error("Workflow approval cannot reactivate a completed native goal");
+        if (typeof goal.objective !== "string" || !goal.objective.trim()
+            || !["number", "string"].includes(typeof goal.createdAt) || !goal.createdAt
+            || Object.hasOwn(goal, "threadId") && goal.threadId !== threadId) {
+          throw new Error("Completed native goal lacks matching thread identity");
+        }
+        entry.completedGoal = structuredClone(goal);
+      }
       else if (goal) throw new Error("Approval belongs to a native goal that is no longer resumable");
       if (turnId) {
         const thread = (await this.rpc("thread/read", { threadId, includeTurns: false })).thread;
@@ -129,15 +154,15 @@ export class CodexApprovalGate {
         throw new Error("Human rejected transition; autonomous work remains parked");
       }
       const state = await this.approvedState(threadId, snapshot);
-      check();
+      await checkGoal();
       if (autoContinue && !state.is_final) {
         await this.assertOwner(threadId);
         await this.continueApproved({ threadId, state, fromState: snapshot.pending_approval.from_state,
-          approvalId:ticket.approval_id, goal: entry.goal, check });
+          approvalId:ticket.approval_id, goal: entry.goal, check, checkGoal });
         check();
       }
       if (!retainCheckpoint) await this.service.clear(threadId, ticket.approval_id);
-      return state;
+      return { state, checkGoal, completedGoal: entry.completedGoal };
     })().finally(() => {
       if (this.pending.get(threadId) === entry) this.pending.delete(threadId);
       if (this.safety.get(threadId) === entry.safety) this.safety.delete(threadId);
@@ -145,14 +170,15 @@ export class CodexApprovalGate {
     return entry.promise;
   }
 
-  async beforeTurn(threadId, { turnId = null } = {}) {
+  async beforeTurn(threadId, { turnId = null, requestMethod = "turn/start" } = {}) {
     const epoch = this.epochs.get(threadId) ?? 0;
     const snapshot = await this.stateFor(threadId);
     if (this.closed || (this.epochs.get(threadId) ?? 0) !== epoch) throw new Error("Approval request superseded by newer input");
     if (!snapshot) return;
-    const state = await this.park(threadId, snapshot, { turnId, retainCheckpoint: true });
+    const { state, checkGoal, completedGoal } = await this.park(threadId, snapshot, { turnId, retainCheckpoint: true, requestMethod });
+    if (completedGoal && requestMethod === "thread/goal/set") throw new Error("Workflow approval cannot reactivate a completed native goal");
     return { state, approvalId: snapshot.pending_approval.approval_id,
-      fromState: snapshot.pending_approval.from_state };
+      fromState: snapshot.pending_approval.from_state, checkGoal };
   }
 
   async reopen(threadId) {

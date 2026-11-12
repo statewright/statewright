@@ -12,6 +12,9 @@ TUI/Desktop acceptance.
   denial; no workflow restriction is overridden by classifier approval.
 - Recover failed waiting-for-review notifications and handle late native
   transport acknowledgments without accepting stale decisions.
+- Present workflow review when an older native Codex goal is already complete.
+  Approved ordinary turns preserve that goal and recheck its identity through
+  routing; workflow review cannot reactivate it through a native goal-set request.
 - Align managed-client and native diagnostic version reporting with the package.
 - Remember accepted classifier reviews for the workflow's configured duration
   (`once`, `2h`, `4h`, `8h`, or `always`). Reuse requires the same command,

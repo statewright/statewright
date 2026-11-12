@@ -68,7 +68,7 @@ async function fixture(t) {
         value.check();
         continuations.push(value);
         events.push("continue");
-        goal = { ...goal, status: "active" };
+        if (value.goal) goal = { ...goal, status: "active" };
       },
     });
     gates.push(gate);
@@ -85,6 +85,92 @@ async function fixture(t) {
     dialog: () => sent.findLast(item => item.method === "mcpServer/elicitation/request"),
   };
 }
+
+const completedGoal = {status:'complete',objective:'Previously completed work',createdAt:123,goalId:'completed-goal'};
+
+for(const goal of [{status:'complete'}, {...completedGoal,threadId:'foreign-thread'}])test('malformed or foreign completed goal cannot release a workflow review',async t=>{
+ const f=await fixture(t);f.setGoal(goal);await f.journal.save(threadId,snapshot);
+ await assert.rejects(f.gate.beforeTurn(threadId),/lacks matching thread identity/);
+ assert.equal(f.dialog(),undefined);assert.deepEqual(f.decisions,[]);assert.deepEqual(f.continuations,[]);
+});
+
+test('workflow approval does not authorize explicit reactivation of its completed native goal',async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));await f.journal.save(threadId,snapshot);
+ await assert.rejects(f.gate.beforeTurn(threadId,{requestMethod:'thread/goal/set'}),/cannot reactivate a completed/);
+ assert.equal(f.dialog(),undefined);assert.deepEqual(f.goal(),completedGoal);assert.deepEqual(f.decisions,[]);
+});
+
+test('completed native goal permits pending workflow review and a user turn without goal reactivation',async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));
+ await f.journal.save(threadId,snapshot);
+ const waiting=f.gate.beforeTurn(threadId);
+ await until(()=>f.dialog());
+ assert.equal(f.events.includes('thread/goal/set'),false);
+ assert.deepEqual(f.decisions,[]);
+ f.gate.handleReply({id:f.dialog().id,result:{action:'accept'}});
+ const result=await waiting;
+ assert.deepEqual(result.state,approved);
+ assert.deepEqual(f.goal(),completedGoal);
+ assert.deepEqual(f.continuations,[]);
+ assert.deepEqual(await f.journal.load(threadId),snapshot,'request acknowledgement still owns checkpoint clearing');
+ await result.checkGoal();
+ f.setGoal({...completedGoal,goalId:'replacement-goal'});
+ await assert.rejects(result.checkGoal(),/Native goal changed during approval/);
+});
+
+test('automatic workflow continuation preserves an unrelated completed goal',async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));
+ const waiting=f.gate.observe(threadId,snapshot,'turn1');
+ await until(()=>f.dialog());
+ f.gate.handleReply({id:f.dialog().id,result:{action:'accept'}});
+ await waiting;
+ assert.equal(f.continuations.length,1);
+ assert.equal(f.continuations[0].goal,undefined);
+ assert.deepEqual(f.goal(),completedGoal);
+ assert.equal(f.events.includes('thread/goal/set'),false);
+});
+
+test('completed-goal review survives a dismissed form and cold gate reopen',async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));await f.journal.save(threadId,snapshot);
+ const first=f.gate.reopen(threadId),rejected=assert.rejects(first,/dismissed/);
+ await until(()=>f.dialog());const oldId=f.dialog().id;
+ f.gate.handleReply({id:oldId,result:{action:'cancel'}});await rejected;f.gate.close();
+ assert.deepEqual(await f.journal.load(threadId),snapshot);
+ const cold=f.makeGate(),second=cold.reopen(threadId);
+ await until(()=>f.dialog()?.id!==oldId);
+ cold.handleReply({id:f.dialog().id,result:{action:'accept'}});await second;
+ assert.deepEqual(f.goal(),completedGoal);assert.equal(f.events.includes('thread/goal/set'),false);
+ assert.equal(f.continuations.length,1);assert.equal(await f.journal.load(threadId),null);
+});
+
+test('ownership lost during completed-goal verification prevents continuation',async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));let owned=true,reads=0;
+ f.service.ownsThread=async id=>owned&&id===threadId;
+ const rpc=f.gate.rpc;f.gate.rpc=async(method,args)=>{const result=await rpc(method,args);if(method==='thread/goal/get'&&++reads===2)owned=false;return result;};
+ const waiting=f.gate.observe(threadId,snapshot,'turn1'),rejected=assert.rejects(waiting,/different root thread/);
+ await until(()=>f.dialog());f.gate.handleReply({id:f.dialog().id,result:{action:'accept'}});await rejected;
+ assert.deepEqual(f.continuations,[]);assert.deepEqual(await f.journal.load(threadId),snapshot);
+ assert.deepEqual(f.goal(),completedGoal);
+});
+
+for(const change of [null,{...completedGoal,status:'active'},{...completedGoal,goalId:'replaced'}])test(`completed-goal replacement cannot release approval (${change?.status??'cleared'},${change?.goalId??'none'})`,async t=>{
+ const f=await fixture(t);f.setGoal(structuredClone(completedGoal));
+ const waiting=f.gate.observe(threadId,snapshot,'turn1');
+ const rejected=assert.rejects(waiting,/Native goal changed during approval/);
+ await until(()=>f.dialog());f.setGoal(structuredClone(change));
+ f.gate.handleReply({id:f.dialog().id,result:{action:'accept'}});
+ await rejected;
+ assert.deepEqual(f.continuations,[]);
+ assert.deepEqual(await f.journal.load(threadId),snapshot);
+ assert.equal(f.events.includes('thread/goal/set'),false);
+});
+
+for(const status of ['blocked','usage_limited','budget_limited','unexpected'])test(`${status} goal does not gain execution authority from workflow review`,async t=>{
+ const f=await fixture(t);f.setGoal({...completedGoal,status});
+ await f.journal.save(threadId,snapshot);
+ await assert.rejects(f.gate.reopen(threadId),/no longer resumable/);
+ assert.equal(f.dialog(),undefined);assert.deepEqual(f.decisions,[]);assert.deepEqual(f.continuations,[]);
+});
 
 test("approval checkpoints and pauses before interruption, then releases only after applied approval", async t => {
   const f = await fixture(t);
@@ -143,7 +229,10 @@ test("beforeTurn waits for approval without creating a second autonomous continu
   const waiting = f.gate.beforeTurn(threadId);
   await until(() => f.dialog());
   f.gate.handleReply({ id: f.dialog().id, result: { action: "accept" } });
-  assert.deepEqual(await waiting, { state: approved, approvalId: snapshot.pending_approval.approval_id,
+  const {checkGoal,...release}=await waiting;
+  assert.equal(typeof checkGoal,'function');
+  await checkGoal();
+  assert.deepEqual(release, { state: approved, approvalId: snapshot.pending_approval.approval_id,
     fromState: snapshot.pending_approval.from_state });
   assert.equal(f.continuations.length, 0);
   assert.deepEqual(await f.journal.load(threadId), snapshot);

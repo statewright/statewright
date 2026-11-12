@@ -224,6 +224,7 @@ async function fixture(t, { withService = true, delayedIdle = false, nativeGoal 
     get settings() { return settings; },
     armPending() { state = structuredClone(pendingState); },
     setState(value) { state = structuredClone(value); },
+    setGoal(value) { goal = structuredClone(value); },
     changeRoot() { owned = false; },
     setRoute(value) { routes = [value]; },
     setRoutes(values) { routes = [...values]; },
@@ -253,6 +254,52 @@ function resolved(f, request) {
 }
 
 const pausedGoal = { status: "paused", objective: "Complete the fixture milestone", createdAt: 12345 };
+
+test('a pending workflow review cannot reactivate a completed goal through native goal/set',async t=>{
+ const goal={...pausedGoal,status:'complete',goalId:'historical-completed-goal'};
+ const f=await fixture(t,{nativeGoal:goal});await f.rpc('thread/start');f.armPending();
+ const id=f.request('thread/goal/set',{threadId,status:'active'});
+ const response=await f.response(id,{allowError:true});
+ assert.match(response.error.message,/cannot reactivate a completed/);
+ assert.equal(form(f),undefined);assert.equal(starts(f).length,0);
+ assert.equal(f.calls.some(c=>c.method==='thread/goal/set'),false);assert.deepEqual(f.goal,goal);
+});
+
+for(const automatic of [false,true])test(`completed native goal survives workflow approval (automatic=${automatic})`,async t=>{
+ const goal={...pausedGoal,status:'complete',goalId:'historical-completed-goal'};
+ const f=await fixture(t,{nativeGoal:goal});let id;
+ if(automatic)await f.observePending();
+ else{
+  await f.rpc('thread/start');f.armPending();
+  id=f.request('turn/start',{threadId,input:[{type:'text',text:'Summarize the reviewed work'}]});
+  await until(()=>form(f),'completed-goal workflow review form');
+ }
+ assert.deepEqual(f.goal,goal);
+ assert.equal(f.calls.some(c=>c.method==='thread/goal/set'),false);
+ assert.equal(starts(f).length,automatic?1:0);
+ f.respond(form(f),'accept');
+ if(id)await f.response(id);
+ await until(()=>starts(f).length===(automatic?2:1),'approved ordinary turn');
+ assert.deepEqual(f.goal,goal);
+ assert.equal(f.calls.some(c=>c.method==='thread/goal/set'),false);
+ assert.equal(starts(f).at(-1).params.model,'fixture-destination-model');
+ if(!automatic)assert.match(JSON.stringify(starts(f).at(-1).params.input),/Summarize the reviewed work/);
+ assert.deepEqual(f.errors,[]);
+});
+
+for(const automatic of [false,true])test(`completed goal replacement during routing preserves checkpoint (automatic=${automatic})`,async t=>{
+ const goal={...pausedGoal,status:'complete',goalId:'historical-completed-goal'};
+ const replacement={...goal,goalId:'new-goal'};
+ const f=await fixture(t,{nativeGoal:goal});let id;
+ if(automatic)await f.observePending();
+ else{await f.rpc('thread/start');f.armPending();id=f.request('turn/start',{threadId,input:[{type:'text',text:'Summarize reviewed work'}]});await until(()=>form(f),'review form');}
+ const hold=f.holdReservation();f.respond(form(f),'accept');await hold.entered.promise;
+ f.setGoal(replacement);hold.release.resolve();
+ if(id){const response=await f.response(id,{allowError:true});assert.match(response.error.message,/Native goal changed during approval/);}
+ else await until(()=>f.errors.length>0,'completed goal race refusal');
+ assert.equal(starts(f).length,automatic?1:0);assert.equal(f.saved.size,1);
+ assert.deepEqual(f.goal,replacement);assert.equal(f.calls.some(c=>c.method==='thread/goal/set'),false);
+});
 const parkedSteerMessage = "Approval parked the prior turn; submit a new turn to continue with the approved route";
 
 function assertParkedSteerRefusal(response) {

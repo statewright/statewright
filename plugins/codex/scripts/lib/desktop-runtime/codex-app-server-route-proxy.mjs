@@ -1448,8 +1448,8 @@ export async function startCodexAppServerRouteProxy({
         return forwardWhenOpen(downstream, JSON.stringify(value));
       },
       record: event => onHandoffStatus({ schema: "statewright/approval-lifecycle/v1", ...event }),
-      continueApproved: async ({ threadId, state, fromState, approvalId, goal, check }) => {
-        const checkOwner = async () => { check(); await gate.assertOwner(threadId); check(); };
+      continueApproved: async ({ threadId, state, fromState, approvalId, goal, check, checkGoal }) => {
+        const checkOwner = async () => { check(); await gate.assertOwner(threadId); await checkGoal(); check(); };
         const release = await acquireRouteLease();
         let reservation, forwarded = false;
         try {
@@ -1524,7 +1524,10 @@ export async function startCodexAppServerRouteProxy({
       };
       const checkReleaseOwner = async () => {
         checkCurrentRequest();
-        if (approvedRelease) await gate.assertOwner(message.params.threadId);
+        if (approvedRelease) {
+          await gate.assertOwner(message.params.threadId);
+          await approvedRelease.checkGoal();
+        }
         checkCurrentRequest();
       };
       try {
@@ -1664,7 +1667,8 @@ export async function startCodexAppServerRouteProxy({
             const epoch = operatorActivity.get(message.params?.threadId);
             try {
               approvedRelease = await gate.beforeTurn(message.params?.threadId,
-                { turnId: message.params?.turnId ?? turnOrigins.get(message.params?.threadId)?.turnId });
+                { turnId: message.params?.turnId ?? turnOrigins.get(message.params?.threadId)?.turnId,
+                  requestMethod: message.method });
               if (operatorActivity.get(message.params?.threadId) !== epoch) throw new Error("Approval request superseded by newer user input");
               if (approvedRelease && message.method === "turn/steer") {
                 throw new Error("Approval parked the prior turn; submit a new turn to continue with the approved route");

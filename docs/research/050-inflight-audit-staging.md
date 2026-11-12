@@ -31,7 +31,7 @@ fresh successor lookup under an old run ID. Tests cover pending-review arrival,
 transition preservation, successor/revision rejection and database connection
 failure. Serialization round-trip is not proof of database recovery.
 
-Validation receipts are retained under /Volumes/sidecar/build-tmp/:
+Validation receipts are retained in the private release evidence directory:
 inflight-audit full v1 failed three catalog expectations after adding a new tool;
 these were updated to assert the new explicit mutating annotation and trusted-env
 catalog size, not to weaken existing read annotations. Default full v2 passed526

@@ -39,8 +39,8 @@ Workflow source SHA256:
 
 ## Runtime source candidate
 
-Base: `2346d45348a02f865ea84d4bbe54228bc151f950`, in the clean linked preparation
-worktree `/Volumes/sidecar/.agent-worktrees/statewright-classifier-forward-20261107`.
+Base: `2346d45348a02f865ea84d4bbe54228bc151f950`, in a clean linked preparation
+worktree.
 The earlier provider-middleware worktree is separate and is not part of this patch.
 No canonical Statewright runtime bytes or existing staged work were overwritten.
 

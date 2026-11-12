@@ -65,7 +65,7 @@ history module SHA256 equals the source/generated hash above; the staging shim
 selects the new version. An independent installed-module inspection returns the
 same healthy 4,907-record result and unchanged original history SHA256.
 
-From the verified idle pane `%4` / shell PID6437 in `/Users/tester/dev/polyhedron`,
+From the verified idle pane `%4` / shell PID6437 in the affected project checkout,
 retried only `scodex resume 01a0a281-f183-7ce1-ab50-dcaf77684f6e`. Launcher PID57856
 uses the new durable package. Native Codex started without the history error.
 Dismissed its optional CLI-update offer without installing/updating Codex.

@@ -70,7 +70,12 @@ export function formatGuardDenial(result) {
   if (approval?.action === "unavailable") {
     display += ` Native approval could not be completed: ${approval.reason}. The invocation remains denied; do not retry it or switch clients.`;
   } else if (approval?.action === "deny") {
-    display += ` Native approval outcome: ${approval.reason}. The invocation remains denied.`;
+    const explanations = {
+      approval_already_pending: "Another approval dialog is already open. Wait for it to resolve; this invocation has not been approved.",
+      approval_review_capacity_reached: "The review queue is full. Resolve existing review requests before requesting another review; this invocation has not been approved.",
+      approval_previously_denied: "Approval for this exact invocation was previously denied or dismissed; the invocation remains denied.",
+    };
+    display += ` ${explanations[approval.reason] ?? `Native approval outcome: ${approval.reason}. The invocation remains denied.`}`;
   }
   return {
     display,

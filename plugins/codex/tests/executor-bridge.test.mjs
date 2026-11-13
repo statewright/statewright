@@ -66,6 +66,20 @@ test("formats classifier denials for display without discarding machine evidence
   assert.doesNotMatch(denial.machine, /internal scoring/);
 });
 
+test("explains pending, full, and previously denied reviews without losing reason codes", () => {
+  for (const [reason, message] of [
+    ["approval_already_pending", /Another approval dialog is already open/],
+    ["approval_review_capacity_reached", /review queue is full/],
+    ["approval_previously_denied", /exact invocation was previously denied or dismissed/],
+  ]) {
+    const denial = formatGuardDenial({risk_assessment: {final_denial_basis: "semantic_threshold_not_met"},
+      classifier_approval: {action: "deny", reason, command: "private-sentinel"}});
+    assert.match(denial.display, message);
+    assert.match(denial.machine, new RegExp(reason));
+    assert.doesNotMatch(denial.display + denial.machine, /private-sentinel/);
+  }
+});
+
 test("agent delegation denial directs inline work and suppresses approval retry guidance", () => {
   const denial = formatGuardDenial({
     risk_assessment: {
@@ -730,6 +744,8 @@ case "$1" in
       malformed) printf '%s' 'private-invalid-output'; exit 0 ;;
       invalid_action) printf '%s' '{"schema":"statewright/classifier-approval/v2","action":"approve_forever"}'; exit 0 ;;
       failed) printf '%s' '{"schema":"statewright/classifier-approval/v2","action":"allow_once"}'; exit 7 ;;
+      approval_already_pending|approval_review_capacity_reached|approval_previously_denied)
+        printf '{"schema":"statewright/classifier-approval/v2","action":"deny","reason":"%s"}' "$APPROVAL_FIXTURE"; exit 0 ;;
     esac ;;
 esac
 exec "${process.execPath}" "$@"
@@ -749,6 +765,22 @@ exec "${process.execPath}" "$@"
       assert.match(output.permissionDecisionReason, message);
       assert.match(output.additionalContext, new RegExp(reason));
       assert.doesNotMatch(failure.stdout, /private-invalid-output|unavailable in this client/);
+    }
+
+    for (const [reason, message] of [
+      ["approval_already_pending", /Another approval dialog is already open/],
+      ["approval_review_capacity_reached", /review queue is full/],
+      ["approval_previously_denied", /exact invocation was previously denied or dismissed/],
+    ]) {
+      const result = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {
+        session_id, tool_name: "classifier_denied_display", tool_input: {command: "private-input-sentinel"},
+      }, {...environment, STATEWRIGHT_NODE_BIN: nodeFixture, APPROVAL_FIXTURE: reason});
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout).hookSpecificOutput;
+      assert.equal(output.permissionDecision, "deny");
+      assert.match(output.permissionDecisionReason, message);
+      assert.match(output.additionalContext, new RegExp(reason));
+      assert.doesNotMatch(result.stdout, /private-input-sentinel/);
     }
 
     const stale = await invoke("bash", [resolve(codexRoot, "hook.sh"), "pre-tool"], {

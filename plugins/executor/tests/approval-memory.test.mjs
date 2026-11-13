@@ -98,6 +98,138 @@ test("host change during the final workflow state read invalidates the binding",
   assert.equal(await controller.current(req),false);
 });
 
+test("a waiting alternative does not expire the original review ticket",async t=>{
+  const f=await fixture(t),sent=[];let clock=1000;
+  const current=state();current.approval_memory_policy.approve_for="8h";
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make(),deferFirst:true,maxReworks:1,ttlMs:1000,now:()=>clock});
+  const original=request();original.approval_memory.approve_for="8h";
+  const held=await controller.begin(original);const ticket=held.response.review_ticket;assert(ticket);
+  const alternative=request();alternative.approval_memory.approve_for="8h";alternative.approval_memory.invocation_sha256="d".repeat(64);alternative.classifier_receipt.invocation_fingerprint="invocation_v1_alternative";
+  const pending=await controller.begin(alternative);assert.equal(pending.outcome,"ask");
+  clock+=10000;assert(controller.deferredEntry(ticket),"pending human review must not expire the original ticket");
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});await pending.completion;
+  assert(controller.deferredEntry(ticket),"resolved alternative must leave the original ticket reviewable");
+});
+
+test("an owner is reserved while a deferred review revalidates state",async()=>{
+  const sent=[];let release;let paused=false;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),deferFirst:true,maxReworks:1,
+    getState:async()=>{if(paused)await gate;return state();}});
+  const first=request(), second=request();
+  second.classifier_receipt.intent_fingerprint="intent_v1_second";
+  second.classifier_receipt.invocation_fingerprint="invocation_v1_second";
+  const one=(await controller.begin(first)).response.review_ticket;
+  const two=(await controller.begin(second)).response.review_ticket;
+  paused=true;const review=controller.reviewDeferred(one);
+  const busy=await controller.reviewDeferred(two);
+  assert.equal(busy.reason,"classifier_review_already_pending");
+  assert(controller.deferredEntry(two),"a busy review must retain its ticket");
+  const alternate=request();alternate.classifier_receipt.invocation_fingerprint="invocation_v1_alternate";
+  assert.equal((await controller.begin(alternate)).response.reason,"approval_already_pending");
+  assert.equal(sent.length,0);
+  paused=false;release();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,1);
+  controller.handleReply({id:sent[0].id,result:{action:"decline"}});await review;
+  const next=controller.reviewDeferred(two);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,2);
+  const dialog=sent.filter(item=>item.method==="mcpServer/elicitation/request").at(-1);
+  controller.handleReply({id:dialog.id,result:{action:"decline"}});await next;
+});
+
+test("review reservations release after stale state, abort, and disconnect",async()=>{
+  for(const outcome of ["stale", "abort", "disconnect"]){
+    const sent=[];let release;let pause=false;
+    const gate=new Promise(resolve=>{release=resolve;});
+    const controller=new ClassifierApprovalController({send:v=>sent.push(v),deferFirst:true,maxReworks:1,
+      getState:async()=>{if(pause)await gate;return outcome==="stale"&&pause?{...state(),state_epoch:5}:state();}});
+    const one=request(),two=request();two.classifier_receipt.intent_fingerprint="intent_v1_other";
+    two.classifier_receipt.invocation_fingerprint="invocation_v1_other";
+    const ticket=(await controller.begin(one)).response.review_ticket;
+    const next=(await controller.begin(two)).response.review_ticket;
+    const abort=new AbortController();pause=true;
+    const pending=controller.reviewDeferred(ticket,{signal:abort.signal});
+    if(outcome==="abort")abort.abort();
+    if(outcome==="disconnect")controller.close();
+    release();await pending;
+    assert.equal(controller.reviewOwners.size,0,outcome);
+    if(outcome!=="disconnect"){
+      pause=false;const retry=controller.reviewDeferred(next);
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,1,outcome);
+      controller.handleReply({id:sent[0].id,result:{action:"decline"}});await retry;
+    }
+  }
+});
+
+test("a different owner can review while the first owner is reserved",async()=>{
+  const sent=[];let release,paused=false,firstRead=true;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),deferFirst:true,maxReworks:1,
+    getState:async()=>{if(paused&&firstRead){firstRead=false;await gate;}return state();}});
+  const a=request(),b=request();b.thread_id="other-thread";
+  const ta=(await controller.begin(a)).response.review_ticket;
+  const tb=(await controller.begin(b)).response.review_ticket;
+  paused=true;const first=controller.reviewDeferred(ta);
+  const second=controller.reviewDeferred(tb);
+  await new Promise(resolve=>setImmediate(resolve));
+  const other=sent.find(item=>item.params?.threadId==="other-thread");assert(other);
+  controller.handleReply({id:other.id,result:{action:"accept"}});await second;
+  release();await new Promise(resolve=>setImmediate(resolve));
+  const original=sent.find(item=>item.params?.threadId==="thread");assert(original);
+  controller.handleReply({id:original.id,result:{action:"accept"}});await first;
+  assert.equal(controller.reviewOwners.size,0);
+});
+
+test("aborting a stalled state read releases the owner without a late prompt",async()=>{
+  const sent=[];let release,stall=false;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),deferFirst:true,maxReworks:1,
+    getState:async()=>{if(stall)await gate;return state();}});
+  const a=request(),b=request();b.classifier_receipt.intent_fingerprint="intent_v1_other";
+  b.classifier_receipt.invocation_fingerprint="invocation_v1_other";
+  const first=(await controller.begin(a)).response.review_ticket;
+  const second=(await controller.begin(b)).response.review_ticket;
+  const abort=new AbortController();stall=true;
+  const pending=controller.reviewDeferred(first,{signal:abort.signal});abort.abort();
+  const settled=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve("stuck"),100))]);
+  assert.notEqual(settled,"stuck");assert.equal(controller.reviewOwners.size,0);
+  stall=false;const next=controller.reviewDeferred(second);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,1);
+  controller.handleReply({id:sent[0].id,result:{action:"decline"}});await next;
+  release();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,1);
+});
+
+test("disconnect during a stalled state read settles without a late prompt",async()=>{
+  const sent=[];let release,stall=false;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),deferFirst:true,maxReworks:1,
+    getState:async()=>{if(stall)await gate;return state();}});
+  const ticket=(await controller.begin(request())).response.review_ticket;
+  stall=true;const pending=controller.reviewDeferred(ticket);controller.close();
+  const settled=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve("stuck"),100))]);
+  assert.notEqual(settled,"stuck");assert.equal(controller.reviewOwners.size,0);
+  release();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(sent.filter(item=>item.method==="mcpServer/elicitation/request").length,0);
+});
+
+test("unpresented review tickets expire and the queue is bounded",async()=>{
+  let clock=1000;
+  const controller=new ClassifierApprovalController({send:()=>{},deferFirst:true,maxReworks:1,ttlMs:1000,now:()=>clock});
+  let firstTicket;
+  for(let i=0;i<256;i++){
+    const value=request();value.classifier_receipt.intent_fingerprint=`intent_v1_${i}`;value.classifier_receipt.invocation_fingerprint=`invocation_v1_${i}`;
+    const result=await controller.begin(value);assert.equal(result.response.action,"rework");
+    firstTicket??=result.response.review_ticket;
+  }
+  const extra=request();extra.classifier_receipt.intent_fingerprint="intent_v1_extra";extra.classifier_receipt.invocation_fingerprint="invocation_v1_extra";
+  assert.equal((await controller.begin(extra)).response.reason,"approval_review_capacity_reached");
+  clock+=1001;assert.equal(controller.deferredEntry(firstTicket),null);
+  assert.equal((await controller.begin(extra)).response.action,"rework");
+});
+
 test("provider replacement during grant confirmation denies the pending reuse",async t=>{
   const f=await fixture(t),sent=[],value=request(),current=state();
   const name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"owner/repo"};

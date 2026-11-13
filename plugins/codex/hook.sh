@@ -1187,10 +1187,13 @@ case "$ENDPOINT" in
             ADAPTER_DISPLAY="${ADAPTER_DISPLAY} The exact denied invocation cannot count as rework; change the invocation on the reported structural axis."
             ;;
           approval_already_pending)
-            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} One approval request for this intent is already pending; this concurrent invocation remains denied."
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Another approval dialog is already open. Wait for it to resolve; this invocation has not been approved."
+            ;;
+          approval_review_capacity_reached)
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} The review queue is full. Resolve existing review requests before requesting another review; this invocation has not been approved."
             ;;
           approval_previously_denied)
-            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Approval for this intent was already denied or dismissed; reformulate or wait for a new bounded approval window."
+            ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Approval for this exact invocation was previously denied or dismissed; the invocation remains denied."
             ;;
           native_approval_timeout|approval_request_aborted|provider_connection_closed|native_approval_unavailable)
             ADAPTER_DISPLAY="${ADAPTER_DISPLAY} Native human approval did not complete; the invocation remains denied."

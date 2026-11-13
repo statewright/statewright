@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason } from "../scripts/classifier-approval.mjs";
+import { redactedApprovalRequest, requestClassifierApproval, classifierApprovalFailureReason, reviewMcpRequest } from "../scripts/classifier-approval.mjs";
 import { createServer } from "node:http";
 import { once } from "node:events";
 
@@ -59,6 +59,22 @@ test('external uncertainty carries the command and directory through both helper
   assert.equal(request.display_context.command,'git diff -- pb/hooks/order_fulfillment.pb.js');
   assert.equal(request.display_context.cwd,'/workspace');
   assert.deepEqual(redactedApprovalRequest(request),request);
+});
+
+test("unavailable review ticket reports a useful safe reason",async()=>{
+  const value={id:1,params:{arguments:{ticket:"11111111-1111-1111-1111-111111111111"}}};
+  const options={environment:{STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT:"/fixture"},
+    readFile:async()=>JSON.stringify({proxyUrl:"ws://127.0.0.1:1234",proxyToken:"private-fixture"}),
+    fetch:async()=>new Response(JSON.stringify({reason:"Classifier approval has no owning native connection"}),{status:400})};
+  const result=await reviewMcpRequest(value,options);
+  assert.equal(result.result.isError,true);
+  assert.match(result.result.content[0].text,/ticket is unavailable or its owning connection is gone/);
+  assert.match(result.result.content[0].text,/not approved; do not replay/);
+  assert.doesNotMatch(JSON.stringify(result),/private-fixture/);
+  const unknown=await reviewMcpRequest(value,{...options,fetch:async()=>new Response(JSON.stringify({reason:"private-fixture"}),{status:400})});
+  assert.doesNotMatch(JSON.stringify(unknown),/private-fixture/);
+  const busy=await reviewMcpRequest(value,{...options,fetch:async()=>new Response(JSON.stringify({schema:"statewright/classifier-review/v1",action:"denied",reason:"classifier_review_already_pending"}),{status:200})});
+  assert.match(busy.result.content[0].text,/ticket remains available after that dialog resolves/);
 });
 
 test("MCP approval keeps original input for binding and displays safe provider arguments",()=>{

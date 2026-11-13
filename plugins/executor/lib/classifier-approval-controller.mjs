@@ -126,12 +126,16 @@ export class ClassifierApprovalController {
     Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory, deferFirst, resolveMcpBinding});
     this.entries = new Map();
     this.requests = new Map();
+    this.reviewOwners = new Set();
+    this.closeSignal = new AbortController();
     this.closedReason=null;
   }
 
   prune(timestamp = this.now()) {
     for (const [key, entry] of this.entries) {
-      if (timestamp - entry.updatedAt >= this.ttlMs && !entry.pending && !entry.reviewing) this.entries.delete(key);
+      const ownerPrompt = entry.deferred && (this.reviewOwners.has(entry.deferred.request.threadId)
+        || [...this.requests.values()].some(({pending}) => pending.request.threadId === entry.deferred.request.threadId));
+      if (timestamp - entry.updatedAt >= this.ttlMs && !entry.pending && !entry.reviewing && !ownerPrompt) this.entries.delete(key);
     }
   }
 
@@ -158,17 +162,40 @@ export class ClassifierApprovalController {
     const deferred = this.deferredEntry(ticket);
     if (!deferred || this.closedReason || signal?.aborted) return null;
     const {key, entry, request} = deferred;
-    if (entry.pending || entry.reviewing || entry.denied) return null;
+    if (entry.pending || entry.reviewing || this.reviewOwners.has(request.threadId)
+        || [...this.requests.values()].some(({pending}) => pending.request.threadId === request.threadId)) {
+      return this.result(request, "deny", {reason:"classifier_review_already_pending"});
+    }
+    if (entry.denied) return null;
+    this.reviewOwners.add(request.threadId);
     entry.deferred = null;
     entry.reviewing = true;
+    let onAbort;
     try {
-      if (!await this.current(request) || this.closedReason || signal?.aborted) {
+      const stateCheck = this.current(request);
+      const current = await Promise.race([stateCheck, new Promise(resolve => {
+        onAbort = () => resolve(false);
+        signal?.addEventListener("abort", onAbort, {once:true});
+        this.closeSignal.signal.addEventListener("abort", onAbort, {once:true});
+        if (signal?.aborted || this.closeSignal.signal.aborted) onAbort();
+      })]);
+      if (!current || this.closedReason || signal?.aborted) {
         return this.result(request, "deny", {reason:"approval_state_changed"});
       }
+      if (onAbort) {
+        signal?.removeEventListener("abort", onAbort);
+        this.closeSignal.signal.removeEventListener("abort", onAbort);
+      }
+      onAbort = null;
       const decision = this.present(request, key, entry, {signal, deferred:true});
       return await decision.completion;
     } finally {
+      if (onAbort) {
+        signal?.removeEventListener("abort", onAbort);
+        this.closeSignal.signal.removeEventListener("abort", onAbort);
+      }
       entry.reviewing = false;
+      this.reviewOwners.delete(request.threadId);
     }
   }
 
@@ -235,9 +262,17 @@ export class ClassifierApprovalController {
     }
     const timestamp = this.now();
     this.prune(timestamp);
-    const key = this.key(request);
-    const entry = this.entries.get(key) ?? {attempts: 0, updatedAt: timestamp,
-      pending: null, seenInvocations: new Set(), denied: false};
+    const familyKey = this.key(request);
+    const family = this.entries.get(familyKey);
+    const alternateKey = JSON.stringify(["alternate", familyKey, request.invocationFingerprint]);
+    const alternate = this.entries.has(alternateKey)
+      || Boolean(family?.deferred && family.deferred.request.invocationFingerprint !== request.invocationFingerprint);
+    const key = alternate ? alternateKey : familyKey;
+    if (!this.entries.has(key) && this.entries.size >= 256) {
+      return approvalDeny(this.result(request, "deny", {reason:"approval_review_capacity_reached"}));
+    }
+    const entry = this.entries.get(key) ?? {attempts: alternate ? (family?.attempts ?? 1) : 0, updatedAt: timestamp,
+      pending: null, seenInvocations: new Set(), denied: false, ...(alternate ? {familyKey} : {})};
     if (entry.denied) {
       return approvalDeny(this.result(request, "deny", {reason: "approval_previously_denied",
         prior_reason: entry.denialReason}));
@@ -263,6 +298,10 @@ export class ClassifierApprovalController {
     if (entry.seenInvocations.has(request.invocationFingerprint)) {
       return approvalDeny(this.result(request, "deny", {reason: "exact_invocation_already_observed",
         attempts: entry.attempts, max_reworks: this.maxReworks}));
+    }
+    if (this.reviewOwners.has(request.threadId)
+        || [...this.requests.values()].some(({pending}) => pending.request.threadId === request.threadId)) {
+      return approvalDeny(this.result(request, "deny", {reason:"approval_already_pending"}));
     }
     entry.seenInvocations.add(request.invocationFingerprint);
     entry.attempts += 1;
@@ -345,6 +384,10 @@ export class ClassifierApprovalController {
     this.requests.delete(pending.requestId);
     entry.pending = null;
     entry.updatedAt = this.now();
+    if (entry.familyKey) {
+      const family = this.entries.get(entry.familyKey);
+      if (family?.deferred) family.updatedAt = entry.updatedAt;
+    }
     if (action === "allow_once") {
       if (pending.deferred && !pending.grant) entry.permit = pending.request;
       else this.entries.delete(key);
@@ -460,6 +503,7 @@ export class ClassifierApprovalController {
 
   close(reason = "provider_connection_closed") {
     this.closedReason=reason;
+    this.closeSignal.abort();
     for (const container of [...this.requests.values()]) this.finish(container, "deny", reason);
     this.entries.clear();
   }

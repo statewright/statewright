@@ -419,6 +419,53 @@ test("explicit native review presents the held invocation and only then permits 
   assert.equal(messages.filter(message => message.method === "mcpServer/elicitation/request").length, 1);
 });
 
+test("a same-intent alternative does not erase the original review ticket", async t => {
+  const fixture=await setup(t,{maxReworks:1,deferFirst:true,memory:true});
+  const {client,messages}=await fixture.connectAndOwn();
+  const original=approvalRequest("ticket-original",{approval_memory:memoryContext,tool_name:"Bash",tool_input:{command:"original-command",cwd:"/fixture"}});
+  const held=await (await fixture.post(original)).json();
+  assert.match(held.review_ticket,/^[a-f0-9-]{36}$/);
+  const alternate=approvalRequest("ticket-alternate",{approval_memory:{...memoryContext,invocation_sha256:"d".repeat(64)},tool_name:"Bash",tool_input:{command:"alternate-command",cwd:"/fixture"}});
+  const alternatePending=fixture.post(alternate);
+  const alternativeModal=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"),"alternate review");
+  client.send(JSON.stringify({id:alternativeModal.id,result:{action:"accept"}}));
+  const alternateGrant=await (await alternatePending).json();assert.equal(alternateGrant.action,"allow_once");
+  const originalReview=fixture.post({ticket:held.review_ticket},{},"/review");
+  const originalModal=await until(()=>messages.filter(m=>m.method==="mcpServer/elicitation/request")[1],"original ticket review");
+  assert.match(originalModal.params.message,/original-command/);
+  client.send(JSON.stringify({id:originalModal.id,result:{action:"accept"}}));
+  const response=await originalReview;
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).action,"approved");
+  const originalGrant=await (await fixture.post(original)).json();
+  assert.equal(originalGrant.reason,"remembered_human_approval");
+  assert.equal(originalGrant.duration,"8h");
+  assert.notEqual(originalGrant.grant_id,alternateGrant.grant_id);
+});
+
+test("a denied alternative preserves its own denial and the original ticket", async t => {
+  const fixture=await setup(t,{maxReworks:1,deferFirst:true,memory:true});
+  const {client,messages}=await fixture.connectAndOwn();
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,allowed_durations:memoryContext.allowed_durations,approve_for:"once"}});
+  const onceContext={...memoryContext,approve_for:"once"};
+  const original=approvalRequest("original-denial-case",{approval_memory:onceContext,tool_name:"Bash",tool_input:{command:"first-command",cwd:"/fixture"}});
+  const held=await (await fixture.post(original)).json();
+  const alternate=approvalRequest("alternate-denial-case",{approval_memory:{...onceContext,invocation_sha256:"d".repeat(64)},tool_name:"Bash",tool_input:{command:"other-command",cwd:"/fixture"}});
+  const alternatePending=fixture.post(alternate);
+  const alternativeModal=await until(()=>messages.find(m=>m.method==="mcpServer/elicitation/request"),"alternate review");
+  const busy=await fixture.post({ticket:held.review_ticket},{},"/review");
+  const busyResult=await busy.json();assert.equal(busyResult.action,"denied");assert.equal(busyResult.reason,"classifier_review_already_pending");
+  client.send(JSON.stringify({id:alternativeModal.id,result:{action:"decline"}}));
+  assert.equal((await (await alternatePending).json()).action,"deny");
+  const originalReview=fixture.post({ticket:held.review_ticket},{},"/review");
+  const originalModal=await until(()=>messages.filter(m=>m.method==="mcpServer/elicitation/request")[1],"original review after alternate denial");
+  client.send(JSON.stringify({id:originalModal.id,result:{action:"accept"}}));
+  assert.equal((await (await originalReview).json()).action,"approved");
+  assert.equal((await (await fixture.post(original)).json()).reason,"deferred_human_approval");
+  assert.equal((await (await fixture.post(alternate)).json()).reason,"approval_previously_denied");
+});
+
 test("explicit native review preserves eight-hour memory and rejects a ticket after state drift", async t => {
   const fixture = await setup(t, {maxReworks:0, deferFirst:true, memory:true});
   const {client, messages} = await fixture.connectAndOwn();

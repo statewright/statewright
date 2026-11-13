@@ -143,6 +143,10 @@ async function approvalPost(path, body, options) {
   });
   const result = await response.json().catch(() => null);
   if (!response.ok || !result || typeof result !== "object") {
+    if (path === "/classifier-approval/review" && response.status === 400
+        && result?.reason === "Classifier approval has no owning native connection") {
+      throw new Error("classifier_approval_review_ticket_unavailable");
+    }
     throw new Error(`classifier_approval_http_${response.status}`);
   }
   return result;
@@ -178,7 +182,7 @@ export async function requestClassifierApproval(value, options = {}) {
   return result;
 }
 
-async function reviewMcpRequest(value) {
+export async function reviewMcpRequest(value, options = {}) {
   const ticket = value.params?.arguments?.ticket;
   let message;
   let isError = false;
@@ -186,19 +190,28 @@ async function reviewMcpRequest(value) {
     if (typeof ticket !== "string" || !/^[a-f0-9-]{36}$/.test(ticket)) {
       throw new Error("classifier_approval_invalid_review_ticket");
     }
-    const result = await approvalPost("/classifier-approval/review", {ticket}, {});
+    const result = await approvalPost("/classifier-approval/review", {ticket}, options);
     if (result.schema !== "statewright/classifier-review/v1" || !["approved","denied"].includes(result.action)) {
       throw new Error("classifier_approval_invalid_action");
     }
     isError = result.action !== "approved";
     message = isError
-      ? "Native review did not authorize the original invocation. Do not replay it."
+      ? result.reason === "classifier_review_already_pending"
+        ? "Another approval dialog is already open. This review ticket remains available after that dialog resolves; the original invocation is not approved. Do not replay it."
+        : "Native review did not authorize the original invocation. Do not replay it."
       : "Native review approved the original invocation. Submit that exact tool request with the same arguments and working directory. Statewright will verify the current policy and binding before execution.";
   } catch (error) {
     isError = true;
-    message = `Native review could not be confirmed (${classifierApprovalFailureReason(error)}). Do not replay the original invocation.`;
+    message = classifierReviewFailureMessage(error);
   }
   return {jsonrpc:"2.0", id:value.id, result:{isError, content:[{type:"text",text:message}]}};
+}
+
+export function classifierReviewFailureMessage(error) {
+  if (classifierApprovalFailureReason(error) === "classifier_approval_review_ticket_unavailable") {
+    return "Native review could not start: the review ticket is unavailable or its owning connection is gone. The original invocation was not approved; do not replay it.";
+  }
+  return `Native review could not be confirmed (${classifierApprovalFailureReason(error)}). Do not replay the original invocation.`;
 }
 
 export async function manageApprovalMemory({threadId, action, grantId}, options={}) {

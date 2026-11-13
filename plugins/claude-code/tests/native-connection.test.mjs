@@ -205,11 +205,11 @@ async function host({ startup = true, options = {} } = {}) {
   const $ = {
     plugin: { root: '/test-plugin', name: 'statewright' },
     store: { get: async key => stored.get(key), set: async (key, value) => stored.set(key, value) },
-    session: { id: async () => state.sessionId ? state.sessionId() : state.session, model: async () => state.model ?? 'claude-opus-5-5' },
+    session: { surfaces: async () => state.surfaces ?? ['terminal'], id: async () => state.sessionId ? state.sessionId() : state.session, model: async () => state.model ?? 'claude-opus-5-5' },
     settings: { read: async () => state.settings ?? {} },
     env: { get: async key => key === 'CLAUDE_CODE_NO_MODEL_FALLBACK' ? state.noFallback : state.env?.[key] },
     http: { fetch: async (url, init) => { (state.diagnostics ??= []).push({ url, init }); return { ok: true, status: 200 }; } },
-    command: { register: async () => {}, run: async args => { state.slashCommands.push(args); return {}; } },
+    command: { register: async () => {}, run: async args => { state.slashCommands.push(args); return state.reconnect ? state.reconnect(args) : {}; } },
     process: { run: async (argv, init) => { state.commands.push({ argv, init }); return { exitCode: 0, ...await state.run?.({ argv, init }) }; } },
     tool: { check: async args => state.toolPermission ? state.toolPermission(args) : { decision: 'allow' },
       register: async spec => { state.spec = spec; return { tool: `mcp__statewright__${spec.name}` }; } },
@@ -261,7 +261,7 @@ async function host({ startup = true, options = {} } = {}) {
     // Dedicated startup tests below exercise the queued check independently.
     const connection = state.connection;
     state.connection = { isConnected: false, reason: 'auth' };
-    await flush(); state.connection = connection; state.connects = 0; events.length = 0;
+    await flush(); state.connection = connection; state.connects = 0; state.slashCommands.length = 0; events.length = 0;
   }
   return { $, state, hooks, timers, events, stored, fire, pane, find, content, press, flush };
 }
@@ -409,10 +409,11 @@ test('Desktop Client survives focus redraw, dispatches Connect once and keeps it
   await h.fire('ui.message', { ...e, data: { ...e.data, conversation: 'foreign' } });
   assert.equal(h.state.commands.length, 0); assert.equal(h.state.connects, 0);
   await h.fire('ui.message', e); await h.fire('ui.message', e);
-  const waiting = deferred(); h.state.run = () => waiting.promise;
+  const waiting = deferred(), loginStarted = deferred(); h.state.reconnect = () => { loginStarted.resolve(); return waiting.promise; };
   const pending = h.flush();
-  for (let i = 0; i < 30 && !h.state.commands.length; i++) await Promise.resolve();
-  assert.equal(h.state.commands.length, 1);
+  await loginStarted.promise;
+  assert.equal(h.state.commands.length, 0);
+  assert.deepEqual(h.state.slashCommands, [{ command: 'mcp', args: '' }]);
   assert.ok(h.find(await render(true), 'action-cancel-connect'));
   assert.equal(h.events.filter(([kind]) => kind === 'close').length, 0, 'Desktop keeps waiting/cancel visible');
   const cancel = h.find(await render(true), 'action-cancel-connect').props.props;
@@ -444,20 +445,17 @@ test('Desktop sign-in failure offers a visible retry, not a hidden terminal comm
     data: { action: 'connect', revision: p.revision, conversation: p.conversation } });
   await h.flush();
   const tree = await render();
-  assert.match(h.content(tree), /Sign-in didn’t complete\. Try connecting again\./);
+  assert.match(h.content(tree), /Open \/mcp, select Statewright and choose Connect/);
+  assert.equal(h.state.commands.length, 0);
   assert.doesNotMatch(h.content(tree), /terminal command below/);
   assert.ok(h.find(tree, 'action-connect'));
 });
 
 for (const [exitCode, message] of [[127, /sign-in helper could not start/], [124, /sign-in timed out/]])
-test(`Desktop sign-in exit ${exitCode} identifies the failed step without leaking helper output`, async () => {
+test(`Terminal sign-in exit ${exitCode} identifies the failed step without leaking helper output`, async () => {
   const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
   h.state.run = async () => ({ exitCode, stderr: 'private callback and token must not be shown' });
-  const render = () => h.fire('ui.render', { component: 'Pane', requestId: 'statewright', surface: 'desktop', props: {} });
-  const p = h.find(await render(), 'action-connect').props.props;
-  await h.fire('ui.message', { surface: 'desktop', component: 'Pane', requestId: 'statewright', element: 'action-connect', module: 'hooks/desktop-action.js',
-    data: { action: 'connect', revision: p.revision, conversation: p.conversation } });
-  await h.flush(); const text = h.content(await render());
+  await h.press('connect'); await h.flush(); const text = h.content(await h.pane());
   assert.match(text, message); assert.doesNotMatch(text, /private callback|token/);
   assert.equal(h.state.commands.length, 1); assert.equal(h.state.calls.length, 0);
 });
@@ -486,13 +484,14 @@ test('Desktop Client load failure offers fenced native Select actions, not anoth
   await select.props.onSelect(select.props.options[0].value); await h.flush();
   assert.equal(h.state.calls.length, 1, 'consumed fallback choice cannot reconnect again');
 });
-test('shipping manifest is configurable native HTTP OAuth with production defaults and stable identity', () => {
+test('shipping manifest uses a literal native OAuth URL for Desktop binding with stable identity', () => {
   const manifest = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url)));
   const config = JSON.parse(readFileSync(new URL('../.mcp.json', import.meta.url)));
   assert.equal(manifest.name, 'statewright');
   assert.equal(manifest.version, '0.3.9');
-  assert.equal(manifest.userConfig.gateway_url.default, GATEWAY);
-  assert.deepEqual(config.mcpServers, { [SERVER]: { type: 'http', url: '${user_config.gateway_url}',
+  assert.equal(manifest.userConfig.gateway_url, undefined);
+  assert.equal(new URL(config.mcpServers[SERVER].url).origin, new URL(GATEWAY).origin);
+  assert.deepEqual(config.mcpServers, { [SERVER]: { type: 'http', url: GATEWAY,
     oauth: { clientId: 'statewright-claude', callbackPort: 54545, scopes: 'mcp' } } });
   assert.deepEqual(manifest, JSON.parse(readFileSync(new URL('../plugin.json', import.meta.url))));
   assert.deepEqual(JSON.parse(readFileSync(new URL('../settings.json', import.meta.url))), {});
@@ -506,7 +505,7 @@ test('native auth refusal opens sign-in once, then loads actual catalog and pres
   const result = await h.fire('tool.call', { tool: registered, workflow: 'bugfix' });
   assert.equal(typeof result.result, 'string');
   assert.equal(JSON.parse(result.result).status, 'connection_required');
-  assert.equal(h.state.connects, 1, 'model can check saved credentials, not consent to login');
+  assert.equal(h.state.connects, 1, 'a tool checks credentials without queuing commands inside a waiting hook');
   assert.equal(h.state.commands.length, 0);
   h.state.run = async () => { h.state.connection = { isConnected: true, server: `plugin:statewright:${SERVER}` }; };
   const connect = h.find(await h.pane(), 'connect');
@@ -514,7 +513,7 @@ test('native auth refusal opens sign-in once, then loads actual catalog and pres
   assert.deepEqual(h.state.commands.map(c => c.argv), [['/usr/bin/expect', '/test-plugin/scripts/native-login.exp']]);
   assert.equal(h.state.commands[0].init.timeoutMs, 330000);
   assert.ok(h.state.slashCommands.every(c => c.args?.startsWith('reconnect ')), 'never open the generic picker');
-  assert.equal(h.state.connects, 3);
+  assert.equal(h.state.connects, 4);
   assert.deepEqual(h.state.calls.map(c => [c.tool, c.args]), [['statewright_native_connect', { context: { version: 1, conversation_id: CHAT } }]]);
   assert.equal(h.find(await h.pane(), 'workflow').props.value, 'bugfix');
   assert.equal(h.find(await h.pane(), 'start'), undefined);
@@ -742,9 +741,10 @@ for (const reason of ['policy', 'disabled', 'unapproved', 'unlisted', 'failed'])
 }
 test('auth canceled or unfinished does not loop or claim success; retry remains explicit', async () => {
   const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.run = async () => ({ exitCode: 1 });
   await h.press('connect'); await h.flush();
   assert.equal(h.state.commands.length, 1); assert.equal(h.state.calls.length, 0);
-  assert.match(h.content(await h.pane()), /Sign-in hasn’t completed/);
+  assert.match(h.content(await h.pane()), /Sign-in didn’t complete/);
   assert.ok(h.find(await h.pane(), 'connect'));
 });
 test('unavailable native sign-in panel gives supported manual path, no fallback auth helper', async () => {
@@ -757,7 +757,7 @@ test('failed native login exit never claims connection or leaks process output',
   const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
   h.state.run = async () => ({ exitCode: 1, stdout: 'private callback', stderr: 'secret details' });
   await h.press('connect'); await h.flush();
-  assert.equal(h.state.connects, 1); assert.equal(h.state.calls.length, 0);
+  assert.equal(h.state.connects, 2); assert.equal(h.state.calls.length, 0);
   assert.doesNotMatch(h.content(await h.pane()), /private callback|secret details/);
   assert.ok(h.find(await h.pane(), 'connect'));
 });
@@ -1475,4 +1475,157 @@ test('Off retires an old native permission check without waiting or dropping its
   wait.resolve({ decision: 'allow' }); await reading;
   assert.equal(h.state.calls.length, before, 'superseded old ask never reaches gateway');
   assert.equal(h.snapshot.state, null);
+});
+
+const desktopReconnectRefusal = "Reconnect, enable, and disable aren't available in this session.";
+async function desktopConnect(h) {
+  const pane = await h.fire('ui.render', { component: 'Pane', requestId: 'statewright', surface: 'desktop', props: {} });
+  const p = h.find(pane, 'action-connect').props.props;
+  await h.fire('ui.message', { surface: 'desktop', component: 'Pane', requestId: 'statewright', element: 'action-connect', module: 'hooks/desktop-action.js',
+    data: { action: 'connect', revision: p.revision, conversation: p.conversation } });
+  await h.flush();
+}
+for (const throws of [false, true]) test(`Host reconnect refusal survives terminal login and quiet checks; throws=${throws}`, async () => {
+  const h = await host();
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => {
+    if (throws) throw new Error(desktopReconnectRefusal);
+    return { text: desktopReconnectRefusal };
+  };
+  await h.press('connect'); await h.flush();
+  assert.equal(h.state.commands.length, 1, 'one explicitly requested login');
+  const record = h.stored.get('latest-connection-diagnostic');
+  assert.equal(record.stage, 'reconnect'); assert.equal(record.code, 'reconnect_unavailable');
+  assert.match(h.content(await h.pane()), /Signed in.*cannot reload/);
+  assert.equal(h.state.calls.length, 0, 'no catalog or workflow on failed reload');
+  const attempts = h.state.slashCommands.length;
+  for (let i = 0; i < 2; i++) {
+    const response = JSON.parse((await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` })).result);
+    assert.match(response.message, /Signed in.*cannot reload/);
+    assert.equal(response.executionAvailable, false);
+    assert.deepEqual(response.workflows, []);
+  }
+  assert.equal(h.state.commands.length, 1, 'no browser login loop');
+  assert.equal(h.state.slashCommands.length, attempts, 'do not repeat an unavailable reconnect');
+  assert.deepEqual(h.stored.get('latest-connection-diagnostic'), record, 'quiet auth cannot overwrite the useful failure');
+  const workflow = JSON.parse((await h.fire('tool.call', { tool: 'mcp__statewright__statewright_get_state' })).result);
+  assert.match(workflow.message, /cannot reload/);
+  h.state.connection = { isConnected: true, server: 'plugin:statewright:statewright' };
+  const recovered = JSON.parse((await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` })).result);
+  assert.equal(recovered.status, 'connected');
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'connected');
+});
+test('quiet auth check reloads an external login once without opening OAuth', async () => {
+  const h = await host({ startup: false });
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => {
+    h.state.connection = { isConnected: true, server: 'plugin:statewright:statewright' };
+    return { text: 'Reconnected' };
+  };
+  await h.flush();
+  assert.deepEqual(h.state.slashCommands, [{ command: 'mcp', args: 'reconnect plugin:statewright:statewright' }]);
+  assert.equal(h.state.commands.length, 0);
+  assert.deepEqual(h.state.calls.map(c => c.tool), ['statewright_list_workflows']);
+});
+test('successful login with unchanged auth is reload pending, never another login', async () => {
+  const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  await h.press('connect'); await h.flush();
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'credential_reload_pending');
+  assert.match(h.content(await h.pane()), /Signed in/);
+  await h.fire('command.run', { command: 'statewright' }); await h.flush();
+  assert.equal(h.state.commands.length, 1);
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'credential_reload_pending');
+});
+test('reconnect policy denial does not fall through to OAuth or another server', async () => {
+  const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => { throw new Error('permission denied PRIVATE_PAYLOAD'); };
+  await h.press('connect'); await h.flush();
+  assert.equal(h.state.commands.length, 0); assert.equal(h.state.calls.length, 0);
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'permission_refused');
+  assert.doesNotMatch(h.content(await h.pane()), /PRIVATE_PAYLOAD|Signed in/);
+});
+test('late reconnect result cannot affect a new conversation', async () => {
+  const h = await host(); const pending = deferred();
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = () => pending.promise;
+  await h.press('connect'); const running = h.flush(); await new Promise(resolve => setImmediate(resolve));
+  h.state.session = 'two'; h.state.connection = { isConnected: true, server: 'plugin:statewright:statewright' };
+  await h.fire('session.start', {}); await h.flush();
+  pending.resolve({ text: desktopReconnectRefusal }); await running;
+  assert.equal(h.stored.get('latest-connection-diagnostic').conversation, 'two');
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'connected');
+  assert.equal(h.state.commands.length, 0);
+});
+test('quiet host reconnect refusal does not claim a login happened or prompt for another one', async () => {
+  const h = await host({ startup: false });
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => ({ text: desktopReconnectRefusal });
+  await h.flush();
+  const response = JSON.parse((await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` })).result);
+  assert.equal(response.status, 'connection_reload_required');
+  assert.match(response.message, /If you already signed in from a terminal/);
+  assert.doesNotMatch(response.message, /Signed in\.|Sign-in is needed/);
+  assert.equal(h.state.commands.length, 0); assert.equal(h.state.asks.length, 0);
+  assert.equal(h.state.slashCommands.length, 1);
+  assert.ok(h.find(await h.pane(), 'check-connection'));
+});
+test('cancel during reconnect prevents a late refusal from opening OAuth or replacing cancellation', async () => {
+  const h = await host(); const pending = deferred(), started = deferred();
+  h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = () => { started.resolve(); return pending.promise; };
+  await h.press('connect'); const running = h.flush(); await started.promise;
+  await h.press('cancel-connect');
+  pending.resolve({ text: desktopReconnectRefusal }); await running;
+  assert.match(h.content(await h.pane()), /cancelled/);
+  assert.equal(h.state.commands.length, 0); assert.equal(h.state.calls.length, 0);
+  assert.notEqual(h.stored.get('latest-connection-diagnostic').code, 'reconnect_unavailable');
+});
+test('refusal text is handled without exposing native response payloads', async () => {
+  const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => ({ text: 'Permission denied PRIVATE_CALLBACK' });
+  await h.press('connect'); await h.flush();
+  assert.equal(h.state.commands.length, 0); assert.equal(h.state.calls.length, 0);
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'permission_refused');
+  assert.doesNotMatch(h.content(await h.pane()), /PRIVATE_CALLBACK/);
+});
+test('Desktop signs in through the host MCP dialog and never launches the CLI helper', async () => {
+  const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async args => {
+    assert.deepEqual(args, { command: 'mcp', args: '' });
+    h.state.connection = { isConnected: true, server: 'plugin:statewright:statewright' };
+    return {};
+  };
+  await desktopConnect(h);
+  assert.equal(h.state.commands.length, 0);
+  assert.deepEqual(h.state.slashCommands, [{ command: 'mcp', args: '' }]);
+  assert.deepEqual(h.state.calls.map(call => call.tool), ['statewright_native_connect']);
+  assert.match(h.content(await h.pane()), /Connected to Statewright/);
+});
+test('Desktop tool-triggered Connect identifies its host before the sidebar renders', async () => {
+  const h = await host({ startup: false }); h.state.surfaces = ['desktop'];
+  h.state.connection = { isConnected: false, reason: 'auth' }; h.state.answer = 'Connect';
+  await h.fire('tool.call', { tool: `mcp__statewright__${h.state.spec.name}` }); await h.flush();
+  assert.equal(h.state.commands.length, 0);
+  assert.deepEqual(h.state.slashCommands, [{ command: 'mcp', args: '' }]);
+  assert.match(h.state.asks[0][0], /Claude’s MCP connections/);
+  assert.match(h.content(await h.pane()), /quit and reopen Claude Desktop/);
+  assert.doesNotMatch(h.content(await h.pane()), /Sign-in hasn’t completed|Signed in\./);
+  await h.press('check-connection'); await h.flush();
+  assert.equal(h.state.slashCommands.length, 1, 'checking saved credentials never reopens the dialog');
+  const state = JSON.parse((await h.fire('tool.call', { tool: 'mcp__statewright__statewright_get_state' })).result);
+  assert.match(state.message, /Open \/mcp/);
+  assert.equal(h.state.commands.length, 0);
+});
+for (const throws of [false, true]) test(`Desktop dialog refusal never falls back to a CLI login; throws=${throws}`, async () => {
+  const h = await host(); h.state.connection = { isConnected: false, reason: 'auth' };
+  h.state.reconnect = async () => {
+    if (throws) throw new Error('Permission denied PRIVATE_CALLBACK');
+    return { text: 'Permission denied PRIVATE_CALLBACK' };
+  };
+  await desktopConnect(h);
+  assert.equal(h.state.commands.length, 0); assert.equal(h.state.calls.length, 0);
+  assert.equal(h.stored.get('latest-connection-diagnostic').stage, 'host_sign_in');
+  assert.equal(h.stored.get('latest-connection-diagnostic').code, 'permission_refused');
+  assert.match(h.content(await h.pane()), /Open \/mcp/);
+  assert.doesNotMatch(h.content(await h.pane()), /PRIVATE_CALLBACK/);
 });

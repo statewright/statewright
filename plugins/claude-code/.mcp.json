@@ -2,7 +2,7 @@
   "mcpServers": {
     "statewright": {
       "type": "http",
-      "url": "${user_config.gateway_url}",
+      "url": "https://mcp.statewright.ai/mcp",
       "oauth": {
         "clientId": "statewright-claude",
         "callbackPort": 54545,

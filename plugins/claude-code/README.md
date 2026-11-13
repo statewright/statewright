@@ -31,9 +31,12 @@ a workflow. Plugin updates do not remove those hooks; do not run the native
 and legacy integrations together.
 
 The Arbiter appears when the Code conversation starts. Select its connection
-status to open the sidebar, then **Connect**. Finish Statewright sign-in and
-Claude's native permission prompts. Claude owns OAuth credentials and refresh;
-a Statewright API key file is not required.
+status to open the sidebar, then **Connect**. In Desktop, this opens Claude's
+`/mcp` dialog: select Statewright and choose **Connect** there. Finish browser
+sign-in, then fully quit and reopen Desktop and resume the conversation if its
+connection has not updated. Desktop cannot reconnect the server mid-session.
+The terminal uses the native CLI sign-in helper. Claude owns OAuth credentials
+and refresh; a Statewright API key file is not required.
 
 The shared managed-client credential adapter can also retrieve a missing native
 helper from the matching published Claude plugin release, verifying source/tag,
@@ -66,9 +69,19 @@ preferences. Enable Powerline only if your terminal font supports it;
 
 ## Another gateway or an SSH session
 
-Set **Statewright gateway** through `/statewright configure`, then reload plugins.
-The default is `https://mcp.statewright.ai/mcp`. Your service must support the
-native Claude control protocol and register the `statewright-claude` OAuth client.
+The marketplace package binds the literal URL `https://mcp.statewright.ai/mcp`.
+Desktop checks the raw `.mcp.json` URL during sign-in and does not resolve
+`${user_config.*}` there. The old **Statewright gateway** preference has been
+removed; `/statewright configure` now contains appearance preferences only.
+
+For another gateway, prepare a separate plugin distribution from source with
+your literal HTTPS MCP endpoint in `plugins/claude-code/.mcp.json` before
+packaging. Keep its native server identity and OAuth declaration intact. Your
+service must support the native Claude control protocol and register the
+`statewright-claude` OAuth client. Restart Desktop after changing that package's
+configuration. Do not edit installed caches: the next update replaces them.
+Existing custom-gateway users need that custom package before upgrading;
+the marketplace package does not use the old saved gateway preference.
 
 If browser sign-in is unavailable, run this in a separate terminal on the same
 machine and in the same Claude configuration scope:
@@ -78,9 +91,17 @@ claude mcp login plugin:statewright:statewright --no-browser
 ```
 
 Open its link on a browser-capable computer and paste the full callback URL
-into that terminal. Return to Claude and connect again. Do not paste tokens or
-callback URLs into the conversation. Both paths require the native Claude CLI;
-automatic browser sign-in also requires Expect.
+into that terminal. In the terminal host, return to Claude and check the saved
+connection; the plugin attempts one scoped reconnect on missing authentication.
+For Desktop, use `/mcp` → Statewright → **Connect** instead of this CLI fallback,
+then fully restart Desktop if the live session remains disconnected. CLI
+`Connected` does not establish Desktop authentication. The literal-URL fix
+plus full Desktop restart was reported working on engine 2.1.321; importing an
+external CLI credential alone has not been separately verified.
+Do not paste tokens or
+callback URLs into the conversation. The terminal fallback requires the native
+Claude CLI; its automatic browser helper also requires Expect. Desktop sign-in
+uses neither helper.
 
 ## Upgrade from manual hooks
 
@@ -116,6 +137,18 @@ Do not remove other servers or grant blanket tool permissions. Never run the old
   and reopen the affected Claude host, then resume the conversation.
 - **Connection needs attention:** open the sidebar for the failed step. A native
   permission denial is not an OAuth failure; signing in again does not fix it.
+- **Signed in but still disconnected:** `reconnect/reconnect_unavailable` means
+  the host refused connection reload. `reconnect/credential_reload_pending`
+  means the login helper completed but the session still reports missing auth.
+  The sidebar keeps that diagnosis and offers **Check saved connection**;
+  successful sign-in is not repeated in that view. Only a verified connection
+  and catalog response enable workflows. A fresh session or plugin reload
+  clears the in-memory diagnosis; it does not prove credentials were imported.
+- **Desktop says the plugin points at a different server URL:** verify the
+  installed package has a literal URL in `.mcp.json`, then fully restart
+  Desktop. `expected=<unparseable>` in `verifyPluginMcpBinding` is consistent
+  with Desktop reading an unresolved URL placeholder. Reloading only the
+  plugin is not a substitute for the restart in the confirmed recovery.
 - **A command was denied:** preserve the refusal. Shell classification can be
   conservative; do not retry the denied operation through another interpreter.
 - **Model unavailable:** only the recognized Fable usage-credit gate has an
@@ -132,6 +165,8 @@ Do not remove other servers or grant blanket tool permissions. Never run the old
 repository root. `claude plugin validate plugins/claude-code` and
 `claude plugin test plugins/claude-code` exercise the native plugin contract.
 Fixture passes do not replace live OAuth, TUI or Desktop acceptance.
+Track each Claude Desktop/embedded-engine/CLI and Codex Desktop/engine/CLI
+release separately using [host release compatibility](../../docs/releases/host-compatibility.md).
 
 See [Statewright docs](https://statewright.ai/docs),
 [Claude mod support](https://code.claude.com/docs/en/plugins/mods/overview), and

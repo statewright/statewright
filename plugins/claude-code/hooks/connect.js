@@ -14,14 +14,14 @@ const PAGE_SIZE = 32; // Native Select accepts at most 64 options.
 let navigationRevision = 0;
 const fresh = conversation => ({ conversation, desktopNavigationRevision: ++navigationRevision, epoch: 0, busy: false, connected: false,
   names: [], workflowAliases: {}, selected: '', page: 0, notice: '', error: '', connectionIssue: null, manual: false, timer: null, paneOpen: false, handoff: false,
-  checked: false, interactive: false, pending: null, prompted: false, prompting: false, powerlineOverride: null, appearanceGeneration: 0,
+  checked: false, signedIn: false, reloadIssue: null, interactive: false, pending: null, prompted: false, prompting: false, powerlineOverride: null, appearanceGeneration: 0,
   native: null, control: null, controlError: '', generation: 0, requiresEnforcement: false, controlConsent: false, consentEpoch: 0,
   runningTool: null, actionBusy: false, journey: null, showGraph: true, routes: [], routeError: '', modelActivity: null, baseRequest: null, fallback: null });
 let view = fresh('');
 const diagnosticSeen = new Set();
 let diagnosticAttempts = 0;
 function reportDiagnostic($, v, reason, operation, phase) {
-  if (['auth', 'request_aborted'].includes(reason)) return; // Signed-out/cancelled is not a malfunction.
+  if (['auth', 'desktop_sign_in_required', 'request_aborted'].includes(reason)) return; // Signed-out/cancelled is not a malfunction.
   const event = diagnosticEvent({ plugin: 'claude-code', version: '0.3.9', platform: 'claude-native',
     handled: true, context: { mechanism: 'handled', runtime: 'claude-native', reason, operation, phase } });
   const key = JSON.stringify(event.fingerprint);
@@ -203,8 +203,8 @@ function executionFor($) {
     after: (ms, callback) => $.clock.after(ms, callback),
     fault: (v, message) => { v.controlError = message; redraw($); } });
 }
-// Native Claude owns OAuth and its credential store. No shell, token access or
-// generic /mcp picker. The login child reads the same installed plugin and
+// Native Claude owns OAuth and its credential store. Desktop uses its own
+// /mcp sign-in; only terminal sessions use the CLI helper. The child reads the same installed plugin and
 // saved gateway configuration; it never overrides enabled plugins or policy.
 // Keep one bounded login across view cancellation/resume until it settles.
 let nativeSignIn = null;
@@ -317,12 +317,57 @@ async function recordConnection($, v, epoch, stage, outcome, code, operation = '
   }
 }
 
-async function connect($, v, epoch, allowSignIn) {
+// command.run resolves with transcript text, not a success flag. Keep this
+// capability refusal separate from permission denial and never persist raw text.
+function reconnectUnavailable(value) {
+  return typeof value === 'string' && /Reconnect, enable, and disable (?:aren['’]t|are not) available in this session\./i.test(value);
+}
+async function reloadConnection($, v, epoch) {
+  try {
+    const response = await $.command.run({ command: 'mcp', args: `reconnect ${NATIVE_SERVER}` });
+    if (!await live($, v, epoch)) return false;
+    if (reconnectUnavailable(response?.text)) v.reloadIssue = 'reconnect_unavailable';
+    else if (response?.text && /denied|refused|not permitted|not allowed/i.test(response.text))
+      throw new Error('Connection reload permission refused');
+  } catch (error) {
+    if (!await live($, v, epoch)) return false;
+    if (!reconnectUnavailable(error?.message)) throw error;
+    v.reloadIssue = 'reconnect_unavailable';
+  }
+  return !v.reloadIssue;
+}
+async function showReloadIssue($, v, epoch) {
+  if (!await live($, v, epoch)) return;
+  const host = v.connectionSurface === 'desktop' ? 'Claude Desktop' : 'This Claude host';
+  v.manual = !v.signedIn;
+  v.error = `${v.signedIn ? 'Signed in. ' : ''}${host} ${v.reloadIssue === 'reconnect_unavailable' ? 'cannot reload this connection in a running session.' : 'has not picked up the saved sign-in.'} ` +
+    (v.connectionSurface === 'desktop'
+      ? 'Open /mcp, select Statewright and choose Connect. After sign-in, quit and reopen Desktop, then resume this conversation.'
+      : 'Open /mcp to review the connection. Restart the affected Claude host, then resume this conversation.') +
+    (v.signedIn ? ' You do not need to sign in again here.' : ' If you already signed in from a terminal, do not repeat sign-in here.');
+  const reportKey = `${v.reloadIssue}:${v.signedIn}`;
+  if (v.reloadReported === reportKey) {
+    v.connectionIssue = v.reloadIssue;
+    v.error += ` [reconnect/${v.reloadIssue}]`;
+    return;
+  }
+  await recordConnection($, v, epoch, 'reconnect', 'failed', v.reloadIssue, 'command.run');
+  if (await live($, v, epoch)) v.reloadReported = reportKey;
+}
+async function connect($, v, epoch, allowSignIn, allowReload) {
   let stage = 'check';
   try {
     if (!await live($, v, epoch)) return;
+    // Tool-triggered Connect can precede the first sidebar render. Use the
+    // host's surfaces so Desktop never falls through to the external CLI.
+    try {
+      const surfaces = await $.session.surfaces();
+      if (!await live($, v, epoch)) return;
+      if (surfaces.includes('desktop')) v.connectionSurface = 'desktop';
+      else if (!v.connectionSurface && surfaces.includes('terminal')) v.connectionSurface = 'terminal';
+    } catch { /* Older hosts can still identify their surface through rendering. */ }
     v.telemetryConsent = null; v.telemetryCheckedAt = 0;
-    await recordConnection($, v, epoch, stage, 'running', 'checking');
+    if (!v.reloadIssue) await recordConnection($, v, epoch, stage, 'running', 'checking');
     if (!await live($, v, epoch)) return;
     let result;
     // session.start precedes the native REPL binding. Only this explicit
@@ -341,7 +386,44 @@ async function connect($, v, epoch, allowSignIn) {
       }
     }
     if (!await live($, v, epoch)) return;
-    if (!result?.isConnected && result?.reason === 'auth' && allowSignIn) {
+    if (!result?.isConnected && result?.reason === 'auth' && !v.reloadIssue && allowReload && v.connectionSurface !== 'desktop') {
+      // A saved login may have changed in another process. Try one scoped
+      // reload before asking for OAuth; never reconnect policy/disabled results.
+      stage = 'reconnect';
+      const reloaded = await reloadConnection($, v, epoch);
+      if (!await live($, v, epoch)) return;
+      if (reloaded) result = await $.mcp.connect(SERVER);
+      if (!await live($, v, epoch)) return;
+    }
+    if (!result?.isConnected && result?.reason === 'auth' && v.connectionSurface === 'desktop') {
+      const instructions = 'Open /mcp, select Statewright and choose Connect. After sign-in, quit and reopen Claude Desktop, then resume this conversation.';
+      v.manual = true;
+      if (allowSignIn) {
+        stage = 'host_sign_in';
+        v.notice = instructions; redraw($);
+        // This opens the host-owned dialog after a deliberate user action.
+        // Only that dialog can authenticate Desktop's bound server.
+        const dialog = await $.command.run({ command: 'mcp', args: '' });
+        if (!await live($, v, epoch)) return;
+        if (dialog?.text && /denied|refused|not permitted|not allowed/i.test(dialog.text))
+          throw new Error('Native connection dialog permission refused');
+        result = await $.mcp.connect(SERVER);
+        if (!await live($, v, epoch)) return;
+      }
+      if (!result?.isConnected && result?.reason === 'auth') {
+        v.error = `Claude Desktop has not connected this session. ${instructions}`;
+        await recordConnection($, v, epoch, stage, 'failed', 'desktop_sign_in_required', 'command.run');
+        return;
+      }
+    }
+    if (!result?.isConnected && result?.reason === 'auth' && v.reloadIssue && (!allowSignIn || v.signedIn)) {
+      await showReloadIssue($, v, epoch); return;
+    }
+    if (!result?.isConnected && result?.reason === 'auth' && allowSignIn && !v.signedIn) {
+      if (v.connectionSurface !== 'terminal') {
+        v.error = 'Open /mcp and connect Statewright in Claude. The session surface could not be verified.';
+        await recordConnection($, v, epoch, 'login', 'failed', 'surface_unavailable'); return;
+      }
       v.notice = 'Opening Statewright sign-in in your browser…';
       v.manual = true;
       redraw($);
@@ -366,13 +448,21 @@ async function connect($, v, epoch, allowSignIn) {
       }
       finally { v.handoff = false; }
       if (!await live($, v, epoch)) return;
+      v.signedIn = true;
       // A CLI login updates the native credential store outside this process.
       // Reconnect just this server before asking the mod connection API again.
       stage = 'reconnect';
-      await $.command.run({ command: 'mcp', args: `reconnect ${NATIVE_SERVER}` });
+      if (v.reloadIssue || !await reloadConnection($, v, epoch)) {
+        if (await live($, v, epoch)) await showReloadIssue($, v, epoch);
+        return;
+      }
       if (!await live($, v, epoch)) return;
       result = await $.mcp.connect(SERVER);
       if (!await live($, v, epoch)) return;
+    }
+    if (!result?.isConnected && result?.reason === 'auth' && v.signedIn) {
+      v.reloadIssue = 'credential_reload_pending';
+      await showReloadIssue($, v, epoch); return;
     }
     if (!result?.isConnected) {
       v.error = refusals[result?.reason] ?? refusals.failed;
@@ -383,6 +473,7 @@ async function connect($, v, epoch, allowSignIn) {
     // Do not trust a foreign server identity returned by another mod.
     stage = 'identity';
     if (result.server !== NATIVE_SERVER) throw new Error('Unexpected server');
+    v.reloadIssue = null; v.reloadReported = null; v.signedIn = false;
     // Authentication succeeded: a later catalog failure is not a login prompt.
     v.manual = false;
     stage = 'catalog';
@@ -444,7 +535,9 @@ async function connect($, v, epoch, allowSignIn) {
           ? 'Claude has not attached Statewright to this conversation yet. Reload plugins, then try connecting again.'
           : 'Claude couldn’t check your Statewright connection. Try again; if it persists, reload plugins.'
         : stage === 'reconnect'
-          ? 'Sign-in finished, but Claude couldn’t refresh this connection. Reload plugins, then try again.'
+          ? `${v.signedIn ? 'Sign-in finished, but ' : ''}Claude couldn’t reload this connection. Check Claude’s connection permissions before trying again.`
+          : stage === 'host_sign_in'
+            ? 'Claude could not open its connection dialog. Open /mcp, select Statewright and choose Connect. After sign-in, quit and reopen Claude Desktop.'
           : 'Connected to Statewright. Couldn’t read your workflows from Statewright. Try connecting again.';
       const diagnostic = stage === 'catalog' && v.catalogFailure?.epoch === epoch
         ? v.catalogFailure : connectionFailure(stage, error);
@@ -468,15 +561,15 @@ async function schedule($, v, allowSignIn = true) {
   v.busy = true; v.error = ''; v.notice = ''; v.connected = false; v.manual = false;
   v.native = null; v.controlError = '';
   v.catalogFailure = null;
-  v.connectionIssue = null;
+  v.connectionIssue = v.reloadIssue;
   v.interactive = allowSignIn;
   const epoch = ++v.epoch;
-  const pending = { started: false };
+  const pending = { started: false, allowReload: true };
   pending.promise = new Promise(resolve => { pending.resolve = resolve; });
   pending.start = () => {
     if (pending.started) return;
     pending.started = true;
-    return connect($, v, epoch, allowSignIn);
+    return connect($, v, epoch, allowSignIn, pending.allowReload);
   };
   v.pending = pending;
   v.timer = $.clock.after(allowSignIn ? 600000 : 20000, async () => {
@@ -733,8 +826,15 @@ export function register(on, options = {}) {
       const permission = await $.tool.check({ tool: e.tool, input: flatArgs(e) });
       if (permission.decision === 'deny') return { deny: permission.reason || 'Claude does not permit this Statewright action.' };
       if (!v.connected && !v.busy) await schedule($, v, false);
-      if (v.busy && !v.interactive) { const pending = v.pending; pending?.start(); await pending?.promise; }
+      if (v.busy && !v.interactive) {
+        const pending = v.pending;
+        // command.run cannot run while the host is waiting on this tool hook.
+        if (pending) pending.allowReload = false;
+        pending?.start(); await pending?.promise;
+      }
       if (await current($) !== v) return { deny: 'The conversation changed. Request Statewright again here.' };
+      if (!v.connected && (v.reloadIssue || v.connectionIssue === 'desktop_sign_in_required'))
+        return { result: JSON.stringify({ status: 'action_needed', message: v.error }) };
       try { const result = await workflowAction($, workflowTools.get(e.tool), flatArgs(e), undefined, permission);
         return { result: JSON.stringify({ ...result, client_model_routing: routingView(v) }) }; }
       catch (error) { await openPane($, false); return { result: JSON.stringify({ status: 'action_needed', message: error.message }) }; }
@@ -749,6 +849,7 @@ export function register(on, options = {}) {
     if (!v.connected && !v.busy) await schedule($, v, false);
     if (v.busy && !v.interactive) {
       const pending = v.pending;
+      if (pending) pending.allowReload = false;
       pending?.start();
       await pending?.promise;
     }
@@ -759,14 +860,16 @@ export function register(on, options = {}) {
       v.page = Math.max(0, Math.floor(v.names.indexOf(v.selected) / PAGE_SIZE));
     }
     const placement = await openPane($);
-    if (v.manual && !v.busy && !v.prompted) {
+    if (v.manual && !v.reloadIssue && !v.busy && !v.prompted) {
       v.prompted = true;
       v.prompting = true;
       const epoch = v.epoch;
       // Tool-opened panes may not be placed on narrow terminals. Native Ask
       // works independently of pane placement and waits for a real person.
       let answer;
-      try { answer = await $.ui.ask('Statewright would like to connect. Open sign-in in your browser?',
+      try { answer = await $.ui.ask(v.connectionSurface === 'desktop'
+        ? 'Open Claude’s MCP connections to sign in to Statewright?'
+        : 'Statewright would like to connect. Open sign-in in your browser?',
         { header: 'Statewright', options: ['Connect', 'Not now'] }); } catch { /* Dismissed/headless: no consent. */ }
       finally { v.prompting = false; }
       if (!await live($, v, epoch)) return { result: JSON.stringify({ status: 'cancelled',
@@ -781,10 +884,10 @@ export function register(on, options = {}) {
     const ready = executionReadiness(v.native, true);
     const loadFailed = Boolean(e.workflow && v.controlError);
     const status = loadFailed ? 'action_needed' : v.busy ? 'sign_in_in_progress' : v.connected ? v.native?.state ? 'workflow_active' : 'connected'
-      : v.manual ? 'connection_required' : 'connection_error';
+      : v.reloadIssue ? 'connection_reload_required' : v.manual ? 'connection_required' : 'connection_error';
     return { result: JSON.stringify({ status,
       message: loadFailed ? v.controlError : v.busy ? 'Statewright sign-in is in progress. Wait for the user to finish; do not start another login.'
-        : v.connected ? v.native?.state ? 'Workflow loaded. Follow its current state and declared transitions.' : 'Choose a workflow and Start when you’re ready.' : v.manual ? 'Sign-in is needed. Open /statewright and choose Connect when you’re ready.'
+        : v.connected ? v.native?.state ? 'Workflow loaded. Follow its current state and declared transitions.' : 'Choose a workflow and Start when you’re ready.' : v.reloadIssue || v.connectionIssue === 'desktop_sign_in_required' ? v.error : v.manual ? 'Sign-in is needed. Open /statewright and choose Connect when you’re ready.'
         : v.error || v.notice || 'Open /statewright to retry the connection.',
       paneVisible: placement?.isPlaced === true,
       workflows: v.connected ? v.names : [], selected: v.selected || null, executionAvailable: v.connected && ready.available,
@@ -839,6 +942,7 @@ export function register(on, options = {}) {
     if (await current($) !== v) return rest;
     const columns = e.props?.bodyColumns ?? 80;
     if (e.surface === 'desktop') {
+      v.connectionSurface = 'desktop';
       const p = statusPresentation({ ...v, selectedModel }, { surface: 'desktop' });
       const chip = (key, label, color = ARBITER_PURPLE, brand = false, control) => Box({ key,
         borderStyle: brand ? 'single' : 'round', borderColor: color,
@@ -903,6 +1007,8 @@ export function register(on, options = {}) {
     if (e.requestId !== PANE) return next(e);
     const v = await current($), { Box, Text, Button, Select, Svg, Client } = $.ui.resolve(e);
     const desktop = e.surface === 'desktop';
+    if (desktop) v.connectionSurface = 'desktop';
+    else if (!v.connectionSurface) v.connectionSurface = 'terminal';
     // Client buttons survive the Desktop focus redraw that drops native Button
     // handles (#99211). Their messages still have to match the current view.
     const desktopKey = desktop ? desktopViewKey(v) : null;
@@ -929,12 +1035,13 @@ export function register(on, options = {}) {
     };
     const rows = [desktop ? Text({ bold: true, color: ARBITER_PURPLE, children: [desktopTitle(v)] })
       : text(v.connected ? 'Connected to Statewright' : v.connectionIssue === 'auto_review_unavailable' ? 'Check Claude permissions' : 'Statewright would like to connect')];
-    if (desktop && !v.connected && !v.busy && !['auto_review_unavailable', 'tool_unavailable'].includes(v.connectionIssue)) rows.push(text('Connect to see your workflows and use them in this conversation.'));
+    if (desktop && !v.connected && !v.busy && !v.reloadIssue && !['auto_review_unavailable', 'tool_unavailable'].includes(v.connectionIssue)) rows.push(text('Connect to see your workflows and use them in this conversation.'));
     if (desktop && v.busy) rows.push(text(v.notice || 'Checking Statewright. You can keep this conversation open.'));
     // Keep the action above explanatory copy, even in a short/narrow pane.
     if (v.busy) rows.push(button('cancel-connect', 'Cancel connection', 'c', () => cancel($, v)));
     else if (!v.connected) {
-      if (v.connectionIssue !== 'tool_unavailable') rows.push(button('connect', v.connectionIssue === 'auto_review_unavailable' ? 'Connect' : v.error ? 'Try connecting again' : 'Connect', 'c', () => schedule($, v)));
+      if (v.signedIn || v.reloadIssue || v.connectionIssue === 'desktop_sign_in_required') rows.push(button('check-connection', 'Check saved connection', 'r', () => schedule($, v, false)));
+      if (!v.signedIn && v.connectionIssue !== 'tool_unavailable') rows.push(button('connect', v.connectionIssue === 'auto_review_unavailable' || v.reloadIssue ? 'Connect' : v.error ? 'Try connecting again' : 'Connect', 'c', () => schedule($, v)));
     }
     else {
     if (v.native?.state) {

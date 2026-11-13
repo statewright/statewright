@@ -181,6 +181,7 @@ function setup(on) {
   const clock = mock.clock(on);
   on('session.id', () => ({ value: state.session }));
   on('session.model', () => ({ value: state.model }));
+  on('session.surfaces', () => ({ value: ['terminal'] }));
   on('http.fetch', (_, e) => { state.diagnostics.push(e); return { value: { status: 200, ok: true, headers: {}, text: '' } }; });
   on('command.register', () => ({ value: undefined }));
   on('tool.register', ($, e) => ({ value: { tool: `mcp__statewright__${e.name}` } }));
@@ -214,6 +215,7 @@ function setup(on) {
     return { value: { exitCode: state.completeLogin ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } };
   });
   on('command.run', { command: 'mcp' }, ($, e) => {
+    if (e.args === '') { state.connected = state.completeLogin; return {}; }
     expect(e.args).toBe(`reconnect ${nativeServer}`); return {};
   });
   on('mcp.call', ($, e) => {
@@ -592,7 +594,7 @@ for (const surface of ['terminal', 'desktop'] as const) for (const width of [32,
     const ui = await $.ui.mount({ ...pane, surface, props: { ...pane.props, bodyColumns: width } });
     expect(await ui.find({ type: 'Text', text: surface === 'desktop' ? 'Connection needs attention' : 'Statewright would like to connect' })).toBeDefined();
     await ui.press({ key: 'connect' }); await clock.settle();
-    expect(state.commands.length).toBe(1);
+    expect(state.commands.length).toBe(surface === 'desktop' ? 0 : 1);
     expect(await ui.find({ type: 'Text', text: 'Connected to Statewright' })).toBeDefined();
     await ui.select({ key: 'workflow', value: 'plan' });
     expect(await ui.find({ type: 'Text', text: 'Selected: plan' })).toBeDefined();

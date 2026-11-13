@@ -38,6 +38,7 @@ tasks:
       # void plugin Stop-contract tests (docs/research/003; W2-R4 receipt).
       STATEWRIGHT_STOP_CONTINUATION: "1"
     cmds:
+      - node --test scripts/host-compatibility.test.mjs
       - node plugins/executor/scripts/sync-error-reporting.mjs --check
       - node plugins/codex/scripts/sync-executor-core.mjs --check
       - node plugins/claude-code/scripts/sync-managed-client.mjs --check

@@ -1,0 +1,96 @@
+{
+  "schema": "statewright/host-compatibility/v1",
+  "records": [
+    {
+      "id": "2026-11-12-claude-desktop-credential-reload",
+      "identity": {
+        "client": "claude",
+        "surface": "desktop",
+        "appVersion": null,
+        "appBuild": null,
+        "engineVersion": "2.1.321",
+        "engineBuild": null,
+        "cliVersion": "2.1.323",
+        "osVersion": null,
+        "architecture": null,
+        "pluginVersion": "0.3.8",
+        "pluginSource": "921dc4881c1b861b6d00c45e769d30890f928f8b",
+        "pluginArtifactSha256": null,
+        "gatewayOrigin": "https://mcp.statewright.ai"
+      },
+      "status": "reported_failure",
+      "observedAt": "2026-11-12",
+      "evidence": "User incident report; Desktop engine from api-request.version. CLI reports Connected but live Desktop connect returns auth; reconnect command refused. Actual command.run return shape and previous working host build unavailable. See host-compatibility.md.",
+      "checks": {
+        "externalLoginReload": {
+          "status": "reported_failure",
+          "evidence": "Desktop refuses reconnect in this session after CLI OAuth."
+        },
+        "restartAndResume": {
+          "status": "untested",
+          "evidence": "New-session and full Desktop restart credential import not verified."
+        }
+      }
+    },
+    {
+      "id": "2026-11-12-claude-cli-baseline-needed",
+      "identity": {
+        "client": "claude",
+        "surface": "cli",
+        "cliVersion": "2.1.323",
+        "pluginVersion": "0.3.8"
+      },
+      "status": "untested",
+      "evidence": "User reports Connected in the CLI; this is not acceptance of catalog, hooks, routing or resume."
+    },
+    {
+      "id": "2026-11-12-codex-cli-baseline-needed",
+      "identity": {
+        "client": "codex",
+        "surface": "cli"
+      },
+      "status": "untested",
+      "evidence": "No exact host and plugin acceptance receipt collected in this task. Existing transport tests cannot supply one."
+    },
+    {
+      "id": "2026-11-12-codex-desktop-baseline-needed",
+      "identity": {
+        "client": "codex",
+        "surface": "desktop"
+      },
+      "status": "untested",
+      "evidence": "No exact Desktop app, embedded engine and plugin acceptance receipt collected in this task. CLI evidence does not establish Desktop compatibility."
+    },
+    {
+      "id": "2026-11-12-claude-desktop-literal-url-recovery",
+      "identity": {
+        "client": "claude",
+        "surface": "desktop",
+        "appVersion": null,
+        "appBuild": null,
+        "engineVersion": "2.1.321",
+        "engineBuild": null,
+        "cliVersion": "2.1.323",
+        "osVersion": null,
+        "architecture": null,
+        "pluginVersion": "0.3.8",
+        "pluginSource": null,
+        "pluginArtifactSha256": null,
+        "gatewayOrigin": "https://mcp.statewright.ai"
+      },
+      "status": "reported_recovery",
+      "observedAt": "2026-11-12",
+      "evidence": "User follow-up: verifyPluginMcpBinding compares the raw user_config URL placeholder with the resolved origin (expected=<unparseable>). Replacing it with the literal production URL in cache and marketplace checkout plus a full Desktop restart restored sign-in. Local patch on base 921dc4881c1b861b6d00c45e769d30890f928f8b; exact modified artifact and application build unknown. This is not acceptance of the combined upstream candidate.",
+      "checks": {
+        "freshLogin": {
+          "status": "reported_pass",
+          "evidence": "User confirmed working after literal URL patch and full restart."
+        },
+        "restartAndResume": {
+          "status": "partial",
+          "evidence": "Sign-in worked after restart; full workflow/resume/routing cases not evidenced."
+        }
+      }
+    }
+  ]
+}

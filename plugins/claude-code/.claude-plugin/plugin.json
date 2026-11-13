@@ -17,12 +17,6 @@
     "workflow"
   ],
   "userConfig": {
-    "gateway_url": {
-      "type": "string",
-      "title": "Statewright gateway",
-      "description": "MCP URL for your Statewright service. Reload the plugin after changing it, then connect to that service.",
-      "default": "https://mcp.statewright.ai/mcp"
-    },
     "powerline": {
       "type": "boolean",
       "title": "Powerline separators",

@@ -11,6 +11,7 @@ import { startCodexAppServerRouteProxy } from "../lib/codex-app-server-route-pro
 import { handleExecutorHook } from "../../codex/scripts/executor-hook.mjs";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
 import {ApprovalMemory} from "../lib/approval-memory.mjs";
+import {digestJson} from "../lib/native-mcp-approval-binding.mjs";
 import {manageApprovalMemory, requestClassifierApproval} from "../../codex/scripts/classifier-approval.mjs";
 
 const memoryContext={schema:"statewright/approval-memory-context/v1",policy_sha256:"a".repeat(64),
@@ -63,8 +64,13 @@ function hold() {
   };
 }
 
-async function setup(t, {maxReworks = 2, memory = false, userAgent = null, deferFirst = false} = {}) {
+async function setup(t, {maxReworks = 2, memory = false, userAgent = null, deferFirst = false, catalogue = null} = {}) {
   const memoryRoot=memory?await mkdtemp(join(tmpdir(),"statewright-native-memory-")):null;
+  let configValue={mcp_servers:{},apps:{github:{token:"fixture-secret-must-not-log"}}};
+  let catalogueHold=null;
+  let finalOwnerArm=null;
+  let finalStateArm=null;
+  let afterConfirmHold=null;
   if(memoryRoot)t.after(()=>rm(memoryRoot,{recursive:true,force:true}));
   const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(upstream, "listening");
@@ -79,6 +85,20 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
       const turn = { id: "classifier-active-turn", status: "inProgress", items: [] };
       socket.send(JSON.stringify({ id: request.id, result: { turn } }));
       socket.send(JSON.stringify({ method: "turn/started", params: { threadId, turn } }));
+    } else if (request.method === "mcpServerStatus/list" && catalogue) {
+      const sendCatalogue=()=>socket.send(JSON.stringify({id:request.id,result:{data:catalogue,nextCursor:null}}));
+      if (catalogueHold) { const waiting=catalogueHold; catalogueHold=null; waiting.enter(); void waiting.release.then(sendCatalogue); }
+      else sendCatalogue();
+    } else if (request.method === "config/read" && catalogue) {
+      if (finalOwnerArm && --finalOwnerArm.remaining === 0) {
+        ownerHold=finalOwnerArm.waiting;
+        finalOwnerArm=null;
+      }
+      if (finalStateArm && --finalStateArm.remaining === 0) {
+        stateHold=finalStateArm.waiting;
+        finalStateArm=null;
+      }
+      socket.send(JSON.stringify({id:request.id,result:{config:configValue}}));
     } else if (request.method === "initialize") {
       socket.send(JSON.stringify({id: request.id, result: {userAgent}}));
     } else if (request.id !== undefined) {
@@ -93,6 +113,11 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
   let ownerHold = null;
   const warnings = [];
   const statuses = [];
+  const approvalMemory=memory?new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"}):null;
+  if (approvalMemory) {
+    const confirm=approvalMemory.confirm.bind(approvalMemory);
+    approvalMemory.confirm=async (...args)=>{const result=await confirm(...args);if(afterConfirmHold){finalStateArm={waiting:afterConfirmHold,remaining:2};afterConfirmHold=null;}return result;};
+  }
   const proxy = await startCodexAppServerRouteProxy({
     upstreamUrl: `ws://127.0.0.1:${upstream.address().port}`,
     classifierApprovalToken: token,
@@ -101,7 +126,7 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
     onCompatibilityWarning: message => warnings.push(message),
     onHandoffStatus: event => statuses.push(event),
     classifierApprovalService: {
-      ...(memory?{approvalMemory:new ApprovalMemory({root:memoryRoot,namespace:"fixture-principal-project-staging"})}:{}),
+      ...(approvalMemory?{approvalMemory}:{}),
       ownsThread: async id => {
         if (ownerHold) {
           const pending = ownerHold;
@@ -151,6 +176,12 @@ async function setup(t, {maxReworks = 2, memory = false, userAgent = null, defer
     await new Promise(resolve => upstream.close(resolve));
   });
   return { connectAndOwn, endpoint, post, warnings, statuses,
+    emit(message) { for (const socket of upstream.clients) socket.send(JSON.stringify(message)); },
+    setConfig(value) { configValue = structuredClone(value); },
+    holdCatalogue() { return catalogueHold = hold(); },
+    holdFinalOwner() { const waiting=hold(); finalOwnerArm={waiting,remaining:2}; return waiting; },
+    holdFinalState() { const waiting=hold(); finalStateArm={waiting,remaining:2}; return waiting; },
+    holdStateAfterConfirm() { return afterConfirmHold=hold(); },
     setState(value) { state = structuredClone(value); },
     setOwned(value) { owned = value; },
     holdStateRead() {
@@ -168,6 +199,189 @@ test("native initialization warns older Codex clients without blocking their con
     assert.equal(fixture.warnings.length, expected);
     if (expected) assert.match(fixture.warnings[0], /Statewright may not work properly.*Update Codex/);
   }
+});
+
+test("owned host catalogue binds an MCP eight-hour grant across progress",async t=>{
+  const catalogue=[{name:"codex_apps",tools:{github_fetch_commit:{name:"github_fetch_commit"}},authStatus:"authenticated"}];
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue});
+  const {client,messages}=await fixture.connectAndOwn();
+  const stable="d".repeat(64),name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"statewright/statewright",commit_sha:"abc"};
+  const value=approvalRequest("mcp-first",{tool_name:name,tool_input:{...args,workdir:"/workspace"},original_tool_input:args,
+    native_turn_id:"turn-one",native_tool_use_id:"item-one",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const state={run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}};
+  fixture.setState(state);
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"turn-one",status:"inProgress"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"turn-one",item:{id:"item-one",type:"mcpToolCall",server:"codex_apps",tool:"github_fetch_commit",arguments:args,appContext:{connectorId:"github"}}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="item-one"),"native item start");
+  const options={environment:{STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT:"/synthetic/owner.json"},
+    readFile:async()=>JSON.stringify({proxyUrl:fixture.endpoint.replace(/^http/,"ws"),proxyToken:token})};
+  const pending=requestClassifierApproval(value,options);
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"MCP native approval");
+  assert.match(modal.params.message,/8 hours/);client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  const grant=await pending;assert.equal(grant.duration,"8h");assert(grant.grant_id);
+  fixture.emit({method:"item/completed",params:{threadId,turnId:"turn-one",item:{id:"item-one"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"turn-one",item:{id:"item-two",type:"mcpToolCall",server:"codex_apps",tool:"github_fetch_commit",arguments:args,appContext:{connectorId:"github"}}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="item-two"),"repeat native item start");
+  value.native_tool_use_id="item-two";
+  state.approval_memory_policy.policy_sha256="f".repeat(64);fixture.setState(state);
+  value.approval_memory.policy_sha256="f".repeat(64);value.classifier_receipt.invocation_fingerprint="invocation_v1_mcp-next";
+  const reused=await requestClassifierApproval(value,options);assert.equal(reused.reason,"remembered_human_approval");
+  assert.equal(reused.expires_at,grant.expires_at);assert.equal(messages.filter(message=>message.method==="mcpServer/elicitation/request").length,1);
+  assert(!JSON.stringify(messages).includes("fixture-secret-must-not-log"));
+  assert(!JSON.stringify(fixture.statuses).includes("fixture-secret-must-not-log"));
+  fixture.emit({method:"item/completed",params:{threadId,turnId:"turn-one",item:{id:"item-two"}}});
+  fixture.emit({method:"mcpServer/oauthLogin/completed",params:{name:"codex_apps"}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"turn-one",item:{id:"item-three",type:"mcpToolCall",server:"codex_apps",tool:"github_fetch_commit",arguments:args,appContext:{connectorId:"github"}}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="item-three"),"post-login native item");
+  value.native_tool_use_id="item-three";value.classifier_receipt.invocation_fingerprint="invocation_v1_mcp-changed";
+  const changed=requestClassifierApproval(value,options);
+  const nextModal=await until(()=>messages.filter(message=>message.method==="mcpServer/elicitation/request")[1],"new approval after provider lifecycle change");
+  client.send(JSON.stringify({id:nextModal.id,result:{action:"accept"}}));
+  assert.equal((await changed).duration,"8h");
+  fixture.setConfig({mcp_servers:{},apps:{github:{token:"replacement-private-value"}}});
+  fixture.emit({method:"item/completed",params:{threadId,turnId:"turn-one",item:{id:"item-three"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"turn-one",item:{id:"item-four",type:"mcpToolCall",server:"codex_apps",tool:"github_fetch_commit",arguments:args,appContext:{connectorId:"github"}}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="item-four"),"post-config native item");
+  value.native_tool_use_id="item-four";value.classifier_receipt.invocation_fingerprint="invocation_v1_mcp-config";
+  const reconfigured=requestClassifierApproval(value,options);
+  const configModal=await until(()=>messages.filter(message=>message.method==="mcpServer/elicitation/request")[2],"new approval after configuration change");
+  client.send(JSON.stringify({id:configModal.id,result:{action:"accept"}}));
+  assert.equal((await reconfigured).duration,"8h");
+  assert(!JSON.stringify(fixture.statuses).includes("replacement-private-value"));
+  fixture.emit({method:"item/completed",params:{threadId,turnId:"turn-one",item:{id:"item-four"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"turn-one",item:{id:"item-five",type:"mcpToolCall",server:"codex_apps",tool:"github_fetch_commit",arguments:args}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="item-five"),"item without app identity");
+  value.native_tool_use_id="item-five";value.classifier_receipt.invocation_fingerprint="invocation_v1_mcp-missing-connector";
+  const missing=requestClassifierApproval(value,options);
+  const onceModal=await until(()=>messages.filter(message=>message.method==="mcpServer/elicitation/request")[3],"one-time approval without app identity");
+  assert.match(onceModal.params.message,/one.time/i);
+  client.send(JSON.stringify({id:onceModal.id,result:{action:"accept"}}));
+  assert.equal((await missing).grant_id,undefined);
+});
+
+test("configured native MCP origin can receive eight-hour approval", async t => {
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue:[{name:"native",tools:{lookup:{name:"lookup"}},authStatus:"authenticated"}]});
+  fixture.setConfig({mcp_servers:{native:{command:"fixture-native"}}});
+  const {client,messages}=await fixture.connectAndOwn();
+  const name="mcp__native__lookup",args={query:"example"},stable="d".repeat(64);
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}});
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"native-turn",status:"inProgress"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"native-turn",item:{id:"native-item",type:"mcpToolCall",server:"native",tool:"lookup",arguments:args}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="native-item"),"configured native item");
+  const value=approvalRequest("native-mcp",{tool_name:name,tool_input:args,original_tool_name:name,original_tool_input:args,native_turn_id:"native-turn",native_tool_use_id:"native-item",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const pending=fixture.post(value);
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"native MCP approval");
+  assert.match(modal.params.message,/8 hours/);
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  assert.equal((await (await pending).json()).duration,"8h");
+});
+
+test("configuration drift during catalogue lookup cannot mint a timed grant", async t => {
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue:[{name:"native",tools:{lookup:{name:"lookup"}},authStatus:"authenticated"}]});
+  fixture.setConfig({mcp_servers:{native:{command:"first"}}});
+  const {client,messages}=await fixture.connectAndOwn();
+  const name="mcp__native__lookup",args={query:"example"},stable="d".repeat(64);
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}});
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"race-turn",status:"inProgress"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"race-turn",item:{id:"race-item",type:"mcpToolCall",server:"native",tool:"lookup",arguments:args}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="race-item"),"race item");
+  const value=approvalRequest("config-race",{tool_name:name,tool_input:args,original_tool_name:name,original_tool_input:args,native_turn_id:"race-turn",native_tool_use_id:"race-item",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const held=fixture.holdCatalogue();
+  const pending=fixture.post(value);
+  await held.entered;
+  fixture.setConfig({mcp_servers:{native:{command:"second"}}});
+  held.resume();
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"one-time review after config drift");
+  assert.match(modal.params.message,/one.time/i);
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  assert.equal((await (await pending).json()).grant_id,undefined);
+});
+
+test("lifecycle changes during final owner check cannot mint a timed grant", async t => {
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue:[{name:"native",tools:{lookup:{name:"lookup"}},authStatus:"authenticated"}]});
+  fixture.setConfig({mcp_servers:{native:{command:"fixture"}}});
+  const {client,messages}=await fixture.connectAndOwn();
+  const name="mcp__native__lookup",args={query:"example"},stable="d".repeat(64);
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}});
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"owner-turn",status:"inProgress"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"owner-turn",item:{id:"owner-item",type:"mcpToolCall",server:"native",tool:"lookup",arguments:args}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="owner-item"),"owner race item");
+  const value=approvalRequest("owner-race",{tool_name:name,tool_input:args,original_tool_name:name,original_tool_input:args,native_turn_id:"owner-turn",native_tool_use_id:"owner-item",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const held=fixture.holdFinalOwner();
+  const pending=fixture.post(value);
+  await held.entered;
+  fixture.emit({method:"mcpServer/oauthLogin/completed",params:{name:"native"}});
+  await until(()=>messages.find(message=>message.method==="mcpServer/oauthLogin/completed"),"lifecycle during owner check");
+  held.resume();
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"one-time review after lifecycle change");
+  assert.match(modal.params.message,/one.time/i);
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  assert.equal((await (await pending).json()).grant_id,undefined);
+});
+
+test("lifecycle change during final state reread prevents a timed grant", async t => {
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue:[{name:"native",tools:{lookup:{name:"lookup"}},authStatus:"authenticated"}]});
+  fixture.setConfig({mcp_servers:{native:{command:"fixture"}}});
+  const {client,messages}=await fixture.connectAndOwn();
+  const name="mcp__native__lookup",args={query:"example"},stable="d".repeat(64);
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}});
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"state-turn",status:"inProgress"}}});
+  fixture.emit({method:"item/started",params:{threadId,turnId:"state-turn",item:{id:"state-item",type:"mcpToolCall",server:"native",tool:"lookup",arguments:args}}});
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="state-item"),"state race item");
+  const value=approvalRequest("state-race",{tool_name:name,tool_input:args,original_tool_name:name,original_tool_input:args,native_turn_id:"state-turn",native_tool_use_id:"state-item",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const pending=fixture.post(value);
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"8h review before state race");
+  const held=fixture.holdFinalState();
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  await held.entered;
+  fixture.emit({method:"mcpServer/oauthLogin/completed",params:{name:"native"}});
+  await until(()=>messages.find(message=>message.method==="mcpServer/oauthLogin/completed"),"lifecycle during state read");
+  held.resume();
+  const result=await (await pending).json();
+  assert.equal(result.reason,"approval_state_changed");
+  assert.equal(result.grant_id,undefined);
+});
+
+test("lifecycle change during final reread denies remembered grant reuse", async t => {
+  const fixture=await setup(t,{maxReworks:0,memory:true,catalogue:[{name:"native",tools:{lookup:{name:"lookup"}},authStatus:"authenticated"}]});
+  fixture.setConfig({mcp_servers:{native:{command:"fixture"}}});
+  const {client,messages}=await fixture.connectAndOwn();
+  const name="mcp__native__lookup",args={query:"example"},stable="d".repeat(64);
+  fixture.setState({run_id:"run-one",run_session_id:"session-one",state:"implement",state_epoch:4,session_generation:"generation-one",
+    approval_memory_policy:{policy_sha256:memoryContext.policy_sha256,grant_policy_v2_sha256:stable,allowed_durations:memoryContext.allowed_durations,approve_for:"8h"}});
+  fixture.emit({method:"turn/started",params:{threadId,turn:{id:"reuse-turn",status:"inProgress"}}});
+  const emitItem=id=>fixture.emit({method:"item/started",params:{threadId,turnId:"reuse-turn",item:{id,type:"mcpToolCall",server:"native",tool:"lookup",arguments:args}}});
+  emitItem("reuse-first");
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="reuse-first"),"first reuse item");
+  const value=approvalRequest("reuse-first",{tool_name:name,tool_input:args,original_tool_name:name,original_tool_input:args,native_turn_id:"reuse-turn",native_tool_use_id:"reuse-first",
+    approval_memory:{...memoryContext,reusable:false,grant_policy_v2_sha256:stable,invocation_sha256:digestJson([name,args])}});
+  const initial=fixture.post(value);
+  const modal=await until(()=>messages.find(message=>message.method==="mcpServer/elicitation/request"),"initial eight-hour review");
+  client.send(JSON.stringify({id:modal.id,result:{action:"accept"}}));
+  const grant=await (await initial).json();assert.equal(grant.duration,"8h");
+  fixture.emit({method:"item/completed",params:{threadId,turnId:"reuse-turn",item:{id:"reuse-first"}}});
+  emitItem("reuse-second");
+  await until(()=>messages.find(message=>message.method==="item/started" && message.params.item.id==="reuse-second"),"second reuse item");
+  value.native_tool_use_id="reuse-second";value.classifier_receipt.invocation_fingerprint="invocation_v1_reuse-second";
+  const held=fixture.holdStateAfterConfirm();
+  const repeated=fixture.post(value);
+  await held.entered;
+  fixture.emit({method:"mcpServer/oauthLogin/completed",params:{name:"native"}});
+  await until(()=>messages.find(message=>message.method==="mcpServer/oauthLogin/completed"),"lifecycle while reusing grant");
+  held.resume();
+  const result=await (await repeated).json();
+  assert.equal(result.action,"deny");assert.equal(result.reason,"approval_memory_no_longer_valid");
+  assert.equal(messages.filter(message=>message.method==="mcpServer/elicitation/request").length,1);
 });
 
 test("classifier uncertainty reaches native approval immediately when rewrites are disabled", async t => {

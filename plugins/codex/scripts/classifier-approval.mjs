@@ -71,6 +71,10 @@ export function redactedApprovalRequest(value) {
     state_epoch: Number.isSafeInteger(value.state_epoch) && value.state_epoch >= 0
       ? value.state_epoch : null,
     ...(printable(value.session_generation)?{session_generation:value.session_generation}:{}),
+    ...(printable(value.native_turn_id) && printable(value.native_tool_use_id)
+      ? {native_turn_id:value.native_turn_id,native_tool_use_id:value.native_tool_use_id} : {}),
+    ...(printable(value.original_tool_name ?? value.tool_name) && (value.original_tool_name ?? value.tool_name).startsWith("mcp__") && value.original_tool_input && typeof value.original_tool_input === "object" && !Array.isArray(value.original_tool_input)
+      ? {original_tool_name:value.original_tool_name ?? value.tool_name,original_tool_input:value.original_tool_input} : {}),
     ...(approvalMemoryContext(value.approval_memory)?{approval_memory:approvalMemoryContext(value.approval_memory)}:{}),
     classifier_receipt: {
       intent_fingerprint: fingerprint(receipt?.intent_fingerprint, "intent_v1_"),

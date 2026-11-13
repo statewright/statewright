@@ -1091,6 +1091,9 @@ case "$ENDPOINT" in
           | if ($risk | type) != "object" or $risk.separate_approval_allowed != true then empty else {
               schema: "statewright/classifier-approval-request/v2",
               tool_name: $hook.tool_name,
+              original_tool_input: ($hook.tool_input // $hook.input // {}),
+              native_turn_id: $hook.turn_id,
+              native_tool_use_id: $hook.tool_use_id,
               tool_input: (($hook.tool_input // {}) + {
                 workdir: (($hook.tool_input.workdir // $hook.tool_input.cwd // $hook.cwd // "") | tostring | .[0:1024])
               }),

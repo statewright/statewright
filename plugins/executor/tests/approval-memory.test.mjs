@@ -8,6 +8,7 @@ import {once} from "node:events";
 import {mkdir} from "node:fs/promises";
 import {ApprovalMemory,approvalMemoryContext} from "../lib/approval-memory.mjs";
 import {ClassifierApprovalController} from "../lib/classifier-approval-controller.mjs";
+import {digestJson} from "../lib/native-mcp-approval-binding.mjs";
 
 const context={schema:"statewright/approval-memory-context/v1",policy_sha256:"a".repeat(64),
   invocation_sha256:"b".repeat(64),dependency_sha256:"c".repeat(64),reusable:true,
@@ -21,6 +22,97 @@ const state=()=>({run_id:"run",run_session_id:"session",state:"implement",state_
   approval_memory_policy:{policy_sha256:context.policy_sha256,allowed_durations:context.allowed_durations}});
 async function fixture(t){const root=await mkdtemp(join(tmpdir(),"statewright-approval-memory-"));t.after(()=>rm(root,{recursive:true,force:true}));
   let now=1000;return {root,setNow:v=>{now=v;},make:(namespace="principal/project/staging")=>new ApprovalMemory({root,namespace,now:()=>now})};}
+
+test("verified MCP approval survives progress but never a provider or request change",async t=>{
+  const f=await fixture(t), sent=[], value=request(), current=state();
+  const name="mcp__codex_apps__github_fetch_commit", input={repo_full_name:"statewright/statewright",commit_sha:"abc"};
+  value.original_tool_name=name;value.original_tool_input=input;
+  Object.assign(value.approval_memory,{reusable:false,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64),invocation_sha256:digestJson([name,input])});
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  let provider="e".repeat(64);
+  const resolver=async()=>{const digest=provider;return {digest,isCurrent:()=>provider===digest};};
+  const first=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make(),resolveMcpBinding:resolver});
+  const pending=await first.begin(value);assert.match(sent[0].params.message,/8 hours/);
+  first.handleReply({id:sent[0].id,result:{action:"accept"}});
+  const grant=await pending.completion;assert.equal(grant.duration,"8h");assert(grant.grant_id);first.close();
+  current.approval_memory_policy.policy_sha256="f".repeat(64);
+  value.approval_memory.policy_sha256="f".repeat(64);
+  value.classifier_receipt.invocation_fingerprint="invocation_v1_next";
+  const next=new ClassifierApprovalController({send:()=>assert.fail("valid grant reprompted"),getState:async()=>current,memory:f.make(),resolveMcpBinding:resolver});
+  const reused=await next.begin(value);assert.equal(reused.response.reason,"remembered_human_approval");assert.equal(reused.response.expires_at,grant.expires_at);
+  next.close();provider="1".repeat(64);
+  const changed=[],third=new ClassifierApprovalController({send:v=>changed.push(v),getState:async()=>current,memory:f.make(),resolveMcpBinding:resolver});
+  const again=await third.begin(value);assert.equal(again.outcome,"ask");third.handleReply({id:changed[0].id,result:{action:"decline"}});await again.completion;
+  const tampered=structuredClone(value);tampered.original_tool_input.commit_sha="different";
+  assert.equal((await third.begin(tampered)).response.reason,"approval_invocation_binding_mismatch");
+});
+
+test("MCP approval rejects context changes while the human dialog is pending",async t=>{
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  const name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"owner/repo",commit_sha:"abc"};
+  value.original_tool_name=name;value.original_tool_input=args;
+  Object.assign(value.approval_memory,{reusable:false,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64),invocation_sha256:digestJson([name,args])});
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make(),resolveMcpBinding:async()=>({digest:"e".repeat(64),isCurrent:()=>true})});
+  const pending=await controller.begin(value);
+  current.approval_memory_policy.policy_sha256="f".repeat(64);
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});
+  assert.equal((await pending.completion).reason,"approval_state_changed");
+  assert.deepEqual(await f.make().list(),[]);
+});
+
+test("unavailable host identity explicitly offers only one-time review",async t=>{
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  const name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"owner/repo"};
+  value.original_tool_name=name;value.original_tool_input=args;
+  Object.assign(value.approval_memory,{reusable:false,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64),invocation_sha256:digestJson([name,args])});
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make(),resolveMcpBinding:async()=>null});
+  const pending=await controller.begin(value);assert.match(sent[0].params.message,/could not verify this tool.s current server identity/);
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});
+  assert.equal((await pending.completion).duration,undefined);assert.deepEqual(await f.make().list(),[]);
+});
+
+test("a provider change while the dialog is open invalidates the decision",async t=>{
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  const name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"owner/repo"};
+  value.original_tool_name=name;value.original_tool_input=args;
+  Object.assign(value.approval_memory,{reusable:false,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64),invocation_sha256:digestJson([name,args])});
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  let provider="e".repeat(64);
+  const controller=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:f.make(),resolveMcpBinding:async()=>{const digest=provider;return {digest,isCurrent:()=>provider===digest};}});
+  const pending=await controller.begin(value);provider="f".repeat(64);
+  controller.handleReply({id:sent[0].id,result:{action:"accept"}});
+  assert.equal((await pending.completion).reason,"approval_state_changed");assert.deepEqual(await f.make().list(),[]);
+});
+
+test("host change during the final workflow state read invalidates the binding",async()=>{
+  const current=state();
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  let revision=1, reads=0;
+  const controller=new ClassifierApprovalController({send:()=>{},getState:async()=>{if(++reads===2)revision++;return current;},
+    resolveMcpBinding:async()=>{const captured=revision;return {digest:"e".repeat(64),isCurrent:()=>revision===captured};}});
+  const req={threadId:"thread",runId:"run",runSessionId:"session",state:"implement",stateEpoch:4,sessionGeneration:"generation-one",
+    memoryContext:{...context,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)},
+    hostBinding:{toolName:"mcp__x__y",baseDependency:"c".repeat(64),digest:"e".repeat(64),turnId:"turn",toolUseId:"item",invocation:"b".repeat(64)}};
+  assert.equal(await controller.current(req),false);
+});
+
+test("provider replacement during grant confirmation denies the pending reuse",async t=>{
+  const f=await fixture(t),sent=[],value=request(),current=state();
+  const name="mcp__codex_apps__github_fetch_commit",args={repo_full_name:"owner/repo"};
+  value.original_tool_name=name;value.original_tool_input=args;
+  Object.assign(value.approval_memory,{reusable:false,approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64),invocation_sha256:digestJson([name,args])});
+  Object.assign(current.approval_memory_policy,{approve_for:"8h",grant_policy_v2_sha256:"d".repeat(64)});
+  let provider="e".repeat(64);const resolver=async()=>{const digest=provider;return {digest,isCurrent:()=>provider===digest};};const underlying=f.make();
+  const first=new ClassifierApprovalController({send:v=>sent.push(v),getState:async()=>current,memory:underlying,resolveMcpBinding:resolver});
+  const pending=await first.begin(value);first.handleReply({id:sent[0].id,result:{action:"accept"}});await pending.completion;first.close();
+  const racing={lookup:b=>underlying.lookup(b),remember:(b,d)=>underlying.remember(b,d),revoke:id=>underlying.revoke(id),
+    async confirm(b,g){const valid=await underlying.confirm(b,g);provider="f".repeat(64);return valid;}};
+  value.classifier_receipt.invocation_fingerprint="invocation_v1_race";
+  const next=new ClassifierApprovalController({send:()=>assert.fail("stale grant must not prompt"),getState:async()=>current,memory:racing,resolveMcpBinding:resolver});
+  const result=await next.begin(value);assert.equal(result.outcome,"deny");assert.equal(result.response.reason,"approval_memory_no_longer_valid");
+});
 
 test("workflow 8h duration is disclosed and plain native allow survives reconstruction",async t=>{
   const f=await fixture(t),sent=[],value=request();

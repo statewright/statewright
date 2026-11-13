@@ -61,6 +61,20 @@ test('external uncertainty carries the command and directory through both helper
   assert.deepEqual(redactedApprovalRequest(request),request);
 });
 
+test("MCP approval keeps original input for binding and displays safe provider arguments",()=>{
+  const original={repo_full_name:"statewright/statewright",commit_sha:"abc",token:"fixture-secret"};
+  const request=redactedApprovalRequest({...input,tool_name:"mcp__codex_apps__github_fetch_commit",
+    tool_input:{...original,workdir:"/workspace"},original_tool_input:original,
+    native_turn_id:"turn",native_tool_use_id:"item"});
+  assert.equal(request.native_turn_id,"turn");
+  assert.equal(request.native_tool_use_id,"item");
+  assert.equal(request.display_context.details.repo_full_name,"statewright/statewright");
+  assert.equal(request.display_context.details.commit_sha,"abc");
+  assert.equal(request.display_context.details.token,"[redacted]");
+  assert.deepEqual(request.original_tool_input,original);
+  assert.deepEqual(redactedApprovalRequest(request),request);
+});
+
 test("approval CLI responds through a managed Codex home's symlinked plugin directory", async t => {
   const home = await mkdtemp(join(tmpdir(), "statewright-approval-cli-"));
   t.after(() => rm(home, {recursive: true, force: true}));

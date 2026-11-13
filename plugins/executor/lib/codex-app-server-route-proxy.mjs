@@ -1,5 +1,5 @@
 import { WebSocket, WebSocketServer } from "ws";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { HumanInteractionRecorder } from "./human-interaction.mjs";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
@@ -16,6 +16,7 @@ import { pendingApprovalSnapshot } from "./human-approval.mjs";
 import { prepareQueuedHumanInput } from "./queued-human-input.mjs";
 import { nativeWorkflowEntryPrompt, nativeApprovalResultPrompt, codexCompatibilityNotice } from "./native-statewright-guidance.mjs";
 import { WorkflowRouteOriginStore, sameWorkflowRouteBinding, workflowRouteBinding } from "./workflow-route-origin.mjs";
+import { bindCatalogue, digestJson, NativeMcpItems } from "./native-mcp-approval-binding.mjs";
 
 const WORKFLOW_APPROVAL_PRIORITY = 100;
 const CLASSIFIER_APPROVAL_PRIORITY = 200;
@@ -651,8 +652,15 @@ export async function startCodexAppServerRouteProxy({
           if(!response.destroyed){response.writeHead(200,{"Content-Type":"application/json"});response.end(JSON.stringify(result));}
           return;
         }
-        const decision = await owners[0].pipeline.service(value,
-          {signal: approvalController.signal});
+        let decision;
+        try {
+          decision = await owners[0].pipeline.service(value, {signal: approvalController.signal});
+        } finally {
+          // The exact original is needed only to verify its gateway digest.
+          // Do not retain it while an indefinitely long native prompt is open.
+          delete value.original_tool_input;
+          body = "";
+        }
         let result;
         if (decision.outcome === ApprovalOutcome.ASK) result = await decision.completion;
         else if ([ApprovalOutcome.ALLOW, ApprovalOutcome.DENY].includes(decision.outcome)) {
@@ -819,6 +827,10 @@ export async function startCodexAppServerRouteProxy({
     }
     const yoloThreadId = yoloThreads[0] ?? null;
     const connection = Symbol("app-server-connection");
+    const classifierConnectionGeneration = randomUUID();
+    const classifierConfigKey = randomBytes(32);
+    const classifierItems = new NativeMcpItems();
+    let classifierHostRevision = 0;
     const classifierThreads = new Set();
     let parkingCount = 0;
     const activeThreads = new Map();
@@ -877,6 +889,49 @@ export async function startCodexAppServerRouteProxy({
         });
       },
       getState: readClassifierState,
+      resolveMcpBinding: async ({threadId, toolName, dependency, turnId, toolUseId, invocation}) => {
+        const owned = async () => ownsClassifierConnection(threadId)
+          && await classifierApprovalService?.ownsThread?.(threadId);
+        const identity = classifierItems.match({threadId,turnId,toolUseId,toolName,invocation});
+        if (!identity || !await owned()) return null;
+        const revision = classifierHostRevision;
+        const config = await internalRpc("config/read", {includeLayers:false});
+        if (!config?.config || typeof config.config !== "object") return null;
+        if (!("mcp_servers" in config.config) && !("apps" in config.config)) return null;
+        const configuredServers = config.config.mcp_servers;
+        const hasNativeConfig = configuredServers && typeof configuredServers === "object"
+          && !Array.isArray(configuredServers) && Object.hasOwn(configuredServers, identity.server)
+          && configuredServers[identity.server] && typeof configuredServers[identity.server] === "object";
+        const hasConnector = typeof identity.connectorId === "string" && identity.connectorId.trim().length > 0;
+        // Host metadata must distinguish an app from a configured native MCP
+        // server. Absence of appContext alone is not evidence of native origin.
+        if (hasConnector ? hasNativeConfig : !hasNativeConfig || identity.server === "codex_apps") return null;
+        const relevant = {mcp_servers:config.config.mcp_servers ?? null, apps:config.config.apps ?? null};
+        const configDigest = createHmac("sha256", classifierConfigKey).update(JSON.stringify(relevant)).digest("hex");
+        let cursor = null;
+        const seen = new Set();
+        const servers = [];
+        do {
+          if (seen.has(cursor) || seen.size >= 20) return null;
+          seen.add(cursor);
+          const result = await internalRpc("mcpServerStatus/list", {threadId, cursor, limit:100, detail:"toolsAndAuthOnly"});
+          if (!await owned() || !Array.isArray(result?.data)) return null;
+          servers.push(...result.data);
+          cursor = result.nextCursor ?? null;
+        } while (cursor !== null);
+        const catalogue = bindCatalogue(toolName, servers, classifierConnectionGeneration, dependency);
+        const afterConfig = await internalRpc("config/read", {includeLayers:false});
+        if (!afterConfig?.config || typeof afterConfig.config !== "object"
+            || (!("mcp_servers" in afterConfig.config) && !("apps" in afterConfig.config))) return null;
+        const afterRelevant = {mcp_servers:afterConfig.config.mcp_servers ?? null, apps:afterConfig.config.apps ?? null};
+        const afterDigest = createHmac("sha256", classifierConfigKey).update(JSON.stringify(afterRelevant)).digest("hex");
+        if (!catalogue || !await owned() || revision !== classifierHostRevision
+            || configDigest !== afterDigest
+            || !isDeepStrictEqual(identity, classifierItems.match({threadId,turnId,toolUseId,toolName,invocation}))) return null;
+        return {digest:digestJson({catalogue,revision,configDigest,identity}),
+          isCurrent:()=>revision === classifierHostRevision && ownsClassifierConnection(threadId)
+            && isDeepStrictEqual(identity, classifierItems.match({threadId,turnId,toolUseId,toolName,invocation}))};
+      },
       memory: classifierApprovalService.approvalMemory ?? null,
       maxReworks: classifierMaxReworks,
       deferFirst: classifierDeferFirst,
@@ -900,6 +955,7 @@ export async function startCodexAppServerRouteProxy({
       const next = String(threadId);
       if (classifierAttachedThreadId && classifierAttachedThreadId !== next) {
         classifierController?.close("native_owner_transferred");
+        classifierItems.clear();
       }
       classifierThreads.clear();
       classifierThreads.add(next);
@@ -1532,6 +1588,7 @@ export async function startCodexAppServerRouteProxy({
       };
       try {
         message = JSON.parse(payload);
+        if (["config/mcpServer/reload", "config/value/write", "config/batchWrite", "mcpServer/oauth/login", "app/install", "app/uninstall"].includes(message.method)) classifierHostRevision++;
         if (message.method && typeof message.id === "string" && message.id.startsWith(internalPrefix)) {
           throw new Error("Statewright internal RPC identities cannot be used for client requests.");
         }
@@ -1922,6 +1979,8 @@ export async function startCodexAppServerRouteProxy({
       const prefaceMessages = [];
       try {
         let notification = JSON.parse(payload);
+        if (["mcpServer/startupStatus/updated", "mcpServer/oauthLogin/completed", "app/list/updated", "app/installed", "account/updated"].includes(notification.method)) classifierHostRevision++;
+        classifierItems.observe(notification);
         const humanInput = prepareQueuedHumanInput(notification);
         if (humanInput !== notification) {
           notification = humanInput;

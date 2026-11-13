@@ -14,6 +14,7 @@ export function approvalMemoryContext(value) {
       || (value.approve_for !== undefined && (!APPROVAL_DURATIONS.includes(value.approve_for)
         || (value.approve_for !== "once" && !value.allowed_durations.includes(value.approve_for))))) return null;
   return {schema:value.schema, policy_sha256:value.policy_sha256,
+    ...(hex(value.grant_policy_v2_sha256) ? {grant_policy_v2_sha256:value.grant_policy_v2_sha256} : {}),
     invocation_sha256:value.invocation_sha256, dependency_sha256:value.dependency_sha256,
     reusable:value.reusable, approve_for:value.approve_for ?? "once",
     allowed_durations:APPROVAL_DURATIONS.filter(v=>v==="once"||value.allowed_durations.includes(v))};
@@ -22,7 +23,7 @@ function identity(binding) {
   if (!binding || !["policy_sha256","invocation_sha256","dependency_sha256"].every(k=>hex(binding[k]))) {
     throw new Error("approval_memory_binding_unavailable");
   }
-  return JSON.stringify([binding.policy_sha256,binding.invocation_sha256,binding.dependency_sha256]);
+  return JSON.stringify([binding.grant_policy_v2_sha256 ?? binding.policy_sha256,binding.invocation_sha256,binding.dependency_sha256]);
 }
 
 /** Private local grants. A grant never authorizes a tool by itself: the native

@@ -62,6 +62,9 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
         "policy_sha256":digest(&json!({"contract":1,"definition":session.definition,
             "context":session.context,"audit_override":session.classifier_audit_override,
             "audit_revision":session.classifier_audit_revision,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
+        "grant_policy_v2_sha256":digest(&json!({"contract":2,"definition":session.definition,
+            "audit_override":session.classifier_audit_override,
+            "audit_revision":session.classifier_audit_revision,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
         "allowed_durations":durations,"approve_for":approve_for})
 }
 
@@ -137,6 +140,7 @@ pub(crate) fn context(
             || exact_shell || crate::tool_intent::is_native_web_run(tool_name));
     json!({"schema":"statewright/approval-memory-context/v1",
         "policy_sha256":policy["policy_sha256"],"allowed_durations":policy["allowed_durations"],"approve_for":policy["approve_for"],
+        "grant_policy_v2_sha256":policy["grant_policy_v2_sha256"],
         "invocation_sha256":digest(&json!([tool_name,input])),
         "dependency_sha256":digest(&dependency_value(&json!([command_evidence,references]))),
         "reusable":reusable,
@@ -154,6 +158,25 @@ mod tests {
             "id":"memory-fixture","initial":"work","states":{"work":{}}}))
             .unwrap(),
         )
+    }
+    #[test]
+    fn stable_grant_policy_keeps_legacy_snapshot_context_sensitive() {
+        let mut session = session();
+        let before = policy(&session);
+        session.context["progress"] = json!("another step");
+        let after = policy(&session);
+        assert_ne!(before["policy_sha256"], after["policy_sha256"]);
+        assert_eq!(before["grant_policy_v2_sha256"], after["grant_policy_v2_sha256"]);
+        session.classifier_audit_revision += 1;
+        assert_ne!(after["grant_policy_v2_sha256"], policy(&session)["grant_policy_v2_sha256"]);
+    }
+    #[test]
+    fn native_mcp_canonical_digest_matches_bridge_vector() {
+        let value = json!(["mcp__codex_apps__github_fetch_commit",
+            {"repo_full_name":"statewright/statewright", "commit_sha":"abc"}]);
+        assert_eq!(digest(&value), "7f0d842f4df60dfc4ed2700f613774620f98383e457d0959f2cf320ca3b5076f");
+        let ordered = json!(["mcp__x__y", {"2":2,"10":1,"\u{e000}":3,"\u{10000}":4}]);
+        assert_eq!(digest(&ordered), "9c039e5819278e9ee85f5acc4632a0a04ffba4e409b58131fb4b11f4526be37a");
     }
     #[test]
     fn policy_propagates_workflow_approval_duration() {

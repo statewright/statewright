@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { approvalDisplayContext, interactionValue, s1Classification, s1ClassificationDisplay } from "./human-interaction.mjs";
 import { approvalAsk, approvalDeny, approvalAllow, approvalNotHandled } from "./approval-pipeline.mjs";
 import {approvalMemoryContext} from "./approval-memory.mjs";
+import {verifyOriginalInvocation} from "./native-mcp-approval-binding.mjs";
 
 const REWORKABLE_BASES = new Set([
   "semantic_threshold_not_met",
@@ -45,6 +46,8 @@ export function classifierApprovalRequest(value) {
   const separateApprovalAllowed = receipt.separate_approval_allowed === true;
   const memoryContext=approvalMemoryContext(value.approval_memory);
   const sessionGeneration=printable(value.session_generation)?value.session_generation:null;
+  const nativeTurnId=printable(value.native_turn_id)?value.native_turn_id:null;
+  const nativeToolUseId=printable(value.native_tool_use_id)?value.native_tool_use_id:null;
   if(memoryContext?.reusable&&!sessionGeneration)return null;
   if (!threadId || !runId || !runSessionId || !state || stateEpoch === null
       || !intentFingerprint || !invocationFingerprint || !basis) return null;
@@ -56,7 +59,7 @@ export function classifierApprovalRequest(value) {
   return Object.freeze({threadId, runId, runSessionId, state, stateEpoch, intentFingerprint,
     invocationFingerprint, basis, requiredAuthority, reformulationAllowed,
     exactInvocationRetryAllowed, separateApprovalAllowed,
-    memoryContext,sessionGeneration,
+    memoryContext,sessionGeneration,nativeTurnId,nativeToolUseId,
     displayContext: approvalDisplayContext(value),
     reviewContext: interactionValue(receipt.review_context ?? null), s1: s1Classification(receipt)});
 }
@@ -95,19 +98,21 @@ export function classifierReviewMessage(request) {
   lines.push(`Phase: ${request.state}`, duration === "once"
     ? "Allow this exact invocation once?"
     : `Allow this exact invocation and remember it ${remember}, while its request, source evidence and policy match?`);
+  if (request.hostBinding && duration !== "once") lines.push("This approval is scoped to the current host connection and observed server configuration and lifecycle; the host may not expose the external account identity.");
   if (request.memoryUnavailableReason) lines.push(request.memoryUnavailableReason);
   return lines.join("\n");
 }
 
 /**
  * Process-resident retry accounting and one-use native approval for classifier
- * uncertainty. Only gateway-issued redacted identities enter this controller;
- * raw commands and tool arguments stay in the short-lived hook process.
+ * uncertainty. A bounded original MCP input may reach begin() over the
+ * authenticated local bridge for digest verification; it is never stored in
+ * the pending request, grant record, or lifecycle telemetry.
  */
 export class ClassifierApprovalController {
   constructor({send, record = async () => {}, maxReworks = 0,
     ttlMs = 10 * 60_000,
-    now = () => Date.now(), getState = null, memory = null, deferFirst = false} = {}) {
+    now = () => Date.now(), getState = null, memory = null, deferFirst = false, resolveMcpBinding = null} = {}) {
     if (typeof send !== "function") throw new Error("Classifier approval requires a native sender");
     if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
       throw new Error("Classifier rework budget must be between 0 and 10");
@@ -118,7 +123,7 @@ export class ClassifierApprovalController {
     if (getState !== null && typeof getState !== "function") {
       throw new Error("Classifier approval state reader must be a function");
     }
-    Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory, deferFirst});
+    Object.assign(this, {send, record, maxReworks, ttlMs, now, getState, memory, deferFirst, resolveMcpBinding});
     this.entries = new Map();
     this.requests = new Map();
     this.closedReason=null;
@@ -186,9 +191,24 @@ export class ClassifierApprovalController {
     if (value?.schema !== "statewright/classifier-approval-request/v2") {
       return approvalNotHandled();
     }
-    const request = classifierApprovalRequest(value);
+    let request = classifierApprovalRequest(value);
     if (!request) return approvalDeny(Object.freeze({schema: "statewright/classifier-approval/v2",
       action: "deny", reason: "invalid_redacted_classifier_receipt"}));
+    if (typeof value.original_tool_name === "string" && value.original_tool_name.startsWith("mcp__")
+        && request.memoryContext?.grant_policy_v2_sha256) {
+      const toolName = verifyOriginalInvocation(value, request.memoryContext);
+      if (!toolName) return approvalDeny(this.result(request,"deny",{reason:"approval_invocation_binding_mismatch"}));
+      const baseDependency = request.memoryContext.dependency_sha256;
+      if (!await this.current(request)) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
+      let bound = null;
+      try { bound = await this.resolveMcpBinding?.({threadId:request.threadId,toolName,dependency:baseDependency,
+        turnId:request.nativeTurnId,toolUseId:request.nativeToolUseId,invocation:request.memoryContext.invocation_sha256}); } catch { /* one-time review remains available */ }
+      if (!await this.current(request)) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
+      if (typeof bound?.digest === "string" && typeof bound.isCurrent === "function" && bound.isCurrent()) request = Object.freeze({...request,
+        hostBinding:{toolName,baseDependency,digest:bound.digest,turnId:request.nativeTurnId,toolUseId:request.nativeToolUseId,invocation:request.memoryContext.invocation_sha256},
+        memoryContext:{...request.memoryContext,reusable:true,dependency_sha256:bound.digest}});
+      else request = Object.freeze({...request,hostBindingUnavailable:true});
+    }
     if(this.closedReason)return approvalDeny(this.result(request,"deny",{reason:this.closedReason}));
     if (signal?.aborted) return approvalDeny(
       this.result(request, "deny", {reason: "approval_request_aborted"}));
@@ -200,7 +220,7 @@ export class ClassifierApprovalController {
           const current=await this.current(request);
           if (signal?.aborted || !current) return approvalDeny(this.result(request,"deny",{reason:"approval_state_changed"}));
           const valid=await this.memory.confirm(request.memoryContext,grant);
-          if(!valid||signal?.aborted||this.closedReason)return approvalDeny(this.result(request,"deny",{reason:"approval_memory_no_longer_valid"}));
+          if(!valid||signal?.aborted||this.closedReason||!await this.current(request))return approvalDeny(this.result(request,"deny",{reason:"approval_memory_no_longer_valid"}));
           this.emit({type:"classifier_approval_memory_reused",threadId:request.threadId,
             run_id:request.runId,state:request.state,grant_id:grant.id,duration:grant.duration,
             expires_at:grant.expires_at, invocation_fingerprint:request.invocationFingerprint});
@@ -272,7 +292,9 @@ export class ClassifierApprovalController {
     const configuredDuration=request.memoryContext?.approve_for ?? "once";
     const reusable=Boolean(this.memory && request.memoryContext?.reusable);
     const effectiveDuration=reusable ? configuredDuration : "once";
-    const memoryUnavailableReason = !request.memoryContext
+    const memoryUnavailableReason = request.hostBindingUnavailable
+      ? "The host could not verify this tool's current server identity; only a one-time approval is available."
+      : !request.memoryContext
       ? "The request did not include a valid approval-memory policy and binding; only a one-time approval is available."
       : configuredDuration !== "once" && !reusable
         ? (!this.memory ? "The configured reusable approval is unavailable: the approval store is unavailable."
@@ -369,12 +391,24 @@ export class ClassifierApprovalController {
   async current(request) {
     try {
       const state=await this.getState?.(request.threadId);
-      return state && !state.is_final && !state.pending_approval && state.run_id===request.runId
+      const valid = state && !state.is_final && !state.pending_approval && state.run_id===request.runId
         && state.run_session_id===request.runSessionId && state.state===request.state && state.state_epoch===request.stateEpoch
         && (!request.sessionGeneration || state.session_generation===request.sessionGeneration)
         && (!request.memoryContext || state.approval_memory_policy?.policy_sha256===request.memoryContext.policy_sha256
           && (state.approval_memory_policy?.approve_for ?? "once") === request.memoryContext.approve_for
-          && request.memoryContext.allowed_durations.every(d=>d==="once"||state.approval_memory_policy?.allowed_durations?.includes(d)));
+          && request.memoryContext.allowed_durations.every(d=>d==="once"||state.approval_memory_policy?.allowed_durations?.includes(d))
+          && (!request.memoryContext.grant_policy_v2_sha256 || state.approval_memory_policy?.grant_policy_v2_sha256===request.memoryContext.grant_policy_v2_sha256));
+      if (!valid || !request.hostBinding) return valid;
+      const {toolName,baseDependency,digest,turnId,toolUseId,invocation}=request.hostBinding;
+      const current = await this.resolveMcpBinding?.({threadId:request.threadId,toolName,dependency:baseDependency,turnId,toolUseId,invocation});
+      if (current?.digest !== digest || typeof current.isCurrent !== "function") return false;
+      const after=await this.getState?.(request.threadId);
+      return !!after && !after.is_final && !after.pending_approval && after.run_id===request.runId
+        && after.run_session_id===request.runSessionId && after.state===request.state && after.state_epoch===request.stateEpoch
+        && after.session_generation===request.sessionGeneration
+        && after.approval_memory_policy?.policy_sha256===request.memoryContext.policy_sha256
+        && after.approval_memory_policy?.grant_policy_v2_sha256===request.memoryContext.grant_policy_v2_sha256
+        && current.isCurrent();
     }catch{return false;}
   }
 

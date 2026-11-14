@@ -596,8 +596,24 @@ if [ "${STATEWRIGHT_TELEMETRY_SUPERVISE_ONLY:-false}" = "true" ]; then
 fi
 
 # --- Tool discovery (defined before main loop) ---
+# A palette endpoint rejection is not evidence that the MCP gateway rejects
+# this credential (OAuth audiences can intentionally differ). Keep it local to
+# this endpoint and credential; never poison the gateway recovery sentinel.
+client_tools_rejection_matches() {
+  local marker="${INVALID_KEY_SENTINEL}.client_tools"
+  [ -f "$marker" ] &&
+    [ "$(cat "$marker" 2>/dev/null)" = "$(key_fingerprint "$PB_URL|$1")" ]
+}
+
+mark_client_tools_rejected() {
+  local marker="${INVALID_KEY_SENTINEL}.client_tools"
+  mkdir -p "$(dirname "$marker")" 2>/dev/null || return 0
+  (umask 077; printf '%s\n' "$(key_fingerprint "$PB_URL|$1")" > "$marker")
+}
+
 upload_client_tools() {
   local key="$1"
+  client_tools_rejection_matches "$key" && return 0
   local MCP_CONFIG="$HOME/.claude/.mcp.json"
   local tools
 
@@ -703,7 +719,7 @@ upload_client_tools() {
   response=$(cat "$body" 2>/dev/null || true)
   rm -f "$body"
   if [ "$status" = "401" ] && printf '%s' "$response" | jq -e '.error == "invalid_api_key"' >/dev/null 2>&1; then
-    mark_invalid_key "$key"
+    mark_client_tools_rejected "$key"
   fi
 }
 

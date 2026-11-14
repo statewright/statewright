@@ -774,3 +774,89 @@ test("cursor adopts a newly saved API key without restarting its MCP process", a
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("codex palette rejection remains non-interactive without blocking valid gateway access", async () => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-codex-invalid-key-"));
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  const browserCapture = join(root, "browser-command.txt");
+  const curlCapture = join(root, "curl-command.txt");
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
+  );
+  try {
+    await mkdir(bin, { recursive: true });
+    const fakeCurl = join(bin, "curl");
+    await writeFile(fakeCurl, `#!/usr/bin/env bash
+output=''
+url=''
+previous=''
+printf '%s\\n' "$@" >> "$STATEWRIGHT_CURL_CAPTURE"
+for argument in "$@"; do
+  if [ "$previous" = '-o' ]; then output="$argument"; fi
+  case "$argument" in http://*|https://*) url="$argument" ;; esac
+  previous="$argument"
+done
+case "$url" in
+  */api/client-tools)
+    printf '%s' '{"error":"invalid_api_key"}' > "$output"
+    printf '401'
+    ;;
+  *)
+    printf '%s\\n200' '{"jsonrpc":"2.0","result":{"tools":[]},"id":2}'
+    ;;
+esac
+`);
+    await chmod(fakeCurl, 0o755);
+    Object.assign(environment, {
+      HOME: home,
+      PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
+      STATEWRIGHT_API_KEY: "sw_live_fixture_invalid_key",
+      STATEWRIGHT_GATEWAY_URL: "https://gateway.example.test/mcp",
+      STATEWRIGHT_PB_URL: "https://auth.example.test",
+      STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: browserCapture,
+      STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_NO_UPDATE_CHECK: "1",
+      STATEWRIGHT_SENTRY_DISABLED: "true",
+    });
+
+    const child = spawn("bash", [resolve("plugins/codex/mcp-proxy.sh")], {
+      cwd: root,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+    await waitForOutput(() => stdout, /"id":1/);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
+    const gatewayIdentity = createHash("sha256").update(environment.STATEWRIGHT_GATEWAY_URL).digest("hex");
+    const gatewayState = join(home, ".statewright", "gateways", gatewayIdentity);
+    const invalidMarker = join(gatewayState, "invalid_api_key.client_tools");
+    await waitForOutput(async () => {
+      try { return await readFile(invalidMarker, "utf8"); } catch { return ""; }
+    }, /[0-9a-f]{64}/, 10_000);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+    await waitForOutput(() => stdout, /"id":2/);
+    child.stdin.end();
+    const code = await new Promise((resolveClose, rejectClose) => {
+      child.once("error", rejectClose);
+      child.once("close", resolveClose);
+    });
+
+    assert.equal(code, 0, stderr);
+    assert.match(await readFile(curlCapture, "utf8"), /\/api\/client-tools/);
+    await assert.rejects(readFile(browserCapture));
+    await assert.rejects(readFile(join(gatewayState, "invalid_api_key")));
+    assert.doesNotMatch(stderr, /secret|token=|private|statewright\.ai\/keys/);
+    const gatewayResponse = responseById(stdout, 2);
+    assert.ok(gatewayResponse.result, JSON.stringify(gatewayResponse));
+    assert.equal(gatewayResponse.error, undefined);
+
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

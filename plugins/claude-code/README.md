@@ -1,6 +1,6 @@
 # Statewright for Claude Code
 
-The 0.3.9 candidate includes the Arbiter, workflow sidebar, compact tool results and
+The 0.4.0 candidate includes the Arbiter, workflow sidebar, compact tool results and
 per-state model routing to Claude Code and **Claude Desktop → Code → Local**.
 Use ordinary Claude; no separate app or Statewright launcher is required.
 

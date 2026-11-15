@@ -8,7 +8,7 @@ Your workflows, in the harness you choose. Statewright defines tools, checks, an
 
 ![Statewright workflow editor](docs/images/workflow-editor.png)
 
-> **Next candidate: 0.3.9.** [Codex notes](docs/releases/codex-0.3.9.md) · [Claude notes](docs/releases/claude-0.3.9.md). Unpublished; release gates remain pending.
+> **0.4.0 release notes.** [Codex notes](docs/releases/codex-0.4.0.md) · [Claude notes](docs/releases/claude-0.4.0.md).
 
 ## The problem
 

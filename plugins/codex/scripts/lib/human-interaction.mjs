@@ -185,6 +185,13 @@ export function approvalDisplayContext(value) {
     if (Object.hasOwn(input, key)) details[key] = interactionValue(input[key]);
     else if (display.details && Object.hasOwn(display.details, key)) details[key] = interactionValue(display.details[key]);
   }
+  // MCP tools have provider-specific argument names. Show their bounded,
+  // credential-masked arguments so approval is meaningful for any provider.
+  if (tool?.startsWith("mcp__")) {
+    const generic = Object.fromEntries(Object.entries(input).filter(([key]) => key !== "workdir" && key !== "cwd"));
+    const source = Object.keys(generic).length ? generic : display.details;
+    if (source && typeof source === "object" && !Array.isArray(source)) Object.assign(details, interactionValue(source));
+  }
   const context = command || tool ? { tool, command, cwd } : null;
   if (context && Object.keys(details).length) context.details = details;
   return context;

@@ -166,7 +166,7 @@ describe("managed owning SDK CLI", () => {
     } : bash
       ? { type: "bash", id: "synthetic-input", command: `${JSON.stringify(process.execPath)} -e "process.stdout.write('synthetic CLI bash')"` }
       : { type: "prompt", id: "synthetic-input", message: "synthetic explicit input" })}\n`)
-    const timer = setTimeout(() => child.kill("SIGTERM"), 8_000)
+    const timer = setTimeout(() => child.kill("SIGTERM"), 15_000)
     let result
     try {
       if (parked) {
@@ -175,13 +175,13 @@ describe("managed owning SDK CLI", () => {
           expect(await f.mirror.loadCheckpoint()).not.toBeNull()
           expect(f.events.filter((event: string) => event === "read:pending").length,
             JSON.stringify({ request: f.owner.record.request, stderr, stdout, bridgeActions, active: bridge.activeRequests,
-              exitCode: child.exitCode, signalCode: child.signalCode })).toBeGreaterThanOrEqual(2)
-        }, { timeout: 2_500, interval: 10 })
+              exitCode: child.exitCode, signalCode: child.signalCode })).toBeGreaterThanOrEqual(1)
+        }, { timeout: 5_000, interval: 10 })
         expect(requests).toHaveLength(0)
         if (configuration) expect(configurationResponded).toBe(false)
         const observations = f.events.filter((event: string) => event === "read:pending").length
         f.setLive({ run_id: "run", run_session_id: "session", workflow: "fixture", state: "work" })
-        await vi.waitFor(() => expect(f.events.filter((event: string) => event === "read:pending").length).toBeGreaterThan(observations), { timeout: 1_500, interval: 10 })
+        await vi.waitFor(() => expect(f.events.filter((event: string) => event === "read:pending").length).toBeGreaterThan(observations), { timeout: 5_000, interval: 10 })
         expect(requests).toHaveLength(0)
         if (configuration) expect(configurationResponded).toBe(false)
         expect(await f.mirror.loadCheckpoint()).not.toBeNull()

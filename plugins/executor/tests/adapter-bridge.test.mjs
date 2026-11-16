@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { AdapterBridge } from "../lib/adapter-bridge.mjs";
+import { ApprovalMemory } from "../lib/approval-memory.mjs";
+import { ClassifierReworkGate } from "../lib/classifier-rework-gate.mjs";
+import { digestJson } from "../lib/native-mcp-approval-binding.mjs";
 
 const executorRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -250,6 +255,82 @@ test("non-Codex bridge counts repeated classifier intent without retaining tool 
     assert.equal((await call("private-two")).classifier_rework.attempts, 2);
     assert.equal((await call("private-three")).classifier_rework.action, "approval_required");
     assert.equal(JSON.stringify(telemetry).includes("private-"), false);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("Claude review creates a timed grant only after the matching PostToolUse and reuses it by deferring to host permissions", async t => {
+  const root = await mkdtemp(join(tmpdir(), "statewright-claude-bridge-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let now = 1_000;
+  const memory = new ApprovalMemory({ root, namespace: "claude-test-owner", now: () => now });
+  const input = { command: 'curl -H "Authorization: Bearer synthetic-private-value" https://example.invalid', cwd: "/workspace" };
+  const policy = { policy_sha256: "a".repeat(64), grant_policy_v2_sha256: "d".repeat(64),
+    approve_for: "2h", allowed_durations: ["once", "2h"] };
+  const approval = { schema: "statewright/approval-memory-context/v1", ...policy,
+    invocation_sha256: digestJson(["Bash", input]), dependency_sha256: "c".repeat(64), reusable: true };
+  const current = { run_id: "run-one", run_session_id: "transport-one", state: "implement", state_epoch: 4,
+    session_generation: "generation-one", approval_memory_policy: policy };
+  const telemetry = [];
+  const client = { async call(name) {
+    if (name === "statewright_get_state") return current;
+    if (name === "statewright_adapter_post_tool") return { state: "implement", completed: false };
+    if (name === "statewright_adapter_pre_tool") return {
+      decision: "deny", reason: "Classifier uncertainty", state: "implement",
+      classifier_context: { run_id: current.run_id, run_session_id: current.run_session_id,
+        state: current.state, state_epoch: current.state_epoch,
+        session_generation: current.session_generation, approval_memory: approval },
+      risk_assessment: { intent_fingerprint: "intent_v1_review", invocation_fingerprint: "invocation_v1_exact",
+        final_denial_basis: "incomplete_structural_evidence",
+        required_authority: "complete_structural_evidence_or_separate_approval",
+        reformulation_allowed: true, exact_invocation_retry_allowed: false,
+        separate_approval_allowed: true },
+    };
+    throw new Error(`unexpected call ${name}`);
+  } };
+  const bridge = await new AdapterBridge(client, { executorId: "claude-executor", token: "test-token",
+    host: "claude-code", approvalMemory: memory,
+    sessionOwner: { async assertOwner() {}, assertGateway() {} },
+    classifierReworkGate: new ClassifierReworkGate({ maxReworks: 0 }),
+    telemetry: async (event, fields) => telemetry.push({ event, fields }) }).start();
+  const invoke = async (route, body) => {
+    const response = await fetch(`${bridge.url}${route}`, { method: "POST",
+      headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  try {
+    const body = { session_id: "session-one", tool_use_id: "tool-use-one", tool_name: "Bash", tool_input: input };
+    const first = await invoke("/hooks/pre-tool", body);
+    assert.equal(first.decision, "ask");
+    assert.equal(first.classifier_approval?.action, "ask");
+    assert.match(first.reason, /2 hours/);
+    assert.match(first.reason, /Authorization: \[redacted\]/);
+    assert.doesNotMatch(JSON.stringify(first), /synthetic-private-value/);
+    assert.deepEqual(await memory.list(), []);
+    await invoke("/hooks/post-tool", { ...body, tool_response: "completed", is_error: false });
+    const grants = await memory.list();
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0].duration, "2h");
+    assert.equal(grants[0].expires_at, now + 2 * 3600_000);
+    const second = await invoke("/hooks/pre-tool", { ...body, tool_use_id: "tool-use-two" });
+    assert.equal(second.decision, "defer");
+    assert.equal(second.classifier_approval?.action, "reused");
+    assert.notEqual(second.decision, "allow");
+    const lifecycle = telemetry.filter(({fields}) => fields.schema === "statewright/classifier-approval-lifecycle/v1");
+    assert(lifecycle.some(({fields}) => fields.type === "classifier_human_approval_requested"));
+    assert(lifecycle.some(({fields}) => fields.type === "classifier_human_approval_granted"));
+    assert(lifecycle.some(({fields}) => fields.type === "classifier_approval_memory_created"));
+    assert(lifecycle.some(({fields}) => fields.type === "classifier_approval_memory_reused"));
+    for (const {fields} of lifecycle) {
+      assert.equal(fields.provider, "claude-code");
+      assert.equal(fields.host, "claude-code");
+      assert.equal(fields.run_id, "run-one");
+      assert.equal(fields.state, "implement");
+    }
+    assert.doesNotMatch(JSON.stringify(lifecycle), /synthetic-private-value|display_context|"command"/);
   } finally {
     await bridge.close();
   }

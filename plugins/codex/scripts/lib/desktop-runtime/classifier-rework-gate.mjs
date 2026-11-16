@@ -44,8 +44,8 @@ export function classifierIntent(receipt) {
  */
 export class ClassifierReworkGate {
   constructor({ maxReworks = 2, ttlMs = 10 * 60_000, now = () => Date.now() } = {}) {
-    if (!Number.isSafeInteger(maxReworks) || maxReworks < 1 || maxReworks > 10) {
-      throw new Error("Classifier rework budget must be between 1 and 10");
+    if (!Number.isSafeInteger(maxReworks) || maxReworks < 0 || maxReworks > 10) {
+      throw new Error("Classifier rework budget must be between 0 and 10");
     }
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 1_000) {
       throw new Error("Classifier rework TTL must be at least one second");

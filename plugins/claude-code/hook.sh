@@ -145,6 +145,21 @@ adapter_call() {
   curl "${args[@]}" 2>/dev/null
 }
 
+# Claude reports cwd beside tool_input. Bind that execution directory to the
+# gateway's shell approval context without changing the invocation Claude runs.
+# If Claude does not provide an absolute directory, the gateway keeps it once-only.
+adapter_tool_input() {
+  local cwd
+  cwd=$(printf '%s' "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+  printf '%s' "$HOOK_INPUT" | jq -c --arg cwd "$cwd" '
+    . as $hook | (.tool_input // {}) as $input |
+    if $hook.tool_name == "Bash" and ($input | type) == "object" and
+      ($input.cwd == null) and ($input.workdir == null) and
+      ($cwd | startswith("/"))
+    then $input + {cwd:$cwd} else $input end
+  ' 2>/dev/null || printf '{}'
+}
+
 # Project only provider-exact assistant usage metadata from Claude's local
 # transcript. Transcript text, prompts, arguments, and tool results stay local.
 project_claude_transcript_usage() {
@@ -490,18 +505,25 @@ case "$ENDPOINT" in
       case "$TOOL_NAME" in
         *statewright_*|TodoRead|TodoWrite|TaskCreate|TaskUpdate|TaskList|TaskGet|TaskStop|TaskOutput|SendMessage|AskUserQuestion|ExitPlanMode|ToolSearch|Skill) exit 0 ;;
       esac
-      TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
+      TOOL_INPUT=$(adapter_tool_input)
+      TOOL_USE_ID=$(echo "$HOOK_INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
       REQUEST=$(jq -cn --arg name "$TOOL_NAME" --argjson input "$TOOL_INPUT" \
-        '{tool_name:$name,tool_input:$input}')
+        --arg session "$HOOK_SESSION" --arg tool_use_id "$TOOL_USE_ID" \
+        '{tool_name:$name,tool_input:$input,session_id:$session,tool_use_id:$tool_use_id}')
       RESPONSE=$(adapter_call pre-tool POST "$REQUEST" || true)
       if [ -z "$RESPONSE" ]; then
         jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright executor bridge is unavailable; refusing an unguarded tool call."}}'
         exit 0
       fi
-      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "allow"')
-      if [ "$DECISION" = "deny" ]; then
+      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "deny"')
+      if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
         REASON=$(echo "$RESPONSE" | jq -r '.reason // "Blocked by Statewright"')
         jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+      elif [ "$DECISION" = "ask" ]; then
+        REASON=$(echo "$RESPONSE" | jq -r '.classifier_approval.reason // .reason // "Statewright requires human review for this tool call."')
+        jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":$r}}'
+      elif [ "$DECISION" != "allow" ] && [ "$DECISION" != "defer" ]; then
+        jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright executor bridge returned an unrecognized decision."}}'
       fi
       exit 0
     fi
@@ -693,11 +715,13 @@ case "$ENDPOINT" in
     fi
 
     if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ -z "$SW_ACTION" ]; then
-      TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
+      TOOL_INPUT=$(adapter_tool_input)
+      TOOL_USE_ID=$(echo "$HOOK_INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
       IS_ERROR=$(echo "$HOOK_INPUT" | jq -r '.is_error // false' 2>/dev/null || echo false)
       REQUEST=$(jq -cn --arg name "$TOOL_NAME" --argjson input "$TOOL_INPUT" \
         --arg response "$TOOL_RESULT" --argjson is_error "$IS_ERROR" \
-        '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error}')
+        --arg session "$HOOK_SESSION" --arg tool_use_id "$TOOL_USE_ID" \
+        '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error,session_id:$session,tool_use_id:$tool_use_id}')
       RESPONSE=$(adapter_call post-tool POST "$REQUEST" || true)
       if [ -z "$RESPONSE" ]; then
         jq -n '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[statewright] Executor bridge became unavailable after this tool call. Stop before issuing another tool call; workflow state could not be accounted."}}'
@@ -959,7 +983,8 @@ case "$ENDPOINT" in
 
   stop)
     if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
-      RESPONSE=$(adapter_call stop POST '{}' || true)
+      REQUEST=$(jq -cn --arg session "$HOOK_SESSION" '{session_id:$session}')
+      RESPONSE=$(adapter_call stop POST "$REQUEST" || true)
       if [ -z "$RESPONSE" ]; then
         jq -n '{"decision":"block","reason":"Statewright executor bridge is unavailable; cannot verify workflow completion."}'
         exit 0
@@ -1034,6 +1059,12 @@ case "$ENDPOINT" in
     # Four-tier decision stack for autonomous permission resolution.
     # Only fires when a tool IS about to be used but the runtime's native
     # permission system would normally prompt the human.
+
+    # Managed execution uses the adapter bridge for classifier review. Do not
+    # replace Claude's own permission decision with this legacy auto-responder.
+    if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+      exit 0
+    fi
 
     # No active workflow: pass through to human
     if [ ! -f "$ACTIVE_FILE" ]; then

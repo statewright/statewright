@@ -139,36 +139,3 @@ test('approved native command result is logged only after its exact item complet
   assert.equal(events[2].result.output,'failed fixture');
   assert.equal(events[0].interaction_id,events[2].interaction_id);
 });
-
-test('Claude classifier review records requested and resolved decisions without native App Server messages',async()=>{
-  const events=[];const recorder=new HumanInteractionRecorder(event=>events.push(event));
-  const common={provider:'claude-code',host:'claude-code',threadId:'session-one',run_id:'run-one',
-    state:'implement',basis:'incomplete_structural_evidence',
-    invocation_fingerprint:'invocation_v1_exact',policy_sha256:'a'.repeat(64),
-    display_context:{command:'curl --api-key synthetic-private-value https://example.invalid'}};
-  recorder.recordClassifierApproval({...common,type:'classifier_human_approval_requested',decision:'ask',approval_request_id:'tool-use-one'});
-  recorder.recordClassifierApproval({...common,type:'classifier_human_approval_granted',approval_request_id:'tool-use-one',
-    decision:'granted',grant_id:'grant-one',duration:'2h',expires_at:7_201_000});
-  recorder.recordClassifierApproval({...common,type:'classifier_human_approval_requested',decision:'ask',approval_request_id:'tool-use-two'});
-  recorder.recordClassifierApproval({...common,type:'classifier_human_approval_denied',approval_request_id:'tool-use-two',
-    decision:'denied',reason:'human_declined'});
-  await new Promise(setImmediate);
-  assert.deepEqual(events.map(event=>event.stage),['requested','resolved','requested','resolved']);
-  assert.equal(events[0].interaction_id,events[1].interaction_id);
-  assert.equal(events[2].interaction_id,events[3].interaction_id);
-  assert.notEqual(events[0].interaction_id,events[2].interaction_id);
-  for(const event of events){
-    assert.equal(event.provider,'claude-code');assert.equal(event.host,'claude-code');
-    assert.equal(event.method,'statewright/classifierApproval');
-    assert.equal(event.run_id,'run-one');assert.equal(event.state,'implement');
-  }
-  assert.equal(events[1].result.action,'allow_once');
-  assert.equal(events[1].result.approval_scope,'remembered');
-  assert.equal(events[1].result.duration,'2h');
-  assert.equal(events[1].result.expires_at,7_201_000);
-  assert.equal(events[1].result.invocation_fingerprint,'invocation_v1_exact');
-  assert.equal(events[1].result.policy_sha256,'a'.repeat(64));
-  assert.equal(events[3].result.action,'deny');
-  assert.equal(events[3].result.reason,'human_declined');
-  assert.doesNotMatch(JSON.stringify(events),/synthetic-private-value|display_context/);
-});

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -12,8 +12,6 @@ const scratch = mkdtempSync(join(tmpdir(), "statewright-claude-hook-"))
 let server
 let bridgeUrl
 let lastPreTool = null
-let lastPostTool = null
-let lastStop = null
 let postCount = 0
 
 before(async () => {
@@ -40,17 +38,11 @@ before(async () => {
         }))
       } else if (request.url === "/hooks/pre-tool") {
         lastPreTool = body
-        if (body.tool_name === "Bash" && body.tool_input.command === "inspect one") {
-          response.end(JSON.stringify({ decision: "ask", classifier_approval: { reason: "Review inspect one. Allowing will remember this for 2h." } }))
-        } else if (body.tool_name === "Bash" && body.tool_input.command === "inspect two") {
-          response.end(JSON.stringify({ decision: "defer" }))
-        } else response.end(JSON.stringify({ decision: "deny", reason: "Read denied by test" }))
+        response.end(JSON.stringify({ decision: "deny", reason: "Read denied by test" }))
       } else if (request.url === "/hooks/post-tool") {
-        lastPostTool = body
         postCount += 1
         response.end(JSON.stringify({}))
       } else if (request.url === "/hooks/stop") {
-        lastStop = body
         response.end(JSON.stringify({ decision: "block", reason: "Continue workflow" }))
       } else if (request.url === "/newer/api/plugins/versions") {
         response.end(JSON.stringify({ versions: { "claude-code": "9.9.9" } }))
@@ -138,66 +130,4 @@ test("executor bridge owns Claude pre-tool, post-tool, and stop lifecycle", asyn
   })
   assert.equal(postCount, 1)
   assert.equal((await invoke("stop")).decision, "block")
-})
-
-test("managed classifier review asks Claude with the selected duration and binds tool identity", async () => {
-  const ask = await invoke("pre-tool", {
-    tool_name: "Bash", tool_use_id: "tool-review-1",
-    cwd: scratch, tool_input: { command: "inspect one" },
-  })
-  assert.equal(ask.hookSpecificOutput.permissionDecision, "ask")
-  assert.match(ask.hookSpecificOutput.permissionDecisionReason, /Allowing will remember this for 2h/)
-  assert.equal(lastPreTool.session_id, "claude-session")
-  assert.equal(lastPreTool.tool_use_id, "tool-review-1")
-  assert.equal(realpathSync(lastPreTool.tool_input.cwd), realpathSync(scratch))
-
-  await invoke("post-tool", {
-    tool_name: "Bash", tool_use_id: "tool-review-1",
-    cwd: scratch, tool_input: { command: "inspect one" }, tool_result: "ok",
-  })
-  assert.equal(lastPostTool.session_id, "claude-session")
-  assert.equal(lastPostTool.tool_use_id, "tool-review-1")
-  assert.deepEqual(lastPostTool.tool_input, lastPreTool.tool_input)
-  await invoke("stop")
-  assert.deepEqual(lastStop, { session_id: "claude-session" })
-})
-
-test("remembered classifier approval defers to Claude permissions and managed responder stays silent", async () => {
-  const deferred = await invoke("pre-tool", {
-    tool_name: "Bash", tool_use_id: "tool-reuse-1",
-    cwd: scratch,
-    tool_input: { command: "inspect two" },
-  })
-  assert.deepEqual(deferred, {})
-  assert.equal(realpathSync(lastPreTool.tool_input.cwd), realpathSync(scratch))
-  const sessionDir = join(scratch, ".statewright", "sessions", "claude-session".slice(0, 12))
-  mkdirSync(sessionDir, { recursive: true })
-  writeFileSync(join(sessionDir, ".active"), "active\n")
-  writeFileSync(join(sessionDir, ".state_cache"), JSON.stringify({
-    state: "work", allowed_tools: ["Bash"], allowed_commands: ["inspect two"],
-    meta: { autonomous: true },
-  }))
-  try {
-    const responder = await invoke("permission-request", {
-      tool_name: "Bash", tool_use_id: "tool-reuse-1",
-      tool_input: { command: "inspect two" },
-    })
-    assert.deepEqual(responder, {})
-  } finally {
-    rmSync(sessionDir, { recursive: true, force: true })
-  }
-})
-
-test("post-tool forwards Claude's actual changed input for invocation binding", async () => {
-  await invoke("pre-tool", {
-    tool_name: "Bash", tool_use_id: "tool-rewrite-1", cwd: scratch,
-    tool_input: { command: "inspect one" },
-  })
-  const checked = lastPreTool.tool_input
-  await invoke("post-tool", {
-    tool_name: "Bash", tool_use_id: "tool-rewrite-1", cwd: scratch,
-    tool_input: { command: "inspect changed" }, tool_result: "ok",
-  })
-  assert.equal(lastPostTool.tool_input.command, "inspect changed")
-  assert.notDeepEqual(lastPostTool.tool_input, checked)
 })

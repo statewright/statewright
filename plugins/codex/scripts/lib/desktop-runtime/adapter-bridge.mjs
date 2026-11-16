@@ -1,10 +1,8 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { ClassifierReworkGate } from "./classifier-rework-gate.mjs";
-import { ClaudeClassifierApproval } from "./claude-classifier-approval.mjs";
 import { collectCommandEvidence } from "./command-evidence.mjs";
 import { collectCommandReferences } from "./command-reference.mjs";
-import { HumanInteractionRecorder } from "./human-interaction.mjs";
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_ERROR_BYTES = 4 * 1024;
@@ -107,20 +105,6 @@ export class AdapterBridge {
       delivery: Boolean(options.deliveryActive),
     };
     this.classifierReworkGate = options.classifierReworkGate ?? new ClassifierReworkGate();
-    this.humanInteractions = this.host === "claude-code"
-      ? new HumanInteractionRecorder(event => this.record("app_server_handoff_status", event)) : null;
-    this.claudeClassifierApproval = this.host === "claude-code" ? new ClaudeClassifierApproval({
-      memory: options.approvalMemory ?? null,
-      reworkGate: this.classifierReworkGate,
-      getState: () => this.client.call("statewright_get_state"),
-      owner: this.sessionOwner,
-      sessionId: this.executor.id,
-      record: async event => {
-        this.humanInteractions.recordClassifierApproval(event);
-        await this.record("app_server_handoff_status", {schema: "statewright/classifier-approval-lifecycle/v1",
-          ...event, thread_id: event.threadId});
-      },
-    }) : null;
     this.token = options.token ?? randomUUID();
     this.server = null;
     this.url = null;
@@ -300,12 +284,7 @@ export class AdapterBridge {
           const denied = result?.decision === "deny" || result?.decision === "block";
           // Codex hooks submit every eligible invocation to the bound native
           // approval controller, which alone owns its retry budget.
-          let classifierRework;
-          if (this.claudeClassifierApproval) {
-            const evaluated = await this.claudeClassifierApproval.preTool(body, result, classifierScope);
-            result = evaluated.result;
-            classifierRework = evaluated.rework;
-          } else classifierRework = this.host === "codex" ? null : denied
+          const classifierRework = this.host === "codex" ? null : denied
             ? this.classifierReworkGate.observeDenial({ receipt: riskAssessment, scope: classifierScope })
             : (this.classifierReworkGate.observeSuccess({ receipt: riskAssessment, scope: classifierScope }), null);
           if (classifierRework) result = { ...result, classifier_rework: classifierRework };
@@ -338,7 +317,6 @@ export class AdapterBridge {
             tool_response: body.tool_response ?? "",
             is_error: Boolean(body.is_error),
           }));
-          await this.claudeClassifierApproval?.postTool(body);
           await this.sessionOwner?.assertOwner();
           await this.assertOwnedState();
           if (this.requestController) await this.sessionOwner.assertRequest(body.request_reference);
@@ -359,7 +337,6 @@ export class AdapterBridge {
         if (url.pathname === "/hooks/stop") {
           await this.nativeReadiness?.assertReady();
           this.assertNativeDispatch();
-          this.claudeClassifierApproval?.unresolved(body.session_id, "stop_without_matching_post_tool");
           const result = adapterResult(await this.client.call("statewright_adapter_stop"));
           await this.nativeReadiness?.assertReady();
           if (result?.decision === "allow") this.terminalStopObserved = true;
@@ -438,9 +415,6 @@ export class AdapterBridge {
         });
         this.server = null;
       }
-      this.claudeClassifierApproval?.close();
-      await this.claudeClassifierApproval?.recordChain;
-      await this.humanInteractions?.drain();
     }
   }
 }

@@ -198,14 +198,11 @@ export function approvalDisplayContext(value) {
 }
 
 export class HumanInteractionRecorder {
-  constructor(record) { this.record = record; this.pending = new Map(); this.completed = new Map(); this.executions = new Map(); this.inFlight = new Set(); }
+  constructor(record) { this.record = record; this.pending = new Map(); this.completed = new Map(); this.executions = new Map(); }
   emit(fields) {
     const event = {schema:"statewright/human-interaction/v1", ...fields};
-    const delivery = Promise.resolve().then(() => this.record(event)).catch(() => {});
-    this.inFlight.add(delivery);
-    void delivery.then(() => this.inFlight.delete(delivery));
+    void Promise.resolve().then(() => this.record(event)).catch(() => {});
   }
-  drain() { return Promise.all([...this.inFlight]); }
   request(message, {runId} = {}) {
     if (message?.id === undefined || typeof message.method !== "string"
         || !/(?:\/requestApproval|\/requestUserInput|elicitation\/request)$/.test(message.method)) return;
@@ -244,34 +241,6 @@ export class HumanInteractionRecorder {
     const grant = event.grant_id ? {
       grant_id:event.grant_id, duration:event.duration, expires_at:event.expires_at,
     } : {};
-    if (event.provider === "claude-code") {
-      const shared = {method:"statewright/classifierApproval", provider:"claude-code", host:"claude-code",
-        interaction_id:event.approval_request_id ?? event.grant_id ?? randomUUID(),
-        request_id:event.approval_request_id ?? event.invocation_fingerprint ?? null,
-        thread_id:event.threadId, run_id:event.run_id, state:event.state,
-        timestamp:event.timestamp};
-      const granted = event.type === "classifier_human_approval_granted";
-      const denied = event.type === "classifier_human_approval_denied";
-      const result = {action:granted ? "allow_once" : denied ? "deny" : event.decision,
-        decision:event.decision,
-        ...(granted ? {approval_scope:event.grant_id ? "remembered" : "once"} : {}),
-        reason:event.reason,
-        actor_source:event.actor_source,
-        invocation_fingerprint:event.invocation_fingerprint,
-        invocation_sha256:event.invocation_sha256,
-        policy_sha256:event.policy_sha256,
-        policy_fingerprint:event.policy_fingerprint,
-        dependency_sha256:event.dependency_sha256, ...grant};
-      if (event.type === "classifier_human_approval_requested") {
-        this.emit({...shared, stage:"requested", result:{...result, duration:event.duration}});
-      } else if (["classifier_human_approval_granted", "classifier_human_approval_denied",
-        "classifier_human_approval_unresolved"].includes(event.type)) {
-        this.emit({...shared, stage:"resolved", result});
-      } else if (event.type === "classifier_approval_memory_reused") {
-        this.emit({...shared, stage:"approval_reused", result});
-      }
-      return;
-    }
     if (event.type === "classifier_approval_memory_reused") {
       this.emit({stage:"approval_reused", method:"statewright/classifierApproval",
         interaction_id:event.grant_id, request_id:event.invocation_fingerprint,

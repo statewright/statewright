@@ -70,17 +70,6 @@ test("approval displays S1 predictions without treating them as authority", () =
   assert.doesNotMatch(unavailable,/99%/);
 });
 
-test("shared review message states the selected duration and masks command credentials", () => {
-  const parsed = classifierApprovalRequest(request({tool_name:"Bash",tool_input:{
-    command:'curl -H "Authorization: Bearer fixture-secret" --api-key fixture-key https://example.invalid',
-  }}));
-  const message = classifierReviewMessage({...parsed,effectiveDuration:"2h"});
-  assert.match(message,/remember it for 2 hours/);
-  assert.match(message,/Command: curl/);
-  assert.match(message,/Authorization: \[redacted\]/);
-  assert.doesNotMatch(message,/fixture-secret|fixture-key/);
-});
-
 test("default uncertainty handling immediately holds for a native human decision", async () => {
   const sent = [];
   const controller = new ClassifierApprovalController({send: value => sent.push(value), getState: currentState});

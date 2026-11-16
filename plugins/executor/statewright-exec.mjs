@@ -21,8 +21,6 @@ import {
 } from "./lib/telemetry.mjs";
 import { ExecutorLease, validateExecutorLease } from "./lib/executor-lease.mjs";
 import { AdapterBridge } from "./lib/adapter-bridge.mjs";
-import { ApprovalMemory } from "./lib/approval-memory.mjs";
-import { resolveGatewayProfile } from "./lib/gateway-profile.mjs";
 import {
   buildHostLaunch,
   hostRoutingMode,
@@ -492,13 +490,9 @@ export async function main(argv = process.argv.slice(2)) {
   const apiKey = await resolveApiKey();
   const executorId = randomUUID();
   const gatewayUrl = process.env.STATEWRIGHT_GATEWAY_URL ?? "https://mcp.statewright.ai";
-  const telemetryOrigin = options.host === "claude-code" && options.telemetryEnabled
-    && !process.env.STATEWRIGHT_TELEMETRY_URL
-    ? (await resolveGatewayProfile(process.env)).authUrl : null;
   const telemetry = options.telemetryEnabled
     ? createTelemetryWriter(resolve(options.telemetryPath), {
-        endpoint: process.env.STATEWRIGHT_TELEMETRY_URL
-          ?? (telemetryOrigin ? `${telemetryOrigin}/api/gateway/telemetry/events` : null),
+        endpoint: process.env.STATEWRIGHT_TELEMETRY_URL ?? null,
         apiKey,
       })
     : createNullTelemetryWriter();
@@ -610,13 +604,6 @@ export async function main(argv = process.argv.slice(2)) {
       executorId,
       deliveryActive: verifiedDeliveryOwner,
       host: options.host,
-      ...(options.host === "claude-code" ? {
-        sessionOwner,
-        approvalMemory: new ApprovalMemory({
-          root: join(homedir(), ".statewright", "classifier-memory"),
-          namespace: JSON.stringify([gatewayUrl, cwd, transportClientId, apiKey]),
-        }),
-      } : {}),
       telemetry,
     }).start();
     const session = {

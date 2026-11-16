@@ -646,7 +646,7 @@ export async function startCodexAppServerRouteProxy({
           else if(value.action==="revoke") {
             result={schema:"statewright/approval-memory-management/v1",...await memory.revoke(value.grant_id)};
             await onHandoffStatus({schema:"statewright/classifier-approval-lifecycle/v1",
-              type:"classifier_approval_memory_revoked",threadId:value.thread_id,grant_id:value.grant_id});
+              type:"classifier_approval_memory_revoked",threadId:value.thread_id,grant_id:value.grant_id,provider:"codex",host:"codex"});
           }else throw new Error("Unsupported approval memory action");
           request.off("aborted",abortApproval);response.off("close",closeApproval);
           if(!response.destroyed){response.writeHead(200,{"Content-Type":"application/json"});response.end(JSON.stringify(result));}
@@ -938,7 +938,7 @@ export async function startCodexAppServerRouteProxy({
       record: event => {
         humanInteractions.recordClassifierApproval(event);
         return onHandoffStatus({schema: "statewright/classifier-approval-lifecycle/v1",
-          ...event, thread_id:event.threadId});
+          ...event, thread_id:event.threadId, provider:"codex", host:"codex"});
       },
     }) : null;
     classifierOwner = classifierController ? {

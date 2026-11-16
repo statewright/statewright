@@ -161,6 +161,7 @@ pub struct Gateway {
     /// a user-facing routing disclosure.
     host_client_name: Option<String>,
     classifier_environment: Option<String>,
+    classifier_audit_switch: Option<String>,
     classifier_audit_root: Option<std::path::PathBuf>,
     #[cfg(test)]
     classifier_assessment_pause: Option<(tokio::sync::oneshot::Sender<()>,tokio::sync::oneshot::Receiver<()>)>,
@@ -303,12 +304,21 @@ impl Gateway {
             event_service: None,
             host_client_name: None,
             classifier_environment: std::env::var("STATEWRIGHT_ENV").ok(),
+            classifier_audit_switch: std::env::var("STATEWRIGHT_CLASSIFIER_AUDIT_ENABLED").ok(),
             classifier_audit_root: std::env::var_os("STATEWRIGHT_CLASSIFIER_AUDIT_DIR").map(Into::into),
             #[cfg(test)]
             classifier_assessment_pause: None,
             #[cfg(test)]
             classifier_recording_pause: None,
         }
+    }
+
+    fn classifier_audit_deployment(&self) -> crate::classifier_audit::AuditDeployment<'_> {
+        crate::classifier_audit::AuditDeployment::new(
+            self.classifier_environment.as_deref(),
+            self.classifier_audit_switch.as_deref(),
+            self.classifier_audit_root.as_deref(),
+        )
     }
 
     /// Get the session ID for this gateway instance.
@@ -619,7 +629,7 @@ impl Gateway {
         if let Some(session) = self.session_manager.get(&self.session_id) {
             state["approval_memory_policy"] = crate::approval_memory::policy(&session);
             state["session_generation"] = json!(session.generation);
-            state["classifier_audit"] = json!({"mode":if crate::classifier_audit::AuditConfig::for_session(&session,self.classifier_environment.as_deref()).is_ok_and(|c|c.enabled()) {"audit"} else {"enforce"},
+            state["classifier_audit"] = json!({"mode":if crate::classifier_audit::AuditConfig::for_session(&session,self.classifier_audit_deployment()).is_ok_and(|c|c.enabled()) {"audit"} else {"enforce"},
                 "revision":session.classifier_audit_revision,"overridden":session.classifier_audit_override.is_some(),
                 "toggle_available":crate::classifier_audit::AuditConfig::supports_toggle(self.classifier_environment.as_deref())});
         }
@@ -1741,7 +1751,7 @@ impl Gateway {
         };
         match crate::classifier_audit::AuditConfig::for_session(
             &initial_session,
-            self.classifier_environment.as_deref()) {
+            self.classifier_audit_deployment()) {
             Ok(_)=>{},
             Err(reason)=>return json!({"decision":"deny","denial_stage":"classifier_audit_configuration","reason":reason}),
         };
@@ -1825,7 +1835,7 @@ impl Gateway {
             return json!({"decision":"deny","reason":"Workflow changed while classifier evidence was assessed.","denial_stage":"classifier_context_changed"});
         }
         let audit_config=match crate::classifier_audit::AuditConfig::for_session(
-            &session,self.classifier_environment.as_deref()) {
+            &session,self.classifier_audit_deployment()) {
             Ok(config)=>config,Err(reason)=>return json!({"decision":"deny","reason":reason,"denial_stage":"classifier_audit_configuration"}),
         };
         // Approval gate (P1): a parked workflow denies ALL tool traffic —
@@ -3534,7 +3544,7 @@ impl Gateway {
                 }
 
                 if let Err(reason)=crate::classifier_audit::AuditConfig::from_metadata(
-                    definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_environment.as_deref()) {
+                    definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")),self.classifier_audit_deployment()) {
                     return JsonRpcResponse::success(id,serde_json::to_value(crate::protocol::ToolCallResult::error(reason)).unwrap());
                 }
 
@@ -3566,7 +3576,7 @@ impl Gateway {
                 };
                 if let Some((_,checkpoint))=&paused {
                     if let Err(reason)=crate::classifier_audit::AuditConfig::for_session(
-                        &checkpoint,self.classifier_environment.as_deref()) {
+                        &checkpoint,self.classifier_audit_deployment()) {
                         return JsonRpcResponse::error(id,-32600,reason);
                     }
                 }
@@ -8153,6 +8163,7 @@ mod tests {
         let manager=SessionManager::new();manager.create("toggle".into(),definition.clone());
         let mut gateway=Gateway::new(manager.clone(),UpstreamManager::mock(vec![]),"toggle".into(),HashMap::new(),Some("audit-toggle".into()),"owner".into(),None);
         gateway.current_run_id=Some("run".into());gateway.classifier_audit_root=Some(root.clone());
+        gateway.classifier_audit_switch=Some("true".into());
         let generation=manager.get("toggle").unwrap().generation;
         let request=|mode:&str,run:&str|json!({"mode":mode,"run_id":run,"session_generation":generation,"expected_revision":if mode=="enforce"{1}else{0}});
         for environment in [None,Some("production"),Some("unknown")] {
@@ -8170,17 +8181,17 @@ mod tests {
         }
         assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("audit","run")).await.result.unwrap()["isError"]!=true);
         let active=manager.get("toggle").unwrap();
-        assert!(crate::classifier_audit::AuditConfig::for_session(&active,Some("staging")).unwrap().enabled());
+        assert!(crate::classifier_audit::AuditConfig::for_session(&active,gateway.classifier_audit_deployment()).unwrap().enabled());
         assert_eq!(serde_json::to_value(&active.definition).unwrap(),serde_json::to_value(&definition).unwrap());
         assert_eq!(active.transition_count,0);
         let restored=crate::session::GatewaySession::from_checkpoint(active.checkpoint(),"toggle","work").unwrap();
         assert_eq!(restored.classifier_audit_override,Some(crate::classifier_audit::AuditMode::Audit));
-        assert!(crate::classifier_audit::AuditConfig::for_session(&restored,Some("production")).is_err());
+        assert!(crate::classifier_audit::AuditConfig::for_session(&restored,crate::classifier_audit::AuditDeployment::new(Some("production"),Some("true"),Some(&root))).is_err());
         manager.restore(restored);
         assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("enforce","run")).await.result.unwrap()["isError"]!=true);
         let enforced=manager.get("toggle").unwrap();
         assert!(!same_classifier_snapshot(&active,&enforced));
-        assert!(!crate::classifier_audit::AuditConfig::for_session(&enforced,Some("staging")).unwrap().enabled());
+        assert!(!crate::classifier_audit::AuditConfig::for_session(&enforced,gateway.classifier_audit_deployment()).unwrap().enabled());
         assert_eq!(enforced.classifier_audit_revision,2);
         assert!(gateway.handle_custom_tool_call(None,"statewright_set_classifier_audit",request("enforce","run")).await.result.unwrap()["isError"]==true);
         gateway.classifier_audit_root=None;
@@ -8246,15 +8257,18 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root=std::env::temp_dir().join(format!("statewright-gateway-audit-{}",uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
-        for (label,environment,extra,command,expected) in [
-            ("audit",Some("staging"),json!({}),"unknown_fixture --inspect","allow"),
-            ("prod",Some("production"),json!({}),"unknown_fixture --inspect","deny"),
-            ("unknown_env",None,json!({}),"unknown_fixture --inspect","deny"),
-            ("dev2",Some("dev2"),json!({}),"unknown_fixture --inspect","allow"),
-            ("write_denied",Some("staging"),json!({"disallowed_tools":["Write"]}),"unknown_fixture --inspect","deny"),
-            ("known_risk",Some("staging"),json!({}),"rm fixture","deny"),
-            ("tool_denied",Some("staging"),json!({"disallowed_tools":["Bash"]}),"unknown_fixture --inspect","deny"),
-            ("recording_failure",Some("staging"),json!({}),"unknown_fixture --inspect","deny"),
+        for (label,environment,switch,extra,command,expected) in [
+            ("audit",Some("staging"),None,json!({}),"unknown_fixture --inspect","allow"),
+            ("prod",Some("production"),None,json!({}),"unknown_fixture --inspect","deny"),
+            ("prod_enabled",Some("production"),Some("true"),json!({}),"unknown_fixture --inspect","allow"),
+            ("prod_no_root",Some("production"),Some("true"),json!({}),"unknown_fixture --inspect","deny"),
+            ("prod_bad_root",Some("production"),Some("true"),json!({}),"unknown_fixture --inspect","deny"),
+            ("unknown_env",None,None,json!({}),"unknown_fixture --inspect","deny"),
+            ("dev2",Some("dev2"),None,json!({}),"unknown_fixture --inspect","allow"),
+            ("write_denied",Some("staging"),None,json!({"disallowed_tools":["Write"]}),"unknown_fixture --inspect","deny"),
+            ("known_risk",Some("staging"),None,json!({}),"rm fixture","deny"),
+            ("tool_denied",Some("staging"),None,json!({"disallowed_tools":["Bash"]}),"unknown_fixture --inspect","deny"),
+            ("recording_failure",Some("staging"),None,json!({}),"unknown_fixture --inspect","deny"),
         ] {
             let mut state=json!({});state.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             let definition:MachineDefinition=serde_json::from_value(json!({"id":"audit-fixture","initial":"work",
@@ -8264,7 +8278,8 @@ mod tests {
             let manager=SessionManager::new();manager.create("audit-fixture".into(),definition);
             let mut gateway=Gateway::new(manager,UpstreamManager::mock(vec![]),"audit-fixture".into(),HashMap::new(),Some("audit-fixture".into()),"fixture-owner".into(),None);
             gateway.current_run_id=Some("fixture-run".into());gateway.classifier_environment=environment.map(str::to_owned);
-            gateway.classifier_audit_root=Some(if label=="recording_failure"{root.join("absent")}else{root.clone()});
+            gateway.classifier_audit_switch=switch.map(str::to_owned);
+            gateway.classifier_audit_root=if label=="prod_no_root"{None}else{Some(if label=="recording_failure" || label=="prod_bad_root"{root.join("absent")}else{root.clone()})};
             let before=std::fs::read_dir(&root).unwrap().count();
             let result=gateway.adapter_pre_tool("exec_command",&json!({"cmd":command})).await;
             assert_eq!(result["decision"],expected,"{label}: {result}");

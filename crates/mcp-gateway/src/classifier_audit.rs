@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +29,30 @@ pub enum AuditEnvironment {
     Dev1,
     Dev2,
     Dev3,
+    Production,
+}
+
+/// Values captured by the gateway from deployment configuration, never from
+/// workflow metadata. Only the exact string `true` opens the production gate.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditDeployment<'a> {
+    environment: Option<&'a str>,
+    production_enabled: bool,
+    audit_root: Option<&'a Path>,
+}
+
+impl<'a> AuditDeployment<'a> {
+    pub fn new(
+        environment: Option<&'a str>,
+        production_switch: Option<&str>,
+        audit_root: Option<&'a Path>,
+    ) -> Self {
+        Self {
+            environment,
+            production_enabled: production_switch == Some("true"),
+            audit_root,
+        }
+    }
 }
 
 /// Construct only through the strict parser; workflow JSON cannot pick a lane.
@@ -37,27 +62,43 @@ pub struct AuditConfig {
 }
 
 impl AuditConfig {
-    pub fn for_session(session: &crate::session::GatewaySession, environment: Option<&str>) -> Result<Self, &'static str> {
-        let configured = Self::from_metadata(session.definition.meta.as_ref().and_then(|m|m.extra.get("classifier_audit")), environment)?;
+    pub fn for_session(
+        session: &crate::session::GatewaySession,
+        deployment: AuditDeployment<'_>,
+    ) -> Result<Self, &'static str> {
+        let configured = Self::from_metadata(
+            session
+                .definition
+                .meta
+                .as_ref()
+                .and_then(|m| m.extra.get("classifier_audit")),
+            deployment,
+        )?;
         match session.classifier_audit_override {
             None => Ok(configured),
-            Some(mode) => Self::from_metadata(Some(&serde_json::json!({"mode":mode})), environment),
+            Some(AuditMode::Audit) if deployment.environment == Some("production") => Err(
+                "production classifier audit requires pinned workflow metadata, not a run override",
+            ),
+            Some(mode) => Self::from_metadata(Some(&serde_json::json!({"mode":mode})), deployment),
         }
     }
 
     pub fn supports_toggle(environment: Option<&str>) -> bool {
-        matches!(environment, Some("staging" | "dev" | "dev1" | "dev2" | "dev3"))
+        matches!(
+            environment,
+            Some("staging" | "dev" | "dev1" | "dev2" | "dev3")
+        )
     }
     pub fn from_workflow_extra(
         extra: &BTreeMap<String, serde_json::Value>,
-        trusted_environment: Option<&str>,
+        deployment: AuditDeployment<'_>,
     ) -> Result<Self, &'static str> {
-        Self::from_metadata(extra.get("classifier_audit"), trusted_environment)
+        Self::from_metadata(extra.get("classifier_audit"), deployment)
     }
 
     pub fn from_metadata(
         metadata: Option<&serde_json::Value>,
-        trusted_environment: Option<&str>,
+        deployment: AuditDeployment<'_>,
     ) -> Result<Self, &'static str> {
         let mode = match metadata {
             None => AuditMode::Enforce,
@@ -70,15 +111,27 @@ impl AuditConfig {
         if mode == AuditMode::Enforce {
             return Ok(Self { environment: None });
         }
-        let environment = match trusted_environment {
+        let environment = match deployment.environment {
             Some("staging") => AuditEnvironment::Staging,
             Some("dev") => AuditEnvironment::Dev,
             Some("dev1") => AuditEnvironment::Dev1,
             Some("dev2") => AuditEnvironment::Dev2,
             Some("dev3") => AuditEnvironment::Dev3,
-            _ => return Err(
-                "classifier audit requires trusted staging, dev, dev1, dev2 or dev3 environment",
-            ),
+            Some("production") if deployment.production_enabled => {
+                let Some(root) = deployment.audit_root else {
+                    return Err(
+                        "production classifier audit requires a private server intake directory",
+                    );
+                };
+                crate::classifier_audit_store::validate_root(root)
+                    .map_err(|_| "production classifier audit requires a valid private server intake directory")?;
+                AuditEnvironment::Production
+            }
+            _ => {
+                return Err(
+                    "classifier audit requires trusted staging, dev, dev1, dev2 or dev3 environment",
+                );
+            }
         };
         Ok(Self {
             environment: Some(environment),
@@ -222,8 +275,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn deployment(environment: Option<&str>) -> AuditDeployment<'_> {
+        AuditDeployment::new(environment, None, None)
+    }
+
     fn audit_config(environment: &str) -> AuditConfig {
-        AuditConfig::from_metadata(Some(&json!({"mode": "audit"})), Some(environment)).unwrap()
+        AuditConfig::from_metadata(
+            Some(&json!({"mode": "audit"})),
+            deployment(Some(environment)),
+        )
+        .unwrap()
     }
 
     fn evidence() -> AuditEvidenceReferences {
@@ -265,25 +326,142 @@ mod tests {
             Some(""),
         ] {
             assert!(
-                AuditConfig::from_metadata(Some(&json!({"mode": "audit"})), environment).is_err()
+                AuditConfig::from_metadata(
+                    Some(&json!({"mode": "audit"})),
+                    deployment(environment)
+                )
+                .is_err()
             );
         }
-        assert!(AuditConfig::from_metadata(
-            Some(&json!({"mode": "audit", "environment": "staging"})),
-            Some("staging")
+        assert!(
+            AuditConfig::from_metadata(
+                Some(&json!({"mode": "audit", "environment": "staging"})),
+                deployment(Some("staging"))
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_requires_exact_switch_and_private_intake() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("statewright-audit-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let audit = json!({"mode": "audit"});
+        for flag in [
+            None,
+            Some("false"),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some(" true"),
+        ] {
+            assert!(
+                AuditConfig::from_metadata(
+                    Some(&audit),
+                    AuditDeployment::new(Some("production"), flag, Some(&root))
+                )
+                .is_err(),
+                "flag {flag:?}"
+            );
+        }
+        let config = AuditConfig::from_metadata(
+            Some(&audit),
+            AuditDeployment::new(Some("production"), Some("true"), Some(&root)),
         )
-        .is_err());
+        .unwrap();
+        assert!(
+            !AuditConfig::from_metadata(
+                None,
+                AuditDeployment::new(Some("production"), Some("true"), Some(&root))
+            )
+            .unwrap()
+            .enabled()
+        );
+        let AuditAction::RecordBeforeProceeding(receipt) = evaluate(
+            config,
+            ClassifierOutcome::DenyUncertain,
+            clear(),
+            evidence(),
+        ) else {
+            panic!("production audit candidate expected")
+        };
+        assert_eq!(
+            serde_json::to_value(receipt.environment).unwrap(),
+            "production"
+        );
+        assert!(!AuditConfig::supports_toggle(Some("production")));
+        for environment in ["prod", "Production", "PRODUCTION"] {
+            assert!(
+                AuditConfig::from_metadata(
+                    Some(&audit),
+                    AuditDeployment::new(Some(environment), Some("true"), Some(&root))
+                )
+                .is_err(),
+                "environment {environment}"
+            );
+        }
+        for flag in [None, Some("false"), Some("true")] {
+            assert!(
+                AuditConfig::from_metadata(
+                    Some(&audit),
+                    AuditDeployment::new(Some("staging"), flag, None)
+                )
+                .unwrap()
+                .enabled()
+            );
+        }
+        assert!(
+            AuditConfig::from_metadata(
+                Some(&audit),
+                AuditDeployment::new(Some("production"), Some("true"), None)
+            )
+            .is_err()
+        );
+        assert!(
+            AuditConfig::from_metadata(
+                Some(&audit),
+                AuditDeployment::new(Some("production"), Some("true"), Some(&root.join("absent")))
+            )
+            .is_err()
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            AuditConfig::from_metadata(
+                Some(&audit),
+                AuditDeployment::new(Some("production"), Some("true"), Some(&root))
+            )
+            .is_err()
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            AuditConfig::from_metadata(
+                Some(&audit),
+                AuditDeployment::new(Some("production"), Some("true"), Some(&root))
+            )
+            .is_err()
+        );
+        std::fs::remove_dir(&root).unwrap();
     }
 
     #[test]
     fn default_enforcement_and_malformed_configuration_fail_closed() {
-        assert!(!AuditConfig::from_workflow_extra(&BTreeMap::new(), None)
-            .unwrap()
-            .enabled());
         assert!(
-            !AuditConfig::from_metadata(Some(&json!({"mode": "enforce"})), Some("production"))
+            !AuditConfig::from_workflow_extra(&BTreeMap::new(), deployment(None))
                 .unwrap()
                 .enabled()
+        );
+        assert!(
+            !AuditConfig::from_metadata(
+                Some(&json!({"mode": "enforce"})),
+                deployment(Some("production"))
+            )
+            .unwrap()
+            .enabled()
         );
         for metadata in [
             json!(null),
@@ -293,7 +471,9 @@ mod tests {
             json!({"mode": "AUDIT"}),
             json!({"mode": "audit", "allow": true}),
         ] {
-            assert!(AuditConfig::from_metadata(Some(&metadata), Some("staging")).is_err());
+            assert!(
+                AuditConfig::from_metadata(Some(&metadata), deployment(Some("staging"))).is_err()
+            );
         }
     }
 
@@ -334,7 +514,7 @@ mod tests {
                 AuditAction::PreserveEnforcement
             );
         }
-        let enforce = AuditConfig::from_metadata(None, Some("staging")).unwrap();
+        let enforce = AuditConfig::from_metadata(None, deployment(Some("staging"))).unwrap();
         assert_eq!(
             evaluate(
                 enforce,

@@ -97,8 +97,9 @@ fn invalid(message: &'static str) -> io::Error {
 
 /// Commit one envelope containing both receipt and unlabelled simulation case.
 /// Success requires synced file contents and directory entries. The root must
-/// already exist, must not be a symlink, and on Unix must disallow group/other
-/// access. Ancestors and filesystem durability are deployment responsibilities.
+/// already exist, must not be a symlink, and on Unix must have owner access
+/// without group/other access. Ancestors and filesystem durability are
+/// deployment responsibilities.
 /// Unsupported platforms fail rather than promise nonexistent mode semantics.
 pub fn validate_root(root: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(root)?;
@@ -108,8 +109,9 @@ pub fn validate_root(root: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(invalid("audit root must disallow group and other access"));
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 || mode & 0o700 != 0o700 {
+            return Err(invalid("audit root must have private owner access (0700)"));
         }
         Ok(())
     }
@@ -184,7 +186,7 @@ pub fn persist(
 mod tests {
     use super::*;
     use crate::classifier_audit::{
-        self, AuditAction, AuditConfig, AuditEvidenceReferences, ClassifierOutcome, EvidenceDigest,
+        self, AuditAction, AuditConfig, AuditDeployment, AuditEvidenceReferences, ClassifierOutcome, EvidenceDigest,
         IndependentGuards, NativePermissions,
     };
     use std::os::unix::fs::PermissionsExt;
@@ -215,7 +217,7 @@ mod tests {
             native_context: digest,
         };
         let config =
-            AuditConfig::from_metadata(Some(&serde_json::json!({"mode":"audit"})), Some("staging"))
+            AuditConfig::from_metadata(Some(&serde_json::json!({"mode":"audit"})), AuditDeployment::new(Some("staging"), None, None))
                 .unwrap();
         let guards = IndependentGuards {
             workflow_tool: true,

@@ -13,9 +13,38 @@ configuration error rejects the request rather than silently enabling audit.
 
 The environment comes from the gateway's trusted deployment `STATEWRIGHT_ENV`,
 never workflow JSON, command assignments, client arguments or inference. Audit
-accepts exactly `staging`, `dev`, `dev1`, `dev2`, and `dev3`. Production, missing,
-unknown and differently cased environments reject audit configuration. Additional
-development lanes need an explicit reviewed allowlist change.
+accepts exactly `staging`, `dev`, `dev1`, `dev2`, and `dev3` without a deployment
+switch. Missing, unknown and differently cased environments reject audit
+configuration. Additional development lanes need an explicit reviewed allowlist
+change.
+
+## Proposed production admission (ADR 022 amendment, not accepted)
+
+Production audit is a default-off source capability, not a production rollout.
+It requires all three trusted gateway deployment inputs:
+
+| Variable | Required production value |
+| --- | --- |
+| `STATEWRIGHT_ENV` | Exactly `production` (lowercase) |
+| `STATEWRIGHT_CLASSIFIER_AUDIT_ENABLED` | Exactly `true` (lowercase); unset, `false`, `1`, `TRUE`, `yes`, whitespace and every other value mean off |
+| `STATEWRIGHT_CLASSIFIER_AUDIT_DIR` | Existing nonsymlink private intake directory with Unix owner `0700` access; invalid roots are rejected |
+
+The deployment switch is off by default. `STATEWRIGHT_ENV=production` alone
+never enables audit, and `prod`, `Production` and `PRODUCTION` remain invalid
+even with the switch on. The gateway reads these process inputs at construction,
+not from workflow metadata. Turning the switch off in deployment and restarting
+or replacing gateway processes returns production to enforcement; changing an
+already running process's ambient environment does not reconfigure it. Staging
+and dev/dev1/dev2/dev3 continue to accept audit without the switch, including
+when it is unset or false.
+
+Production opt-in also requires pinned workflow metadata with
+`meta.classifier_audit.mode: audit`. The in-flight
+`statewright_set_classifier_audit` tool stays hidden and rejects direct calls
+in production regardless of the switch. No run-local override can turn
+production audit on. The go-live overlay, staging-accepted image pin, intake
+retention and rotation, privacy copy, volume access control and owner's explicit
+OK remain separate open gates.
 
 Audit can advance only a classifier decision of `DenyUncertain`. Known risk,
 explicit deny, workflow tool policy, interceptor, capability, scope, required
@@ -51,15 +80,19 @@ records carry `unlabelled_pending_review`, provenance references and sanitized
 shape. Reviewed labels remain a separate human-controlled operation.
 
 Integration: export `classifier_audit` from the gateway library; parse
-`machine.meta.extra` with `AuditConfig::from_workflow_extra` and the trusted
-environment; map existing classifier outcomes into the typed enum without
+`machine.meta.extra` with `AuditConfig::from_workflow_extra` and deployment
+values captured from the trusted process environment; map existing classifier
+outcomes into the typed enum without
 promoting generic authorization failures into uncertainty; pass fresh independent
 guard results and native evidence references to `evaluate`; persist both records
-before applying `RecordBeforeProceeding`. A test adapter must prove storage failure,
-production opt-in, explicit denial and stale-context failures remain blocked.
+before applying `RecordBeforeProceeding`. A test adapter must prove storage
+failure, production admission only with the deployment switch and valid intake
+directory, explicit
+denial and stale-context failures remain blocked.
 
 Focused helper tests: `cargo test -p statewright-mcp-gateway classifier_audit::tests`.
-These tests validate the pure policy helper. Gateway/native storage and simulation
+These tests validate the policy gate and private-directory check. Gateway/native
+storage and simulation
 ingestion need separate integration evidence before claiming runtime completion.
 
 ## Durable native intake store
@@ -70,7 +103,8 @@ The MCP tool `statewright_set_classifier_audit` is advertised only when the
 server identity is staging/dev/dev1/dev2/dev3. Read `statewright_get_state`, then
 send `mode: audit|enforce`, its exact `run_id`, `session_generation`, and
 `expected_revision` from `classifier_audit.revision`. Production/unknown reject
-direct calls as well as omitting the tool. No active run, terminal runs, foreign
+direct calls as well as omitting the tool, even when the production deployment
+switch is on. No active run, terminal runs, foreign
 identity, stale revisions, malformed arguments and unavailable audit storage fail.
 
 This is a run-local checkpointed override, not a workflow edit or transition.
@@ -118,6 +152,7 @@ The envelope sets `label:null`, `status:unlabelled_pending_review` and
 `replay_ready:false`. Captured structural cases support observation and review;
 they are not complete argv replay cases. Full command simulation requires review
 of trusted local source evidence and separately approved labelling/sanitization.
-Their capture alone establishes neither classifier accuracy nor permittedness.
+Their capture alone establishes neither classifier accuracy nor permittedness;
+unlabelled cases are excluded from accuracy metrics.
 
 Focused store tests: `cargo test -p statewright-mcp-gateway classifier_audit_store::tests`.

@@ -50,3 +50,40 @@ memory, silently approve on telemetry/storage failure, or broaden generic comman
 allowlists to manufacture recovery. Runtime flags and deployment are unchanged.
 Rollback reverts these owned source changes; incompatible or changed policy
 digests cannot reuse old grants. Grants can be explicitly revoked before rollback.
+
+## Amendment (draft, 2026-11-16): production audit behind an explicit kill switch
+
+Status: Proposed — not accepted. This amendment prepares a default-off source
+gate; it does not approve production audit or change the production deployment.
+The nonproduction decision above remains in force unless this amendment is
+accepted and the separate go-live gates are completed.
+
+Production may admit pinned `meta.classifier_audit.mode: audit` only when the
+trusted gateway deployment sets exactly `STATEWRIGHT_ENV=production` and
+`STATEWRIGHT_CLASSIFIER_AUDIT_ENABLED=true`, and provisions a valid private
+`STATEWRIGHT_CLASSIFIER_AUDIT_DIR`. The environment and switch come from the
+gateway process, never workflow JSON. Environment alone does not enable audit.
+An unset switch or any value other than exact lowercase `true` rejects audit
+configuration and keeps enforcement; `prod`, `Production`, and `PRODUCTION`
+remain invalid environment names. Turning the deployment switch off and
+restarting or replacing gateway processes restores enforcement. The gateway
+reads deployment variables at process construction, so editing an already
+running process's ambient environment is not a live toggle.
+
+The MCP `statewright_set_classifier_audit` tool remains hidden and rejects
+direct calls in production even when the switch is on. Production opt-in must
+come from pinned workflow metadata plus the deployment switch, never a mid-run
+override. Staging and dev/dev1/dev2/dev3 retain their existing behavior without
+requiring the switch, so this amendment does not break staging audit.
+
+Audit still cannot bypass known risk, explicit denials, workflow policy or
+scope, required human review, or host permissions. A missing or invalid private
+intake directory or persistence failure keeps the command blocked. Intake has
+no raw argv; cases remain unlabelled and excluded from accuracy metrics until
+separate human review.
+
+Before an owner can approve go-live, prepare and review the production overlay
+(private PVC, initContainer and environment), pin the gateway image to a build
+accepted in staging, define intake-file retention and rotation, approve privacy
+copy and volume access control, and obtain the owner's explicit OK. None of
+those deployment or operational steps is completed by this amendment.

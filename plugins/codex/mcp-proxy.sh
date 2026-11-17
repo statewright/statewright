@@ -19,6 +19,34 @@ stable_tool_catalog_response() {
       (reduce ($tools[0] + $live)[] as $tool ({}; .[$tool.name] = $tool) | [.[]])})}'
 }
 MCP_RECOVERY="${SCRIPT_DIR}/scripts/lib/desktop-runtime/mcp-recovery.mjs"
+# Managed launchers hand the local MCP bridge token over as a 0600 file so it
+# never sits in the Codex environment that agent commands inherit. Load it into
+# an unexported shell variable; STATEWRIGHT_MANAGED_MCP_TOKEN is the legacy
+# carrier from older launchers.
+# The file must be a regular file (not a symlink) owned by this user with no
+# group/other permission bits; anything else is ignored.
+statewright_private_token_file() {
+  local path="$1" mode=""
+  [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
+  mode=$(stat -c '%a' "$path" 2>/dev/null) || mode=$(stat -f '%Lp' "$path" 2>/dev/null) || return 1
+  case "$mode" in 400|600) return 0 ;; *) return 1 ;; esac
+}
+STATEWRIGHT_MANAGED_MCP_BEARER="${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
+if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && statewright_private_token_file "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}"; then
+  IFS= read -r STATEWRIGHT_MANAGED_MCP_BEARER < "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" || true
+fi
+export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
 DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # GUI MCP launches do not inherit the terminal PATH. Keep the launcher's pinned
 # interpreter authoritative; this helper does not replace the signed host app.
@@ -125,7 +153,7 @@ run_codex_local_tool() {
       return 0
       ;;
     statewright_search_docs|statewright_search_references|statewright_connect)
-      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN \
+      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN -u STATEWRIGHT_MANAGED_MCP_TOKEN_FILE \
         -u STATEWRIGHT_ADAPTER_URL -u STATEWRIGHT_ADAPTER_TOKEN "$0" <<<"$line"
       return 0
       ;;
@@ -155,7 +183,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     [ "$method" = "tools/call" ] && [ "$tool_name" = "statewright_run_agent" ] && timeout_seconds=300
     response=$(curl -sS --max-time "$timeout_seconds" -w '\n%{http_code}' -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_MANAGED_MCP_BEARER:-}") \
       -H "X-Statewright-Client-Id: ${STATEWRIGHT_CLIENT_ID:-}" \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
@@ -195,7 +223,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
     fi
     response=$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN:-}") \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
     if [ "$method" = "initialize" ]; then
@@ -337,7 +365,7 @@ persist_verified_device_key() {
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
   status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
     "${PB_URL%/}/api/gateway/workflows" \
-    -H "Authorization: Bearer $key" \
+    -K <(statewright_bearer_config "$key") \
     -H 'Accept: application/json' 2>/dev/null || true)
   rm -f "$body"
   [ "$status" = "200" ] || return 1
@@ -714,7 +742,7 @@ upload_client_tools() {
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-client-tools.XXXXXX") || return 0
   status=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' -X POST "$PB_URL/api/client-tools" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $key" \
+    -K <(statewright_bearer_config "$key") \
     -d "{\"tools\": $tools, \"commands\": $commands}" 2>/dev/null || true)
   response=$(cat "$body" 2>/dev/null || true)
   rm -f "$body"
@@ -893,7 +921,7 @@ while IFS= read -r line; do
   # Forward to gateway with auth
   HTTP_RESPONSE=$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST "$GW_URL" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$line" 2>/dev/null || true)
   if [ "${HTTP_RESPONSE##*$'\n'}" = "401" ]; then

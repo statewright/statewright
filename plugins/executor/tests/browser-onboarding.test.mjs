@@ -74,6 +74,34 @@ async function waitForOutput(readOutput, pattern, timeoutMs = 2_000) {
   }
 }
 
+function argvSafeCurlScript(responseBody, { writeHttpCode = false } = {}) {
+  return `#!/usr/bin/env bash
+printf '%s\\n' "$@" >> "$STATEWRIGHT_CURL_CAPTURE"
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "-K" ] || [ "$previous" = "--config" ]; then
+    if [ -n "\${STATEWRIGHT_CURL_CONFIG_CAPTURE:-}" ] && [ -r "$argument" ]; then
+      cat "$argument" >> "$STATEWRIGHT_CURL_CONFIG_CAPTURE"
+      printf '\\n' >> "$STATEWRIGHT_CURL_CONFIG_CAPTURE"
+    fi
+  fi
+  previous="$argument"
+done
+printf '%s\\n' '${responseBody}'
+${writeHttpCode ? "printf '200'\n" : ""}
+`;
+}
+
+async function assertBearerKeptOutOfArgv(argvPath, configPath, token) {
+  const argv = await readFile(argvPath, "utf8");
+  assert.doesNotMatch(argv, /Authorization:\s*Bearer/, "bearer header leaked into curl argv");
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.doesNotMatch(argv, new RegExp(escaped), "token leaked into curl argv");
+  const config = await readFile(configPath, "utf8");
+  assert.match(config, new RegExp(`Authorization: Bearer ${escaped}`));
+}
+
+
 test("codex advertises a stable catalog but opens device approval only on explicit connect", async (t) => {
   const name = "codex";
   const proxy = resolve("plugins/codex/mcp-proxy.sh");
@@ -621,6 +649,7 @@ test("codex adopts a local credential at call time without catalog refresh or re
   const bin = join(root, "bin");
   const browserCapture = join(root, "browser-command.txt");
   const curlCapture = join(root, "curl-command.txt");
+  const curlConfigCapture = join(root, "curl-config.txt");
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
   );
@@ -630,7 +659,7 @@ test("codex adopts a local credential at call time without catalog refresh or re
     const fakeCurl = join(bin, "curl");
     await writeFile(
       fakeCurl,
-      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[{\"name\":\"statewright_get_state\"}]},\"id\":4}'\nprintf '200'\n",
+      argvSafeCurlScript('{"jsonrpc":"2.0","result":{"tools":[{"name":"statewright_get_state"}]},"id":4}', { writeHttpCode: true }),
     );
     await chmod(fakeCurl, 0o755);
     Object.assign(environment, {
@@ -638,6 +667,7 @@ test("codex adopts a local credential at call time without catalog refresh or re
       PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
       STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: browserCapture,
       STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_CURL_CONFIG_CAPTURE: curlConfigCapture,
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
@@ -671,7 +701,7 @@ test("codex adopts a local credential at call time without catalog refresh or re
 
     assert.equal(code, 0, stderr);
     assert.ok(responseById(stdout, 4).result.tools.some((tool) => tool.name === "statewright_get_state"));
-    assert.match(await readFile(curlCapture, "utf8"), /Authorization: Bearer sw_live_new_key/);
+    await assertBearerKeptOutOfArgv(curlCapture, curlConfigCapture, "sw_live_new_key");
     await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) {
@@ -727,6 +757,7 @@ test("cursor adopts a newly saved API key without restarting its MCP process", a
   const bin = join(root, "bin");
   const browserCapture = join(root, "browser-command.txt");
   const curlCapture = join(root, "curl-command.txt");
+  const curlConfigCapture = join(root, "curl-config.txt");
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.toLowerCase().startsWith("statewright_")),
   );
@@ -735,7 +766,7 @@ test("cursor adopts a newly saved API key without restarting its MCP process", a
     const fakeCurl = join(bin, "curl");
     await writeFile(
       fakeCurl,
-      "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$STATEWRIGHT_CURL_CAPTURE\"\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[]},\"id\":2}'\n",
+      argvSafeCurlScript('{"jsonrpc":"2.0","result":{"tools":[]},"id":2}'),
     );
     await chmod(fakeCurl, 0o755);
     Object.assign(environment, {
@@ -743,6 +774,7 @@ test("cursor adopts a newly saved API key without restarting its MCP process", a
       PATH: `${bin}${delimiter}${environment.PATH ?? ""}`,
       STATEWRIGHT_BROWSER_OPEN_CAPTURE_PATH: browserCapture,
       STATEWRIGHT_CURL_CAPTURE: curlCapture,
+      STATEWRIGHT_CURL_CONFIG_CAPTURE: curlConfigCapture,
       STATEWRIGHT_NO_UPDATE_CHECK: "1",
       STATEWRIGHT_SENTRY_DISABLED: "true",
     });
@@ -768,7 +800,7 @@ test("cursor adopts a newly saved API key without restarting its MCP process", a
 
     assert.equal(code, 0, stderr);
     assert.match(stdout, /\"id\":2/);
-    assert.match(await readFile(curlCapture, "utf8"), /Authorization: Bearer sw_live_new_key/);
+    await assertBearerKeptOutOfArgv(curlCapture, curlConfigCapture, "sw_live_new_key");
     await assert.rejects(readFile(join(home, ".statewright", "missing_api_key_prompted")));
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -15,6 +15,7 @@ export const MANAGED_CLIENT_FILES = [
   ["statewright-managed-client.mjs", "executor/statewright-managed-client.mjs"],
   ["lib/git-closeout.mjs", "executor/lib/git-closeout.mjs"],
   ["lib/managed-client-supervisor.mjs", "executor/lib/managed-client-supervisor.mjs"],
+  ["lib/managed-credential-isolation.mjs", "executor/lib/managed-credential-isolation.mjs"],
   ["lib/approval-evidence.mjs", "executor/lib/approval-evidence.mjs"],
   ["lib/approval-origin.mjs", "executor/lib/approval-origin.mjs"],
   ["lib/model-ladder.mjs", "executor/lib/model-ladder.mjs"],

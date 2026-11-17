@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
 import { createGatewayCredentialRecovery } from "./gateway-credential-recovery.mjs";
 import { approvalOriginProof } from "./approval-origin.mjs";
 import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
+import { ensurePrivateDirectory, isStatewrightCredentialEnvName, managedCodexEnvironment, readCredentialHandoff, removeManagedMcpTokenFile, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -57,6 +58,7 @@ const RESIDENT_RUNTIME_FILES = [
   join(EXECUTOR_ROOT, "local-telemetry-agent.mjs"),
   join(EXECUTOR_ROOT, "gateway-profile.mjs"),
   join(EXECUTOR_ROOT, "credential-store.mjs"),
+  join(EXECUTOR_ROOT, "managed-credential-isolation.mjs"),
 ];
 
 function safeName(value) {
@@ -253,8 +255,13 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
     );
   }
   await unlink(manifestPath).catch(() => {});
-  await mkdir(root, { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(root);
   const logHandle = await open(join(root, "resident.log"), "a", 0o600);
+  // The gateway key is handed to the resident over a one-shot stdin pipe and
+  // never placed in its environment: everything the resident spawns (Codex,
+  // and every command Codex runs) would otherwise inherit it.
+  const apiKey = typeof environment.STATEWRIGHT_API_KEY === "string" && environment.STATEWRIGHT_API_KEY.trim()
+    ? environment.STATEWRIGHT_API_KEY.trim() : null;
   const child = spawn(process.execPath, [
     RESIDENT_ENTRYPOINT,
     "--client-id", clientId,
@@ -267,11 +274,15 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
     "--history-mode", historyMode ?? "",
   ], {
     cwd,
-    env: { ...environment, STATEWRIGHT_CODEX_RESIDENT_ROOT: root },
+    env: { ...stripStatewrightCredentials(environment), STATEWRIGHT_CODEX_RESIDENT_ROOT: root },
     detached: true,
-    stdio: ["ignore", logHandle.fd, logHandle.fd],
+    stdio: ["pipe", logHandle.fd, logHandle.fd],
   });
   await logHandle.close();
+  await new Promise((resolveHandoff) => {
+    child.stdin.once("error", () => resolveHandoff());
+    child.stdin.end(apiKey ? JSON.stringify({ apiKey }) : "", () => resolveHandoff());
+  });
   child.unref();
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const manifest = await readManifest(manifestPath);
@@ -303,26 +314,36 @@ async function main() {
   const reporter = createErrorReporter({ plugin: "codex", version: "0.4.0" });
   reporter.installProcessHandlers();
   if (!clientId || !command || !cwd) throw new Error("resident requires client-id, command, and cwd");
+  // Keep credentials in this process's memory only. process.env is inherited
+  // by the App Server and by every shell command Codex runs.
+  const handedOffKey = await readCredentialHandoff(process.stdin);
+  const credentialEnvironment = { ...process.env, ...(handedOffKey ? { STATEWRIGHT_API_KEY: handedOffKey } : {}) };
+  for (const name of Object.keys(process.env)) {
+    if (isStatewrightCredentialEnvName(name)) delete process.env[name];
+  }
   const root = process.env.STATEWRIGHT_CODEX_RESIDENT_ROOT ?? residentRoot(home, clientId);
   const controlDir = residentControlDir(home, clientId);
   const manifestPath = join(root, "manifest.json");
-  await mkdir(controlDir, { recursive: true, mode: 0o700 });
+  // mkdir's mode does not tighten a directory that already exists; the token
+  // file lives here, so enforce owner + 0700 explicitly.
+  await ensurePrivateDirectory(controlDir);
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
-  const bridge = await createManagedMcpBridge({ environment: process.env, clientId, home });
-  let telemetry = await telemetryWriter(process.env);
+  const bridge = await createManagedMcpBridge({ environment: credentialEnvironment, clientId, home });
+  let telemetry = await telemetryWriter(credentialEnvironment);
+  const mcpTokenFile = await writeManagedMcpTokenFile(controlDir, bridge.token);
   const approvalService = createRuntimeApprovalService({ root: join(root, "approvals"), clientId, cwd,
       recoveryRun: threadId => readBoundRecoveryRun(home, clientId, threadId),
       apiKey: bridge.apiKey, gatewayUrl: bridge.gatewayUrl,
       reprovisionCredential: createGatewayCredentialRecovery({ apiKey: bridge.apiKey,
         gatewayUrl: bridge.gatewayUrl, pbUrl: process.env.STATEWRIGHT_PB_URL,
-        environment: process.env, home,
+        environment: credentialEnvironment, home,
         onRenewed: async nextKey => {
           // The child uses the stable local bridge token, so no app-server or
           // TUI restart is needed. Rotate credential-scoped approval memory.
-          const nextTelemetry = await telemetryWriter({...process.env, STATEWRIGHT_API_KEY: nextKey});
+          const nextTelemetry = await telemetryWriter({...credentialEnvironment, STATEWRIGHT_API_KEY: nextKey});
           bridge.apiKey = nextKey;
           approvalService.updateCredential(nextKey);
-          process.env.STATEWRIGHT_API_KEY = nextKey;
+          credentialEnvironment.STATEWRIGHT_API_KEY = nextKey;
           telemetry = nextTelemetry;
         } }),
       originProof: bridge.originProof,
@@ -346,6 +367,7 @@ async function main() {
     services.closeNativeUsage();
     await runtime?.close();
     await bridge.close();
+    await removeManagedMcpTokenFile(mcpTokenFile, bridge.token).catch(() => {});
     await unlink(manifestPath).catch(() => {});
     process.exit(0);
   };
@@ -357,15 +379,16 @@ async function main() {
     clientId,
     historyArgs,
     historyMode,
-    environment: {
-      ...process.env,
-      STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
-      STATEWRIGHT_MANAGED_CLIENT_HOST: "codex",
-      STATEWRIGHT_CLIENT_ID: clientId,
-      STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
-      STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
-      STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
-    },
+    environment: managedCodexEnvironment(process.env, {
+      mcpUrl: bridge.url,
+      tokenFile: mcpTokenFile,
+      extra: {
+        STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir,
+        STATEWRIGHT_MANAGED_CLIENT_HOST: "codex",
+        STATEWRIGHT_CLIENT_ID: clientId,
+        STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
+      },
+    }),
     nextRouteRequest: (threadId) => nextCodexResidentRouteRequest(controlDir, clientId, threadId),
     approvalService,
     threadListCwd,

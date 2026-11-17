@@ -5,6 +5,19 @@
 command -v jq &>/dev/null || exit 0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
 # shellcheck source=client-id.sh
 source "$SCRIPT_DIR/client-id.sh"
 # shellcheck source=gateway-profile.sh
@@ -99,7 +112,7 @@ PAYLOAD=$(jq -n \
 
 RESP=$(curl -s --max-time 5 -X POST "$PB_URL/api/gateway/logs" \
   -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $API_KEY" \
+  -K <(statewright_bearer_config "$API_KEY") \
   -d "$PAYLOAD" 2>&1)
 
 # Debug: log to user-owned dir on failure (no key material)

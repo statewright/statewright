@@ -11,6 +11,35 @@ HOOK_INPUT=$(cat 2>/dev/null || true)
 # with Node's realpath-based module identity.
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
+# Managed launchers hand the local MCP bridge token over as a 0600 file so it
+# never sits in the Codex environment that agent commands inherit. Load it into
+# an unexported shell variable; STATEWRIGHT_MANAGED_MCP_TOKEN is the legacy
+# carrier from older launchers.
+# The file must be a regular file (not a symlink) owned by this user with no
+# group/other permission bits; anything else is ignored.
+statewright_private_token_file() {
+  local path="$1" mode=""
+  [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
+  mode=$(stat -c '%a' "$path" 2>/dev/null) || mode=$(stat -f '%Lp' "$path" 2>/dev/null) || return 1
+  case "$mode" in 400|600) return 0 ;; *) return 1 ;; esac
+}
+STATEWRIGHT_MANAGED_MCP_BEARER="${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
+if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && statewright_private_token_file "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}"; then
+  IFS= read -r STATEWRIGHT_MANAGED_MCP_BEARER < "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" || true
+fi
+export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
 # Codex may launch hooks with a narrower PATH than the interactive shell that
 # started the app server. Resolve the JavaScript runtime once from an explicit
 # override, the hook PATH, or the standard per-user/system install locations.
@@ -150,15 +179,15 @@ mcp_raw_call() {
   authorization="$API_KEY"
   # Managed Desktop and TUI hooks must share the MCP bridge's authenticated
   # gateway session. Never fall back to a direct gateway when it is configured.
-  if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ]; then
-    [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 0
+  if [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_BEARER:-}${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}" ]; then
+    [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_BEARER:-}" ] || return 0
     [[ "$STATEWRIGHT_MANAGED_MCP_URL" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+/?$ ]] || return 0
     endpoint="${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp"
-    authorization="$STATEWRIGHT_MANAGED_MCP_TOKEN"
+    authorization="$STATEWRIGHT_MANAGED_MCP_BEARER"
   fi
   response=$(printf '%s' "$1" | curl -sf --max-time 4 -X POST "$endpoint" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $authorization" \
+    -K <(statewright_bearer_config "$authorization") \
     "${SESSION_HEADER_ARGS[@]}" \
     --data-binary @- 2>/dev/null) || return 0
   printf '%s' "$response"
@@ -330,8 +359,8 @@ fetch_local_state() {
 reconcile_managed_activation() {
   local registration fetched kind state temporary run_id run_session_id epoch
   if [ -f "$ACTIVE_FILE" ] && [ -f "$CACHE_FILE" ] && is_valid_cached_state "$(cat "$CACHE_FILE")"; then return 0; fi
-  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 0
-  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" ] || return 1
+  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}${STATEWRIGHT_MANAGED_MCP_BEARER:-}${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}" ] || return 0
+  [ -n "${STATEWRIGHT_MANAGED_MCP_URL:-}" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_BEARER:-}" ] || return 1
   [[ "$STATEWRIGHT_MANAGED_MCP_URL" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+/?$ ]] || return 1
   registration="${STATEWRIGHT_ROUTE_CONTROL_DIR:-}/codex-root-session.json"
   [ -n "${STATEWRIGHT_ROUTE_CONTROL_DIR:-}" ] && [ -f "$registration" ] && managed_root_is_owned || return 1
@@ -644,7 +673,7 @@ emit_native_telemetry() {
   fi
   curl -sf --max-time 2 -X POST "$PB_URL/api/gateway/telemetry/events" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     -d "$payload" >/dev/null 2>&1 || true
 }
 

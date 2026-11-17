@@ -48,6 +48,7 @@ export const RUNTIME_FILES = [
   "executor/lib/approval-evidence.mjs",
   "executor/lib/approval-origin.mjs",
   "executor/lib/managed-client-supervisor.mjs",
+  "executor/lib/managed-credential-isolation.mjs",
   "executor/lib/model-ladder.mjs",
   "executor/lib/codex-history-integrity.mjs",
   "executor/lib/managed-client-identity.mjs",

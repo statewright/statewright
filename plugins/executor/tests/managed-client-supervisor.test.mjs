@@ -40,6 +40,23 @@ async function waitFor(condition, attempts = 40) {
   return false;
 }
 
+
+// Managed Codex launches prepend a shell_environment_policy override so agent
+// commands never inherit Statewright credentials. These argv fixtures assert
+// the user's own arguments; the override has its own regression test.
+const SHELL_POLICY_ARG = /^shell_environment_policy\.exclude=\[/;
+function withoutShellPolicyArgv(args) {
+  const out = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "-c" && SHELL_POLICY_ARG.test(args[index + 1] ?? "")) { index += 1; continue; }
+    out.push(args[index]);
+  }
+  return out;
+}
+function withoutShellPolicyText(text) {
+  return text.replace(/-c shell_environment_policy\.exclude=\[[^\]]*\] ?/g, "");
+}
+
 test("Windows process-tree cleanup excludes managed-client and CI credentials", async () => {
   const taskkill = new EventEmitter();
   taskkill.kill = () => true;
@@ -400,7 +417,7 @@ test("non-Yolo explicit Codex resume permissions select the compatibility transp
         historyGuard: async () => ({ status: "healthy" }),
       }), 0);
     } finally { process.stderr.write = originalWrite; }
-    assert.deepEqual(JSON.parse(await readFile(captured, "utf8")), [
+    assert.deepEqual(withoutShellPolicyArgv(JSON.parse(await readFile(captured, "utf8"))), [
       "--sandbox", "workspace-write", "resume", "durable-thread",
     ]);
     assert.match(stderr.join(""), /explicit permission overrides.*restart transport/i);
@@ -601,7 +618,7 @@ test("managed codex exec remains one-shot when its hook requests a model route",
       pollMs: 5,
       bridgeFactory: fakeBridgeFactory,
     }), 0);
-    assert.deepEqual((await readFile(calls, "utf8")).trim().split("\n"), ["exec review this diff"]);
+    assert.deepEqual(withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n"), ["exec review this diff"]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -815,7 +832,7 @@ test("managed supervisor consumes Claude route requests and restarts the same ch
     assert.equal(await runManagedClient({
       host: "claude", command: fake, args: ["--permission-mode", "auto"], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
     }), 0);
-    const callsText = await readFile(calls, "utf8");
+    const callsText = withoutShellPolicyText(await readFile(calls, "utf8"));
     assert.match(callsText, /^--permission-mode auto/m);
     assert.match(callsText, /--permission-mode auto --resume claude-session-3 --model claude-opus-4-6/);
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -858,7 +875,7 @@ test("managed Claude supervisor defers a native child route instead of replacing
     assert.equal(await runManagedClient({
       host: "claude", command: fake, args: ["--permission-mode", "auto"], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
     }), 0);
-    const callsText = await readFile(calls, "utf8");
+    const callsText = withoutShellPolicyText(await readFile(calls, "utf8"));
     const callLines = callsText.trim().split("\n");
     assert.equal(callLines.length, 2);
     assert.match(callLines[1], /--resume claude-root --model claude-sonnet-4-6/);
@@ -874,7 +891,7 @@ test("managed supervisor only restarts its own child after a route request", asy
     await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + " " + process.env.STATEWRIGHT_MANAGED_MCP_URL + "\\n");\nconst marker = join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "once");\nif (!existsSync(marker)) { writeFileSync(marker, ""); writeFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "codex-root-session.json"), JSON.stringify({version:1,session_id:"session-3",client_id:process.env.STATEWRIGHT_CLIENT_ID})); writeFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "route.json"), JSON.stringify({session_id:"session-3",root_session_id:"session-3",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"openai-codex/gpt-5.6-sol",effort:"high"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\n`);
     await chmod(fake, 0o755);
     assert.equal(await runManagedClient({ host: "codex", command: fake, args: ["--full-auto"], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory }), 0);
-    const callsText = await readFile(calls, "utf8");
+    const callsText = withoutShellPolicyText(await readFile(calls, "utf8"));
     assert.match(callsText, /^--full-auto/m);
     assert.match(callsText, /-m gpt-5\.6-sol -c model_provider="openai" -c model_reasoning_effort="high" --full-auto resume session-3/);
     assert.match(callsText, /http:\/\/127\.0\.0\.1:9999/);
@@ -893,7 +910,7 @@ test("managed supervisor consumes successive current.route.json receipts", async
       environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" },
       home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
     }), 0);
-    const callLines = (await readFile(calls, "utf8")).trim().split("\n");
+    const callLines = withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n");
     assert.equal(callLines.length, 3);
     assert.match(callLines[1], /-m gpt-5\.6-terra .*model_reasoning_effort="medium".*resume session-current/);
     assert.match(callLines[2], /-m gpt-5\.6-sol .*model_reasoning_effort="high".*resume session-current/);
@@ -927,7 +944,7 @@ test("a fresh managed Codex does not let the first child route elect itself as r
     await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\nwriteFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "child.route.json"), JSON.stringify({session_id:"child-first",root_session_id:"child-first",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"openai-codex/gpt-5.6-sol",effort:"high"}));\nsetTimeout(() => process.exit(0), 100);\n`);
     await chmod(fake, 0o755);
     assert.equal(await runManagedClient({ host: "codex", command: fake, args: [], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory }), 0);
-    assert.deepEqual((await readFile(calls, "utf8")).trim().split("\n"), [""]);
+    assert.deepEqual(withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n"), [""]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -939,7 +956,7 @@ test("managed Codex discovers the actual root thread behind resume --last", asyn
     await writeFile(fake, `#!/usr/bin/env node\nimport { appendFileSync, existsSync, writeFileSync } from "node:fs";\nimport { join } from "node:path";\nappendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(" ") + "\\n");\nconst marker = join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "once");\nif (!existsSync(marker)) { writeFileSync(marker, ""); writeFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "codex-root-session.json"), JSON.stringify({version:1,session_id:"actual-last-thread",client_id:process.env.STATEWRIGHT_CLIENT_ID})); writeFileSync(join(process.env.STATEWRIGHT_ROUTE_CONTROL_DIR, "route.json"), JSON.stringify({session_id:"actual-last-thread",root_session_id:"actual-last-thread",client_id:process.env.STATEWRIGHT_CLIENT_ID,model:"openai-codex/gpt-5.6-sol",effort:"high"})); process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000); }\n`);
     await chmod(fake, 0o755);
     assert.equal(await runManagedClient({ host: "codex", command: fake, args: ["resume", "--last"], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory }), 0);
-    const callLines = (await readFile(calls, "utf8")).trim().split("\n");
+    const callLines = withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n");
     assert.equal(callLines.length, 2);
     assert.equal(callLines[0], "resume --last");
     assert.match(callLines[1], /resume actual-last-thread/);
@@ -984,7 +1001,7 @@ test("managed Codex ignores an ephemeral child route emitted through a zsh login
       bridgeFactory: fakeBridgeFactory,
     }), 0);
     await access(selected);
-    const callLines = (await readFile(calls, "utf8")).trim().split("\n");
+    const callLines = withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n");
     assert.deepEqual(callLines, ["resume durable-parent"]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1001,7 +1018,7 @@ test("managed supervisor preserves its own identity across a routed restart", as
       host: "codex", command: fake, args: [], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
       historyGuard: async (options) => { historyChecks.push(options); return { status: "healthy" }; },
     }), 0);
-    const identities = (await readFile(calls, "utf8")).trim().split("\n");
+    const identities = withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n");
     assert.equal(identities.length, 2);
     assert.equal(identities[0], identities[1]);
     assert.match(identities[0], /^swc_[a-f0-9]{32}$/);
@@ -1042,7 +1059,7 @@ test("managed Codex telemetry survives a routed child restart and stops after it
       bridgeFactory: fakeBridgeFactory,
     });
     assert.equal(await waitFor(async () => {
-      try { return (await readFile(calls, "utf8")).trim().split("\n").length === 2; } catch { return false; }
+      try { return withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n").length === 2; } catch { return false; }
     }), true);
     const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
     assert.equal(health.listener_status, "healthy");
@@ -1072,7 +1089,7 @@ test("managed supervisor rejects a route that attempts to rebind its identity", 
     assert.equal(await runManagedClient({
       host: "codex", command: fake, args: [], environment: { PATH: process.env.PATH, STATEWRIGHT_API_KEY: "test" }, home: root, pollMs: 5, bridgeFactory: fakeBridgeFactory,
     }), 0);
-    assert.equal((await readFile(calls, "utf8")).trim().split("\n").length, 1);
+    assert.equal(withoutShellPolicyText(await readFile(calls, "utf8")).trim().split("\n").length, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

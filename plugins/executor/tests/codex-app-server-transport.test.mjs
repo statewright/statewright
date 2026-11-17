@@ -159,7 +159,7 @@ test("transport preserves a resolved Windows npm shim entrypoint for its App Ser
     await writeFile(entrypoint, `import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
-if (args[0] === "app-server") {
+if (args.includes("app-server")) {
   writeFileSync(${JSON.stringify(appServerArgs)}, JSON.stringify(args));
   const target = new URL(args.at(-1));
   createServer((_request, response) => { response.writeHead(200); response.end("ok"); }).listen(Number(target.port), target.hostname);
@@ -181,11 +181,21 @@ if (args[0] === "app-server") {
       reporter: { async report() {} },
     });
     assert.equal(result, 0);
-    assert.deepEqual(JSON.parse(await readFile(appServerArgs, "utf8")).slice(0, 2), ["app-server", "--listen"]);
+    const recorded = JSON.parse(await readFile(appServerArgs, "utf8"));
+    const subcommand = recorded.indexOf("app-server");
+    assert.deepEqual(recorded.slice(subcommand, subcommand + 2), ["app-server", "--listen"]);
+    assertShellCredentialPolicy(recorded.slice(0, subcommand));
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
+
+function assertShellCredentialPolicy(globalArgs) {
+  const policy = globalArgs.find(value => value.startsWith("shell_environment_policy.exclude="));
+  assert.ok(policy, "App Server must drop Statewright credentials from shell commands");
+  assert.match(policy, /"STATEWRIGHT_\*API_KEY\*"/);
+  assert.match(policy, /"STATEWRIGHT_\*_TOKEN"/);
+}
 
 function npmTemplateShim() {
   // Exact template npm's cmd-shim dependency writes for Windows JS bin links.
@@ -254,7 +264,7 @@ test("transport preserves a resolved npm-template Windows shim entrypoint for it
     await writeFile(entrypoint, `import { createServer } from "node:http";
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
-if (args[0] === "app-server") {
+if (args.includes("app-server")) {
   writeFileSync(${JSON.stringify(appServerArgs)}, JSON.stringify(args));
   const target = new URL(args.at(-1));
   createServer((_request, response) => { response.writeHead(200); response.end("ok"); }).listen(Number(target.port), target.hostname);
@@ -277,7 +287,9 @@ if (args[0] === "app-server") {
     });
     assert.equal(result, 0);
     const recorded = JSON.parse(await readFile(appServerArgs, "utf8"));
-    assert.deepEqual(recorded.slice(0, 2), ["app-server", "--listen"]);
+    const subcommand = recorded.indexOf("app-server");
+    assert.deepEqual(recorded.slice(subcommand, subcommand + 2), ["app-server", "--listen"]);
+    assertShellCredentialPolicy(recorded.slice(0, subcommand));
     assert.match(recorded.at(-1), /^ws:\/\/127\.0\.0\.1:\d+$/);
   } finally {
     await rm(home, { recursive: true, force: true });

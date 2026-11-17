@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -8,6 +8,17 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 import { desktopAppServerLaunchPlan, desktopBrokerEnvironment, desktopClassifierState, desktopProfileEnvironment, desktopThreadAuthorizer, runDesktopAppServerBroker, startDesktopMcpBridge, startProfileDesktopMcpBridge } from "../lib/codex-desktop-app-server-launcher.mjs";
 import { adoptCodexRootSession, claimCodexRootSession, readCodexRootSession, resetCodexRootSession } from "../lib/managed-client-identity.mjs";
+
+// The App Server (and every command it runs) must not carry the bridge token
+// in its environment; it receives a 0600 token file path instead.
+async function assertBridgeTokenFile(environment, expected) {
+  assert.equal(environment.STATEWRIGHT_MANAGED_MCP_TOKEN, undefined);
+  assert.equal(environment.STATEWRIGHT_API_KEY, undefined);
+  const path = environment.STATEWRIGHT_MANAGED_MCP_TOKEN_FILE;
+  assert.equal(typeof path, "string");
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.ok(await readFile(path, "utf8") === expected, "token file carries the bridge token");
+}
 
 function fakeMcpBridge(onClose = () => {}) {
   return async () => ({
@@ -237,7 +248,7 @@ test("Desktop broker buffers an immediate stdio request and initializes its priv
         assert.equal(options.environment.STATEWRIGHT_MANAGED_CLIENT_HOST, "codex");
         assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, "swc_0123456789abcdef0123456789abcdef");
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43123");
-        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "desktop-bridge-token");
+        await assertBridgeTokenFile(options.environment, "desktop-bridge-token");
         assert.equal(options.environment.STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT,
           join(controlDir, "..", "manifest.json"));
         assert.equal(typeof options.classifierApprovalService.getState, "function");
@@ -332,7 +343,7 @@ test("Desktop broker reuses the launcher's unsandboxed MCP bridge without leakin
       startMcpBridge: async () => { innerBridgeStarted += 1; throw new Error("inner bridge must not start"); },
       startRuntime: async options => {
         assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, "http://127.0.0.1:43124");
-        assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, "launcher-owned-token");
+        await assertBridgeTokenFile(options.environment, "launcher-owned-token");
         assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_URL, undefined);
         assert.equal(options.environment.STATEWRIGHT_DESKTOP_MCP_TOKEN, undefined);
         return { proxyUrl: `ws://127.0.0.1:${upstream.address().port}`, proxyToken: "classifier-token",

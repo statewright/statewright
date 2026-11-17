@@ -9,6 +9,7 @@ import { bootstrapManagedClients, codexNativeDestinationInvocation, codexOneShot
 import { resolveTuiGatewayApiKey } from "./lib/credential-store.mjs";
 import { resolvedGatewayEnvironment } from "./lib/gateway-profile.mjs";
 import { createErrorReporter, isExpectedExit, isExpectedPluginError } from "./lib/error-reporting.mjs";
+import { codexShellEnvironmentPolicyArgs } from "./lib/managed-credential-isolation.mjs";
 
 const launcherPath = fileURLToPath(import.meta.url);
 
@@ -163,9 +164,15 @@ async function main() {
       process.stderr.write("[statewright] no credential is stored for this gateway; launching the client so statewright_connect can complete browser approval. Restart after approval to enable managed routing.\n");
     }
   }
-  const child = spawn(options.realBin, options.args, {
+  // Unmanaged/fallback Codex: the MCP proxy may need a user-exported key, so
+  // the env is left as is, but Codex's own shells still exclude credentials.
+  // (shell_environment_policy does not apply to MCP servers or hooks.)
+  const passthroughEnvironment = managedClientChildEnvironment({ host: options.host, environment });
+  const policyArgs = options.host === "codex" && process.platform !== "win32"
+    ? await codexShellEnvironmentPolicyArgs({ codexHome: passthroughEnvironment.CODEX_HOME ?? join(homedir(), ".codex") }) : [];
+  const child = spawn(options.realBin, [...policyArgs, ...options.args], {
     stdio: "inherit",
-    env: managedClientChildEnvironment({ host: options.host, environment }),
+    env: passthroughEnvironment,
     cwd: process.cwd(),
     shell: process.platform === "win32",
   });

@@ -1043,12 +1043,21 @@ export function register(on, options = {}) {
       reportDiagnostic($, await current($), 'command_failed', 'command');
     return next(e);
   });
+  // Claude 2.1.326+ holds a Stop `block` in more cases, so only an enforcing
+  // workflow may block. A dormant session (no workflow, or no readable
+  // conversation) passes through even when a lookup fails; an enforcing one
+  // still fails closed when its completion cannot be confirmed.
+  const unconfirmedStop = 'Statewright could not confirm workflow completion. Read its state or turn it Off.';
+  const enforcingStop = v => Boolean(v?.requiresEnforcement && !v.routeError && !v.native?.state?.pending_approval);
   on('classic.Stop', async ($, e, next) => {
-    const result = await next(e), v = await current($);
-    if (result?.block || v.routeError || !v.requiresEnforcement || v.native?.state?.pending_approval) return result;
-    const decision = outcome(await nativeRequest($, 'stop', {}));
+    const result = await next(e);
+    let v;
+    try { v = await current($); } catch { return enforcingStop(view) ? { ...result, block: unconfirmedStop } : result; }
+    if (result?.block || !enforcingStop(v)) return result;
+    let decision;
+    try { decision = outcome(await nativeRequest($, 'stop', {})); } catch { return { ...result, block: unconfirmedStop }; }
     return decision.decision === 'block' ? { ...result, block: decision.reason } : result;
-  }).catch(() => ({ block: 'Statewright could not confirm workflow completion. Read its state or turn it Off.' }));
+  }).catch(() => (enforcingStop(view) ? { block: unconfirmedStop } : {}));
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       const v = await current($);

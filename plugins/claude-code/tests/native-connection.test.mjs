@@ -1871,3 +1871,21 @@ for (const throws of [false, true]) test(`Desktop dialog refusal never falls bac
   assert.match(h.content(await h.pane()), /Open \/mcp/);
   assert.doesNotMatch(h.content(await h.pane()), /PRIVATE_CALLBACK/);
 });
+
+test('a dormant Stop never blocks, even when the conversation is unreadable (Claude 2.1.326 block semantics)', async () => {
+  const h = await host();
+  // No workflow: a plain Stop passes through untouched.
+  assert.equal((await h.fire('classic.Stop', {}, async () => ({}))).block, undefined);
+  // The conversation id is unreadable: still dormant, so no block.
+  h.state.sessionId = () => '';
+  assert.equal((await h.fire('classic.Stop', {}, async () => ({}))).block, undefined);
+});
+
+test('an enforcing Stop still fails closed when completion cannot be confirmed', async () => {
+  const h = await workflowHost();
+  await h.find(await h.pane(), 'workflow').props.onSelect('plan');
+  await h.press('start');
+  assert.match((await h.fire('classic.Stop', {}, async () => ({}))).block, /Finish/);
+  h.state.sessionId = () => '';
+  assert.match((await h.fire('classic.Stop', {}, async () => ({}))).block, /could not confirm workflow completion/);
+});

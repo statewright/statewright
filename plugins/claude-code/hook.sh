@@ -30,6 +30,40 @@ TRANSCRIPT_TELEMETRY="${SCRIPT_DIR}/scripts/transcript-telemetry.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+# A managed Claude supervisor keeps the gateway key out of Claude's env (its
+# Bash tool and every agent command inherit it) and hands its loopback MCP
+# bridge token over as a 0600 file. Hooks reach the gateway through that
+# bridge. STATEWRIGHT_MANAGED_MCP_TOKEN is the legacy env carrier.
+statewright_private_token_file() {
+  local path="$1" mode=""
+  [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
+  mode=$(stat -c '%a' "$path" 2>/dev/null) || mode=$(stat -f '%Lp' "$path" 2>/dev/null) || return 1
+  case "$mode" in 400|600) return 0 ;; *) return 1 ;; esac
+}
+STATEWRIGHT_MANAGED_MCP_BEARER="${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
+if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && statewright_private_token_file "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}"; then
+  IFS= read -r STATEWRIGHT_MANAGED_MCP_BEARER < "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" || true
+fi
+export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
+MANAGED_BRIDGE=false
+if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-}" = "claude" ] && [ -n "$STATEWRIGHT_MANAGED_MCP_BEARER" ] \
+    && [[ "${STATEWRIGHT_MANAGED_MCP_URL:-}" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+/?$ ]]; then
+  MANAGED_BRIDGE=true
+fi
+
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
+
 # Provider-neutral workflow capabilities. Keep the native name for the shell
 # guard, but map concrete Claude/Codex file and search tools to Read/Write.
 statewright_capability_for_tool() {
@@ -164,19 +198,15 @@ if [ "$NEEDS_BOOTSTRAP" = true ]; then
 fi
 
 # --- Helper: call MCP gateway ---
-curl_bearer_config() {
-  local token="$1"
-  case "$token" in *$'\r'*|*$'\n'*) return 1 ;; esac
-  token="${token//\\/\\\\}"
-  token="${token//\"/\\\"}"
-  printf 'header = "Authorization: Bearer %s"\n' "$token"
-}
-
 mcp_call() {
-  local auth_config
-  auth_config=$(curl_bearer_config "$API_KEY") || return 0
-  printf '%s\n' "$auth_config" | curl -K - -sf --max-time 5 -X POST "$GW_URL/" \
+  local endpoint="$GW_URL/" authorization="$API_KEY"
+  if [ "$MANAGED_BRIDGE" = true ]; then
+    endpoint="${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp"
+    authorization="$STATEWRIGHT_MANAGED_MCP_BEARER"
+  fi
+  curl -sf --max-time 5 -X POST "$endpoint" \
     -H 'Content-Type: application/json' \
+    -K <(statewright_bearer_config "$authorization") \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$1" 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
@@ -214,7 +244,7 @@ adapter_call() {
   fi
   if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then
     local auth_config
-    auth_config=$(curl_bearer_config "$STATEWRIGHT_ADAPTER_TOKEN") || return 1
+    auth_config=$(statewright_bearer_config "$STATEWRIGHT_ADAPTER_TOKEN") || return 1
     printf '%s\n' "$auth_config" | curl -K - "${args[@]}" 2>/dev/null
   else
     curl "${args[@]}" 2>/dev/null
@@ -396,7 +426,7 @@ case "$ENDPOINT" in
     drain_claude_telemetry_outbox
 
     # --- No API key: provisioning (runs even when dormant) ---
-    if [ -z "$API_KEY" ] && [ -z "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
+    if [ -z "$API_KEY" ] && [ -z "${STATEWRIGHT_ADAPTER_URL:-}" ] && [ "$MANAGED_BRIDGE" != true ]; then
       # Let key-paste prompts through
       if echo "$HOOK_INPUT" | grep -q "sw_live_" 2>/dev/null; then
         PASTED_KEY=$(echo "$HOOK_INPUT" | grep -o 'sw_live_[a-zA-Z0-9_-]*')

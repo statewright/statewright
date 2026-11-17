@@ -9,6 +9,7 @@ import { codexHistoryRepairMode, guardCodexResumeHistory, resolveCodexHistorySto
 import { createErrorReporter, isExpectedExit, isExpectedTransportClose } from "./error-reporting.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 import {recordCodexHookHost} from "./codex-hook-context.mjs";
+import { codexShellEnvironmentPolicyArgs, MANAGED_MCP_TOKEN_FILE_ENV, stripStatewrightCredentials } from "./managed-credential-isolation.mjs";
 
 const DEFAULT_READY_TIMEOUT_MS = 10_000;
 
@@ -223,7 +224,7 @@ export async function runCodexAppServerTransport({
   try {
     tui = spawn(launch.command, [...launch.prefixArgs, ...stripRemoteArgs(args), "--remote", runtime.proxyUrl], {
       cwd,
-      env: environment,
+      env: stripStatewrightCredentials(environment, { keep: [MANAGED_MCP_TOKEN_FILE_ENV] }),
       stdio: "inherit",
       shell: launch.shell,
     });
@@ -310,9 +311,15 @@ export async function startCodexAppServerRuntime({
   // Keep that complete launch descriptor intact: passing only node.exe loses
   // the Codex JavaScript entrypoint before this App Server child is spawned.
   const launch = providedLaunch ?? await resolveWindowsLaunch(command);
-  const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, ...historyArgs, "app-server", "--listen", url], {
+  // The App Server runs every agent command. It receives no gateway or bridge
+  // credential (only the bridge token file path, for the Statewright MCP proxy
+  // and hooks), and Codex is told to drop Statewright credential names from
+  // the shell commands it spawns as a second line of defense.
+  // cmd.exe would re-parse the TOML array; the env isolation still applies.
+  const shellPolicyArgs = launch.shell ? [] : await codexShellEnvironmentPolicyArgs({ codexHome });
+  const appServer = spawn(launch.command, [...launch.prefixArgs, ...providerArgs, ...historyArgs, ...shellPolicyArgs, "app-server", "--listen", url], {
     cwd,
-    env: { ...environment, CODEX_HOME: codexHome },
+    env: { ...stripStatewrightCredentials(environment, { keep: [MANAGED_MCP_TOKEN_FILE_ENV] }), CODEX_HOME: codexHome },
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
     shell: launch.shell,

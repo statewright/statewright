@@ -135,10 +135,41 @@ for name in evil_statewright_x mcp__other__statewright_status mcp__other__statew
   printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
     || fail "foreign or unknown MCP tool $name must not bypass the gate (got: $out)"
 done
+# The direct `statewright` server name is trusted only for a gateway URL.
+direct=mcp__statewright__statewright_get_state
+mkdir -p "$TMP/project"
+export CLAUDE_PROJECT_DIR="$TMP/project"
+for config in '' '{"mcpServers":{"statewright":{"type":"http","url":"https://evil.example/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://x.statewright.ai@evil.example/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"command":"node","args":["/tmp/impostor.mjs"]}}}'; do
+  if [ -n "$config" ]; then printf '%s\n' "$config" > "$TMP/home/.claude.json"; else rm -f "$TMP/home/.claude.json"; fi
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "an impostor statewright server ($config) must not bypass the gate (got: $out)"
+done
+for config in '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}'; do
+  printf '%s\n' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  [ -z "$out" ] || fail "the gateway-backed statewright server ($config) should pass (got: $out)"
+done
+# Local (per-project) scope wins over user scope, as in Claude.
+jq -n --arg p "$TMP/project" '{mcpServers:{statewright:{type:"http",url:"https://mcp.statewright.ai/mcp"}},
+  projects:{($p):{mcpServers:{statewright:{type:"http",url:"https://evil.example/mcp"}}}}}' > "$TMP/home/.claude.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+  || fail "a local-scope impostor must not bypass the gate (got: $out)"
+rm -f "$TMP/home/.claude.json"
+printf '%s\n' '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp"}}}' > "$TMP/project/.mcp.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+[ -z "$out" ] || fail "a project-scope gateway server should pass (got: $out)"
+printf '%s\n' '{"mcpServers":{"statewright":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}' > "$TMP/home/.claude.json"
 for name in statewright_get_state mcp__statewright__statewright_get_state mcp__plugin_statewright_statewright__statewright_get_state mcp__plugin_statewright_statewright_get_state; do
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$name" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   [ -z "$out" ] || fail "known Statewright MCP tool $name should pass (got: $out)"
 done
+rm -f "$TMP/home/.claude.json" "$TMP/project/.mcp.json"
+unset CLAUDE_PROJECT_DIR
 
 # --- 7. The managed bridge receives its synthetic bearer through curl stdin,
 # while curl argv contains neither the adapter token nor an Authorization value.
@@ -166,5 +197,30 @@ if grep -Fq "$adapter_token" "$TMP/curl-argv" || grep -Fq 'Authorization:' "$TMP
 fi
 grep -Fxq -- "header = \"Authorization: Bearer $adapter_token\"" "$TMP/curl-config" \
   || fail 'adapter curl stdin config must carry the bearer authorization'
+
+# --- 8. The managed bridge fails closed: only an explicit allow runs a tool.
+for reply in '{}' '{"reason":"no decision"}' '{"decision":"block","reason":"blocked"}' 'not json' '{"decision":"ALLOW"}'; do
+  cat > "$TMP/bin/curl" <<SHCURL
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '$reply'
+SHCURL
+  out=$(printf '%s' "$(jq -n --arg s "$SESSION_ID" '{session_id:$s,tool_name:"Bash",tool_input:{command:"echo hi"}}')" |
+    HOME="$TMP/home" PATH="$TMP/bin:$PATH" STATEWRIGHT_API_KEY='test-key' \
+    STATEWRIGHT_ADAPTER_URL='http://127.0.0.1:1' STATEWRIGHT_ADAPTER_TOKEN="$adapter_token" \
+    STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" pre-tool)
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "bridge reply $reply must deny (got: $out)"
+done
+cat > "$TMP/bin/curl" <<'SHCURL'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"decision":"allow"}'
+SHCURL
+out=$(printf '%s' "$(jq -n --arg s "$SESSION_ID" '{session_id:$s,tool_name:"Bash",tool_input:{command:"echo hi"}}')" |
+  HOME="$TMP/home" PATH="$TMP/bin:$PATH" STATEWRIGHT_API_KEY='test-key' \
+  STATEWRIGHT_ADAPTER_URL='http://127.0.0.1:1' STATEWRIGHT_ADAPTER_TOKEN="$adapter_token" \
+  STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" pre-tool)
+[ -z "$out" ] || fail "an explicit bridge allow should pass (got: $out)"
 
 echo "Claude approval-gate tests passed"

@@ -46,12 +46,50 @@ statewright_allowed_capability() {
   printf '%s\n' "$2" | grep -Fqx "$(statewright_capability_for_tool "$1")"
 }
 
+statewright_url_origin() {
+  printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]+).*#\1#' | tr '[:upper:]' '[:lower:]'
+}
+
+# A configured server URL is trusted only when it is this hook's gateway
+# origin or an https Statewright origin (no userinfo, default port).
+statewright_trusted_gateway_url() {
+  local origin
+  origin=$(statewright_url_origin "$1")
+  case "$origin" in *@*|'') return 1 ;; esac
+  [ "$origin" = "$(statewright_url_origin "$GW_URL")" ] && return 0
+  case "$origin" in
+    https://statewright.ai|https://*.statewright.ai) return 0 ;;
+  esac
+  return 1
+}
+
+# Any MCP server can be registered under the name `statewright`. Trust the
+# direct `mcp__statewright__*` names only when Claude's effective config for
+# that name (local, then project, then user scope) points at the Statewright
+# gateway or this plugin's own stdio proxy.
+statewright_direct_server_trusted() {
+  local project="${CLAUDE_PROJECT_DIR:-$PWD}" entry="" url
+  entry=$(jq -c --arg p "$project" '.projects[$p].mcpServers.statewright // empty' "$HOME/.claude.json" 2>/dev/null || true)
+  [ -n "$entry" ] || entry=$(jq -c '.mcpServers.statewright // empty' "$project/.mcp.json" 2>/dev/null || true)
+  [ -n "$entry" ] || entry=$(jq -c '.mcpServers.statewright // empty' "$HOME/.claude.json" 2>/dev/null || true)
+  [ -n "$entry" ] || return 1
+  url=$(printf '%s' "$entry" | jq -r '.url // empty' 2>/dev/null || true)
+  if [ -n "$url" ]; then
+    statewright_trusted_gateway_url "$url"
+    return
+  fi
+  printf '%s' "$entry" | jq -e --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" \
+    '([.command] + (.args // [])) | index($proxy) != null' >/dev/null 2>&1
+}
+
 # Only the Statewright server's exact MCP tools bypass workflow tool gating.
 # Claude has used both plugin prefix spellings as well as the direct server.
 statewright_mcp_tool_name() {
   local name="$1"
   case "$name" in
-    mcp__statewright__*) name="${name#mcp__statewright__}" ;;
+    mcp__statewright__*)
+      statewright_direct_server_trusted || return 1
+      name="${name#mcp__statewright__}" ;;
     mcp__plugin_statewright_statewright__*) name="${name#mcp__plugin_statewright_statewright__}" ;;
     mcp__plugin_statewright_*) name="${name#mcp__plugin_statewright_}" ;;
     statewright_*) ;;
@@ -537,9 +575,12 @@ case "$ENDPOINT" in
         jq -n '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Statewright executor bridge is unavailable; refusing an unguarded tool call."}}'
         exit 0
       fi
-      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "allow"')
-      if [ "$DECISION" = "deny" ]; then
-        REASON=$(echo "$RESPONSE" | jq -r '.reason // "Blocked by Statewright"')
+      # Fail closed: only an explicit allow lets the tool run. A missing,
+      # malformed or unknown decision (including "block") is a denial.
+      DECISION=$(echo "$RESPONSE" | jq -r '.decision // "deny"' 2>/dev/null || echo deny)
+      if [ "$DECISION" != "allow" ]; then
+        REASON=$(echo "$RESPONSE" | jq -r '.reason // "Statewright did not return an allow decision; refusing this tool call."' 2>/dev/null \
+          || echo 'Statewright returned an unreadable decision; refusing this tool call.')
         jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
       fi
       exit 0

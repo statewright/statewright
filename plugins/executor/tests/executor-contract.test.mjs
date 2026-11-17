@@ -48,6 +48,19 @@ test("executor environment distinguishes stable authenticated client from canoni
   assert.equal(environment.STATEWRIGHT_BRANCH_SESSION_ID, "canonical-owned-session");
 });
 
+test("Claude host never receives the adapter bridge bearer in its environment", () => {
+  const session = { workflow: "delivery", executorId: "executor", transportSessionId: "br_exec_1",
+    leasePath: "/run/lease.json", pluginsRoot: "/plugins",
+    adapterBridge: { url: "http://127.0.0.1:1234", token: "bridge-token" } };
+  const claude = executorAgentEnvironment({ PATH: "/bin", STATEWRIGHT_ADAPTER_TOKEN: "inherited" }, { ...session, host: "claude" });
+  assert.equal(claude.STATEWRIGHT_ADAPTER_TOKEN, undefined);
+  assert.equal(Object.values(claude).includes("bridge-token"), false);
+  assert.equal(Object.values(claude).includes("inherited"), false);
+  // Hosts whose shim still authenticates to the bridge keep their bearer.
+  const pi = executorAgentEnvironment({ PATH: "/bin" }, { ...session, host: "pi" });
+  assert.equal(pi.STATEWRIGHT_ADAPTER_TOKEN, "bridge-token");
+});
+
 test("OpenCode host observation requires an explicit readiness owner", () => {
   assert.throws(
     () => assertHostAdapterContract({ host: "opencode" }),

@@ -94,17 +94,33 @@ async function rememberApprovalGrant($, entry) {
   entries.push({ scope, token: entry.token, grant_id: entry.grant_id, expires_at: entry.expires_at ?? null });
   await $.store.set(APPROVAL_GRANTS_KEY, entries.slice(-MAX_APPROVAL_GRANTS));
 }
+// Revoke at the gateway first, so copies of a token stop working everywhere,
+// then remove the local copies. The copy reports exactly which part happened.
+async function revokeGrantsAtGateway($) {
+  const v = await current($);
+  if (!v.control || !/^[a-f0-9]{64}$/.test(v.native?.owner_fingerprint ?? '')) return false;
+  let root;
+  try { root = await $.session.root?.(); } catch { /* Revoke the conversation scope. */ }
+  try {
+    const result = await nativeRequest($, 'approval_revoke', absoluteHostPath(root) ? { project_root: root } : {});
+    return outcome(result)?.classifier_approval?.action === 'revoked';
+  } catch { return false; }
+}
 async function revokeApprovalGrants($) {
+  const server = await revokeGrantsAtGateway($);
   const scope = await approvalGrantScope($), saved = await $.store.get(APPROVAL_GRANTS_KEY);
+  const serverNote = server
+    ? ' Statewright also revoked them at the gateway, so copies no longer work.'
+    : ' Statewright could not revoke them at the gateway; any copy keeps working until it expires (Always: until revoked at the gateway). Try again when connected.';
   if (scope.startsWith('conversation:')) {
     if (typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
     else await $.store.set(APPROVAL_GRANTS_KEY, []);
-    return 'Stored timed approvals across all projects were removed.';
+    return `Stored timed approvals across all projects were removed from this device.${serverNote}`;
   }
   const remaining = (Array.isArray(saved) ? saved : []).filter(entry => validGrant(entry) && entry.scope !== scope);
   if (!remaining.length && typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
   else await $.store.set(APPROVAL_GRANTS_KEY, remaining);
-  return 'Stored timed approvals for this project were removed.';
+  return `Stored timed approvals for this project were removed from this device.${serverNote}`;
 }
 const CONTROL_QUESTION_INPUT = { questions: [{ question: CONTROL_QUESTION, header: 'Statewright',
   options: CONTROL_OPTIONS.map(label => ({ label, description: '' })), multiSelect: false }] };
@@ -862,7 +878,7 @@ export function register(on, options = {}) {
   on('tool.check', { tool: /^mcp__plugin[:_]statewright[:_]statewright__/ }, async ($, e, next) => {
     if (gatewayTool(e.tool)) {
       const approvalControl = e.tool.endsWith(`__${NATIVE_CONTROL_TOOL}`) &&
-        ['approval_grant', 'approval_review'].includes(e.input?.operation);
+        ['approval_grant', 'approval_review', 'approval_revoke'].includes(e.input?.operation);
       if (approvalControl && (!own($, next) || !permissionFrames.has(argumentKey(e.input))))
         return { decision: 'deny', reason: 'Only the Statewright native review prompt can submit this approval decision.' };
       if (!own($, next) && !catalogTool(e.tool, e.input))

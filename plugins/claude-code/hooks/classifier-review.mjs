@@ -244,7 +244,7 @@ export function classifierReviewMessage(decision, toolName, toolInput, defaultDu
   lines.push('', `Why review: ${REASONS[basis] ?? 'The request has an unresolved effect.'}`);
   lines.push(s1ClassificationDisplay(risk));
   lines.push('A timed approval skips Statewright review only for this exact command and working directory while its policy and any dependencies Statewright captured remain unchanged. Claude’s own permission prompt may still follow.');
-  lines.push('Statewright may not detect changes to executable contents it did not capture. Always lasts until you revoke it or the bound command, working directory, captured dependencies, or policy change.');
+  lines.push('Statewright may not detect changes to executable contents it did not capture. Always lasts until you revoke approvals for this project (Statewright revokes them at the gateway too) or the bound command, working directory, captured dependencies, or policy change.');
   lines.push(`Default choice: ${DURATION_LABELS[defaultDuration] ?? DURATION_LABELS.once}.`);
   return lines.join('\n');
 }

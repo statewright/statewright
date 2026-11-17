@@ -922,11 +922,11 @@ test('all mod boundaries reject foreign native context and mutations; own reads 
     assert.ok((await h.fire('mcp.call', { server: SERVER, tool: 'statewright_native_request', args: input }, () => assert.fail())).deny);
   }
 });
-for (const operation of ['approval_grant', 'approval_review']) test(`model-originated ${operation} is denied by tool.check`, async () => {
+for (const operation of ['approval_grant', 'approval_review', 'approval_revoke']) test(`model-originated ${operation} is denied by tool.check`, async () => {
   const h = await host();
   const tool = `mcp__plugin_statewright_${SERVER}__statewright_native_request`;
   const input = { context: { version: 1, conversation_id: CHAT }, operation,
-    input: { review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    input: operation === 'approval_revoke' ? { project_root: '/workspace' } : { review_request_id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       ...(operation === 'approval_grant' ? { duration: '4h', invocation_sha256: 'c'.repeat(64) } : { action: 'denied' }) },
     expected_revision: crypto.randomUUID() };
   const verdict = await h.fire('tool.check', { tool, tool_use_id: 'model-grant', input },
@@ -960,6 +960,8 @@ async function workflowHost(catalog) {
     if (args.operation === 'stop') outcome = { decision: snapshot.state?.is_final || !snapshot.state ? 'allow' : 'block', reason: 'Finish the workflow' };
     if (args.operation === 'transition') snapshot.state = { ...snapshot.state, state: 'complete', is_final: true, transition_count: 1, transitions: [] };
     if (args.operation === 'deactivate') snapshot.state = null;
+    if (args.operation === 'approval_revoke') outcome = h.state.revokeOutcome
+      ?? { classifier_approval: { action: 'revoked', revoked_before: '2026-11-16T20:00:00Z' } };
     snapshot.revision = crypto.randomUUID();
     return result({ ...snapshot, outcome: result(outcome) });
   };
@@ -1162,6 +1164,7 @@ test('disconnected revocation clears all stored tokens and says so', async () =>
   ]);
   const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
   assert.match(result.text, /across all projects/);
+  assert.match(result.text, /could not revoke them at the gateway; any copy keeps working until it expires/);
   assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), []);
 });
 
@@ -1176,7 +1179,27 @@ test('connected revocation clears only the current owner and project', async () 
   ]);
   const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
   assert.match(result.text, /for this project/);
+  assert.match(result.text, /also revoked them at the gateway, so copies no longer work/);
   assert.deepEqual(h.stored.get('classifier-approval-grants:v1'), [other]);
+  const revoke = h.state.calls.filter(call => call.args.operation === 'approval_revoke');
+  assert.equal(revoke.length, 1, 'the gateway revoke runs before local removal');
+  assert.deepEqual(revoke[0].args.input, { project_root: '/current' });
+});
+
+test('a failed gateway revoke still clears local tokens and says copies survive', async () => {
+  const h = await workflowHost(), owner = 'a'.repeat(64);
+  h.snapshot.owner_fingerprint = owner;
+  h.$.session.root = async () => '/current';
+  await h.press('start');
+  h.state.revokeOutcome = { classifier_approval: { action: 'revoke_failed', reason: 'database unavailable' } };
+  h.stored.set('classifier-approval-grants:v1', [
+    { scope: `owner:${owner}:project:/current`, token: 'signed', grant_id: 'hash', expires_at: null },
+  ]);
+  const result = await h.fire('command.run', { command: 'statewright', args: 'approvals revoke' });
+  assert.match(result.text, /removed from this device/);
+  assert.match(result.text, /could not revoke them at the gateway/);
+  assert.doesNotMatch(result.text, /copies no longer work/);
+  assert.equal((h.stored.get('classifier-approval-grants:v1') ?? []).length, 0);
 });
 
 test('missing host project root sends no token from another conversation or owner', async () => {

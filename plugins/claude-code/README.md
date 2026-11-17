@@ -179,11 +179,41 @@ captured dependencies remain unchanged; Statewright may
 miss changes to executable contents it did not capture.
 
 Use `/statewright approvals revoke` or **Revoke approvals for this project** in
-the sidebar to remove saved grant tokens from the plugin store. If project
-scope is unavailable, the command removes all saved tokens. This local revoke
-does not invalidate a copied token at the gateway; the server-side revoke
-list is planned for Week 2 (B4). Timed grants require a gateway signing key
-and durable approval history; without them, only one-time approval is available.
+the sidebar to revoke timed and Always grants. The plugin first asks the
+gateway to revoke every grant you hold for this project (the gateway records a
+cutoff time and rejects any token issued at or before it, in any conversation,
+including copies), then removes the saved tokens from the plugin store. If the
+gateway can't be reached, the message says so: the local copies are still
+removed, but a copied token keeps working until it expires (Always: until a
+gateway revoke succeeds, `STATEWRIGHT_APPROVAL_ALWAYS=off`, or the signing key
+rotates). If project scope is unavailable, the command removes all saved tokens
+and revokes the conversation scope at the gateway. Timed grants require a
+gateway signing key and durable approval history; without them, only one-time
+approval is available.
+
+Each review id is bound to the MCP connection (`Mcp-Session-Id`) the plugin
+used when Statewright issued it. A grant or decline arriving on any other
+connection is rejected, and the attempt consumes the id. Reopening the
+Statewright connection mid-review therefore cancels that review; Statewright
+asks again on the next attempt.
+
+### Known risks
+
+- **Reading Claude's credential store.** The gateway authenticates the plugin
+  with Claude's own stored Statewright MCP credential (macOS Keychain item
+  `Claude Code-credentials`; `~/.claude/.credentials.json` on Linux). On macOS
+  that item can be released to any process running as you without a Keychain
+  prompt. An agent that reads it could open its own MCP connection and run the
+  whole review flow there, approving its own commands. The gateway can't tell
+  that connection from the plugin's: both hold the same credential, and the
+  plugin's store is readable by the same user. Statewright therefore treats
+  reads of these stores (`security find-generic-password`, `dump-keychain`,
+  `.credentials.json`, `secret-tool lookup`, Statewright's own key files) as
+  known risk: they are denied and never offered for review. That screen is
+  lexical and best effort; Claude's own permission prompt is the other control.
+- **A legacy `mcp__statewright__*` server.** The legacy shell hook only
+  recognises the `statewright` server when its configured URL is a Statewright
+  gateway (see `STATEWRIGHT_URL`).
 
 ## Development
 

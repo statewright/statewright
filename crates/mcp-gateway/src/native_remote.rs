@@ -99,6 +99,9 @@ struct ApprovalGrant { review_request_id:String, invocation_sha256:String, durat
 struct ApprovalReview { review_request_id:String, action:String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ApprovalRevoke { #[serde(default)] project_root:Option<String> }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PostTool {
     tool_name: String,
     tool_input: serde_json::Map<String, Value>,
@@ -196,6 +199,14 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
             }
             "statewright_native_approval_review"
         }
+        "approval_revoke" => {
+            let input:ApprovalRevoke=serde_json::from_value(request.input.clone())
+                .map_err(|_|"Invalid classifier approval revoke input")?;
+            if input.project_root.as_deref().is_some_and(|root|!valid_project_root(root)) {
+                return Err("Invalid classifier approval revoke input");
+            }
+            "statewright_native_approval_revoke"
+        }
         "post_tool" => {
             let input: PostTool = serde_json::from_value(request.input.clone())
                 .map_err(|_| "Invalid native post-tool input")?;
@@ -229,12 +240,12 @@ pub(super) fn parse(arguments: Value) -> Result<(Request, &'static str), &'stati
 pub(super) fn definition() -> ToolInfo {
     ToolInfo { name: TOOL.into(), annotations: Some(ToolAnnotations { read_only_hint: Some(false),
         destructive_hint: Some(false), idempotent_hint: Some(false), open_world_hint: Some(false), ..Default::default() }),
-        description: Some("Versioned native workspace control. The host supplies its current conversation context. Workflow approval requests open a native human form and do not accept a decision as input. Classifier approval_grant and approval_review are reserved for the plugin hook immediately after a host-native human choice and require a gateway-issued one-use review request ID; model calls are denied by the hook. Read get_state before a mutation; never retry a mutation without readback.".into()),
+        description: Some("Versioned native workspace control. The host supplies its current conversation context. Workflow approval requests open a native human form and do not accept a decision as input. Classifier approval_grant and approval_review are reserved for the plugin hook immediately after a host-native human choice and require a gateway-issued one-use review request ID bound to the MCP transport session that received it; model calls are denied by the hook. approval_revoke invalidates this owner's timed and always grants for the project at the gateway. Read get_state before a mutation; never retry a mutation without readback.".into()),
         input_schema: json!({"type":"object","additionalProperties":false,
           "properties": {"context":{"type":"object","additionalProperties":false,
             "properties":{"version":{"type":"integer","enum":[1]},"conversation_id":{"type":"string","format":"uuid"}},
             "required":["version","conversation_id"]},
-          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval","pre_tool","post_tool","stop","approval_grant","approval_review"]},
+          "operation":{"type":"string","enum":["get_state","load_workflow","transition","deactivate","request_approval","pre_tool","post_tool","stop","approval_grant","approval_review","approval_revoke"]},
           "input":{"type":"object"},"expected_revision":{"type":["string","null"]}},
           "required":["context","operation","input"]}) }
 }
@@ -342,6 +353,7 @@ pub(super) async fn handle(
     validated: FetchResult,
     resource: &str,
     request: JsonRpcRequest,
+    transport: Option<&str>,
 ) -> JsonRpcResponse {
     let fail = |message: &str| JsonRpcResponse::error(request.id.clone(), -32602, message);
     if request.id.is_none() || request.id == Some(Value::Null) {
@@ -444,6 +456,9 @@ pub(super) async fn handle(
     }
     session.gateway.refresh_native_catalog(validated.workflows);
     session.gateway.set_native_owner_fingerprint(owner_fingerprint);
+    // Bind classifier reviews to the gateway-issued MCP transport this request
+    // arrived on, never to the client-supplied conversation id alone.
+    session.gateway.set_native_request_transport(transport);
     if tool != "statewright_get_state"
         && native.expected_revision.as_deref() != Some(&session.native_revision)
     {
@@ -484,6 +499,11 @@ pub(super) async fn handle(
             "statewright_native_approval_review" => {
                 let input:ApprovalReview=serde_json::from_value(native.input).expect("validated native review");
                 let decision=session.gateway.native_approval_review(&input.review_request_id,&input.action).await;
+                serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
+            }
+            "statewright_native_approval_revoke" => {
+                let input:ApprovalRevoke=serde_json::from_value(native.input).expect("validated native revoke");
+                let decision=session.gateway.native_approval_revoke(input.project_root.as_deref()).await;
                 serde_json::to_value(ToolCallResult::text(decision.to_string())).unwrap()
             }
             _ => invoke(&mut session.gateway, tool, native.input).await,

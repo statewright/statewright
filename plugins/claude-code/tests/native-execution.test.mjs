@@ -107,6 +107,9 @@ test('review card masks credentials and explains Claude native permission', () =
   assert.match(message, /any dependencies Statewright captured remain unchanged/);
   assert.match(message, /may not detect changes to executable contents it did not capture/);
   assert.match(message, /Default choice: Allow for 4 hours/);
+  // Revoke is server-side; the copy must not promise more or less than that.
+  assert.match(message, /Always lasts until you revoke approvals for this project \(Statewright revokes them at the gateway too\)/);
+  assert.doesNotMatch(message, /until you revoke it or/);
   assert.doesNotMatch(message, /PRIVATE123|secret/);
 });
 

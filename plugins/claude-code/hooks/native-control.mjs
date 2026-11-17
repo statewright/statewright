@@ -128,6 +128,8 @@ function actionValid(action) {
     case 'approval_review': return only(i, ['review_request_id', 'action']) &&
       typeof i.review_request_id === 'string' && /^[a-f0-9]{32}$/i.test(i.review_request_id) &&
       ['denied', 'unavailable'].includes(i.action);
+    case 'approval_revoke': return only(i, ['project_root']) &&
+      (i.project_root === undefined || typeof i.project_root === 'string' && i.project_root.length > 0 && i.project_root.length <= 4096);
     case 'post_tool': return only(i, ['tool_name', 'tool_input', 'tool_response', 'is_error']) &&
       validName(i.tool_name) && object(i.tool_input) && typeof i.tool_response === 'string' && typeof i.is_error === 'boolean';
     default: return false;

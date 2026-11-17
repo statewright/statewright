@@ -12,6 +12,44 @@ const ONCE_TTL_MS: i64 = 60 * 1000;
 const MAX_REVIEWS: usize = 128;
 const MAX_ONCE: usize = 128;
 const MAX_TOKENS: usize = 64;
+/// Revocation scopes are never evicted (eviction would revive revoked
+/// tokens). At capacity a new scope's revoke fails loudly instead.
+const MAX_REVOCATION_SCOPES: usize = 65_536;
+
+/// Process-local revocation cutoffs keyed by (owner, project scope). With
+/// durable history the gateway also persists each cutoff in Postgres and reads
+/// it back on reuse, so restarts and other replicas honour it; this map is the
+/// authoritative store only when there is no database (and therefore no
+/// reusable-grant key), which in practice means tests.
+static REVOCATIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<(String, String), i64>>> =
+    std::sync::OnceLock::new();
+fn revocations() -> std::sync::MutexGuard<'static, HashMap<(String, String), i64>> {
+    REVOCATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+/// Record that every reusable grant issued at or before `at_ms` for this
+/// owner/project is revoked. Returns false only when a new scope cannot be
+/// tracked.
+pub(crate) fn record_revocation(owner: &str, project: &str, at_ms: i64) -> bool {
+    let mut map = revocations();
+    let key = (owner.to_owned(), project.to_owned());
+    if !map.contains_key(&key) && map.len() >= MAX_REVOCATION_SCOPES {
+        return false;
+    }
+    let entry = map.entry(key).or_insert(at_ms);
+    *entry = (*entry).max(at_ms);
+    true
+}
+pub(crate) fn local_revoked_before(owner: &str, project: &str) -> Option<i64> {
+    revocations()
+        .get(&(owner.to_owned(), project.to_owned()))
+        .copied()
+}
+pub(crate) fn current_ms() -> i64 {
+    now_ms()
+}
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -112,6 +150,9 @@ pub(crate) struct Review {
     pub(crate) tool_name: String,
     pub(crate) tool_input: Value,
     pub(crate) host_cwd: Option<String>,
+    /// Gateway-issued MCP transport session (`Mcp-Session-Id`) the review was
+    /// issued on. Grants and outcomes must arrive on the same transport.
+    pub(crate) transport: Option<String>,
     pub(crate) expires_at_ms: i64,
 }
 impl Review {
@@ -175,6 +216,7 @@ impl Review {
             tool_name: tool_name.into(),
             tool_input: tool_input.clone(),
             host_cwd: host_cwd.map(str::to_owned),
+            transport: None,
             expires_at_ms: issued_at_ms + REVIEW_TTL_MS,
         })
     }
@@ -257,6 +299,11 @@ impl ClassifierGrants {
     }
     pub(crate) fn issue(&mut self, review: Review) -> Option<String> {
         self.prune();
+        // A review that is not bound to a verified MCP transport could be
+        // answered by any holder of the same OAuth credential. Issue nothing.
+        if review.transport.as_deref().is_none_or(str::is_empty) {
+            return None;
+        }
         if self.reviews.len() >= MAX_REVIEWS {
             // Expired entries have already been swept. Never discard a live,
             // unconsumed human decision to admit another request.
@@ -386,12 +433,25 @@ impl ClassifierGrants {
         }
         Some(json!({"action":"consumed","duration":"once","review_request_id":review.id}))
     }
+    #[cfg(test)]
     pub(crate) fn reuse(
         &mut self,
         tokens: &[String],
         owner: &str,
         project: &str,
         binding: &Binding,
+    ) -> Option<Value> {
+        self.reuse_unless_revoked(tokens, owner, project, binding, None)
+    }
+    /// `revoked_before` is the server-side revocation cutoff for this
+    /// owner/project: any token issued at or before it is rejected.
+    pub(crate) fn reuse_unless_revoked(
+        &mut self,
+        tokens: &[String],
+        owner: &str,
+        project: &str,
+        binding: &Binding,
+        revoked_before: Option<i64>,
     ) -> Option<Value> {
         self.prune();
         let key = self.key.as_ref()?;
@@ -422,6 +482,7 @@ impl ClassifierGrants {
                 || claims.project != project
                 || claims.binding != *binding
                 || claims.issued_at_ms > now_ms()
+                || revoked_before.is_some_and(|cutoff| claims.issued_at_ms <= cutoff)
                 || !matches!(claims.duration.as_str(), "2h" | "4h" | "8h" | "always")
                 || (claims.duration == "always" && !self.always_available())
                 || claims
@@ -468,6 +529,8 @@ mod tests {
             true,
         )
         .unwrap();
+        let mut review = review;
+        review.transport = Some("plugin-transport".into());
         (grants, review)
     }
     #[test]
@@ -683,5 +746,44 @@ mod tests {
                 &json!({"command":"x","workdir":"/workspace"}),Some("/workspace"),true,true).unwrap();
             assert_eq!(offered.default_duration,"once");
         }
+    }
+
+    #[test]
+    fn reviews_without_a_verified_transport_are_never_issued() {
+        let (mut grants, mut review) = fixture(true);
+        review.transport = None;
+        assert!(grants.issue(review.clone()).is_none());
+        review.transport = Some(String::new());
+        assert!(grants.issue(review).is_none());
+    }
+    #[test]
+    fn server_side_revocation_rejects_tokens_issued_before_the_cutoff() {
+        for duration in ["2h", "always"] {
+            let (mut grants, review) = fixture(true);
+            let token = grants.grant(review.clone(), duration).unwrap().payload["classifier_approval"]
+                ["token"].as_str().unwrap().to_owned();
+            let cutoff = now_ms();
+            assert!(grants
+                .reuse_unless_revoked(&[token.clone()], "owner", "project", &review.binding, Some(cutoff - 60_000))
+                .is_some(), "older cutoff keeps a newer token");
+            assert!(grants
+                .reuse_unless_revoked(&[token.clone()], "owner", "project", &review.binding, Some(cutoff))
+                .is_none(), "{duration} token survives revoke");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let fresh = grants.grant(review.clone(), duration).unwrap().payload["classifier_approval"]
+                ["token"].as_str().unwrap().to_owned();
+            assert!(grants
+                .reuse_unless_revoked(&[fresh], "owner", "project", &review.binding, Some(cutoff))
+                .is_some(), "a grant made after revoke works");
+        }
+    }
+    #[test]
+    fn revocation_registry_is_monotonic_and_scoped() {
+        let owner = format!("owner-{}", new_id());
+        assert!(record_revocation(&owner, "p1", 200));
+        assert!(record_revocation(&owner, "p1", 100));
+        assert_eq!(local_revoked_before(&owner, "p1"), Some(200));
+        assert_eq!(local_revoked_before(&owner, "p2"), None);
+        assert_eq!(local_revoked_before("other", "p1"), None);
     }
 }

@@ -29,4 +29,23 @@ CREATE TABLE IF NOT EXISTS statewright_events.deliveries (
 );
 CREATE INDEX IF NOT EXISTS event_pending ON statewright_events.deliveries(next_attempt_at) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS event_run ON statewright_events.subscriptions(owner_id,run_id,run_session_id);
+CREATE TABLE IF NOT EXISTS statewright_events.classifier_approval_history (
+    id text PRIMARY KEY,
+    occurred_at timestamptz NOT NULL DEFAULT now(),
+    owner_id text NOT NULL,
+    run_id text NOT NULL,
+    run_session_id text NOT NULL,
+    action text NOT NULL,
+    payload jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS classifier_approval_run ON statewright_events.classifier_approval_history(owner_id,run_id,occurred_at);
 REVOKE ALL ON ALL TABLES IN SCHEMA statewright_events FROM PUBLIC;
+-- Server-side classifier grant revocation. Any reusable grant issued at or
+-- before revoked_before_ms for this owner/project scope is rejected on reuse.
+CREATE TABLE IF NOT EXISTS statewright_events.classifier_grant_revocations (
+    owner_id text NOT NULL,
+    project_id text NOT NULL,
+    revoked_before_ms bigint NOT NULL,
+    revoked_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (owner_id, project_id)
+);

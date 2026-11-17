@@ -159,6 +159,62 @@ Do not remove other servers or grant blanket tool permissions. Never run the old
   execute without another pre-check; post-call input comparison is detection,
   not prevention. Statewright does not replace Claude's own authorization.
 
+## Classifier reviews and timed approvals
+
+When Statewright cannot establish a command's effects, the native plugin may
+ask you to deny it, allow it once, or allow the exact invocation for 2, 4, or
+8 hours or until its binding changes. The workflow's
+`meta.approval_memory.approve_for` selects the initial choice, except that
+**Always** is never preselected; a missing default, `approve_for: always`, or
+an empty duration list starts at **Allow once**. **Always** remains an explicit
+human choice. The gateway's single `STATEWRIGHT_APPROVAL_ALWAYS` switch is
+`on` by default; set it to `off` to remove **Always** from the picker and
+reject both new and existing Always grants. `allowed_durations` limits the
+timed choices. If dependency provenance is
+incomplete, or the gateway has no reusable-grant key and durable history,
+only **Deny** and **Allow once** are offered. Claude's own permission prompt
+may still follow. A timed choice skips only Statewright's classifier review
+for the exact command and session working directory while the policy and
+captured dependencies remain unchanged; Statewright may
+miss changes to executable contents it did not capture.
+
+Use `/statewright approvals revoke` or **Revoke approvals for this project** in
+the sidebar to revoke timed and Always grants. The plugin first asks the
+gateway to revoke every grant you hold for this project (the gateway records a
+cutoff time and rejects any token issued at or before it, in any conversation,
+including copies), then removes the saved tokens from the plugin store. If the
+gateway can't be reached, the message says so: the local copies are still
+removed, but a copied token keeps working until it expires (Always: until a
+gateway revoke succeeds, `STATEWRIGHT_APPROVAL_ALWAYS=off`, or the signing key
+rotates). If project scope is unavailable, the command removes all saved tokens
+and revokes the conversation scope at the gateway. Timed grants require a
+gateway signing key and durable approval history; without them, only one-time
+approval is available.
+
+Each review id is bound to the MCP connection (`Mcp-Session-Id`) the plugin
+used when Statewright issued it. A grant or decline arriving on any other
+connection is rejected, and the attempt consumes the id. Reopening the
+Statewright connection mid-review therefore cancels that review; Statewright
+asks again on the next attempt.
+
+### Known risks
+
+- **Reading Claude's credential store.** The gateway authenticates the plugin
+  with Claude's own stored Statewright MCP credential (macOS Keychain item
+  `Claude Code-credentials`; `~/.claude/.credentials.json` on Linux). On macOS
+  that item can be released to any process running as you without a Keychain
+  prompt. An agent that reads it could open its own MCP connection and run the
+  whole review flow there, approving its own commands. The gateway can't tell
+  that connection from the plugin's: both hold the same credential, and the
+  plugin's store is readable by the same user. Statewright therefore treats
+  reads of these stores (`security find-generic-password`, `dump-keychain`,
+  `.credentials.json`, `secret-tool lookup`, Statewright's own key files) as
+  known risk: they are denied and never offered for review. That screen is
+  lexical and best effort; Claude's own permission prompt is the other control.
+- **A legacy `mcp__statewright__*` server.** The legacy shell hook only
+  recognises the `statewright` server when its configured URL is a Statewright
+  gateway (see `STATEWRIGHT_URL`).
+
 ## Development
 
 `node --test plugins/claude-code/tests/*.test.mjs` runs source tests from the

@@ -62,6 +62,66 @@ function own($, next) { return next.origin?.plugin === $.plugin.name && typeof $
 const flatArgs = ({ tool, tool_use_id, agentId, consent, requestMeta, ...args }) => args;
 const CONTROL_QUESTION = 'Allow Statewright to manage workflows in this conversation? This includes workflow changes and sending tool inputs and results for workflow checks. Claude’s file and command permissions and separate workflow approvals stay in place. This permission ends when the session closes or the plugin reloads.';
 const CONTROL_OPTIONS = ['Allow this session', 'Not now'];
+const APPROVAL_GRANTS_KEY = 'classifier-approval-grants:v1';
+const MAX_APPROVAL_GRANTS = 64;
+const validGrant = entry => entry && typeof entry.scope === 'string' && entry.scope.length > 0 &&
+  typeof entry.token === 'string' && entry.token.length > 0 &&
+  entry.token.length <= 2048 && typeof entry.grant_id === 'string' && entry.grant_id.length <= 128 &&
+  (entry.expires_at == null || typeof entry.expires_at === 'string' || Number.isFinite(entry.expires_at));
+const grantExpiry = value => typeof value === 'number' ? value : Date.parse(value);
+const liveApprovalGrants = saved => (Array.isArray(saved) ? saved : [])
+  .filter(entry => validGrant(entry) && (entry.expires_at == null || grantExpiry(entry.expires_at) > Date.now()))
+  .slice(-MAX_APPROVAL_GRANTS);
+async function approvalGrantScope($) {
+  const v = await current($);
+  let root;
+  try { root = await $.session.root?.(); } catch { /* Fall back to this conversation. */ }
+  const owner = v.native?.owner_fingerprint;
+  return typeof owner === 'string' && /^[a-f0-9]{64}$/.test(owner) && absoluteHostPath(root)
+    ? `owner:${owner}:project:${root}` : `conversation:${v.conversation}`;
+}
+async function approvalGrantEntries($) {
+  const scope = await approvalGrantScope($), saved = await $.store.get(APPROVAL_GRANTS_KEY);
+  const live = liveApprovalGrants(saved);
+  if (Array.isArray(saved) && live.length !== saved.length) await $.store.set(APPROVAL_GRANTS_KEY, live);
+  return live.filter(entry => entry.scope === scope);
+}
+async function rememberApprovalGrant($, entry) {
+  const scope = await approvalGrantScope($), scoped = { ...entry, scope };
+  if (!validGrant(scoped)) throw new Error('Invalid Statewright approval receipt');
+  const saved = await $.store.get(APPROVAL_GRANTS_KEY);
+  const entries = liveApprovalGrants(saved).filter(item => item.grant_id !== entry.grant_id).slice(-MAX_APPROVAL_GRANTS + 1);
+  entries.push({ scope, token: entry.token, grant_id: entry.grant_id, expires_at: entry.expires_at ?? null });
+  await $.store.set(APPROVAL_GRANTS_KEY, entries.slice(-MAX_APPROVAL_GRANTS));
+}
+// Revoke at the gateway first, so copies of a token stop working everywhere,
+// then remove the local copies. The copy reports exactly which part happened.
+async function revokeGrantsAtGateway($) {
+  const v = await current($);
+  if (!v.control || !/^[a-f0-9]{64}$/.test(v.native?.owner_fingerprint ?? '')) return false;
+  let root;
+  try { root = await $.session.root?.(); } catch { /* Revoke the conversation scope. */ }
+  try {
+    const result = await nativeRequest($, 'approval_revoke', absoluteHostPath(root) ? { project_root: root } : {});
+    return outcome(result)?.classifier_approval?.action === 'revoked';
+  } catch { return false; }
+}
+async function revokeApprovalGrants($) {
+  const server = await revokeGrantsAtGateway($);
+  const scope = await approvalGrantScope($), saved = await $.store.get(APPROVAL_GRANTS_KEY);
+  const serverNote = server
+    ? ' Statewright also revoked them at the gateway, so copies no longer work.'
+    : ' Statewright could not revoke them at the gateway; any copy keeps working until it expires (Always: until revoked at the gateway). Try again when connected.';
+  if (scope.startsWith('conversation:')) {
+    if (typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
+    else await $.store.set(APPROVAL_GRANTS_KEY, []);
+    return `Stored timed approvals across all projects were removed from this device.${serverNote}`;
+  }
+  const remaining = (Array.isArray(saved) ? saved : []).filter(entry => validGrant(entry) && entry.scope !== scope);
+  if (!remaining.length && typeof $.store.delete === 'function') await $.store.delete(APPROVAL_GRANTS_KEY);
+  else await $.store.set(APPROVAL_GRANTS_KEY, remaining);
+  return `Stored timed approvals for this project were removed from this device.${serverNote}`;
+}
 const CONTROL_QUESTION_INPUT = { questions: [{ question: CONTROL_QUESTION, header: 'Statewright',
   options: CONTROL_OPTIONS.map(label => ({ label, description: '' })), multiSelect: false }] };
 async function isControlQuestion($, e, next, input) {
@@ -71,6 +131,27 @@ async function isControlQuestion($, e, next, input) {
       (q.invocation && q.invocation !== e.tool_use_id) || argumentKey(input) !== argumentKey(CONTROL_QUESTION_INPUT)) return false;
   q.invocation = e.tool_use_id;
   return true;
+}
+async function isApprovalQuestion($, e, next, input) {
+  const v = await current($), q = v.approvalQuestion;
+  if (!q || q.generation !== v.generation || !own($, next) || e.tool !== 'AskUserQuestion' ||
+      !e.tool_use_id || e.agentId || next.signal?.aborted ||
+      v.runningTool?.id !== q.toolUseId ||
+      (q.invocation && q.invocation !== e.tool_use_id) ||
+      argumentKey(input) !== argumentKey(q.input)) return false;
+  q.invocation = e.tool_use_id;
+  return true;
+}
+async function askClassifierApproval($, question, options, reviewRequestId) {
+  const v = await current($);
+  if (v.approvalQuestion || !v.runningTool || typeof reviewRequestId !== 'string')
+    throw new Error('Statewright review prompt unavailable');
+  const marker = { generation: v.generation, toolUseId: v.runningTool.id, reviewRequestId,
+    invocation: null, input: { questions: [{ question, header: 'Statewright approval',
+      options: options.map(label => ({ label, description: '' })), multiSelect: false }] } };
+  v.approvalQuestion = marker;
+  try { return await $.ui.ask(question, { header: 'Statewright approval', options }); }
+  finally { if (v.approvalQuestion === marker) v.approvalQuestion = null; }
 }
 async function callControl($, args, permission) {
   const v = await current($), key = argumentKey(args);
@@ -200,8 +281,36 @@ function executionFor($) {
   // Host capabilities remain statically scoped to this hooks module. The pure
   // adapter receives callbacks, never the native host object itself.
   return createExecutionAdapter({ view: () => current($), request: (_, operation, input) => nativeRequest($, operation, input),
+    executionScope: (_, tool, input) => observedExecutionScope($, tool, input),
+    approval: { tokens: async () => (await approvalGrantEntries($)).map(entry => entry.token),
+      remember: (_, entry) => rememberApprovalGrant($, entry),
+      ask: (_, question, options, reviewRequestId) => askClassifierApproval($, question, options, reviewRequestId) },
     after: (ms, callback) => $.clock.after(ms, callback),
     fault: (v, message) => { v.controlError = message; redraw($); } });
+}
+const absoluteHostPath = value => typeof value === 'string' && value.length > 0 &&
+  !/[\u0000-\u001f\u007f]/.test(value) &&
+  (value.startsWith('/') || value.startsWith('\\\\') || /^[A-Za-z]:[\\/]/.test(value));
+async function observedExecutionScope($, tool, input) {
+  // A plugin-first update keeps the old gateway wire and command observation.
+  // The upgraded native snapshot advertises an opaque authenticated owner.
+  if (!/^[a-f0-9]{64}$/.test((await current($)).native?.owner_fingerprint ?? ''))
+    return { toolInput: input };
+  let root, cwd;
+  try { root = await $.session.root?.(); } catch { /* Project scope unavailable. */ }
+  if (tool === 'Bash') {
+    try { cwd = await $.session.cwd?.(); } catch { /* Reusable command provenance unavailable. */ }
+  }
+  const projectRoot = absoluteHostPath(root) ? root : undefined;
+  if (tool !== 'Bash') return { toolInput: input, projectRoot };
+  const toolInput = { ...input };
+  delete toolInput.cwd;
+  delete toolInput.workdir;
+  if (!absoluteHostPath(cwd)) return { toolInput, displayInput: input, projectRoot };
+  if (input.cwd && input.cwd !== cwd || input.workdir && input.workdir !== cwd)
+    return { invalid: 'Claude’s Bash working directory differs from its current session directory.' };
+  toolInput.workdir = cwd;
+  return { toolInput, displayInput: toolInput, projectRoot, hostCwd: cwd };
 }
 // Native Claude owns OAuth and its credential store. Desktop uses its own
 // /mcp sign-in; only terminal sessions use the CLI helper. The child reads the same installed plugin and
@@ -738,9 +847,14 @@ export function register(on, options = {}) {
       });
       return { text: 'Opening Statewright preferences…' };
     }
+    if (args === 'approvals revoke') {
+      v.notice = await revokeApprovalGrants($);
+      redraw($);
+      return { text: v.notice };
+    }
     if (args) {
       const match = /^powerline(?:\s+(on|off|default))?$/.exec(args);
-      if (!match) return { text: 'Use /statewright to open the workspace, /statewright configure for saved preferences, or /statewright powerline on|off|default.' };
+      if (!match) return { text: 'Use /statewright to open the workspace, /statewright configure for saved preferences, /statewright powerline on|off|default, or /statewright approvals revoke.' };
       if (match[1]) v.powerlineOverride = match[1] === 'default' ? null : match[1] === 'on';
       redraw($);
       const enabled = v.powerlineOverride ?? (options.powerline === true);
@@ -763,6 +877,10 @@ export function register(on, options = {}) {
   // nested MCP permission check must not be skipped as this handler's re-entry.
   on('tool.check', { tool: /^mcp__plugin[:_]statewright[:_]statewright__/ }, async ($, e, next) => {
     if (gatewayTool(e.tool)) {
+      const approvalControl = e.tool.endsWith(`__${NATIVE_CONTROL_TOOL}`) &&
+        ['approval_grant', 'approval_review', 'approval_revoke'].includes(e.input?.operation);
+      if (approvalControl && (!own($, next) || !permissionFrames.has(argumentKey(e.input))))
+        return { decision: 'deny', reason: 'Only the Statewright native review prompt can submit this approval decision.' };
       if (!own($, next) && !catalogTool(e.tool, e.input))
         return { decision: 'deny', reason: 'Use the Statewright workspace tools for this conversation.' };
       const frame = permissionFrames.get(argumentKey(e.input));
@@ -810,15 +928,16 @@ export function register(on, options = {}) {
     return next(e);
   }).catch(() => ({ decision: 'deny', reason: 'Statewright could not verify this control request. Refresh its connection.' }));
   on('tool.check', { tool: /^(?!mcp__plugin[:_]statewright[:_]statewright__)/ }, async ($, e, next) => {
-    if (await isControlQuestion($, e, next, e.input)) return next(e);
+    if (await isControlQuestion($, e, next, e.input) || await isApprovalQuestion($, e, next, e.input)) return next(e);
     if (e.tool === connectTool || workflowTools.has(e.tool)) return next(e);
     const verdict = await executionFor($).check(null, e, next);
     if (verdict?.decision === 'deny') reportDiagnostic($, await current($), 'permission_refused', 'pre_tool', 'control');
     return verdict;
-  }).catch(async ($, e, next) => next.error?.kind === 're-entry' && await isControlQuestion($, e, next, e.input)
+  }).catch(async ($, e, next) => next.error?.kind === 're-entry' &&
+    (await isControlQuestion($, e, next, e.input) || await isApprovalQuestion($, e, next, e.input))
     ? next(e) : { decision: 'deny', reason: 'Statewright could not verify this tool request. Refresh its connection.' });
   on('tool.call', async ($, e, next) => {
-    if (await isControlQuestion($, e, next, flatArgs(e))) return next(e);
+    if (await isControlQuestion($, e, next, flatArgs(e)) || await isApprovalQuestion($, e, next, flatArgs(e))) return next(e);
     if (gatewayTool(e.tool)) return own($, next) || catalogCall(e) ? next(e)
       : { deny: 'Use the Statewright workspace tools for this conversation.' };
     if (workflowTools.has(e.tool)) {
@@ -895,7 +1014,8 @@ export function register(on, options = {}) {
       capabilities: v.connected ? v.native?.capabilities ?? null : null,
       client_model_routing: routingView(v),
       executionUnavailableReason: v.controlError || ready.reason }) };
-  }).catch(async ($, e, next) => next.called || (next.error?.kind === 're-entry' && await isControlQuestion($, e, next, flatArgs(e)))
+  }).catch(async ($, e, next) => next.called || (next.error?.kind === 're-entry' &&
+    (await isControlQuestion($, e, next, flatArgs(e)) || await isApprovalQuestion($, e, next, flatArgs(e))))
     ? next(e) : { deny: 'Statewright could not handle this request. Open /statewright to retry.' });
   on('mcp.call', async ($, e, next) => {
     const catalog = gatewayServer(e.server) && ((e.tool === 'statewright_list_workflows' && emptyArgs(e.args)) ||
@@ -1123,6 +1243,11 @@ export function register(on, options = {}) {
       }
       if (!v.actionBusy && !v.runningTool) rows.push(button('refresh', 'Refresh workflows', 'r', () => schedule($, v)));
       if (v.controlError) rows.push(text(v.controlError));
+      rows.push(button('revoke-approvals', 'Revoke approvals for this project', 'v', async () => {
+        if (await current($) !== v) return;
+        v.notice = await revokeApprovalGrants($);
+        redraw($);
+      }));
     }
     if (!desktop && v.manual && !v.busy && !nativeSignIn) rows.push(button('copy-login', 'Copy SSH sign-in command', 's', async () => {
       if (await current($) !== v || v.busy || nativeSignIn) return;

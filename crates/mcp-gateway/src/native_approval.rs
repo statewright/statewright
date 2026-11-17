@@ -244,7 +244,10 @@ pub(super) async fn route(
             .as_ref()
             .is_some_and(|p| p["name"] == native::CONNECT_TOOL)
     {
-        return response(native::handle(&state, validated, resource, request).await);
+        return response(
+            native::handle(&state, validated, resource, request, verified_transport(transport))
+                .await,
+        );
     }
     if request.method == "tools/call"
         && request
@@ -281,11 +284,21 @@ pub(super) async fn route(
             }
             return begin(state, &namespace, transport, request).await;
         }
-        return response(native::handle(&state, validated, resource, request).await);
+        return response(
+            native::handle(&state, validated, resource, request, verified_transport(transport))
+                .await,
+        );
     }
     native::discovery(&validated, resource, request)
         .map(response)
         .unwrap_or_else(|| StatusCode::ACCEPTED.into_response())
+}
+
+/// The MCP transport id is issued by this gateway on `initialize` and checked
+/// with `Broker::owns` before any native tool call is dispatched. Only such a
+/// verified id may bind a classifier review; empty headers bind nothing.
+fn verified_transport(transport: &str) -> Option<&str> {
+    (!transport.is_empty()).then_some(transport)
 }
 
 fn parse_answer(value: &Value) -> Answer {

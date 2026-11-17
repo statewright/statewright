@@ -1,6 +1,7 @@
 // Thin native hook binding to the existing gateway adapter. Claude owns tool
 // execution and permissions. Permission-time rewrites are a documented host
 // limitation; post observations report actual inputs, never invented effects.
+import { classifierReviewChoices, classifierReviewDuration, classifierReviewMessage } from './classifier-review.mjs';
 const active = v => Boolean(v.requiresEnforcement || (v.native?.state && !v.native.state.is_final));
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
@@ -55,7 +56,7 @@ export function outcome(snapshot) {
   if (snapshot?.outcome?.isError || snapshot?.outcome?.content?.length !== 1) throw new Error('Statewright action failed');
   return JSON.parse(snapshot.outcome.content[0].text);
 }
-export function createExecutionAdapter({ view, request, fault, after }) {
+export function createExecutionAdapter({ view, request, fault, after, approval, executionScope }) {
   return {
     async call($, e, next) {
       const v = await view($);
@@ -83,7 +84,8 @@ export function createExecutionAdapter({ view, request, fault, after }) {
             const o = record.observed;
             if (o) {
               if (!same(record.input, o.tool_input)) fail('Claude changed the tool input during permission handling. The actual result is recorded.');
-              outcome(await request($, 'post_tool', { tool_name: record.tool, tool_input: o.tool_input,
+              outcome(await request($, 'post_tool', { tool_name: record.tool,
+                tool_input: same(record.input, o.tool_input) ? record.gatewayInput : o.tool_input,
                 tool_response: o.response, is_error: o.failed }));
             } else if (!result?.deny) fail('Claude did not provide completion evidence for the last tool. Its effects were not counted.');
           }
@@ -107,13 +109,63 @@ export function createExecutionAdapter({ view, request, fault, after }) {
       if (!owned || v.runningTool !== record)
         return { decision: 'deny', reason: 'Statewright could not correlate this native tool request.' };
       if (record.checked) return same(record.input, e.input) ? native : { decision: 'deny', reason: 'Tool arguments changed after the workflow check. Submit a new call.' };
-      const s = await request($, 'pre_tool', { tool_name: e.tool, tool_input: e.input });
-      const decision = outcome(s);
+      const checkedInput = JSON.parse(JSON.stringify(e.input));
+      const scope = JSON.parse(JSON.stringify(executionScope
+        ? await executionScope($, e.tool, e.input) : { toolInput: e.input }));
+      if (scope.invalid) return { decision: 'deny', reason: scope.invalid };
+      const scopeCurrent = async () => !executionScope || same(scope, await executionScope($, e.tool, e.input));
+      const upgraded = /^[a-f0-9]{64}$/.test(v.native?.owner_fingerprint ?? '');
+      const tokens = upgraded && approval ? await approval.tokens($).catch(() => []) : [];
+      const preTool = proof => request($, 'pre_tool', {
+        tool_name: e.tool, tool_input: scope.toolInput,
+        ...(upgraded && scope.projectRoot ? { project_root: scope.projectRoot } : {}),
+        ...(upgraded && scope.hostCwd ? { host_cwd: scope.hostCwd } : {}),
+        ...(upgraded && (proof?.token || tokens.length) ? { approval_grant_tokens: proof?.token ? [proof.token] : tokens } : {}),
+        ...(upgraded && proof?.one_use_receipt ? { one_use_receipt: proof.one_use_receipt } : {}),
+      });
+      let decision = outcome(await preTool());
+      const stillCurrent = async () => await view($) === v && record.generation === (v.generation ?? 0) &&
+        active(v) && v.runningTool === record && !record.signal?.aborted && !next.signal?.aborted;
+      if (decision.decision === 'deny' && approval && typeof decision.classifier_context?.review_request_id === 'string') {
+        const context = decision.classifier_context, choices = classifierReviewChoices(context);
+        const question = classifierReviewMessage(decision, e.tool, scope.displayInput ?? scope.toolInput, choices.defaultDuration);
+        let answer;
+        try { answer = await approval.ask($, question, choices.options, context.review_request_id); }
+        catch { /* A cancelled or unsupported prompt grants nothing. */ }
+        if (!await stillCurrent() || !await scopeCurrent()) return { decision: 'deny', reason: STALE };
+        const duration = classifierReviewDuration(answer, choices);
+        if (!duration) {
+          const action = answer === 'Deny' ? 'denied' : 'unavailable';
+          try { outcome(await request($, 'approval_review', { review_request_id: context.review_request_id, action })); }
+          catch { /* The denied tool remains denied even if history is unavailable. */ }
+          return { decision: 'deny', reason: action === 'denied'
+            ? 'You denied this Statewright review.' : 'Statewright approval was unavailable or dismissed.' };
+        }
+        const granted = outcome(await request($, 'approval_grant', { review_request_id: context.review_request_id, duration,
+          invocation_sha256: context.approval_memory?.invocation_sha256,
+          ...(scope.projectRoot ? { project_root: scope.projectRoot } : {}),
+          ...(scope.hostCwd ? { host_cwd: scope.hostCwd } : {}) }));
+        if (!await stillCurrent() || !await scopeCurrent()) return { decision: 'deny', reason: STALE };
+        const receipt = granted.classifier_approval;
+        if (granted.decision !== 'allow' || receipt?.action !== 'granted' || receipt.duration !== duration)
+          return { decision: 'deny', reason: 'Statewright could not confirm this approval.' };
+        let proof;
+        if (typeof receipt.one_use_receipt === 'string')
+          proof = { one_use_receipt: receipt.one_use_receipt };
+        if (duration !== 'once' && typeof receipt.token === 'string') {
+          if (!proof) proof = { token: receipt.token };
+          try { await approval.remember($, { token: receipt.token, grant_id: receipt.grant_id, expires_at: receipt.expires_at }); }
+          catch { /* Immediate use is still verified at the gateway; later reuse is unavailable. */ }
+        }
+        if (!proof || !await stillCurrent() || !await scopeCurrent()) return { decision: 'deny', reason: 'Statewright approval could not be applied to this tool.' };
+        decision = outcome(await preTool(proof));
+      }
       if (await view($) !== v || record.generation !== (v.generation ?? 0) || !active(v) || v.runningTool !== record)
         return { decision: 'deny', reason: STALE };
       if (record.signal?.aborted || next.signal?.aborted) return { decision: 'deny', reason: CANCELLED };
+      if (!await scopeCurrent()) return { decision: 'deny', reason: STALE };
       if (decision.decision !== 'allow') return { decision: 'deny', reason: decision.reason || 'This tool is not allowed in the current workflow state.' };
-      record.input = JSON.parse(JSON.stringify(e.input)); record.checked = true;
+      record.input = checkedInput; record.gatewayInput = JSON.parse(JSON.stringify(scope.toolInput)); record.checked = true;
       // An allow from Statewright never replaces a native ask or organization rule.
       return native;
     },

@@ -6,6 +6,12 @@ use sha2::{Digest, Sha256};
 
 const DURATIONS: [&str; 5] = ["once", "2h", "4h", "8h", "always"];
 
+pub(crate) fn always_enabled() -> bool {
+    std::env::var("STATEWRIGHT_APPROVAL_ALWAYS")
+        .map(|value| value == "on")
+        .unwrap_or(true)
+}
+
 pub(crate) fn digest(value: &Value) -> String {
     // serde_json's default map is ordered; explicitly canonicalize nested maps
     // as well so context identity survives rebuilding a workflow HashMap.
@@ -29,16 +35,19 @@ pub(crate) fn digest(value: &Value) -> String {
 }
 
 pub(crate) fn policy(session: &GatewaySession) -> Value {
+    policy_with_always(session, always_enabled())
+}
+
+fn policy_with_always(session: &GatewaySession, allow_always: bool) -> Value {
     let configured = session
         .definition
         .meta
         .as_ref()
         .and_then(|meta| meta.extra.get("approval_memory"));
-    let durations = match configured {
+    let mut durations = match configured.and_then(|value|value.get("allowed_durations")) {
         None => DURATIONS.to_vec(),
         Some(value) => value
-            .get("allowed_durations")
-            .and_then(Value::as_array)
+            .as_array()
             .filter(|items| {
                 !items.is_empty()
                     && items
@@ -51,12 +60,16 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
                     .filter(|duration| *duration == "once" || items.iter().any(|v| v == duration))
                     .collect()
             })
+            // `approve_for` selects the host picker default, not its cap.
             .unwrap_or_else(|| vec!["once"]),
     };
+    if !allow_always {
+        durations.retain(|duration| *duration != "always");
+    }
     let approve_for = configured
         .and_then(|value| value.get("approve_for"))
         .and_then(Value::as_str)
-        .filter(|value| DURATIONS.contains(value) && durations.contains(value))
+        .filter(|value| *value != "always" && durations.contains(value))
         .unwrap_or("once");
     json!({"schema":"statewright/approval-memory-policy/v1",
         "policy_sha256":digest(&json!({"contract":1,"definition":session.definition,
@@ -66,6 +79,22 @@ pub(crate) fn policy(session: &GatewaySession) -> Value {
             "audit_override":session.classifier_audit_override,
             "audit_revision":session.classifier_audit_revision,"environment":std::env::var("STATEWRIGHT_ENV").ok()})),
         "allowed_durations":durations,"approve_for":approve_for})
+}
+
+/// The Claude host supplies its session cwd separately from Bash arguments.
+/// Bind both observations so a copied grant cannot follow the same command
+/// into another directory, including when the host omits a Bash cwd field.
+pub(crate) fn bind_claude_cwd(context: &mut Value, tool_name: &str, input: &Value, host_cwd: Option<&str>) {
+    use crate::tool_intent::{native_tool_family, NativeToolFamily};
+    if native_tool_family(tool_name) != Some(NativeToolFamily::Command) {
+        return;
+    }
+    context["invocation_sha256"] = json!(digest(&json!([tool_name, input, host_cwd])));
+    let observed_cwd = input.get("workdir").or_else(|| input.get("cwd")).and_then(Value::as_str);
+    if host_cwd.is_none() || host_cwd != observed_cwd {
+        context["reusable"] = json!(false);
+        context["reason"] = json!("host_cwd_provenance_unavailable");
+    }
 }
 
 fn dependency_value(value: &Value) -> Value {
@@ -202,6 +231,78 @@ mod tests {
             )["approve_for"],
             "8h"
         );
+    }
+    #[test]
+    fn approve_for_without_cap_offers_all_durations() {
+        let mut session = session();
+        session.definition = serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work",
+            "meta":{"approval_memory":{"approve_for":"4h"}},
+            "states":{"work":{}}
+        })).unwrap();
+        let policy = policy(&session);
+        assert_eq!(policy["approve_for"], "4h");
+        assert_eq!(policy["allowed_durations"], json!(["once","2h","4h","8h","always"]));
+    }
+    #[test]
+    fn explicit_invalid_cap_fails_closed() {
+        for cap in [json!([]),json!(["invalid"]),json!("4h")] {
+            let mut session=session();
+            session.definition=serde_json::from_value(json!({"id":"memory-fixture","initial":"work",
+                "meta":{"approval_memory":{"approve_for":"4h","allowed_durations":cap}},
+                "states":{"work":{}}})).unwrap();
+            assert_eq!(policy(&session)["allowed_durations"],json!(["once"]));
+            assert_eq!(policy(&session)["approve_for"],"once");
+        }
+    }
+    #[test]
+    fn always_is_never_the_default_even_when_workflow_requests_it() {
+        let mut session = session();
+        for approval_memory in [
+            json!({"approve_for":"always"}),
+            json!({}),
+            json!({"approve_for":"always","allowed_durations":[]}),
+        ] {
+            session.definition = serde_json::from_value(json!({
+                "id":"memory-fixture","initial":"work",
+                "meta":{"approval_memory":approval_memory},"states":{"work":{}}
+            })).unwrap();
+            assert_eq!(policy_with_always(&session,true)["approve_for"],"once");
+        }
+        session.definition = serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work","states":{"work":{}}
+        })).unwrap();
+        assert_eq!(policy_with_always(&session,true)["approve_for"],"once");
+    }
+    #[test]
+    fn one_switch_removes_always_without_capping_timed_choices() {
+        let mut session = session();
+        session.definition = serde_json::from_value(json!({
+            "id":"memory-fixture","initial":"work",
+            "meta":{"approval_memory":{"approve_for":"always"}},"states":{"work":{}}
+        })).unwrap();
+        assert_eq!(policy_with_always(&session,true)["allowed_durations"],
+            json!(["once","2h","4h","8h","always"]));
+        let off = policy_with_always(&session,false);
+        assert_eq!(off["allowed_durations"],json!(["once","2h","4h","8h"]));
+        assert_eq!(off["approve_for"],"once");
+    }
+    #[test]
+    fn claude_command_binding_includes_session_cwd() {
+        let input = json!({"command":"unknown_fixture --inspect","workdir":"/a"});
+        let mut at_a = context(&session(),"Bash",&input,None,None,"shell_ast",true,false);
+        bind_claude_cwd(&mut at_a,"Bash",&input,Some("/a"));
+        assert_eq!(at_a["reusable"],true);
+        let mut at_b = context(&session(),"Bash",&json!({"command":"unknown_fixture --inspect","workdir":"/b"}),
+            None,None,"shell_ast",true,false);
+        bind_claude_cwd(&mut at_b,"Bash",&json!({"command":"unknown_fixture --inspect","workdir":"/b"}),Some("/b"));
+        assert_ne!(at_a["invocation_sha256"],at_b["invocation_sha256"]);
+        let mut absent = context(&session(),"Bash",&input,None,None,"shell_ast",true,false);
+        bind_claude_cwd(&mut absent,"Bash",&input,None);
+        assert_eq!(absent["reusable"],false);
+        let mut mismatch = context(&session(),"Bash",&input,None,None,"shell_ast",true,false);
+        bind_claude_cwd(&mut mismatch,"Bash",&input,Some("/b"));
+        assert_eq!(mismatch["reusable"],false);
     }
 
     #[test]

@@ -254,6 +254,11 @@ export function executorAgentEnvironment(environment, session) {
     STATEWRIGHT_ADAPTER_URL: session.adapterBridge.url,
     STATEWRIGHT_ADAPTER_TOKEN: session.adapterBridge.token,
   };
+  // The Claude host is plugin-native: its hooks reach the gateway through
+  // Claude's own MCP sign-in, so nothing in the child needs the bridge bearer.
+  // Never place it where the agent's shell can read it. A legacy hook.sh that
+  // still sees STATEWRIGHT_ADAPTER_URL then fails closed at the bridge.
+  if (session.host === "claude") delete result.STATEWRIGHT_ADAPTER_TOKEN;
   if (session.workspaceSession) {
     result.STATEWRIGHT_DELIVERY_ACTIVE = "1";
     result.STATEWRIGHT_DELIVERY_MANIFEST = session.workspaceSession.manifestPath;

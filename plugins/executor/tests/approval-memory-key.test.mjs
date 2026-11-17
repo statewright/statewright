@@ -110,7 +110,37 @@ test("list skips unverifiable records and stays bounded above 4096 files", {time
       return writeFile(join(memory.root, `${name}.json`), "{}", {mode: 0o600});
     }));
   }
-  const listed = await memory.list();
-  assert(Array.isArray(listed));
-  assert(listed.every(grant => grant.id === valid.id));
+  // 4098 planted files sort before the genuine grant; it must still be listed.
+  assert.deepEqual((await memory.list()).map(grant => grant.id), [valid.id]);
+});
+
+test("planted files cannot hide a genuine grant from list or revoke", {timeout: 30_000}, async t => {
+  const f = await fixture(t), memory = f.make(), valid = await memory.remember(binding, "always");
+  for (let start = 0; start < 5000; start += 100) {
+    await Promise.all(Array.from({length: 100}, (_, offset) => {
+      const name = (start + offset).toString(16).padStart(64, "0");
+      return writeFile(join(memory.root, `${name}.json`), JSON.stringify({grant: {}, mac: "0".repeat(64)}), {mode: 0o600});
+    }));
+  }
+  assert.deepEqual((await memory.list()).map(grant => grant.id), [valid.id]);
+  await memory.revoke(valid.id);
+  assert.deepEqual(await memory.list(), []);
+  assert.equal(await memory.lookup(binding), null);
+});
+
+test("remember fails closed with a clear error when the live index is full", async t => {
+  const f = await fixture(t), cap = 8;
+  const {ApprovalMemory: Fresh, MAX_INDEXED_GRANTS} = await import(`../lib/approval-memory.mjs?full=${randomUUID()}`);
+  assert.equal(MAX_INDEXED_GRANTS, 4096);
+  assert.throws(() => new Fresh({root: f.root, namespace: "ns", maxGrants: MAX_INDEXED_GRANTS + 1}), /capacity_invalid/);
+  const memory = new Fresh({root: f.root, namespace: "ns", now: f.now, maxGrants: cap});
+  const bindingFor = n => ({...binding, invocation_sha256: n.toString(16).padStart(64, "0")});
+  for (let n = 0; n < cap; n++) await memory.remember(bindingFor(n), n === 0 ? "always" : "2h");
+  await assert.rejects(memory.remember(bindingFor(cap), "2h"), /approval_memory_full: 8 remembered approvals/);
+  // Re-remembering an existing binding is not a new entry.
+  assert.equal((await memory.remember(bindingFor(1), "2h")).duration, "2h");
+  // Expired grants free capacity; the live "always" grant is never evicted.
+  f.setNow(f.now() + 2 * 3600_000);
+  assert.equal((await memory.remember(bindingFor(cap), "2h")).duration, "2h");
+  assert.equal((await memory.lookup(bindingFor(0))).duration, "always");
 });

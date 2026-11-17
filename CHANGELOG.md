@@ -17,6 +17,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the lifetime of the owning App Server process, then the user is asked again.
   Unverifiable records now fail closed to a prompt instead of erroring,
   expired grants are swept, and listing is bounded.
+- **[codex]** The approvals list and revoke now read from an in-process index
+  of the grants this App Server minted (the only ones its key can verify)
+  instead of the first 4,096 file names on disk, so files planted by another
+  process can't hide a genuine grant. At 4,096 live grants for one scope,
+  remembering another fails with a clear `approval_memory_full` error rather
+  than evicting anything.
 
 ## [Claude and Codex Plugins 0.3.8] — 2026-11-04
 

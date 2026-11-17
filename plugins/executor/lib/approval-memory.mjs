@@ -6,7 +6,11 @@ import {join, resolve} from "node:path";
 export const APPROVAL_DURATIONS = Object.freeze(["once", "2h", "4h", "8h", "always"]);
 const TTL = {"2h": 2*3600_000, "4h": 4*3600_000, "8h": 8*3600_000, always: null};
 const MAX_RECORD_AGE = 30*24*3600_000;
-const MAX_LIST_SCAN = 4096;
+// Opportunistic sweep of unindexed files only; never used to find grants.
+const MAX_JUNK_SWEEP = 4096;
+// Live grants one process can hold for one scope. Reaching it is a clear,
+// fail-closed error on remember, never a silent eviction or a hidden grant.
+export const MAX_INDEXED_GRANTS = 4096;
 // Shared by ApprovalMemory owners in this process only. A restart loses every
 // remembered approval, including "always", and asks the human again.
 const sessionKeys = new Map();
@@ -14,6 +18,15 @@ function sessionKey(root) {
   let key=sessionKeys.get(root);
   if(!key){key=randomBytes(32);sessionKeys.set(root,key);}
   return key;
+}
+// Only grants minted with this process's key can ever verify, so this index
+// of ids it minted is the complete set of grants it can list or revoke. Files
+// planted by another process cannot crowd a genuine grant out of the listing.
+const sessionIndexes = new Map();
+function sessionIndex(root) {
+  let index=sessionIndexes.get(root);
+  if(!index){index=new Set();sessionIndexes.set(root,index);}
+  return index;
 }
 const hex = value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 export function approvalMemoryContext(value) {
@@ -39,8 +52,10 @@ function identity(binding) {
 /** Private local grants. A grant never authorizes a tool by itself: the native
  * controller supplies current gateway clearance and verifies its live owner. */
 export class ApprovalMemory {
-  constructor({root, namespace, now=Date.now}) {
+  constructor({root, namespace, now=Date.now, maxGrants=MAX_INDEXED_GRANTS}) {
     if (typeof root!=="string"||!root||typeof namespace!=="string"||!namespace) throw new Error("approval_memory_scope_unavailable");
+    if (!Number.isSafeInteger(maxGrants)||maxGrants<1||maxGrants>MAX_INDEXED_GRANTS) throw new Error("approval_memory_capacity_invalid");
+    this.maxGrants=maxGrants;
     this.root=resolve(root,createHash("sha256").update(namespace).digest("hex"));
     this.now=now;
   }
@@ -139,11 +154,17 @@ export class ApprovalMemory {
   async remember(binding,duration) {
     const value=identity(binding);if(!Object.hasOwn(TTL,duration))throw new Error("approval_memory_duration_invalid");
     return this.locked(async()=>{
-      const key=sessionKey(this.root);
+      const key=sessionKey(this.root),index=sessionIndex(this.root);
       const now=this.now(),id=this.mac(key,value);
+      if(!index.has(id)&&index.size>=this.maxGrants){
+        // Drop ids whose grants expired or vanished before refusing.
+        for(const known of [...index]){const grant=await this.load(key,known);await this.sweep(known,grant,now);
+          if(!grant||grant.expires_at!==null&&now>=grant.expires_at)index.delete(known);}
+        if(index.size>=this.maxGrants)throw new Error(`approval_memory_full: ${this.maxGrants} remembered approvals are live for this scope; revoke some before remembering another`);
+      }
       const grant={schema:"statewright/approval-memory-grant/v1",id,binding_sha256:id,generation:randomUUID(),duration,issued_at:now,last_used_at:now,
         expires_at:TTL[duration]===null?null:now+TTL[duration]};
-      await this.save(key,grant);return grant;
+      await this.save(key,grant);index.add(id);return grant;
     });
   }
   async confirm(binding,expected) {
@@ -158,13 +179,22 @@ export class ApprovalMemory {
   }
   async list() {
     return this.locked(async()=>{
-      const key=sessionKey(this.root);
-      const names=(await readdir(this.root)).filter(name=>/^[a-f0-9]{64}\.json$/.test(name)).sort().slice(0,MAX_LIST_SCAN);
-      const grants=[];for(const name of names){const id=name.slice(0,-5),grant=await this.load(key,id),now=this.now();
+      const key=sessionKey(this.root),index=sessionIndex(this.root);
+      const grants=[];
+      for(const id of [...index].sort()){const grant=await this.load(key,id),now=this.now();
         await this.sweep(id,grant,now);
         if(grant&&now>=grant.last_used_at&&(grant.expires_at===null||now<grant.expires_at)){
           const {binding_sha256,...display}=grant;grants.push(display);
-        }}return grants;
+        }else if(!grant||grant.expires_at!==null&&now>=grant.expires_at)index.delete(id);}
+      // Best-effort cleanup of files this process did not mint. Bounded, and
+      // irrelevant to which grants are listed.
+      let swept=0;
+      for(const name of await readdir(this.root)){
+        if(swept>=MAX_JUNK_SWEEP)break;
+        if(!/^[a-f0-9]{64}\.json$/.test(name)||index.has(name.slice(0,-5)))continue;
+        swept++;await this.sweep(name.slice(0,-5),null,this.now());
+      }
+      return grants;
     });
   }
   async revoke(id) {
@@ -176,6 +206,7 @@ export class ApprovalMemory {
         const grantId=name.slice(0,-5),grant=await this.load(key,grantId);
         if(grant)await unlink(join(this.root,name)).catch(error=>{if(error.code!=="ENOENT")throw error;});
         else await this.sweep(grantId,null,this.now());
+        sessionIndex(this.root).delete(grantId);
       }
       if(process.platform!=="win32"){const directory=await open(this.root,"r");try{await directory.sync();}finally{await directory.close();}}
       return {revoked:id};

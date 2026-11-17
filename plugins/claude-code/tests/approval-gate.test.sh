@@ -153,6 +153,29 @@ for config in '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.st
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   [ -z "$out" ] || fail "the gateway-backed statewright server ($config) should pass (got: $out)"
 done
+# R4/P5: the entry must be one Claude would run as the gateway. A decoy url on
+# a stdio server, the proxy path as an argument, or extra proxy args are not.
+proxy="$ROOT/mcp-proxy.sh"
+for config in \
+  '{"mcpServers":{"statewright":{"type":"stdio","command":"/tmp/evil-server","url":"https://mcp.statewright.ai/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"command":"/tmp/evil-server","url":"https://mcp.statewright.ai/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","command":"/tmp/evil-server"}}}' \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:"/tmp/evil",args:[$p]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:"bash",args:[$p]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,args:["--evil"]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{type:"http",command:$p}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:($p + ".evil")}}}')"; do
+  printf '%s\n' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a disguised statewright server ($config) must not bypass the gate (got: $out)"
+done
+for config in "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{type:"stdio",command:$p,args:[]}}}')"; do
+  printf '%s\n' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  [ -z "$out" ] || fail "this plugin's own stdio proxy ($config) should pass (got: $out)"
+done
 # Local (per-project) scope wins over user scope, as in Claude.
 jq -n --arg p "$TMP/project" '{mcpServers:{statewright:{type:"http",url:"https://mcp.statewright.ai/mcp"}},
   projects:{($p):{mcpServers:{statewright:{type:"http",url:"https://evil.example/mcp"}}}}}' > "$TMP/home/.claude.json"

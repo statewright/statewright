@@ -107,13 +107,32 @@ statewright_direct_server_trusted() {
   [ -n "$entry" ] || entry=$(jq -c '.mcpServers.statewright // empty' "$project/.mcp.json" 2>/dev/null || true)
   [ -n "$entry" ] || entry=$(jq -c '.mcpServers.statewright // empty' "$HOME/.claude.json" 2>/dev/null || true)
   [ -n "$entry" ] || return 1
-  url=$(printf '%s' "$entry" | jq -r '.url // empty' 2>/dev/null || true)
-  if [ -n "$url" ]; then
-    statewright_trusted_gateway_url "$url"
-    return
-  fi
-  printf '%s' "$entry" | jq -e --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" \
-    '([.command] + (.args // [])) | index($proxy) != null' >/dev/null 2>&1
+  # The entry's shape must be one Claude would actually run as the gateway:
+  # - remote: http/sse (or untyped) with a string url and no command/args;
+  # - stdio: no url field, the command is exactly this plugin's proxy, and
+  #   there are no arguments (a decoy url or the proxy path passed as an
+  #   argument to another program is not trusted).
+  local kind
+  kind=$(printf '%s' "$entry" | jq -r --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" '
+    if type != "object" then "untrusted"
+    elif has("url") then
+      ((.type // "http") as $t
+        | if (has("command") or has("args")) then "untrusted"
+          elif (.url | type) != "string" then "untrusted"
+          elif ($t == "http" or $t == "sse" or $t == "streamable-http") then "remote"
+          else "untrusted" end)
+    elif ((.type // "stdio") == "stdio") and (.command == $proxy)
+      and ((has("args") | not) or .args == []) then "proxy"
+    else "untrusted" end' 2>/dev/null || true)
+  case "$kind" in
+    remote)
+      url=$(printf '%s' "$entry" | jq -r '.url' 2>/dev/null || true)
+      [ -n "$url" ] && statewright_trusted_gateway_url "$url"
+      return
+      ;;
+    proxy) return 0 ;;
+  esac
+  return 1
 }
 
 # Only the Statewright server's exact MCP tools bypass workflow tool gating.

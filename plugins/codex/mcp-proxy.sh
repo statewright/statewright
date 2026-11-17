@@ -648,13 +648,20 @@ statewright_safe_server_name() {
 }
 
 # Discovery only scans plugins the user enabled in Claude (enabledPlugins in
-# ~/.claude/settings.json), never every cached marketplace plugin.
+# ~/.claude/settings.json), never every cached marketplace plugin, and only the
+# version Claude has installed (an installPath in
+# ~/.claude/plugins/installed_plugins.json), never a stale cached version.
 # $1 = ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.mcp.json
 statewright_enabled_plugin_config() {
-  local rel="${1#"$HOME/.claude/plugins/cache/"}" marketplace plugin
+  local rel="${1#"$HOME/.claude/plugins/cache/"}" marketplace plugin dir
   marketplace="${rel%%/*}"; rel="${rel#*/}"; plugin="${rel%%/*}"
   [ -n "$marketplace" ] && [ -n "$plugin" ] || return 1
-  jq -e --arg id "$plugin@$marketplace" '.enabledPlugins[$id] == true' "$HOME/.claude/settings.json" >/dev/null 2>&1
+  jq -e --arg id "$plugin@$marketplace" '.enabledPlugins[$id] == true' "$HOME/.claude/settings.json" >/dev/null 2>&1 || return 1
+  dir=$(dirname "$1")
+  jq -e --arg id "$plugin@$marketplace" --arg dir "$dir" '
+    [.plugins[$id]? | if type == "array" then .[] else . end
+      | objects | .installPath | strings | sub("/+$"; "")] | index($dir) != null' \
+    "$HOME/.claude/plugins/installed_plugins.json" >/dev/null 2>&1
 }
 
 # One curl config line `NAME = "VALUE"`, refusing CR/LF like
@@ -682,20 +689,44 @@ statewright_scan_http_server() {
     esac
     config="$config"$'\n'"$line"
   fi
-  printf '%s\n' "$config" | curl -K - -sf --max-time 5 -X POST \
+  printf '%s\n' "$config" | curl -K - --globoff -sf --max-time 5 -X POST \
     -H 'Content-Type: application/json' \
     --data-raw '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":99}' 2>/dev/null
 }
 
-# Launch one stdio MCP server, handshake and list its tools. Its env is
-# exported inside this subshell only (no `bash -c` string, so env values stay
-# out of argv); argv comes from a NUL-delimited jq read, never word-split.
+# Discovery runs third-party servers under a hard bound that a server cannot
+# shadow: GNU timeout (TERM, then KILL 2s later) or, where there is none
+# (macOS), perl's alarm doing the same to the server's process group. Either
+# way the group is KILLed once the server exits, so a grandchild cannot keep
+# discovery waiting. Both are resolved by absolute path, never through PATH (a
+# plugin's env may set PATH).
+statewright_scan_bound() {
+  local candidate
+  for candidate in /usr/bin/timeout /bin/timeout /opt/homebrew/bin/gtimeout /usr/local/bin/gtimeout; do
+    [ -x "$candidate" ] && { printf 'timeout\t%s' "$candidate"; return 0; }
+  done
+  for candidate in /usr/bin/perl /bin/perl; do
+    [ -x "$candidate" ] && { printf 'perl\t%s' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+# Launch one stdio MCP server, handshake and list its tools. It runs in a
+# subshell with a scrubbed environment: only the inherited variables in `keep`
+# survive (STATEWRIGHT_API_KEY, STATEWRIGHT_MANAGED_MCP_TOKEN, *_FILE paths,
+# GH_TOKEN and the rest are unset) and the entry's own env is exported (never
+# STATEWRIGHT_* names), so env values stay out of argv; argv comes from a
+# NUL-delimited jq read, never word-split. The server is bounded by
+# statewright_scan_bound (15s, then KILL).
 # $1 = server entry JSON, $2 = plugin root for ${CLAUDE_PLUGIN_ROOT}.
 statewright_scan_stdio_server() {
   local entry="$1" plugin_root="$2"
   (
-    local command arg pair name
-    local -a argv=()
+    local command arg pair name bound bound_kind bound_bin bound_pid
+    local -a argv=() pairs=()
+    local keep=" HOME PATH USER LOGNAME SHELL LANG LC_ALL LC_CTYPE TMPDIR TERM "
+    bound=$(statewright_scan_bound) || exit 1
+    bound_kind="${bound%%$'\t'*}"; bound_bin="${bound#*$'\t'}"
     command=$(printf '%s' "$entry" | jq -r '.command | strings' 2>/dev/null) || exit 1
     [ -n "$command" ] || exit 1
     command="${command//\$\{CLAUDE_PLUGIN_ROOT\}/$plugin_root}"
@@ -704,16 +735,35 @@ statewright_scan_stdio_server() {
     done < <(printf '%s' "$entry" | jq -j '(.args // []) | if type == "array" then .[] | strings | (. + "\u0000") else empty end' 2>/dev/null)
     while IFS= read -r -d '' pair; do
       name="${pair%%=*}"
-      case "$name" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
-      export "$pair"
+      case "$name" in ''|[0-9]*|*[!A-Za-z0-9_]*|STATEWRIGHT_*) continue ;; esac
+      pairs+=("$pair")
     done < <(printf '%s' "$entry" | jq -j '(.env // {}) | if type == "object" then to_entries[] | select(.value | type == "string") | (.key + "=" + .value + "\u0000") else empty end' 2>/dev/null)
+    while IFS= read -r name; do
+      case "$keep" in *" $name "*) continue ;; esac
+      unset "$name" 2>/dev/null || export -n "$name" 2>/dev/null || exit 1
+    done < <(compgen -e)
+    for pair in ${pairs[@]+"${pairs[@]}"}; do export "$pair"; done
+    export CLAUDE_PLUGIN_ROOT="$plugin_root"
     {
       printf '%s\n' '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"statewright-scanner","version":"0.1"}},"id":1}'
       sleep 0.5
       printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
       printf '%s\n' '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
       sleep 2
-    } | timeout 15 "$command" ${argv[@]+"${argv[@]}"} 2>/dev/null
+    } | if [ "$bound_kind" = timeout ]; then
+      # timeout leads its own process group; once it returns, KILL whatever
+      # the server left in that group so a grandchild cannot hold stdout open.
+      "$bound_bin" -k 2 15 "$command" ${argv[@]+"${argv[@]}"} <&0 2>/dev/null &
+      bound_pid=$!
+      wait "$bound_pid"
+      kill -KILL -- "-$bound_pid" 2>/dev/null
+    else
+      "$bound_bin" -e '
+        my $t = shift; my $p = fork; exit 1 unless defined $p;
+        if (!$p) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+        $SIG{ALRM} = sub { kill "TERM", -$p; sleep 2; kill "KILL", -$p; waitpid($p, 0); exit 124 };
+        alarm $t; waitpid($p, 0); my $status = $? >> 8; kill "KILL", -$p; exit $status' 15 "$command" ${argv[@]+"${argv[@]}"} 2>/dev/null
+    fi
   )
 }
 

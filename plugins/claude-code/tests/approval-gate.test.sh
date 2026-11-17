@@ -223,4 +223,31 @@ out=$(printf '%s' "$(jq -n --arg s "$SESSION_ID" '{session_id:$s,tool_name:"Bash
   STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" pre-tool)
 [ -z "$out" ] || fail "an explicit bridge allow should pass (got: $out)"
 
+# --- 9. An unreachable bridge holds Stop at most 3 times in a row, then lets
+# Claude stop with a visible warning (no endless continuation loop).
+cat > "$TMP/bin/curl" <<'SHCURL'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 7
+SHCURL
+legacy_stop() {
+  printf '%s' "$(jq -n --arg s "$SESSION_ID" --argjson a "$1" '{session_id:$s,hook_event_name:"Stop",stop_hook_active:$a}')" |
+    HOME="$TMP/home" PATH="$TMP/bin:$PATH" STATEWRIGHT_API_KEY='test-key' \
+    STATEWRIGHT_ADAPTER_URL='http://127.0.0.1:1' STATEWRIGHT_ADAPTER_TOKEN="$adapter_token" \
+    STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" stop
+}
+for active in false true true; do
+  out=$(legacy_stop "$active")
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "unconfirmed stop $active must block (got: $out)"
+done
+out=$(legacy_stop true)
+printf '%s' "$out" | jq -e '(.decision // "") != "block" and (.systemMessage | test("after 3 attempts"))' >/dev/null \
+  || fail "the fourth unconfirmed stop in a row must release with a warning (got: $out)"
+out=$(legacy_stop false)
+printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "a fresh stop chain may hold again (got: $out)"
+for i in 1 2 3 4; do
+  out=$(legacy_stop false)
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "stop_hook_active false resets the run (got: $out)"
+done
+
 echo "Claude approval-gate tests passed"

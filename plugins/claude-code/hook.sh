@@ -172,6 +172,7 @@ if [ -n "${STATEWRIGHT_MCP_SESSION_ID:-}" ]; then
   SESSION_HEADER_ARGS+=(-H "Mcp-Session-Id: ${STATEWRIGHT_MCP_SESSION_ID}")
 fi
 PROJECT_DIR="$STATEWRIGHT_DIR/sessions/$SESSION_KEY"
+STOP_UNCONFIRMED_MAX=3
 ACTIVE_FILE="$PROJECT_DIR/.active"
 CACHE_FILE="$PROJECT_DIR/.state_cache"
 
@@ -300,7 +301,7 @@ drain_claude_telemetry_outbox() {
 }
 
 clear_session_telemetry_state() {
-  rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges"
+  rm -f "$ACTIVE_FILE" "$CACHE_FILE" "$PROJECT_DIR/.session_hinted" "$PROJECT_DIR/.discovered_commands" "$PROJECT_DIR/.capture_enabled" "$PROJECT_DIR/.run_id" "$PROJECT_DIR/.log_seq" "$PROJECT_DIR/.state_epoch" "$PROJECT_DIR/.claude_transcript_usage.json" "$PROJECT_DIR/.stop_progress" "$PROJECT_DIR/.stop_nudges" "$PROJECT_DIR/.stop_unconfirmed"
 }
 
 is_newer_stable_version() {
@@ -1069,9 +1070,25 @@ case "$ENDPOINT" in
     if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
       RESPONSE=$(adapter_call stop POST '{}' || true)
       if [ -z "$RESPONSE" ]; then
+        # Fail closed, but never loop forever: hold at most
+        # STOP_UNCONFIRMED_MAX consecutive unconfirmed stops per session, then
+        # let Claude stop with a visible warning. A fresh Stop
+        # (stop_hook_active false) starts a new run.
+        UNCONFIRMED_FILE="$PROJECT_DIR/.stop_unconfirmed"
+        STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | jq -r 'if .stop_hook_active == false then "false" else "true" end' 2>/dev/null || echo true)
+        UNCONFIRMED=0
+        [ "$STOP_HOOK_ACTIVE" = "false" ] || UNCONFIRMED=$(cat "$UNCONFIRMED_FILE" 2>/dev/null || echo 0)
+        case "$UNCONFIRMED" in ''|*[!0-9]*) UNCONFIRMED=0 ;; esac
+        if [ "$UNCONFIRMED" -ge "$STOP_UNCONFIRMED_MAX" ]; then
+          rm -f "$UNCONFIRMED_FILE"
+          jq -n --arg n "$STOP_UNCONFIRMED_MAX" '{"systemMessage":("Statewright could not confirm workflow completion after " + $n + " attempts, so Claude was allowed to stop. The workflow may still be active; check its state or turn it Off.")}'
+          exit 0
+        fi
+        mkdir -p "$PROJECT_DIR" && echo $((UNCONFIRMED + 1)) > "$UNCONFIRMED_FILE"
         jq -n '{"decision":"block","reason":"Statewright executor bridge is unavailable; cannot verify workflow completion."}'
         exit 0
       fi
+      rm -f "$PROJECT_DIR/.stop_unconfirmed"
       DECISION=$(echo "$RESPONSE" | jq -r '.decision // "allow"')
       if [ "$DECISION" = "block" ]; then
         REASON=$(echo "$RESPONSE" | jq -r '.reason // "Continue the active Statewright workflow."')

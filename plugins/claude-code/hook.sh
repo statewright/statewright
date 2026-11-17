@@ -80,21 +80,41 @@ statewright_allowed_capability() {
   printf '%s\n' "$2" | grep -Fqx "$(statewright_capability_for_tool "$1")"
 }
 
-statewright_url_origin() {
-  printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]+).*#\1#' | tr '[:upper:]' '[:lower:]'
+# Strictly parse an http(s) URL into "scheme host port". Anything a WHATWG
+# parser (Claude, Node) could read differently is refused instead of guessed:
+# backslashes (read as `/`, so `https://evil.example\.statewright.ai` has host
+# evil.example), whitespace and control characters (stripped by WHATWG),
+# userinfo (`@`), percent-encoding or any non-[A-Za-z0-9.-] byte in the host,
+# and a malformed port.
+statewright_url_parts() {
+  local url="$1" re scheme host port default
+  case "$url" in *\\*|*@*|*[[:space:]]*|*[[:cntrl:]]*) return 1 ;; esac
+  re='^([A-Za-z][A-Za-z0-9+.-]*)://([A-Za-z0-9.-]+)(:([0-9]{1,5}))?([/?#].*)?$'
+  [[ "$url" =~ $re ]] || return 1
+  scheme=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
+  host=$(printf '%s' "${BASH_REMATCH[2]}" | tr '[:upper:]' '[:lower:]')
+  port="${BASH_REMATCH[4]}"
+  case "$scheme" in https) default=443 ;; http) default=80 ;; *) return 1 ;; esac
+  [ -n "$port" ] || port=$default
+  port=$((10#$port))
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || return 1
+  printf '%s %s %s' "$scheme" "$host" "$port"
 }
 
-# A configured server URL is trusted only when it is this hook's gateway
-# origin or an https Statewright origin (no userinfo, default port).
+# A configured server URL is trusted only when its parsed origin is exactly
+# this hook's gateway origin, or https on the default port with a host that is
+# exactly statewright.ai or a well-formed subdomain of it.
 statewright_trusted_gateway_url() {
-  local origin
-  origin=$(statewright_url_origin "$1")
-  case "$origin" in *@*|'') return 1 ;; esac
-  [ "$origin" = "$(statewright_url_origin "$GW_URL")" ] && return 0
-  case "$origin" in
-    https://statewright.ai|https://*.statewright.ai) return 0 ;;
-  esac
-  return 1
+  local parts gateway scheme host port
+  parts=$(statewright_url_parts "$1") || return 1
+  gateway=$(statewright_url_parts "$GW_URL" 2>/dev/null || true)
+  [ -n "$gateway" ] && [ "$parts" = "$gateway" ] && return 0
+  read -r scheme host port <<EOF_PARTS
+$parts
+EOF_PARTS
+  [ "$scheme" = https ] && [ "$port" = 443 ] || return 1
+  [ "$host" = statewright.ai ] && return 0
+  [[ "$host" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+statewright\.ai$ ]]
 }
 
 # Any MCP server can be registered under the name `statewright`. Trust the
@@ -110,8 +130,9 @@ statewright_direct_server_trusted() {
   # The entry's shape must be one Claude would actually run as the gateway:
   # - remote: http/sse (or untyped) with a string url and no command/args;
   # - stdio: no url field, the command is exactly this plugin's proxy, and
-  #   there are no arguments (a decoy url or the proxy path passed as an
-  #   argument to another program is not trusted).
+  #   there are no arguments or env (a decoy url, the proxy path passed as an
+  #   argument to another program, or an env block that redirects the proxy
+  #   with STATEWRIGHT_GATEWAY_URL or runs code with BASH_ENV is not trusted).
   local kind
   kind=$(printf '%s' "$entry" | jq -r --arg proxy "$SCRIPT_DIR/mcp-proxy.sh" '
     if type != "object" then "untrusted"
@@ -122,7 +143,8 @@ statewright_direct_server_trusted() {
           elif ($t == "http" or $t == "sse" or $t == "streamable-http") then "remote"
           else "untrusted" end)
     elif ((.type // "stdio") == "stdio") and (.command == $proxy)
-      and ((has("args") | not) or .args == []) then "proxy"
+      and ((has("args") | not) or .args == [])
+      and ((has("env") | not) or .env == {}) then "proxy"
     else "untrusted" end' 2>/dev/null || true)
   case "$kind" in
     remote)

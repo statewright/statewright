@@ -153,6 +153,24 @@ for config in '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.st
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   [ -z "$out" ] || fail "the gateway-backed statewright server ($config) should pass (got: $out)"
 done
+# H1: the URL is parsed strictly and its host matched exactly. Forms a WHATWG
+# parser reads differently (backslash, whitespace, userinfo, %-escapes) fail.
+for url in 'https://evil.example\\.statewright.ai/mcp' 'https://evil.example%2f.statewright.ai/mcp' \
+  'https://mcp.statewright.ai.evil.example/mcp' 'https://evil.example\\@mcp.statewright.ai/mcp' \
+  'https://x@mcp.statewright.ai/mcp' 'https://mcp.statewright.ai\t/mcp' 'http://mcp.statewright.ai/mcp' \
+  'https://mcp.statewright.ai:8443/mcp' 'https://evilstatewright.ai/mcp' 'https://-x.statewright.ai/mcp' \
+  'https://mcp.statewright.ai./mcp' 'ftp://mcp.statewright.ai/mcp' 'http://127.0.0.1:2/mcp'; do
+  jq -cn --arg u "$(printf '%b' "$url")" '{mcpServers:{statewright:{type:"http",url:$u}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "spoofed gateway url $url must not bypass the gate (got: $out)"
+done
+for url in 'HTTPS://MCP.STATEWRIGHT.AI/mcp' 'https://mcp.statewright.ai:443/mcp' 'https://statewright.ai/mcp' \
+  'https://a.b.statewright.ai' 'http://127.0.0.1:1' 'http://127.0.0.1:1/mcp?x=1'; do
+  jq -cn --arg u "$url" '{mcpServers:{statewright:{type:"http",url:$u}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  [ -z "$out" ] || fail "gateway url $url should be trusted (got: $out)"
+done
 # R4/P5: the entry must be one Claude would run as the gateway. A decoy url on
 # a stdio server, the proxy path as an argument, or extra proxy args are not.
 proxy="$ROOT/mcp-proxy.sh"
@@ -164,7 +182,10 @@ for config in \
   "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:"bash",args:[$p]}}}')" \
   "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,args:["--evil"]}}}')" \
   "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{type:"http",command:$p}}}')" \
-  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:($p + ".evil")}}}')"; do
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:($p + ".evil")}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:{STATEWRIGHT_GATEWAY_URL:"https://evil.example"}}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:{BASH_ENV:"/tmp/evil.sh"}}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:"x"}}}')"; do
   printf '%s\n' "$config" > "$TMP/home/.claude.json"
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \

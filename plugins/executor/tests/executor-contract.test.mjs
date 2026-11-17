@@ -189,6 +189,8 @@ test("legacy --host claude is refused up front with a plugin pointer", () => {
   assert.match(LEGACY_CLAUDE_HOST_MESSAGE, /Claude Code plugin/);
   assert.ok(isExpectedPluginError(new Error(LEGACY_CLAUDE_HOST_MESSAGE)), "a usage refusal is not a crash report");
   assert.doesNotThrow(() => validateOptions({ ...options, host: "pi" }));
+  assert.throws(() => validateOptions({ ...options, host: "nope" }),
+    (error) => /^--host must be one of: /.test(error.message) && !/claude/.test(error.message));
   const cli = spawnSync(process.execPath, [fileURLToPath(new URL("../statewright-exec.mjs", import.meta.url)),
     "--host", "claude", "--workflow", "plan", "--", "fixture"], {
     encoding: "utf8", timeout: 20_000,

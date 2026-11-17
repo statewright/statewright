@@ -131,8 +131,8 @@ function parseArgs(argv) {
 
 export function validateOptions(options) {
   if (options.host === "claude") throw new Error(LEGACY_CLAUDE_HOST_MESSAGE);
-  if (!SUPPORTED_HOSTS.includes(options.host)) {
-    throw new Error(`--host must be one of: ${SUPPORTED_HOSTS.join(", ")}.`);
+  if (!LAUNCHABLE_HOSTS.includes(options.host)) {
+    throw new Error(`--host must be one of: ${LAUNCHABLE_HOSTS.join(", ")}.`);
   }
   if (!options.workflow || /[\u0000-\u001f\u007f]/.test(options.workflow)) {
     throw new Error("--workflow must be a printable workflow name.");

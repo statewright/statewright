@@ -3,6 +3,27 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+- **[codex]** Remembered classifier approvals are no longer signed with a key
+  stored on disk next to the grants. Codex Desktop agents run in
+  `workspace-write` with the user's home readable, so a session could read
+  `~/.statewright/codex-desktop-app-server/<client>/classifier-memory/*/key`
+  and write a forged grant (including `always`) that the controller would
+  treat as a remembered human approval. The signing key is now generated per
+  process and held only in memory; any legacy on-disk key is deleted and
+  grants signed with it are ignored. Remembered approvals therefore last for
+  the lifetime of the owning App Server process, then the user is asked again.
+  Unverifiable records now fail closed to a prompt instead of erroring,
+  expired grants are swept, and listing is bounded.
+- **[codex]** The approvals list and revoke now read from an in-process index
+  of the grants this App Server minted (the only ones its key can verify)
+  instead of the first 4,096 file names on disk, so files planted by another
+  process can't hide a genuine grant. At 4,096 live grants for one scope,
+  remembering another fails with a clear `approval_memory_full` error rather
+  than evicting anything.
+
 ## [Claude and Codex Plugins 0.3.8] — 2026-11-04
 
 ### Fixed

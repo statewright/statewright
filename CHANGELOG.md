@@ -3,6 +3,19 @@
 All notable changes to statewright are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Security
+- **[codex]** Managed Codex sessions no longer put the Statewright API key,
+  refresh tokens or the local MCP bridge token in the environment of Codex or
+  of any command it runs. The resident App Server receives the key over a
+  one-shot pipe and keeps it in memory; the MCP proxy and hooks read the bridge
+  token from a 0600 file named by `STATEWRIGHT_MANAGED_MCP_TOKEN_FILE`, and pass
+  bearer tokens to curl through a config stream instead of argv. Codex is also
+  launched with a `shell_environment_policy.exclude` override (merged with the
+  user's own list) for Statewright credential names. No reconnect is needed;
+  restart running managed Codex sessions so their resident picks up the change.
+
 ## [Claude and Codex Plugins 0.3.8] — 2026-11-04
 
 ### Fixed

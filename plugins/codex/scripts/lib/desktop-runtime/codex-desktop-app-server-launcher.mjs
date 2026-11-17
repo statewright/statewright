@@ -18,6 +18,7 @@ import { ApprovalMemory } from "./approval-memory.mjs";
 import { LocalTelemetryService } from "./local-telemetry-agent.mjs";
 import { projectDesktopUsage } from "./desktop-native-usage.mjs";
 export { connectDesktopProfile } from "./desktop-device-connect.mjs";
+import { managedCodexEnvironment, removeManagedMcpTokenFile, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 // The selected Desktop record owns the endpoint. A shell's profile or explicit
 // API key must never redirect it or supply a credential from another gateway.
@@ -285,6 +286,7 @@ export async function runDesktopAppServerBroker({
   let runtime, services;
   const manifestPath = join(dirname(plan.controlDir), "manifest.json");
   let manifestIdentity = null;
+  let tokenFile = null;
   try {
     const classifierApprovalService = {
       ...(bridge.approvalMemoryScope ? {approvalMemory: new ApprovalMemory({
@@ -297,14 +299,14 @@ export async function runDesktopAppServerBroker({
     services = desktopWorkflowServices({home, controlDir: plan.controlDir, clientId: plan.clientId, bridge,
       peekRouteRequest: (threadId, turnId) => peekCodexResidentRouteRequest(plan.controlDir, plan.clientId, threadId, turnId),
       ownsThread: classifierApprovalService.ownsThread, getState: classifierApprovalService.getState});
+    tokenFile = await writeManagedMcpTokenFile(plan.controlDir, bridge.token);
     runtime = await startRuntime({
       command: plan.command,
-      environment: {
-        ...isolatedEnvironment,
-        STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
-        STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token,
-        STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath,
-      },
+      environment: managedCodexEnvironment(isolatedEnvironment, {
+        mcpUrl: bridge.url,
+        tokenFile,
+        extra: { STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifestPath },
+      }),
       clientId: plan.clientId,
       classifierApprovalService,
       ...services,
@@ -328,6 +330,7 @@ export async function runDesktopAppServerBroker({
   } catch (error) {
     services?.closeNativeUsage();
     await runtime?.close().catch(() => {});
+    await removeManagedMcpTokenFile(tokenFile, bridge.token).catch(() => {});
     await bridge.close().catch(() => {});
     throw error;
   }
@@ -360,6 +363,7 @@ export async function runDesktopAppServerBroker({
       if (manifestIdentity) await removeOwnedDesktopRuntimeManifest(manifestPath, manifestIdentity);
       await runtime.close();
     } finally {
+      await removeManagedMcpTokenFile(tokenFile, bridge.token).catch(() => {});
       await bridge.close();
     }
     })().catch(error => {

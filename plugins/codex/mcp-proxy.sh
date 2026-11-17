@@ -19,6 +19,22 @@ stable_tool_catalog_response() {
       (reduce ($tools[0] + $live)[] as $tool ({}; .[$tool.name] = $tool) | [.[]])})}'
 }
 MCP_RECOVERY="${SCRIPT_DIR}/scripts/lib/desktop-runtime/mcp-recovery.mjs"
+# Managed launchers hand the local MCP bridge token over as a 0600 file so it
+# never sits in the Codex environment that agent commands inherit. Load it into
+# an unexported shell variable; STATEWRIGHT_MANAGED_MCP_TOKEN is the legacy
+# carrier from older launchers.
+STATEWRIGHT_MANAGED_MCP_BEARER="${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
+if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}" ] \
+    && [ -f "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" ] && [ ! -L "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" ]; then
+  IFS= read -r STATEWRIGHT_MANAGED_MCP_BEARER < "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" || true
+fi
+export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+statewright_bearer_config() {
+  local value="${1//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
 DESKTOP_BUNDLED_NODE="${STATEWRIGHT_DESKTOP_BUNDLED_NODE:-/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node}"
 # GUI MCP launches do not inherit the terminal PATH. Keep the launcher's pinned
 # interpreter authoritative; this helper does not replace the signed host app.
@@ -125,7 +141,7 @@ run_codex_local_tool() {
       return 0
       ;;
     statewright_search_docs|statewright_search_references|statewright_connect)
-      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN \
+      env -u STATEWRIGHT_MANAGED_MCP_URL -u STATEWRIGHT_MANAGED_MCP_TOKEN -u STATEWRIGHT_MANAGED_MCP_TOKEN_FILE \
         -u STATEWRIGHT_ADAPTER_URL -u STATEWRIGHT_ADAPTER_TOKEN "$0" <<<"$line"
       return 0
       ;;
@@ -155,7 +171,7 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-codex}" = "codex" ] && \
     [ "$method" = "tools/call" ] && [ "$tool_name" = "statewright_run_agent" ] && timeout_seconds=300
     response=$(curl -sS --max-time "$timeout_seconds" -w '\n%{http_code}' -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_MANAGED_MCP_BEARER:-}") \
       -H "X-Statewright-Client-Id: ${STATEWRIGHT_CLIENT_ID:-}" \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac

@@ -14,6 +14,7 @@ import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 import { GIT_CLOSEOUT_MODULE_PATH } from "./git-closeout.mjs";
+import { codexShellEnvironmentPolicyArgs, managedCodexEnvironment, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -785,8 +786,9 @@ export async function runManagedClient({ host, command, args, environment = proc
         // Pre-seeding here can clobber a running thread even if resume fails.
         const { prepareCodexResidentTui } = await import("./codex-resume-relay.mjs");
         const residentTui = await prepareCodexResidentTui({ proxyUrl: resident.proxyUrl, args, yoloOverride });
+        // The TUI attaches to the resident; it never needs a gateway credential.
         const tuiEnvironment = {
-          ...isolatedEnvironment,
+          ...stripStatewrightCredentials(isolatedEnvironment),
           STATEWRIGHT_ROUTE_CONTROL_DIR: residentRoutes,
           STATEWRIGHT_MANAGED_CLIENT_HOST: host,
           STATEWRIGHT_CLIENT_ID: routedClientId,
@@ -817,6 +819,13 @@ export async function runManagedClient({ host, command, args, environment = proc
       }
     }
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
+    // Codex runs agent commands with its own environment. Keep the gateway key
+    // in this supervisor and hand the bridge token over as a 0600 file in the
+    // private control directory instead of an environment value.
+    const codexBridgeTokenFile = host === "codex" && bridge?.token
+      ? await writeManagedMcpTokenFile(controlDir, bridge.token) : null;
+    const codexPolicyArgs = host === "codex" && !launch.shell
+      ? await codexShellEnvironmentPolicyArgs({ codexHome: isolatedEnvironment.CODEX_HOME ?? join(home, ".codex") }) : [];
     while (true) {
       await preflightCodexHistory(nextArgs);
       const childEnvironment = {
@@ -832,13 +841,16 @@ export async function runManagedClient({ host, command, args, environment = proc
       if (host === "codex" && codexRootSessionId) {
         childEnvironment.STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID = codexRootSessionId;
       }
-      if (bridge) {
+      if (bridge && host !== "codex") {
         childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
         childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
       }
-      const child = spawn(launchCommand, [...launchPrefixArgs, ...nextArgs], {
+      const spawnEnvironment = host === "codex"
+        ? managedCodexEnvironment(childEnvironment, { mcpUrl: bridge?.url ?? null, tokenFile: codexBridgeTokenFile })
+        : childEnvironment;
+      const child = spawn(launchCommand, [...launchPrefixArgs, ...codexPolicyArgs, ...nextArgs], {
         cwd,
-        env: childEnvironment,
+        env: spawnEnvironment,
         stdio: "inherit",
         // POSIX process-group ownership lets cancellation terminate every
         // descendant the CLI starts. Scoped forwarding above prevents that
@@ -852,7 +864,7 @@ export async function runManagedClient({ host, command, args, environment = proc
       let restart = false;
       child.once("exit", () => { exited = true; });
       const exit = waitForExit(child);
-      const stopForwarding = forwardManagedTermination(child, exit, { command: launchCommand, environment: childEnvironment });
+      const stopForwarding = forwardManagedTermination(child, exit, { command: launchCommand, environment: spawnEnvironment });
       try {
         if (oneShotCodexExec) {
           const result = await exit;
@@ -945,19 +957,19 @@ export async function runManagedClient({ host, command, args, environment = proc
               } catch (error) {
                 // Availability failure is fail-closed: stop the detached child
                 // before the supervisor relinquishes its control directory.
-                await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+                await restartManagedChild(child, exit, { command: launchCommand, environment: spawnEnvironment });
                 throw error;
               }
               if (selectedRequest.session_id !== request.session_id
                   || selectedRequest.client_id !== request.client_id
                   || selectedRequest.root_session_id !== request.root_session_id) {
-                await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+                await restartManagedChild(child, exit, { command: launchCommand, environment: spawnEnvironment });
                 throw new Error("Statewright model_ladder attempted to alter managed session identity.");
               }
             }
             nextArgs = buildRoutedArgs({ host, originalArgs: args, request: selectedRequest });
             restart = true;
-            await restartManagedChild(child, exit, { command: launchCommand, environment: childEnvironment });
+            await restartManagedChild(child, exit, { command: launchCommand, environment: spawnEnvironment });
             break;
           }
           await delay(pollMs);

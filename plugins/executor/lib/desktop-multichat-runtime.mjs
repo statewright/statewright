@@ -10,6 +10,7 @@ import { readCodexResumePermissions, readCodexThreadCwds } from "./codex-session
 import { nextCodexResidentRouteRequest, peekCodexResidentRouteRequest } from "./codex-app-server-resident.mjs";
 import { desktopWorkflowServices } from "./desktop-workflow-services.mjs";
 import { ApprovalMemory } from "./approval-memory.mjs";
+import { managedCodexEnvironment, removeManagedMcpTokenFile, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 const threadPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const discoveryReads = new Set(["thread/read", "thread/attachment/list", "thread/goal/get"]);
@@ -65,7 +66,7 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
       await claimManagedControlIdentity(controlDir, { host: "codex", clientId });
       const isolated = isolateEnvironment(environment, { controlDir, clientId });
       const codexHome = isolated.CODEX_HOME ?? join(home, ".codex");
-      let runtime, socket, lease, services, expected = threadId, confirmed = null, pending = false, closed = false;
+      let runtime, socket, lease, services, tokenFile = null, expected = threadId, confirmed = null, pending = false, closed = false;
       const manifest = join(controlDir, "..", "manifest.json");
       const owner = randomUUID();
       const release = async () => {
@@ -94,6 +95,7 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
         socket?.close();
         try { await runtime?.close(); }
         finally {
+          await removeManagedMcpTokenFile(tokenFile, bridge.token).catch(() => {});
           await release();
           try { if (JSON.parse(await readFile(manifest, "utf8")).owner === owner) await unlink(manifest); }
           catch (error) { if (error.code !== "ENOENT") stderr.write("[statewright] Desktop lane manifest cleanup failed.\n"); }
@@ -105,10 +107,11 @@ export async function runDesktopMultichatRuntime({ plan, environment, home, stdi
           ownsThread: async id => confirmed === id && !pending && !closed,
           getState: () => classifierState({bridge, clientId}),
         }) : null;
+        tokenFile = await writeManagedMcpTokenFile(controlDir, bridge.token);
         runtime = await startRuntime({ command: plan.command, clientId,
           ...services,
-          environment: { ...isolated, STATEWRIGHT_MANAGED_MCP_URL: bridge.url,
-            STATEWRIGHT_MANAGED_MCP_TOKEN: bridge.token, STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifest },
+          environment: managedCodexEnvironment(isolated, { mcpUrl: bridge.url, tokenFile,
+            extra: { STATEWRIGHT_CLASSIFIER_APPROVAL_RECEIPT: manifest } }),
           nextRouteRequest: id => nextCodexResidentRouteRequest(controlDir, clientId, id),
           getThreadCwds: ids => readCodexThreadCwds({ threadIds: ids, codexHome }),
           resolveResumePermissions: id => readCodexResumePermissions({ threadId: id, codexHome }),

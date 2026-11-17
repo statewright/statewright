@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -170,7 +170,9 @@ test("pool broker resumes two different projects with isolated workflow identiti
     assert.equal(options.clientId, clientId);
     assert.equal(options.environment.STATEWRIGHT_CLIENT_ID, clientId);
     assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_URL, bridge.url);
-    assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, bridge.token);
+    assert.equal(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN, undefined);
+    assert.equal((await stat(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN_FILE)).mode & 0o777, 0o600);
+    assert.ok(await readFile(options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN_FILE, "utf8") === bridge.token);
     assert.equal(options.environment.STATEWRIGHT_DESKTOP_BRIDGE_POOL_TOKEN, undefined);
     assert.equal(options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR,
       join(f.home, ".statewright", "codex-desktop-app-server", clientId, "routes"));
@@ -187,7 +189,7 @@ test("pool broker resumes two different projects with isolated workflow identiti
     assert.equal(typeof options.telemetry, "function");
   }
   assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_ROUTE_CONTROL_DIR)).size, 2);
-  assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN)).size, 2);
+  assert.equal(new Set(active.map(runtime => runtime.options.environment.STATEWRIGHT_MANAGED_MCP_TOKEN_FILE)).size, 2);
   assert.equal(new Set(active.map(runtime => runtime.options.classifierApprovalService.approvalMemory.root)).size, 2);
   await broker.close();
   assert.deepEqual(await f.leases(), []);

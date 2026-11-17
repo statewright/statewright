@@ -80,6 +80,18 @@ and is never used for another gateway. Headless Linux installations without an
 unlocked Secret Service fail closed; automation can still use the process-scoped
 `STATEWRIGHT_API_KEY` override.
 
+Managed Codex sessions keep credentials out of the agent's reach. The managed
+launcher and its resident App Server hold the gateway key in memory (the resident
+receives it over a one-shot pipe), and Codex itself, its hooks and every command
+it runs never inherit `STATEWRIGHT_API_KEY`, refresh tokens or the local MCP
+bridge token. The Statewright MCP proxy and hooks find the bridge through
+`STATEWRIGHT_MANAGED_MCP_TOKEN_FILE`, an owner-only (0600) file in the session's
+private control directory. Codex is also launched with a
+`shell_environment_policy.exclude` override, merged with any list you configure,
+that drops Statewright credential names from shell commands. A command that
+genuinely needs a Statewright key, such as a staging test, must be given one
+explicitly.
+
 Gateway aliases use non-secret configuration in
 `~/.statewright/environments.json`:
 

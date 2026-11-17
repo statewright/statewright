@@ -2,7 +2,8 @@
 
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { codexShellEnvironmentPolicyArgs } from "./lib/desktop-runtime/managed-credential-isolation.mjs";
 import { join } from "node:path";
 
 function usage() {
@@ -85,12 +86,16 @@ export async function run(options) {
   let workflowOrigin = null;
   let resumeSession = null;
   let prompt = `Call statewright_load_workflow with workflow '${options.workflow}', then follow the active Statewright workflow. ${options.prompt.join(" ")}`;
+  const launchEnvironment = options.environment ?? process.env;
+  // Codex's agent shells must not inherit credentials from this full env.
+  const shellPolicyArgs = process.platform === "win32" ? []
+    : await codexShellEnvironmentPolicyArgs({ codexHome: launchEnvironment.CODEX_HOME ?? join(launchEnvironment.HOME ?? homedir(), ".codex") });
   try {
     while (true) {
-      const child = spawn(options.codexBin, codexArgs({ ...route, resumeSession, prompt }), {
+      const child = spawn(options.codexBin, [...shellPolicyArgs, ...codexArgs({ ...route, resumeSession, prompt })], {
         stdio: "inherit",
         detached: process.platform !== "win32",
-        env: { ...(options.environment ?? process.env), STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir },
+        env: { ...launchEnvironment, STATEWRIGHT_ROUTE_CONTROL_DIR: controlDir },
       });
       let restartRequested = false;
       let exited = false;

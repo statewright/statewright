@@ -14,7 +14,7 @@ import { providerModel, selectAvailableRoute } from "./model-ladder.mjs";
 import { openExternalUrl, prepareManagedApproval } from "./approval-evidence.mjs";
 import { isWindowsCommand, resolveWindowsLaunch } from "./windows-command-resolution.mjs";
 import { GIT_CLOSEOUT_MODULE_PATH } from "./git-closeout.mjs";
-import { codexShellEnvironmentPolicyArgs, managedCodexEnvironment, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
+import { codexShellEnvironmentPolicyArgs, managedAgentEnvironment, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 const CONTINUATION_PROMPT = "Continue the active Statewright workflow in its current state. Use statewright_get_state first.";
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
@@ -819,10 +819,11 @@ export async function runManagedClient({ host, command, args, environment = proc
       }
     }
     bridge = await createManagedMcpBridge({ environment, clientId: routedClientId, bridgeFactory });
-    // Codex runs agent commands with its own environment. Keep the gateway key
-    // in this supervisor and hand the bridge token over as a 0600 file in the
-    // private control directory instead of an environment value.
-    const codexBridgeTokenFile = host === "codex" && bridge?.token
+    // Codex and Claude Code both run agent commands (Bash tool, exec, tests)
+    // with their own environment. Keep the gateway key in this supervisor and
+    // hand the bridge token over as a 0600 file in the private (mkdtemp, 0700)
+    // control directory instead of an environment value.
+    const bridgeTokenFile = bridge?.token
       ? await writeManagedMcpTokenFile(controlDir, bridge.token) : null;
     const codexPolicyArgs = host === "codex" && !launch.shell
       ? await codexShellEnvironmentPolicyArgs({ codexHome: isolatedEnvironment.CODEX_HOME ?? join(home, ".codex") }) : [];
@@ -841,13 +842,9 @@ export async function runManagedClient({ host, command, args, environment = proc
       if (host === "codex" && codexRootSessionId) {
         childEnvironment.STATEWRIGHT_MANAGED_CODEX_ROOT_SESSION_ID = codexRootSessionId;
       }
-      if (bridge && host !== "codex") {
-        childEnvironment.STATEWRIGHT_MANAGED_MCP_URL = bridge.url;
-        childEnvironment.STATEWRIGHT_MANAGED_MCP_TOKEN = bridge.token;
-      }
-      const spawnEnvironment = host === "codex"
-        ? managedCodexEnvironment(childEnvironment, { mcpUrl: bridge?.url ?? null, tokenFile: codexBridgeTokenFile })
-        : childEnvironment;
+      // No gateway key, refresh token or bridge token in the agent's env, for
+      // either host: Statewright's MCP proxy and hooks read the token file.
+      const spawnEnvironment = managedAgentEnvironment(childEnvironment, { mcpUrl: bridge?.url ?? null, tokenFile: bridgeTokenFile });
       const child = spawn(launchCommand, [...launchPrefixArgs, ...codexPolicyArgs, ...nextArgs], {
         cwd,
         env: spawnEnvironment,

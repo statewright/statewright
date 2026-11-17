@@ -15,9 +15,16 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # never sits in the Codex environment that agent commands inherit. Load it into
 # an unexported shell variable; STATEWRIGHT_MANAGED_MCP_TOKEN is the legacy
 # carrier from older launchers.
+# The file must be a regular file (not a symlink) owned by this user with no
+# group/other permission bits; anything else is ignored.
+statewright_private_token_file() {
+  local path="$1" mode=""
+  [ -n "$path" ] && [ -f "$path" ] && [ ! -L "$path" ] && [ -O "$path" ] || return 1
+  mode=$(stat -c '%a' "$path" 2>/dev/null) || mode=$(stat -f '%Lp' "$path" 2>/dev/null) || return 1
+  case "$mode" in 400|600) return 0 ;; *) return 1 ;; esac
+}
 STATEWRIGHT_MANAGED_MCP_BEARER="${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
-if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}" ] \
-    && [ -f "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" ] && [ ! -L "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" ]; then
+if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && statewright_private_token_file "${STATEWRIGHT_MANAGED_MCP_TOKEN_FILE:-}"; then
   IFS= read -r STATEWRIGHT_MANAGED_MCP_BEARER < "$STATEWRIGHT_MANAGED_MCP_TOKEN_FILE" || true
 fi
 export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true

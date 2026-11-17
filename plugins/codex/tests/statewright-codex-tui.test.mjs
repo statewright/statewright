@@ -727,6 +727,8 @@ if (!existsSync(marker)) {
     assert.equal(invocations.length, 2);
     assert.match(invocations[0], /-m gpt-5\.6-terra -c model_reasoning_effort="low"/);
     assert.match(invocations[1], /-m gpt-5\.6-sol -c model_reasoning_effort="high" resume session-1/);
+    // Every launch keeps credentials out of Codex's agent shells.
+    for (const invocation of invocations) assert.match(invocation, /^-c shell_environment_policy\.exclude=\[.*"\*_KEY".*"STATEWRIGHT_\*API_KEY\*"/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

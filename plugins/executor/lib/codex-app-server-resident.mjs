@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,7 +18,7 @@ import { createRuntimeApprovalService } from "./runtime-approval-service.mjs";
 import { createGatewayCredentialRecovery } from "./gateway-credential-recovery.mjs";
 import { approvalOriginProof } from "./approval-origin.mjs";
 import { codexWorkflowServices } from "./desktop-workflow-services.mjs";
-import { isStatewrightCredentialEnvName, managedCodexEnvironment, readCredentialHandoff, removeManagedMcpTokenFile, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
+import { ensurePrivateDirectory, isStatewrightCredentialEnvName, managedCodexEnvironment, readCredentialHandoff, removeManagedMcpTokenFile, stripStatewrightCredentials, writeManagedMcpTokenFile } from "./managed-credential-isolation.mjs";
 
 const EXECUTOR_ROOT = dirname(fileURLToPath(import.meta.url));
 const RESIDENT_ENTRYPOINT = join(EXECUTOR_ROOT, "codex-app-server-resident.mjs");
@@ -255,7 +255,7 @@ export async function ensureCodexAppServerResident({ command, cwd, environment =
     );
   }
   await unlink(manifestPath).catch(() => {});
-  await mkdir(root, { recursive: true, mode: 0o700 });
+  await ensurePrivateDirectory(root);
   const logHandle = await open(join(root, "resident.log"), "a", 0o600);
   // The gateway key is handed to the resident over a one-shot stdin pipe and
   // never placed in its environment: everything the resident spawns (Codex,
@@ -324,7 +324,9 @@ async function main() {
   const root = process.env.STATEWRIGHT_CODEX_RESIDENT_ROOT ?? residentRoot(home, clientId);
   const controlDir = residentControlDir(home, clientId);
   const manifestPath = join(root, "manifest.json");
-  await mkdir(controlDir, { recursive: true, mode: 0o700 });
+  // mkdir's mode does not tighten a directory that already exists; the token
+  // file lives here, so enforce owner + 0700 explicitly.
+  await ensurePrivateDirectory(controlDir);
   await writeManagedControlIdentity(controlDir, { host: "codex", clientId });
   const bridge = await createManagedMcpBridge({ environment: credentialEnvironment, clientId, home });
   let telemetry = await telemetryWriter(credentialEnvironment);

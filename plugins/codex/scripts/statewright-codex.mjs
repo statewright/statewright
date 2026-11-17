@@ -25,6 +25,7 @@ import {
 import { DeliveryController } from "./lib/delivery-controller.mjs";
 import { WorkspaceSession } from "./lib/workspace-session.mjs";
 import { createErrorReporter, isExpectedPluginError } from "./lib/error-reporting.mjs";
+import { codexShellEnvironmentPolicyArgs } from "./lib/desktop-runtime/managed-credential-isolation.mjs";
 
 const errorReporter = createErrorReporter({ plugin: PLUGIN_NAME, version: PLUGIN_VERSION });
 errorReporter.installProcessHandlers();
@@ -272,9 +273,13 @@ export async function main(argv = process.argv.slice(2)) {
     : null;
   const transportSessionId =
     process.env.STATEWRIGHT_MCP_SESSION_ID ?? `br_codex_${randomUUID()}`;
+  // The App Server's agent shells must not inherit STATEWRIGHT_API_KEY (read
+  // above for telemetry) or any other credential; MCP servers are unaffected.
+  const shellPolicyArgs = process.platform === "win32" ? []
+    : await codexShellEnvironmentPolicyArgs({ codexHome: process.env.CODEX_HOME ?? join(homedir(), ".codex") });
   const client = new AppServerClient({
     command: options.codexBin,
-    args: buildAppServerArgs(transportSessionId),
+    args: [...buildAppServerArgs(transportSessionId), ...shellPolicyArgs],
     cwd,
     env: workspaceSession
       ? deliveryAgentEnvironment(process.env, transportSessionId)

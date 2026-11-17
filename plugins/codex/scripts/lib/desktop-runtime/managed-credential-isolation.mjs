@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// Managed Codex processes run arbitrary agent commands. Those commands, and
+// Managed agent processes (Codex and Claude Code) run arbitrary agent commands. Those commands, and
 // any test they start, inherit the Codex process environment, so no gateway
 // credential may ever live there. The supervisor/resident keeps the gateway
 // key in memory; the local MCP bridge token reaches the Statewright MCP proxy
@@ -24,7 +24,11 @@ export const STATEWRIGHT_CREDENTIAL_ENV = Object.freeze([
   "STATEWRIGHT_USAGE_CONTROL_TOKEN",
   "STATEWRIGHT_REFRESH_TOKEN",
 ]);
-const CREDENTIAL_SUFFIX = /^STATEWRIGHT_[A-Z0-9_]*(?:_API_KEY|_TOKEN|_TOKEN_FILE|_SECRET|_PASSWORD)$/i;
+// Covers bare names (STATEWRIGHT_TOKEN, STATEWRIGHT_KEY) as well as any
+// STATEWRIGHT_<...>_KEY/TOKEN/SECRET/PASSWORD/BEARER/CREDENTIAL(S) carrier and
+// its _FILE pointer. STATEWRIGHT_CLIENT_ID is an opaque routing identifier
+// (sent only as x-statewright-client-id), not a credential, and stays visible.
+const CREDENTIAL_SUFFIX = /^STATEWRIGHT_(?:[A-Z0-9_]*_)?(?:KEY|TOKEN|SECRET|PASSWORD|BEARER|CREDENTIALS?)(?:_FILE)?$/i;
 
 export function isStatewrightCredentialEnvName(name) {
   return STATEWRIGHT_CREDENTIAL_ENV.includes(name) || CREDENTIAL_SUFFIX.test(name) || /REFRESH_TOKEN/i.test(name) && /^STATEWRIGHT_/i.test(name);
@@ -43,11 +47,27 @@ export function stripStatewrightCredentials(environment = {}, { keep = [] } = {}
 // defense in depth if a credential ever reaches the Codex environment again.
 export const CODEX_SHELL_CREDENTIAL_EXCLUDES = Object.freeze([
   "STATEWRIGHT_*API_KEY*",
+  "STATEWRIGHT_KEY",
+  "STATEWRIGHT_*_KEY",
+  "STATEWRIGHT_TOKEN",
   "STATEWRIGHT_*_TOKEN",
   "STATEWRIGHT_*_TOKEN_FILE",
   "STATEWRIGHT_*SECRET*",
   "STATEWRIGHT_*PASSWORD*",
   "STATEWRIGHT_*REFRESH*",
+  "STATEWRIGHT_*CREDENTIAL*",
+]);
+
+// Generic credential shapes. These are always part of the managed override:
+// a `-c shell_environment_policy.exclude=[...]` replaces whatever array the
+// user configured, so if their config cannot be read the managed launch must
+// still not hand agent shells every *_KEY / *_TOKEN in the environment.
+export const GENERIC_SHELL_CREDENTIAL_EXCLUDES = Object.freeze([
+  "*_KEY",
+  "*_TOKEN",
+  "*_SECRET",
+  "*_PASSWORD",
+  "*_BEARER",
 ]);
 
 function tomlString(value) {
@@ -66,8 +86,19 @@ function unquoteTomlString(raw) {
 // A `-c shell_environment_policy.exclude=[...]` override replaces the array a
 // user configured. Read their top-level config array (best effort, string
 // literals only) so the managed override is a union, never a weakening.
-export function configuredShellExcludes(configSource = "") {
+export function configuredShellExcludes(configSource = "", { onUnparsed = null } = {}) {
   if (typeof configSource !== "string" || !configSource) return [];
+  const values = parseTopLevelShellExcludes(configSource);
+  // Inline tables, quoted headers and profile-scoped policies are not read.
+  // Report them so the caller can warn; the generic patterns still apply.
+  if (values.length === 0 && /shell_environment_policy/.test(configSource.replace(/#.*$/gm, ""))
+      && /exclude/.test(configSource.replace(/#.*$/gm, ""))) {
+    onUnparsed?.();
+  }
+  return values;
+}
+
+function parseTopLevelShellExcludes(configSource) {
   const lines = configSource.split(/\r?\n/);
   let inPolicy = false;
   let collecting = null;
@@ -97,14 +128,32 @@ export function configuredShellExcludes(configSource = "") {
   return values;
 }
 
-export async function codexShellEnvironmentPolicyArgs({ codexHome } = {}) {
+export async function codexShellEnvironmentPolicyArgs({ codexHome, warn = defaultPolicyWarning } = {}) {
   let configured = [];
   if (codexHome) {
-    try { configured = configuredShellExcludes(await readFile(join(codexHome, "config.toml"), "utf8")); }
-    catch { configured = []; }
+    let source = null;
+    try { source = await readFile(join(codexHome, "config.toml"), "utf8"); } catch { source = null; }
+    if (source) configured = configuredShellExcludes(source, { onUnparsed: () => warn?.() });
   }
-  const excludes = [...new Set([...configured, ...CODEX_SHELL_CREDENTIAL_EXCLUDES])];
+  const excludes = [...new Set([...configured, ...GENERIC_SHELL_CREDENTIAL_EXCLUDES, ...CODEX_SHELL_CREDENTIAL_EXCLUDES])];
   return ["-c", `shell_environment_policy.exclude=[${excludes.map(tomlString).join(",")}]`];
+}
+
+function defaultPolicyWarning() {
+  process.stderr.write("[statewright] could not read shell_environment_policy.exclude from config.toml; agent shells still exclude *_KEY, *_TOKEN, *_SECRET, *_PASSWORD, *_BEARER and Statewright credentials. Use a top-level [shell_environment_policy] exclude = [...] array to keep your own patterns.\n");
+}
+
+// Creates (or tightens) a private control directory: owned by this user and
+// mode 0700, even when it already existed with looser permissions.
+export async function ensurePrivateDirectory(directory) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Statewright control directory is not a directory.");
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error("Statewright control directory is owned by another user.");
+  }
+  if ((info.mode & 0o777) !== 0o700) await chmod(directory, 0o700);
+  return directory;
 }
 
 // Writes the bridge token where only the owning user can read it. The path is
@@ -129,9 +178,13 @@ export async function removeManagedMcpTokenFile(path, token = null) {
   }
 }
 
-// The environment a managed Codex process (TUI, App Server, `codex exec`) may
-// see. Credentials are stripped; the bridge is addressed by URL plus the path
-// of its 0600 token file.
+// The environment a managed agent process (Codex TUI, App Server, `codex
+// exec`, Claude Code) may see. Credentials are stripped; the bridge is
+// addressed by URL plus the path of its 0600 token file.
+export function managedAgentEnvironment(environment, options = {}) {
+  return managedCodexEnvironment(environment, options);
+}
+
 export function managedCodexEnvironment(environment, { mcpUrl = null, tokenFile = null, extra = {} } = {}) {
   const isolated = stripStatewrightCredentials({ ...environment, ...extra });
   if (mcpUrl) isolated.STATEWRIGHT_MANAGED_MCP_URL = mcpUrl;

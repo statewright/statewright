@@ -204,6 +204,84 @@ mark_client_tools_rejected() {
   (umask 077; printf '%s\n' "$(key_fingerprint "$PB_URL|$1")" > "$marker")
 }
 
+# --- Client tool discovery helpers (no eval; names and values are data) ---
+# MCP server names become jq --arg data and argv words, so only plain names
+# are scanned.
+statewright_safe_server_name() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
+}
+
+# Discovery only scans plugins the user enabled in Claude (enabledPlugins in
+# ~/.claude/settings.json), never every cached marketplace plugin.
+# $1 = ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.mcp.json
+statewright_enabled_plugin_config() {
+  local rel="${1#"$HOME/.claude/plugins/cache/"}" marketplace plugin
+  marketplace="${rel%%/*}"; rel="${rel#*/}"; plugin="${rel%%/*}"
+  [ -n "$marketplace" ] && [ -n "$plugin" ] || return 1
+  jq -e --arg id "$plugin@$marketplace" '.enabledPlugins[$id] == true' "$HOME/.claude/settings.json" >/dev/null 2>&1
+}
+
+# One curl config line `NAME = "VALUE"`, refusing CR/LF like
+# statewright_bearer_config so a value cannot add curl options.
+statewright_curl_config_line() {
+  local name="$1" value="$2"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s = "%s"\n' "$name" "$value"
+}
+
+# POST tools/list to one HTTP MCP server. The URL and any Authorization
+# header travel in a curl config on stdin, never in argv or through eval.
+statewright_scan_http_server() {
+  local url="$1" auth="$2" config line
+  case "$url" in http://*|https://*) ;; *) return 1 ;; esac
+  config=$(statewright_curl_config_line url "$url") || return 1
+  if [ -n "$auth" ]; then
+    case "$auth" in
+      [Bb]earer\ *) line=$(statewright_bearer_config "${auth#* }") || return 1 ;;
+      *) line=$(statewright_curl_config_line header "Authorization: $auth") || return 1 ;;
+    esac
+    config="$config"$'\n'"$line"
+  fi
+  printf '%s\n' "$config" | curl -K - -sf --max-time 5 -X POST \
+    -H 'Content-Type: application/json' \
+    --data-raw '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":99}' 2>/dev/null
+}
+
+# Launch one stdio MCP server, handshake and list its tools. Its env is
+# exported inside this subshell only (no `bash -c` string, so env values stay
+# out of argv); argv comes from a NUL-delimited jq read, never word-split.
+# $1 = server entry JSON, $2 = plugin root for ${CLAUDE_PLUGIN_ROOT}.
+statewright_scan_stdio_server() {
+  local entry="$1" plugin_root="$2"
+  (
+    local command arg pair name
+    local -a argv=()
+    command=$(printf '%s' "$entry" | jq -r '.command | strings' 2>/dev/null) || exit 1
+    [ -n "$command" ] || exit 1
+    command="${command//\$\{CLAUDE_PLUGIN_ROOT\}/$plugin_root}"
+    while IFS= read -r -d '' arg; do
+      argv+=("${arg//\$\{CLAUDE_PLUGIN_ROOT\}/$plugin_root}")
+    done < <(printf '%s' "$entry" | jq -j '(.args // []) | if type == "array" then .[] | strings | (. + "\u0000") else empty end' 2>/dev/null)
+    while IFS= read -r -d '' pair; do
+      name="${pair%%=*}"
+      case "$name" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+      export "$pair"
+    done < <(printf '%s' "$entry" | jq -j '(.env // {}) | if type == "object" then to_entries[] | select(.value | type == "string") | (.key + "=" + .value + "\u0000") else empty end' 2>/dev/null)
+    {
+      printf '%s\n' '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"statewright-scanner","version":"0.1"}},"id":1}'
+      sleep 0.5
+      printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+      printf '%s\n' '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
+      sleep 2
+    } | timeout 15 "$command" ${argv[@]+"${argv[@]}"} 2>/dev/null
+  )
+}
+
 upload_client_tools() {
   local key="$1"
   client_tools_rejection_matches "$key" && return 0
@@ -231,58 +309,51 @@ upload_client_tools() {
     {"name":"statewright_list_workflows","source":"MCP:statewright","category":"MCP","description":"List available workflows"}
   ]')
 
-  # Scan configured MCP servers for additional tools
-  # Collect all MCP config files: user global + plugin caches
-  local mcp_configs="$MCP_CONFIG"
+  # Scan the user's own MCP config and enabled Claude plugins for more tools.
+  # Server names, URLs, headers, args and env are data: no eval, no jq
+  # program interpolation, no `bash -c` strings.
+  local -a mcp_configs=()
+  [ -f "$MCP_CONFIG" ] && mcp_configs+=("$MCP_CONFIG")
+  local pconf
   for pconf in "$HOME/.claude/plugins/cache"/*/*/*/.mcp.json; do
-    [ -f "$pconf" ] && mcp_configs="$mcp_configs $pconf"
+    [ -f "$pconf" ] && statewright_enabled_plugin_config "$pconf" && mcp_configs+=("$pconf")
   done
+  local disabled_servers
+  disabled_servers=$(jq -c '.disabledMcpjsonServers // [] | if type == "array" then map(strings) else [] end' "$HOME/.claude/settings.json" 2>/dev/null || true)
+  [ -n "$disabled_servers" ] || disabled_servers='[]'
 
-  local seen_servers=""
-  for conf_file in $mcp_configs; do
-    [ -f "$conf_file" ] || continue
-    for server in $(jq -r '.mcpServers // {} | keys[]' "$conf_file" 2>/dev/null); do
+  local seen_servers="" conf_file server entry server_url server_tools plugin_root
+  for conf_file in ${mcp_configs[@]+"${mcp_configs[@]}"}; do
+    plugin_root=$(dirname "$conf_file")
+    while IFS= read -r server; do
+      statewright_safe_server_name "$server" || continue
       [ "$server" = "statewright" ] && continue
       # Skip duplicates across config files
       case " $seen_servers " in *" $server "*) continue ;; esac
       seen_servers="$seen_servers $server"
-      local server_url=$(jq -r ".mcpServers[\"$server\"].url // empty" "$conf_file" 2>/dev/null)
-      local server_cmd=$(jq -r ".mcpServers[\"$server\"].command // empty" "$conf_file" 2>/dev/null)
-      local server_tools=""
+      entry=$(jq -c --arg s "$server" --argjson disabled "$disabled_servers" \
+        '.mcpServers[$s] | select(type == "object") | select(.disabled != true) | select(($disabled | index($s)) == null)' \
+        "$conf_file" 2>/dev/null || true)
+      [ -n "$entry" ] || continue
+      server_url=$(printf '%s' "$entry" | jq -r '.url // empty | strings' 2>/dev/null || true)
+      server_tools=""
 
       if [ -n "$server_url" ]; then
         # HTTP MCP server — single POST
-        local auth_header=$(jq -r ".mcpServers[\"$server\"].headers.Authorization // empty" "$conf_file" 2>/dev/null)
-        local extra_headers=""
-        [ -n "$auth_header" ] && extra_headers="-H \"Authorization: $auth_header\""
-
-        server_tools=$(eval curl -sf --max-time 5 -X POST "\"$server_url\"" \
-          -H "'Content-Type: application/json'" \
-          $extra_headers \
-          -d "'{"jsonrpc":"2.0","method":"tools/list","params":{},"id":99}'" 2>/dev/null \
-          | jq "[.result.tools[]? | {name: .name, source: \"MCP:$server\", category: \"MCP\", description: .description}]" 2>/dev/null)
-
-      elif [ -n "$server_cmd" ]; then
+        server_tools=$(statewright_scan_http_server "$server_url" \
+          "$(printf '%s' "$entry" | jq -r '.headers.Authorization // empty | strings' 2>/dev/null || true)" \
+          | jq -c --arg server "$server" '[.result.tools[]? | {name: .name, source: ("MCP:" + $server), category: "MCP", description: .description}]' 2>/dev/null)
+      elif [ -n "$(printf '%s' "$entry" | jq -r '.command // empty | strings' 2>/dev/null || true)" ]; then
         # Stdio MCP server — launch, handshake, query, kill
-        local server_args=$(jq -r ".mcpServers[\"$server\"].args // [] | join(\" \")" "$conf_file" 2>/dev/null)
-        local server_env=$(jq -r ".mcpServers[\"$server\"].env // {} | to_entries | map(\"export \" + .key + \"=\" + (.value | @sh) + \";\") | join(\" \")" "$conf_file" 2>/dev/null)
-
-        server_tools=$(timeout 15 bash -c "
-          ${server_env}
-          { echo '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"statewright-scanner\",\"version\":\"0.1\"}},\"id\":1}'; \
-            sleep 0.5; \
-            echo '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}'; \
-            echo '{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"params\":{},\"id\":2}'; \
-            sleep 2; \
-          } | $server_cmd $server_args 2>/dev/null
-        " 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' \
-          | jq -s '[.[] | select(.id == 2) | .result.tools[]? | {name: .name, source: "MCP:'"$server"'", category: "MCP", description: (.description // "")[:120]}]' 2>/dev/null)
+        server_tools=$(statewright_scan_stdio_server "$entry" "$plugin_root" \
+          | LC_ALL=C LANG=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' \
+          | jq -s -c --arg server "$server" '[.[] | select(.id == 2) | .result.tools[]? | {name: .name, source: ("MCP:" + $server), category: "MCP", description: (.description // "")[:120]}]' 2>/dev/null)
       fi
 
       if [ -n "$server_tools" ] && [ "$server_tools" != "null" ] && [ "$server_tools" != "[]" ]; then
-        tools=$(echo "$tools" | jq ". + $server_tools")
+        tools=$(printf '%s' "$tools" | jq -c --argjson more "$server_tools" '. + $more' 2>/dev/null || printf '%s' "$tools")
       fi
-    done
+    done < <(jq -r '.mcpServers // {} | if type == "object" then keys[] else empty end' "$conf_file" 2>/dev/null)
   done
 
   # Discover Taskfile/Makefile commands, namespaced by directory basename
@@ -298,7 +369,7 @@ upload_client_tools() {
     local make_cmds=$(make -pRrq 2>/dev/null | awk -F: '/^[a-zA-Z0-9][^$#\/\t=]*:([^=]|$)/ {split($1,a," ");print a[1]}' | sort -u | grep -v '^\.' | head -30)
     if [ -n "$make_cmds" ]; then
       local make_json=$(echo "$make_cmds" | jq -R '.' | jq -s --arg proj "$project_name" '[.[] | {name: ., source: "Makefile", category: "make", project: $proj}]')
-      commands=$(echo "$commands" | jq ". + $make_json")
+      commands=$(printf '%s' "$commands" | jq -c --argjson more "$make_json" '. + $more' 2>/dev/null || printf '%s' "$commands")
     fi
   fi
 

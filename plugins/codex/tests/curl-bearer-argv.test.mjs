@@ -9,8 +9,18 @@ import { fileURLToPath } from "node:url";
 // Obviously fake credentials, not sw_-shaped, so a secret scanner needs no allowlist.
 const FAKE_TOKEN = "FAKE-bearer-argv-token";
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
-const PLUGIN = resolve(TEST_DIR, "..");
-const SCRIPTS = ["hook.sh", "mcp-proxy.sh", "capture.sh"].map((name) => join(PLUGIN, name));
+const REPO = resolve(TEST_DIR, "../../..");
+
+const PLUGIN_SCRIPTS = [
+  { plugin: "codex", rels: ["hook.sh", "mcp-proxy.sh", "capture.sh"] },
+  { plugin: "claude-code", rels: ["hook.sh", "mcp-proxy.sh", "capture.sh", "skills/statewright/run.sh", "examples/statusline.sh"] },
+  { plugin: "cursor", rels: ["hook.sh", "mcp-proxy.sh"] },
+  { plugin: "executor", rels: ["mcp-proxy.sh"] },
+].flatMap(({ plugin, rels }) => rels.map((rel) => ({
+  plugin,
+  rel,
+  path: join(REPO, "plugins", plugin, rel),
+})));
 
 function stripBearerHelper(source) {
   return source.replace(/statewright_bearer_config\(\) \{[\s\S]*?\n\}\n/, "");
@@ -30,13 +40,17 @@ function run(command, args, { env = {}, stdin = "", cwd } = {}) {
   });
 }
 
-test("hook.sh, mcp-proxy.sh and capture.sh do not put a bearer token in curl argv", async () => {
-  for (const path of SCRIPTS) {
+function rpc(messages) {
+  return messages.map((message) => JSON.stringify(message)).join("\n") + "\n";
+}
+
+test("plugin curl callers do not put a bearer token in curl argv", async () => {
+  for (const { path } of PLUGIN_SCRIPTS) {
     const source = await readFile(path, "utf8");
     assert.match(source, /statewright_bearer_config\(\)/, path);
     const rest = stripBearerHelper(source);
     assert.doesNotMatch(rest, /Authorization:\s*Bearer/, `${path} still has Authorization: Bearer outside the curl config helper`);
-    assert.match(source, /-K <\(statewright_bearer_config/, `${path} should pass bearers through -K`);
+    assert.match(source, /-K <\([\s\S]*?statewright_bearer_config/, `${path} should pass bearers through -K`);
   }
 
   const home = await mkdtemp(join(tmpdir(), "statewright-bearer-argv-"));
@@ -82,6 +96,18 @@ else:
         sys.stdout.write("\\n200")
 `, { mode: 0o755 });
     await chmod(join(bin, "curl"), 0o755);
+    // statusline.sh and some hooks wrap curl in `timeout`; ignore the duration.
+    await writeFile(join(bin, "timeout"), `#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+shift
+exec "$@"
+`, { mode: 0o755 });
+    await chmod(join(bin, "timeout"), 0o755);
 
     const pathEnv = `${bin}:${process.env.PATH || "/usr/bin:/bin"}`;
     const baseEnv = {
@@ -100,71 +126,167 @@ else:
       STATEWRIGHT_CLIENT_ID: "swc_fixture",
     };
 
-    const identity = await run("bash", ["-c", `source "$1"; statewright_client_id codex fixture-thread`, "_", join(PLUGIN, "client-id.sh")], {
-      env: { ...baseEnv, STATEWRIGHT_CLIENT_ID: "hook-bearer-argv-fixture" },
-    });
-    assert.equal(identity.code, 0, identity.stderr);
-    const clientId = identity.stdout.trim();
-    const sessionKey = clientId.replace(/^swc_/, "").slice(0, 16);
-    const sessionDir = join(home, ".statewright", "sessions", sessionKey);
-    await mkdir(sessionDir, { recursive: true });
-    await writeFile(join(sessionDir, ".capture_enabled"), "");
-    await writeFile(join(sessionDir, ".active"), "");
-    await writeFile(join(sessionDir, ".state_cache"), JSON.stringify({
-      state: "intake",
-      run_id: "run-fake",
-      run_session_id: "session-fake",
-      workflow: "fake-workflow",
-      allowed_tools: ["Bash"],
-      transitions: [],
-    }));
+    const argvCount = async () => {
+      try {
+        const raw = await readFile(argvLog, "utf8");
+        return raw.trim() ? raw.trim().split("\n").length : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    const invoke = async (label, command, args, { env = {}, stdin = "", cwd } = {}) => {
+      const before = await argvCount();
+      const result = await run(command, args, { env: { ...baseEnv, ...env }, stdin, cwd });
+      assert.equal(result.code, 0, `${label}: ${result.stderr || result.stdout}`);
+      const after = await argvCount();
+      assert.ok(after > before, `${label} should invoke curl`);
+      return result;
+    };
+
+    const runProxy = (label, script, env, messages) => invoke(
+      label,
+      "bash",
+      [script],
+      { env, stdin: rpc(messages), cwd: dirname(script) },
+    );
+
+    const listOnly = [{ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }];
+    const handshake = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ];
+
+    const setupCaptureSession = async (plugin, identityArgs, hookInput) => {
+      const pluginDir = join(REPO, "plugins", plugin);
+      const identity = await run("bash", ["-c", 'source "$1"; statewright_client_id "$@"', "_", join(pluginDir, "client-id.sh"), ...identityArgs], {
+        env: { ...baseEnv, STATEWRIGHT_CLIENT_ID: `${plugin}-bearer-argv-fixture` },
+      });
+      assert.equal(identity.code, 0, identity.stderr);
+      const clientId = identity.stdout.trim();
+      const sessionKey = clientId.replace(/^swc_/, "").slice(0, 16);
+      const sessionDir = join(home, ".statewright", "sessions", sessionKey);
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(join(sessionDir, ".capture_enabled"), "");
+      await writeFile(join(sessionDir, ".active"), "");
+      await writeFile(join(sessionDir, ".state_cache"), JSON.stringify({
+        state: "intake",
+        run_id: "run-fake",
+        run_session_id: "session-fake",
+        workflow: "fake-workflow",
+        allowed_tools: ["Bash"],
+        transitions: [],
+      }));
+      return { pluginDir, hookInput, clientEnv: { STATEWRIGHT_CLIENT_ID: `${plugin}-bearer-argv-fixture` } };
+    };
 
     const hookInput = JSON.stringify({
       thread_id: "fixture-thread",
+      session_id: "fixture-session",
       tool_name: "Bash",
       tool_input: {},
       tool_response: "ok",
     }) + "\n";
 
-    const capture = await run("bash", [join(PLUGIN, "capture.sh")], { env: baseEnv, stdin: hookInput, cwd: PLUGIN });
-    assert.equal(capture.code, 0, capture.stderr || capture.stdout);
-
-    const hook = await run("bash", [join(PLUGIN, "hook.sh"), "post-tool"], {
-      env: { ...baseEnv, STATEWRIGHT_CLIENT_ID: "hook-bearer-argv-fixture" },
+    const codexSession = await setupCaptureSession("codex", ["codex", "fixture-thread"], hookInput);
+    await invoke("codex capture.sh", "bash", [join(codexSession.pluginDir, "capture.sh")], {
+      env: codexSession.clientEnv,
       stdin: hookInput,
-      cwd: PLUGIN,
+      cwd: codexSession.pluginDir,
     });
-    assert.equal(hook.code, 0, hook.stderr || hook.stdout);
+    await invoke("codex hook.sh post-tool", "bash", [join(codexSession.pluginDir, "hook.sh"), "post-tool"], {
+      env: codexSession.clientEnv,
+      stdin: hookInput,
+      cwd: codexSession.pluginDir,
+    });
+    await runProxy("codex mcp-proxy adapter", join(REPO, "plugins/codex/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
+      STATEWRIGHT_MANAGED_MCP_URL: "",
+      STATEWRIGHT_MANAGED_MCP_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_BEARER: "",
+    }, listOnly);
+    await runProxy("codex mcp-proxy gateway", join(REPO, "plugins/codex/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_URL: "",
+      STATEWRIGHT_MANAGED_MCP_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_BEARER: "",
+    }, handshake);
+    await runProxy("codex mcp-proxy managed", join(REPO, "plugins/codex/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_MANAGED_MCP_BEARER: FAKE_TOKEN,
+    }, listOnly);
 
-    const adapter = await run("bash", [join(PLUGIN, "mcp-proxy.sh")], {
+    const claudeSession = await setupCaptureSession("claude-code", ["fixture-session"], hookInput);
+    await invoke("claude-code capture.sh", "bash", [join(claudeSession.pluginDir, "capture.sh")], {
+      env: claudeSession.clientEnv,
+      stdin: hookInput,
+      cwd: claudeSession.pluginDir,
+    });
+    await invoke("claude-code hook.sh post-tool", "bash", [join(claudeSession.pluginDir, "hook.sh"), "post-tool"], {
       env: {
-        ...baseEnv,
+        ...claudeSession.clientEnv,
         STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
         STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
-        STATEWRIGHT_MANAGED_MCP_URL: "",
-        STATEWRIGHT_MANAGED_MCP_TOKEN: "",
       },
-      stdin: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) + "\n",
-      cwd: PLUGIN,
+      stdin: hookInput,
+      cwd: claudeSession.pluginDir,
     });
-    assert.equal(adapter.code, 0, adapter.stderr || adapter.stdout);
+    await runProxy("claude-code mcp-proxy adapter", join(REPO, "plugins/claude-code/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
+      STATEWRIGHT_MANAGED_MCP_URL: "",
+      STATEWRIGHT_MANAGED_MCP_TOKEN: "",
+    }, listOnly);
+    await runProxy("claude-code mcp-proxy gateway", join(REPO, "plugins/claude-code/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_URL: "",
+      STATEWRIGHT_MANAGED_MCP_TOKEN: "",
+    }, handshake);
+    await runProxy("claude-code mcp-proxy managed", join(REPO, "plugins/claude-code/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+      STATEWRIGHT_MANAGED_MCP_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_MANAGED_MCP_TOKEN: FAKE_TOKEN,
+    }, listOnly);
+    await invoke("claude-code run.sh list", "bash", [join(REPO, "plugins/claude-code/skills/statewright/run.sh"), "list"], {
+      cwd: join(REPO, "plugins/claude-code"),
+    });
+    await invoke("claude-code statusline.sh", "bash", [join(REPO, "plugins/claude-code/examples/statusline.sh")], {
+      stdin: "{}\n",
+      cwd: join(REPO, "plugins/claude-code/examples"),
+    });
 
-    const gateway = await run("bash", [join(PLUGIN, "mcp-proxy.sh")], {
+    await runProxy("cursor mcp-proxy gateway", join(REPO, "plugins/cursor/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+    }, handshake);
+    await runProxy("cursor mcp-proxy adapter", join(REPO, "plugins/cursor/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
+    }, listOnly);
+    await invoke("cursor hook.sh stop", "bash", [join(REPO, "plugins/cursor/hook.sh"), "stop"], {
       env: {
-        ...baseEnv,
-        STATEWRIGHT_ADAPTER_URL: "",
-        STATEWRIGHT_ADAPTER_TOKEN: "",
-        STATEWRIGHT_MANAGED_MCP_URL: "",
-        STATEWRIGHT_MANAGED_MCP_TOKEN: "",
+        STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
+        STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
       },
-      stdin: [
-        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
-        JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-        JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
-      ].join("\n") + "\n",
-      cwd: PLUGIN,
+      stdin: "{}\n",
+      cwd: join(REPO, "plugins/cursor"),
     });
-    assert.equal(gateway.code, 0, gateway.stderr || gateway.stdout);
+
+    await runProxy("executor mcp-proxy adapter", join(REPO, "plugins/executor/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "http://127.0.0.1:9",
+      STATEWRIGHT_ADAPTER_TOKEN: FAKE_TOKEN,
+    }, listOnly);
+    await runProxy("executor mcp-proxy gateway", join(REPO, "plugins/executor/mcp-proxy.sh"), {
+      STATEWRIGHT_ADAPTER_URL: "",
+      STATEWRIGHT_ADAPTER_TOKEN: "",
+    }, handshake);
 
     const raw = await readFile(argvLog, "utf8");
     assert.notEqual(raw.trim(), "", "stub curl should have been invoked");
@@ -204,7 +326,7 @@ test "$out" = $'header = "Authorization: Bearer FAKE-clean-token"'
   try {
     const driverPath = join(home, "probe.sh");
     await writeFile(driverPath, driver, { mode: 0o755 });
-    for (const script of [join(PLUGIN, "hook.sh"), join(PLUGIN, "mcp-proxy.sh"), join(PLUGIN, "capture.sh")]) {
+    for (const { path: script } of PLUGIN_SCRIPTS) {
       const result = await run("bash", [driverPath, script], { env: { PATH: process.env.PATH, HOME: home, LANG: "C" } });
       assert.equal(result.code, 0, `${script}: ${result.stderr || result.stdout}`);
     }

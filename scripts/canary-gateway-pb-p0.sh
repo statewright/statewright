@@ -7,7 +7,8 @@
 #
 # The session task runs the real executor entry point
 # (plugins/executor/statewright-exec.mjs) with the local reference gateway
-# and the default headless host (claude -p; override with SW_CANARY_HOST).
+# and the default host (pi; override with SW_CANARY_HOST). statewright-exec
+# refuses --host claude: Claude Code is plugin-native.
 # The executor authenticates with the canary API key and identifies its
 # streamable-MCP transport session as br_exec_<uuid> via the
 # Mcp-Session-Id header; the workflow opt-slice-branching-v1 forks branch
@@ -31,7 +32,7 @@ SW_PORT=${SW_PORT:-8932}
 SW_PB_PORT=${SW_PB_PORT:-8090}
 SW_PB_URL=${SW_PB_URL:-http://127.0.0.1:${SW_PB_PORT}}
 SW_WORKFLOW=${SW_WORKFLOW:-opt-slice-branching-v1}
-SW_CANARY_HOST=${SW_CANARY_HOST:-claude}
+SW_CANARY_HOST=${SW_CANARY_HOST:-pi}
 SW_API_KEY=${SW_API_KEY:-sw-canary-key}
 SW_TIMEOUT=${SW_TIMEOUT:-300}
 

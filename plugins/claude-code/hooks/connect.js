@@ -1046,18 +1046,57 @@ export function register(on, options = {}) {
   // Claude 2.1.326+ holds a Stop `block` in more cases, so only an enforcing
   // workflow may block. A dormant session (no workflow, or no readable
   // conversation) passes through even when a lookup fails; an enforcing one
-  // still fails closed when its completion cannot be confirmed.
+  // still fails closed when its completion cannot be confirmed, but only a
+  // bounded number of times. Each conversation keeps its own count of
+  // consecutive unconfirmed blocks. A fresh Stop (`stop_hook_active` false)
+  // starts a new run; once MAX_UNCONFIRMED_STOPS blocks in a row could not be
+  // confirmed, Claude may stop and the user sees a warning instead of an
+  // endless continuation loop. Real gateway `block` decisions are never capped.
+  const MAX_UNCONFIRMED_STOPS = 3;
   const unconfirmedStop = 'Statewright could not confirm workflow completion. Read its state or turn it Off.';
+  const releasedStop = `Statewright could not confirm workflow completion after ${MAX_UNCONFIRMED_STOPS} attempts, so Claude was allowed to stop. The workflow may still be active: open /statewright to check its state or turn it Off.`;
+  const unattributedStop = 'Statewright could not tell which conversation is stopping, so it did not hold this stop. Open /statewright to check the workflow state.';
+  const failedStopMessage = 'Statewright could not check this stop, so it did not hold it. The workflow may still be active: open /statewright to check its state or turn it Off.';
+  const unconfirmedStops = new Map();
   const enforcingStop = v => Boolean(v?.requiresEnforcement && !v.routeError && !v.native?.state?.pending_approval);
+  const stopSession = e => (typeof e?.session_id === 'string' && e.session_id ? e.session_id : '');
+  // The module-level view belongs to one conversation. It may decide a Stop
+  // only when that Stop is attributably the same conversation.
+  const stopView = async ($, e) => {
+    try { return await current($); } catch {
+      const id = stopSession(e);
+      return id && view.conversation === id ? view : null;
+    }
+  };
+  const confirmedStop = conversation => { unconfirmedStops.delete(conversation); };
+  const unconfirmed = (e, conversation, result) => {
+    const prior = e?.stop_hook_active === false ? 0 : (unconfirmedStops.get(conversation) ?? 0);
+    unconfirmedStops.delete(conversation);
+    if (prior >= MAX_UNCONFIRMED_STOPS) return { ...result, systemMessage: releasedStop };
+    unconfirmedStops.set(conversation, prior + 1);
+    if (unconfirmedStops.size > 256) unconfirmedStops.delete(unconfirmedStops.keys().next().value);
+    return { ...result, block: unconfirmedStop };
+  };
+  // An unexpected error in the Stop handler itself allows the stop with a
+  // warning; it never decides from the shared module view.
+  const failedStop = ($, result) => {
+    reportDiagnostic($, view, 'control_hook_failed', 'stop', 'control');
+    return { ...result, systemMessage: failedStopMessage };
+  };
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e);
-    let v;
-    try { v = await current($); } catch { return enforcingStop(view) ? { ...result, block: unconfirmedStop } : result; }
-    if (result?.block || !enforcingStop(v)) return result;
+    const v = await stopView($, e);
+    if (!v) {
+      if (!enforcingStop(view)) return result;
+      reportDiagnostic($, view, 'session_unbound', 'stop', 'control');
+      return { ...result, systemMessage: unattributedStop };
+    }
+    if (result?.block || !enforcingStop(v)) { confirmedStop(v.conversation); return result; }
     let decision;
-    try { decision = outcome(await nativeRequest($, 'stop', {})); } catch { return { ...result, block: unconfirmedStop }; }
+    try { decision = outcome(await nativeRequest($, 'stop', {})); } catch { return unconfirmed(e, v.conversation, result); }
+    confirmedStop(v.conversation);
     return decision.decision === 'block' ? { ...result, block: decision.reason } : result;
-  }).catch(() => (enforcingStop(view) ? { block: unconfirmedStop } : {}));
+  }).catch($ => failedStop($, {}));
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       const v = await current($);

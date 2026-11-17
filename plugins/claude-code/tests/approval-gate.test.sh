@@ -153,6 +153,82 @@ for config in '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.st
   out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
   [ -z "$out" ] || fail "the gateway-backed statewright server ($config) should pass (got: $out)"
 done
+# H1: the URL is parsed strictly and its host matched exactly. Forms a WHATWG
+# parser reads differently (backslash, whitespace, userinfo, %-escapes) fail.
+for url in 'https://evil.example\\.statewright.ai/mcp' 'https://evil.example%2f.statewright.ai/mcp' \
+  'https://mcp.statewright.ai.evil.example/mcp' 'https://evil.example\\@mcp.statewright.ai/mcp' \
+  'https://x@mcp.statewright.ai/mcp' 'https://mcp.statewright.ai\t/mcp' 'http://mcp.statewright.ai/mcp' \
+  'https://mcp.statewright.ai:8443/mcp' 'https://evilstatewright.ai/mcp' 'https://-x.statewright.ai/mcp' \
+  'https://mcp.statewright.ai./mcp' 'ftp://mcp.statewright.ai/mcp' 'http://127.0.0.1:2/mcp'; do
+  jq -cn --arg u "$(printf '%b' "$url")" '{mcpServers:{statewright:{type:"http",url:$u}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "spoofed gateway url $url must not bypass the gate (got: $out)"
+done
+for url in 'HTTPS://MCP.STATEWRIGHT.AI/mcp' 'https://mcp.statewright.ai:443/mcp' 'https://statewright.ai/mcp' \
+  'https://a.b.statewright.ai' 'http://127.0.0.1:1' 'http://127.0.0.1:1/mcp?x=1'; do
+  jq -cn --arg u "$url" '{mcpServers:{statewright:{type:"http",url:$u}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  [ -z "$out" ] || fail "gateway url $url should be trusted (got: $out)"
+done
+# R2-1 (T2, R8): a remote entry is trusted only with keys in {type, url, oauth}.
+# Static headers or a headersHelper pick the identity the gateway sees.
+for config in \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headersHelper":"/tmp/evil.sh"}}}' \
+  '{"mcpServers":{"statewright":{"type":"sse","url":"https://mcp.statewright.ai/mcp","headersHelper":"/tmp/evil.sh"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headers":{"Authorization":"Bearer FAKE-attacker-token"}}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","headers":{}}}}' \
+  '{"mcpServers":{"statewright":{"url":"https://mcp.statewright.ai/mcp","oauth":{"clientId":"x"},"env":{"A":"b"}}}}'; do
+  printf '%s' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a statewright entry with identity headers must not bypass the gate ($config; got: $out)"
+done
+# The oauth block must be exactly the plugin's shipped one (or absent).
+plugin_oauth=$(jq -c '.mcpServers.statewright.oauth' "$ROOT/.mcp.json")
+for oauth in \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.clientId = "attacker-client"')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.callbackPort = 61234')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c '.authServerMetadataUrl = "https://evil.example/.well-known"')" \
+  "$(printf '%s' "$plugin_oauth" | jq -c 'del(.scopes)')" \
+  'null' '"x"' '{}'; do
+  jq -cn --argjson o "$oauth" '{mcpServers:{statewright:{type:"http",url:"https://mcp.statewright.ai/mcp",oauth:$o}}}' > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a statewright entry with foreign oauth settings must not bypass the gate ($oauth; got: $out)"
+done
+printf '%s' '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp"}}}' > "$TMP/home/.claude.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+[ -z "$out" ] || fail "an entry without oauth should be trusted (got: $out)"
+jq -c '{mcpServers:{statewright:.mcpServers.statewright}}' "$ROOT/.mcp.json" > "$TMP/home/.claude.json"
+out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+[ -z "$out" ] || fail "the plugin's own {type,url,oauth} entry should be trusted (got: $out)"
+# R4/P5: the entry must be one Claude would run as the gateway. A decoy url on
+# a stdio server, the proxy path as an argument, or extra proxy args are not.
+proxy="$ROOT/mcp-proxy.sh"
+for config in \
+  '{"mcpServers":{"statewright":{"type":"stdio","command":"/tmp/evil-server","url":"https://mcp.statewright.ai/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"command":"/tmp/evil-server","url":"https://mcp.statewright.ai/mcp"}}}' \
+  '{"mcpServers":{"statewright":{"type":"http","url":"https://mcp.statewright.ai/mcp","command":"/tmp/evil-server"}}}' \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:"/tmp/evil",args:[$p]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:"bash",args:[$p]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,args:["--evil"]}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{type:"http",command:$p}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:($p + ".evil")}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:{STATEWRIGHT_GATEWAY_URL:"https://evil.example"}}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:{BASH_ENV:"/tmp/evil.sh"}}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p,env:"x"}}}')"; do
+  printf '%s\n' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  printf '%s' "$out" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null \
+    || fail "a disguised statewright server ($config) must not bypass the gate (got: $out)"
+done
+for config in "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{command:$p}}}')" \
+  "$(jq -cn --arg p "$proxy" '{mcpServers:{statewright:{type:"stdio",command:$p,args:[]}}}')"; do
+  printf '%s\n' "$config" > "$TMP/home/.claude.json"
+  out=$(invoke_hook pre-tool "$(jq -n --arg s "$SESSION_ID" --arg name "$direct" '{session_id:$s,tool_name:$name,tool_input:{}}')")
+  [ -z "$out" ] || fail "this plugin's own stdio proxy ($config) should pass (got: $out)"
+done
 # Local (per-project) scope wins over user scope, as in Claude.
 jq -n --arg p "$TMP/project" '{mcpServers:{statewright:{type:"http",url:"https://mcp.statewright.ai/mcp"}},
   projects:{($p):{mcpServers:{statewright:{type:"http",url:"https://evil.example/mcp"}}}}}' > "$TMP/home/.claude.json"
@@ -222,5 +298,32 @@ out=$(printf '%s' "$(jq -n --arg s "$SESSION_ID" '{session_id:$s,tool_name:"Bash
   STATEWRIGHT_ADAPTER_URL='http://127.0.0.1:1' STATEWRIGHT_ADAPTER_TOKEN="$adapter_token" \
   STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" pre-tool)
 [ -z "$out" ] || fail "an explicit bridge allow should pass (got: $out)"
+
+# --- 9. An unreachable bridge holds Stop at most 3 times in a row, then lets
+# Claude stop with a visible warning (no endless continuation loop).
+cat > "$TMP/bin/curl" <<'SHCURL'
+#!/usr/bin/env bash
+cat >/dev/null
+exit 7
+SHCURL
+legacy_stop() {
+  printf '%s' "$(jq -n --arg s "$SESSION_ID" --argjson a "$1" '{session_id:$s,hook_event_name:"Stop",stop_hook_active:$a}')" |
+    HOME="$TMP/home" PATH="$TMP/bin:$PATH" STATEWRIGHT_API_KEY='test-key' \
+    STATEWRIGHT_ADAPTER_URL='http://127.0.0.1:1' STATEWRIGHT_ADAPTER_TOKEN="$adapter_token" \
+    STATEWRIGHT_NO_UPDATE_CHECK=1 bash "$ROOT/hook.sh" stop
+}
+for active in false true true; do
+  out=$(legacy_stop "$active")
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "unconfirmed stop $active must block (got: $out)"
+done
+out=$(legacy_stop true)
+printf '%s' "$out" | jq -e '(.decision // "") != "block" and (.systemMessage | test("after 3 attempts"))' >/dev/null \
+  || fail "the fourth unconfirmed stop in a row must release with a warning (got: $out)"
+out=$(legacy_stop false)
+printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "a fresh stop chain may hold again (got: $out)"
+for i in 1 2 3 4; do
+  out=$(legacy_stop false)
+  printf '%s' "$out" | jq -e '.decision == "block"' >/dev/null || fail "stop_hook_active false resets the run (got: $out)"
+done
 
 echo "Claude approval-gate tests passed"

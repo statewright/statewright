@@ -1886,6 +1886,67 @@ test('an enforcing Stop still fails closed when completion cannot be confirmed',
   await h.find(await h.pane(), 'workflow').props.onSelect('plan');
   await h.press('start');
   assert.match((await h.fire('classic.Stop', {}, async () => ({}))).block, /Finish/);
+  // The conversation id cannot be read from the host, but the Stop payload
+  // attributes it to this conversation, so its own view still decides.
+  const conversation = h.state.session;
   h.state.sessionId = () => '';
-  assert.match((await h.fire('classic.Stop', {}, async () => ({}))).block, /could not confirm workflow completion/);
+  assert.match((await h.fire('classic.Stop', { session_id: conversation, stop_hook_active: false }, async () => ({}))).block,
+    /could not confirm workflow completion/);
+});
+
+test('an unattributable Stop never borrows another conversation\'s enforcing view', async () => {
+  const h = await workflowHost();
+  await h.find(await h.pane(), 'workflow').props.onSelect('plan');
+  await h.press('start');
+  h.state.sessionId = () => '';
+  for (const e of [{}, { session_id: '22222222-2222-4222-8222-222222222222', stop_hook_active: false }]) {
+    const stop = await h.fire('classic.Stop', e, async () => ({}));
+    assert.equal(stop.block, undefined, JSON.stringify(e));
+    assert.match(stop.systemMessage, /could not tell which conversation/);
+  }
+  await h.flush();
+  assert.match(h.state.diagnostics?.map(d => d.init.body).join('\n') ?? '', /Statewright stop: session_unbound/, 'an unattributed Stop is reported');
+});
+
+test('a Stop handler error allows the stop with a warning, never from the shared view', async () => {
+  const h = await workflowHost();
+  await h.find(await h.pane(), 'workflow').props.onSelect('plan');
+  await h.press('start');
+  const fallback = h.hooks.find(x => x.name === 'classic.Stop').fallback;
+  assert.equal(typeof fallback, 'function');
+  for (const e of [{ session_id: h.state.session, stop_hook_active: true }, { session_id: h.state.session, stop_hook_active: false }, {}]) {
+    for (let i = 0; i < 4; i++) {
+      const stop = await fallback(h.$, e);
+      assert.equal(stop.block, undefined, `the enforcing shared view must not hold a failed Stop (${JSON.stringify(e)})`);
+      assert.match(stop.systemMessage, /could not check this stop/);
+    }
+  }
+  await h.flush();
+  assert.match(h.state.diagnostics?.map(d => d.init.body).join('\n') ?? '', /Statewright stop: control_hook_failed/);
+});
+
+for (const payload of ['stop_hook_active', 'no stop_hook_active']) test(`an unconfirmable Stop blocks at most 3 times, then warns (${payload})`, async () => {
+  const h = await workflowHost();
+  await h.find(await h.pane(), 'workflow').props.onSelect('plan');
+  await h.press('start');
+  const stopEvent = active => payload === 'stop_hook_active' ? { session_id: h.state.session, stop_hook_active: active } : {};
+  // Real gateway decisions are never capped.
+  for (let i = 0; i < 5; i++) assert.match((await h.fire('classic.Stop', stopEvent(true), async () => ({}))).block, /Finish/);
+  const read = h.state.read;
+  h.state.read = async args => { if (args.args?.operation === 'stop') throw new Error('gateway unreachable'); return read(args); };
+  const stop = active => h.fire('classic.Stop', stopEvent(active), async () => ({}));
+  for (const active of [false, true, true]) {
+    const result = await stop(active);
+    assert.match(result.block, /could not confirm workflow completion/);
+    assert.equal(result.systemMessage, undefined);
+  }
+  const released = await stop(true);
+  assert.equal(released.block, undefined, 'the fourth unconfirmed Stop in a row must let Claude stop');
+  assert.match(released.systemMessage, /after 3 attempts/);
+  // A new stop chain may hold the conversation again.
+  assert.match((await stop(false)).block, /could not confirm workflow completion/);
+  if (payload === 'stop_hook_active') {
+    // A fresh Stop (stop_hook_active false) resets the run.
+    for (let i = 0; i < 5; i++) assert.match((await stop(false)).block, /could not confirm/);
+  }
 });

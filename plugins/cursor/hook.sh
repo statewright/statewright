@@ -2,6 +2,19 @@
 # Cursor hook adapter for a Statewright executor bridge or local hook server.
 set -o pipefail
 
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
+
 EVENT="${1:-pre-tool}"
 INPUT=$(cat 2>/dev/null || true)
 PORT_FILE="${STATEWRIGHT_HOOK_PORT_FILE:-/tmp/statewright-hook-port}"
@@ -11,11 +24,8 @@ if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
   exit 0
 fi
 
-AUTH_ARGS=()
 if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
   HOOK_URL="${STATEWRIGHT_ADAPTER_URL%/}/hooks"
-  [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ] && \
-    AUTH_ARGS=(-H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN}")
   STRICT_ADAPTER=true
 else
   PORT=$(cat "$PORT_FILE" 2>/dev/null || true)
@@ -27,7 +37,7 @@ else
 fi
 
 get_state() {
-  curl -sf --max-time 3 "${HOOK_URL}/state" "${AUTH_ARGS[@]}" 2>/dev/null || true
+  curl -sf --max-time 3 "${HOOK_URL}/state" -K <(if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN}"; fi) 2>/dev/null || true
 }
 
 normalize_tool_name() {
@@ -80,7 +90,7 @@ pre_tool() {
     --arg normalized "$normalized" \
     '{tool_name:$normalized,tool_input:$input,host_tool_name:$name}' \
     | curl -sf --max-time 3 -X POST "${HOOK_URL}/pre-tool" \
-        -H 'Content-Type: application/json' "${AUTH_ARGS[@]}" --data-binary @- 2>/dev/null || true)
+        -H 'Content-Type: application/json' -K <(if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN}"; fi) --data-binary @- 2>/dev/null || true)
   if [ -z "$response" ] && [ "$STRICT_ADAPTER" = true ]; then
     reason="Statewright executor bridge is unavailable; refusing an unguarded tool call."
     jq -cn --arg reason "$reason" '{permission:"deny",user_message:$reason,agent_message:$reason}'
@@ -107,7 +117,7 @@ post_tool() {
     --arg response "$tool_response" --argjson is_error "$is_error" \
     '{tool_name:$name,tool_input:$input,tool_response:$response,is_error:$is_error}' \
     | curl -sf --max-time 3 -X POST "${HOOK_URL}/post-tool" \
-        -H 'Content-Type: application/json' "${AUTH_ARGS[@]}" --data-binary @- >/dev/null 2>&1 || true
+        -H 'Content-Type: application/json' -K <(if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN}"; fi) --data-binary @- >/dev/null 2>&1 || true
   echo '{}'
 }
 
@@ -181,7 +191,7 @@ case "$EVENT" in
     ;;
   stop)
     RESPONSE=$(curl -sf --max-time 3 -X POST "${HOOK_URL}/stop" \
-      -H 'Content-Type: application/json' "${AUTH_ARGS[@]}" -d '{}' 2>/dev/null || true)
+      -H 'Content-Type: application/json' -K <(if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN}"; fi) -d '{}' 2>/dev/null || true)
     DECISION=$(printf '%s' "$RESPONSE" | jq -r '.decision // "allow"')
     if [ "$DECISION" = "block" ]; then
       REASON=$(printf '%s' "$RESPONSE" | jq -r '.reason // .additionalContext // "Continue the active Statewright workflow."')

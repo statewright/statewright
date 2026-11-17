@@ -22,8 +22,13 @@ if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_T
 fi
 export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
 # Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
 statewright_bearer_config() {
-  local value="${1//\\/\\\\}"
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf 'header = "Authorization: Bearer %s"\n' "$value"
 }
@@ -661,7 +666,7 @@ emit_native_telemetry() {
   fi
   curl -sf --max-time 2 -X POST "$PB_URL/api/gateway/telemetry/events" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     -d "$payload" >/dev/null 2>&1 || true
 }
 

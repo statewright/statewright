@@ -30,6 +30,19 @@ TRANSCRIPT_TELEMETRY="${SCRIPT_DIR}/scripts/transcript-telemetry.mjs"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
+
 # Provider-neutral workflow capabilities. Keep the native name for the shell
 # guard, but map concrete Claude/Codex file and search tools to Read/Write.
 statewright_capability_for_tool() {
@@ -105,7 +118,7 @@ fi
 mcp_call() {
   curl -sf --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$1" 2>/dev/null | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // empty' 2>/dev/null || true
 }
@@ -138,11 +151,14 @@ adapter_call() {
   local endpoint="$1" method="${2:-GET}" body="${3:-}"
   [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ] || return 1
   local args=(-sf --max-time 5 -X "$method" "${STATEWRIGHT_ADAPTER_URL%/}/hooks/${endpoint}")
-  [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ] && args+=(-H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN}")
   if [ -n "$body" ]; then
     args+=(-H 'Content-Type: application/json' --data-binary "$body")
   fi
-  curl "${args[@]}" 2>/dev/null
+  if [ -n "${STATEWRIGHT_ADAPTER_TOKEN:-}" ]; then
+    curl "${args[@]}" -K <(statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN}") 2>/dev/null
+  else
+    curl "${args[@]}" 2>/dev/null
+  fi
 }
 
 # Project only provider-exact assistant usage metadata from Claude's local

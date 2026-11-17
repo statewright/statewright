@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
 set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,9 +84,9 @@ while IFS= read -r line; do
     continue
   fi
   rm -f "$MISSING_KEY_SENTINEL"
-  headers=(-H 'Content-Type: application/json' -H "Authorization: Bearer ${API_KEY}" -H "X-Statewright-Client-Id: ${CLIENT_ID}")
+  headers=(-H 'Content-Type: application/json' -H "X-Statewright-Client-Id: ${CLIENT_ID}")
   [ -n "$SESSION_ID" ] && headers+=(-H "Mcp-Session-Id: ${SESSION_ID}")
-  response=$(curl -sf --max-time 15 -X POST "${GW_URL%/}/mcp" "${headers[@]}" --data-binary "$line" 2>/dev/null || true)
+  response=$(curl -sf --max-time 15 -X POST "${GW_URL%/}/mcp" -K <(statewright_bearer_config "$API_KEY") "${headers[@]}" --data-binary "$line" 2>/dev/null || true)
   if [ -n "$response" ]; then
     printf '%s\n' "$response"
   else

@@ -30,8 +30,13 @@ if [ -z "$STATEWRIGHT_MANAGED_MCP_BEARER" ] && [ -n "${STATEWRIGHT_MANAGED_MCP_T
 fi
 export -n STATEWRIGHT_MANAGED_MCP_BEARER 2>/dev/null || true
 # Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
 statewright_bearer_config() {
-  local value="${1//\\/\\\\}"
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
   value="${value//\"/\\\"}"
   printf 'header = "Authorization: Bearer %s"\n' "$value"
 }
@@ -211,7 +216,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
     fi
     response=$(curl -sS --max-time 15 -w '\n%{http_code}' -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN:-}") \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
     if [ "$method" = "initialize" ]; then
@@ -353,7 +358,7 @@ persist_verified_device_key() {
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-device-verify.XXXXXX") || return 1
   status=$(curl -sS --max-time 15 -o "$body" -w '%{http_code}' \
     "${PB_URL%/}/api/gateway/workflows" \
-    -H "Authorization: Bearer $key" \
+    -K <(statewright_bearer_config "$key") \
     -H 'Accept: application/json' 2>/dev/null || true)
   rm -f "$body"
   [ "$status" = "200" ] || return 1
@@ -730,7 +735,7 @@ upload_client_tools() {
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-client-tools.XXXXXX") || return 0
   status=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' -X POST "$PB_URL/api/client-tools" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $key" \
+    -K <(statewright_bearer_config "$key") \
     -d "{\"tools\": $tools, \"commands\": $commands}" 2>/dev/null || true)
   response=$(cat "$body" 2>/dev/null || true)
   rm -f "$body"
@@ -909,7 +914,7 @@ while IFS= read -r line; do
   # Forward to gateway with auth
   HTTP_RESPONSE=$(curl -sS --max-time 10 -w '\n%{http_code}' -X POST "$GW_URL" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$line" 2>/dev/null || true)
   if [ "${HTTP_RESPONSE##*$'\n'}" = "401" ]; then

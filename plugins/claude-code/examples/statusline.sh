@@ -38,6 +38,19 @@ else
 fi
 
 # --- Statewright segment (left-aligned, fits inline with existing powerline) ---
+
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
 SW_SEGMENT=""
 
 if [[ -n "$STATEWRIGHT_API_KEY" ]] || [[ -f "$HOME/.statewright/api_key" ]]; then
@@ -46,7 +59,7 @@ if [[ -n "$STATEWRIGHT_API_KEY" ]] || [[ -f "$HOME/.statewright/api_key" ]]; the
 
     SW_STATE=$(timeout 1 curl -s -X POST "${SW_URL}/" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${SW_KEY}" \
+        -K <(statewright_bearer_config "${SW_KEY}") \
         -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"statewright_get_state","arguments":{}}}' 2>/dev/null \
         | jq -r '.result.content[0].text' 2>/dev/null)
 

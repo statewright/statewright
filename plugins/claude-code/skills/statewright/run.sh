@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # /statewright slash command — calls MCP gateway directly
 
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
+
 GW_URL="${STATEWRIGHT_GATEWAY_URL:-https://mcp.statewright.ai}"
 API_KEY="${STATEWRIGHT_API_KEY:-$(cat "$HOME/.statewright/api_key" 2>/dev/null)}"
 
@@ -13,7 +26,7 @@ mcp_call() {
   local RESP
   RESP=$(curl -s --max-time 5 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     -d "$1" 2>/dev/null)
   if [ -n "$RESP" ]; then
     echo "$RESP" | LC_ALL=C perl -0777 -pe 's/[\x00-\x09\x0b-\x0c\x0e-\x1f]//g' | jq -r '.result.content[0].text // .error.message // empty' 2>/dev/null

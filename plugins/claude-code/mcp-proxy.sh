@@ -15,6 +15,19 @@ MISSING_KEY_SENTINEL="$STATEWRIGHT_DIR/missing_api_key_prompted"
 # shellcheck source=client-id.sh
 source "${SCRIPT_DIR}/client-id.sh"
 
+# Pass bearer credentials to curl through a config stream, not argv (ps).
+# Reject CR/LF so a legacy env token cannot inject additional curl config.
+statewright_bearer_config() {
+  local value="$1"
+  case "$value" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$value"
+}
+
+
 key_fingerprint() {
   if command -v shasum >/dev/null 2>&1; then
     printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
@@ -105,12 +118,12 @@ if [ "${STATEWRIGHT_MANAGED_CLIENT_HOST:-claude}" = "claude" ] && [ -n "${STATEW
     fi
     request_headers=(
       -H 'Content-Type: application/json'
-      -H "Authorization: Bearer ${STATEWRIGHT_MANAGED_MCP_TOKEN:-}"
     )
     [ -n "$managed_session_id" ] && request_headers+=(-H "Mcp-Session-Id: ${managed_session_id}")
     response_headers="$managed_tmpdir/headers"
     response_body="$managed_tmpdir/body"
     if curl -sS --max-time 15 -D "$response_headers" -o "$response_body" -X POST "${STATEWRIGHT_MANAGED_MCP_URL%/}/mcp" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_MANAGED_MCP_TOKEN:-}") \
       "${request_headers[@]}" --data-binary "$line" 2>/dev/null; then
       response=$(cat "$response_body")
       response_session_id=$(awk 'BEGIN { IGNORECASE=1 } /^Mcp-Session-Id:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/[\r\n]/, ""); print; exit }' "$response_headers")
@@ -138,7 +151,7 @@ if [ -n "${STATEWRIGHT_ADAPTER_URL:-}" ]; then
     fi
     response=$(curl -sf --max-time 15 -X POST "${STATEWRIGHT_ADAPTER_URL%/}/mcp" \
       -H 'Content-Type: application/json' \
-      -H "Authorization: Bearer ${STATEWRIGHT_ADAPTER_TOKEN:-}" \
+      -K <(statewright_bearer_config "${STATEWRIGHT_ADAPTER_TOKEN:-}") \
       --data-binary "$line" 2>/dev/null || true)
     case "$method" in notifications/*) continue ;; esac
     if [ -n "$response" ]; then
@@ -277,7 +290,7 @@ upload_client_tools() {
   body=$(mktemp "${TMPDIR:-/tmp}/statewright-client-tools.XXXXXX") || return 0
   status=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' -X POST "$PB_URL/api/client-tools" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $key" \
+    -K <(statewright_bearer_config "$key") \
     -d "{\"tools\": $tools, \"commands\": $commands}" 2>/dev/null || true)
   response=$(cat "$body" 2>/dev/null || true)
   rm -f "$body"
@@ -395,7 +408,7 @@ while IFS= read -r line; do
   # Forward to gateway with auth
   RESPONSE=$(curl -sf --max-time 10 -X POST "$GW_URL/" \
     -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $API_KEY" \
+    -K <(statewright_bearer_config "$API_KEY") \
     "${SESSION_HEADER_ARGS[@]}" \
     -d "$line" 2>/dev/null)
 

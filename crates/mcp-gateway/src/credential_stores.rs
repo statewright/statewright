@@ -7,11 +7,17 @@
 //! This is a best-effort screen over every string in the tool input. Before
 //! matching, each string is normalised the way a shell would read it: quotes
 //! and backslash escapes are removed, and `~`, `$HOME`, `${HOME}` and literal
-//! home directories become `~`. A glob that could match a credential store
-//! counts as a reference, and so does naming a credential directory itself
-//! (`cp -r ~/.claude /tmp/x`). It still cannot see through arbitrary
-//! obfuscation (variables, string building in scripts); it closes the
-//! obvious routes and keeps them out of the timed-approval flow.
+//! home directories become `~` (as do `~user` and `${HOME...}` expansions).
+//! Each path word is then resolved lexically (`/./`, `seg/..`) so it is
+//! matched as the real path it names. A glob that could match a credential
+//! store counts as a reference, and so does naming a credential directory
+//! itself, literally or by glob (`cp -r ~/.claude /tmp/x`, `cp -r ~/.cla* x`),
+//! or copying, archiving or linking the home directory whole (`cp -a ~ x`,
+//! `tar -C ~ .`). It is a text screen: it cannot follow the shell's working
+//! directory (`cd ~ && cat .claude/...`), `find` predicates, symlinks made
+//! earlier, variables, or string building in scripts. It closes the obvious
+//! routes and keeps them out of the timed-approval flow; the plugin README's
+//! "Known risks" section documents the limit.
 use serde_json::Value;
 
 const MARKERS: &[&str] = &[
@@ -67,7 +73,8 @@ fn normalise(text: &str) -> String {
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect::<String>()
         .to_ascii_lowercase();
-    let mut out = unquoted.replace("${home}", "~").replace("$home", "~");
+    let mut out = expand_home_parameters(&unquoted).replace("$home", "~");
+    out = collapse_tilde_users(&out);
     for prefix in ["/users/", "/home/"] {
         while let Some(at) = out.find(prefix) {
             let rest = &out[at + prefix.len()..];
@@ -84,6 +91,84 @@ fn normalise(text: &str) -> String {
         }
     }
     out.replace(" /root/", " ~/").replace("//", "/")
+}
+
+/// `${HOME}`, `${HOME:-x}`, `${HOME%/}`, `${HOME#x}` and the like all name
+/// the home directory (or a fallback the screen can't know), so each becomes
+/// `~`. Input is already lowercased.
+fn expand_home_parameters(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("${home") {
+        let after = &rest[at + "${home".len()..];
+        let continues_name = after.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        match after.find('}') {
+            Some(close) if !continues_name => {
+                out.push_str(&rest[..at]);
+                out.push('~');
+                rest = &after[close + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..at + 2]);
+                rest = &rest[at + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `~user/...` is another user's (or your own) home: read it as `~/...`.
+fn collapse_tilde_users(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_word_start = i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'_' | b'-' | b'.' | b'/'));
+        if bytes[i] == b'~' && at_word_start {
+            let name_len = bytes[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.'))
+                .count();
+            let end = i + 1 + name_len;
+            let ends_word = end == bytes.len() || bytes[end] == b'/' || bytes[end].is_ascii_whitespace();
+            if name_len > 0 && ends_word && (bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_') {
+                out.push('~');
+                i = end;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Lexically resolve `.` and `..` segments, the way the kernel would for a
+/// path without symlinks: `~/./.claude`, `~/.config/../.claude` and
+/// `~/.claude/plugins/..` all name `~/.claude`.
+fn resolve_dots(word: &str) -> String {
+    if !word.contains("/.") && !word.starts_with("./") {
+        return word.to_string();
+    }
+    let absolute = word.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in word.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => match parts.last() {
+                Some(&last) if last != ".." && last != "~" => {
+                    parts.pop();
+                }
+                Some(_) => parts.push(".."),
+                None if absolute => {}
+                None => parts.push(".."),
+            },
+            _ => parts.push(segment),
+        }
+    }
+    let joined = parts.join("/");
+    if absolute { format!("/{joined}") } else if joined.is_empty() { ".".to_string() } else { joined }
 }
 
 fn words(text: &str) -> impl Iterator<Item = &str> {
@@ -180,18 +265,54 @@ fn glob_reaches_store(word: &str) -> bool {
     })
 }
 
-/// True when a word names a credential directory itself (`~/.claude`,
-/// `~/.claude/`, `~/.statewright/.`), which a copy or recursive read would
-/// take whole.
+/// True when a (resolved) word names a credential directory itself
+/// (`~/.claude`, `~/.claude/`) or a glob that could expand to one
+/// (`~/.cla*`, `~/.[c]laude`, `~/.state*`), which a copy or recursive read
+/// would take whole.
 fn names_store_dir(word: &str) -> bool {
-    let trimmed = word.trim_end_matches("/.").trim_end_matches('/');
-    CREDENTIAL_DIRS.contains(&trimmed)
+    let trimmed = word.trim_end_matches('/');
+    if CREDENTIAL_DIRS.contains(&trimmed) {
+        return true;
+    }
+    if !trimmed.contains(['*', '?', '[', '{']) {
+        return false;
+    }
+    let widened = widen_braces(trimmed);
+    CREDENTIAL_DIRS.iter().any(|dir| glob_match(widened.as_bytes(), dir.as_bytes()))
+}
+
+/// Commands that copy, archive or link a directory tree.
+const TREE_COMMANDS: &[&str] = &["cp", "rsync", "tar", "zip", "ditto", "cpio", "scp", "rclone", "7z", "ln", "pax"];
+/// Relative names that take a credential directory from the home directory.
+const HOME_RELATIVE: &[&str] = &[".", "*", ".*", ".??*", ".claude", ".statewright"];
+
+/// True when the command copies, archives or links the home directory whole
+/// (`cp -a ~ x`, `tar -C ~ .`, `ln -s ~ /tmp/h`), or changes to it and then
+/// takes a credential directory by relative name (`cd ~ && cp -r .claude x`).
+fn copies_home(words: &[String]) -> bool {
+    if !words.iter().any(|word| TREE_COMMANDS.contains(&word.as_str())) {
+        return false;
+    }
+    words.iter().enumerate().any(|(i, word)| {
+        word.trim_end_matches('/') == "~"
+            && (i == 0
+                || words[i - 1] != "cd"
+                || words.iter().any(|w| {
+                    let w = w.trim_end_matches('/');
+                    HOME_RELATIVE.contains(&w) || names_store_dir(&format!("~/{w}")) && w.starts_with('.')
+                }))
+    })
 }
 
 fn normalised_references(text: &str) -> bool {
     let normal = normalise(text);
-    MARKERS.iter().any(|marker| normal.contains(marker))
-        || words(&normal).any(|word| glob_reaches_store(word) || names_store_dir(word))
+    if MARKERS.iter().any(|marker| normal.contains(marker)) {
+        return true;
+    }
+    let resolved: Vec<String> = words(&normal).map(resolve_dots).collect();
+    resolved.iter().any(|word| {
+        MARKERS.iter().any(|marker| word.contains(marker)) || glob_reaches_store(word) || names_store_dir(word)
+    }) || copies_home(&resolved)
 }
 
 /// True when any string in the tool input references a known credential store.
@@ -261,6 +382,58 @@ mod tests {
         }
         assert!(references_credential_store(&json!({"args":["-r","~/.claude","/tmp/x"]})));
         assert!(references_credential_store(&json!({"path":"/Users/x/.claude","pattern":"token"})));
+    }
+
+    #[test]
+    fn paths_are_matched_as_the_real_path_they_name() {
+        for command in [
+            // Globs that expand to a credential directory.
+            "cp -r ~/.cla* /tmp/x",
+            "cp -r ~/.c?aude /tmp/x",
+            "cp -r ~/.[c]laude /tmp/x",
+            "cp -r ~/.state* /tmp/x",
+            "cp -r ~/.{claude,x} /tmp/x",
+            // `.` and `..` resolved lexically.
+            "cp -r ~/./.claude /tmp/x",
+            "cp -r ~/.claude/plugins/.. /tmp/x",
+            "cp -r ~/.config/../.claude /tmp/x",
+            "cat ~/.config/../.claude/./.cred*",
+            // `~user` and `${HOME...}` expansions.
+            "cp -r ~ben/.claude /tmp/x",
+            "cat ~someone/.statewright/api_key",
+            "cp -r ${HOME:-/x}/.claude /tmp/x",
+            "cp -r ${HOME%/}/.claude /tmp/x",
+            "cat ${HOME#/}/.claude/.credentials.json",
+            // The home directory copied, archived or linked whole.
+            "cp -a ~ /tmp/homecopy",
+            "cp -R ~/ /tmp/homecopy",
+            "tar czf /tmp/h.tgz -C ~ .",
+            "rsync -a $HOME/ /tmp/h",
+            "ln -s ~ /tmp/h",
+            "cd ~ && tar czf /tmp/c.tgz .claude",
+            "cd ~ && cp -r .claude /tmp/x",
+            "cd $HOME; zip -r /tmp/x.zip .statewright",
+        ] {
+            assert!(references_credential_store(&json!({"command":command})), "{command}");
+        }
+    }
+
+    #[test]
+    fn resolving_paths_keeps_ordinary_commands_reviewable() {
+        for command in [
+            "cd ~ && ls",
+            "cd ~ && tar xzf ~/Downloads/x.tgz",
+            "ls ~",
+            "cp -r ~/.config/nvim /tmp/x",
+            "cp -r ~/.claude/plugins/../plugins/cache/x /tmp/x",
+            "cat ~/.claude/plugins/./installed_plugins.json",
+            "echo ${HOMEBREW_PREFIX}/bin",
+            "cp -r ./src ../backup",
+            "cat a~b/.claude",
+            "git diff HEAD~1",
+        ] {
+            assert!(!references_credential_store(&json!({"command":command})), "{command}");
+        }
     }
 
     #[test]
